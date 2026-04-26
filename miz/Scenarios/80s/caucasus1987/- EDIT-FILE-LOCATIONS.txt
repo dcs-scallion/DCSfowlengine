@@ -1,0 +1,21 @@
+###################################################################
+# settings for build mission                                      #
+###################################################################
+# DCS user Saved Games path                                       #
+$DCS_user_path = "C:\Users\Robo\Saved Games\DCS"
+# Name of the compiled mission output                             #
+$mission_name  = "Caucasus1987"
+$target_cfg_name = "${mission_name}_CFG"
+###################################################################
+
+
+###################################################################
+# settings for compilation Fowl DLL & FowlTools                   #
+###################################################################
+# Workspace root Fowl Engine repository                           #
+$work_path_engine = "C:\bfnext-pracovni_DYNAMIC_UPDATE"
+# bftools folder under repository                                 #
+$bftools          = "\bftools"
+# Mission folder under repository                                 #
+$path_engine_mission = "\miz\Scenarios\80s\caucasus1987"
+###################################################################

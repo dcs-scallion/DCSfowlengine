@@ -1,0 +1,47 @@
+[package]
+name = "bfdb"
+version = "0.1.0"
+edition = "2021"
+
+[[bin]]
+name = "bfdb"
+
+[[bin]]
+name = "test"
+path = "src/test.rs"
+
+[[bin]]
+name = "migrate"
+path = "src/migrate.rs"
+
+[dependencies]
+anyhow = { workspace = true }
+arrayvec = { workspace = true }
+bfprotocols = { version = "0.1.0", path = "../bfprotocols" }
+bincode = { workspace = true }
+bytes = { workspace = true }
+chrono = { workspace = true }
+clap = { workspace = true }
+compact_str = { workspace = true }
+dcso3 = { version = "0.2", path = "../dcso3" }
+enumflags2 = { workspace = true }
+env_logger = { workspace = true }
+futures = { workspace = true }
+fxhash = { workspace = true }
+handlebars = { workspace = true }
+log = { workspace = true }
+mlua = { version = "0.9.9", features = ["lua51", "serialize"] }
+netidx-protocols = { workspace = true }
+netidx = { workspace = true }
+paste = { workspace = true }
+pin-project = { workspace = true }
+regex = { workspace = true }
+serde_derive = { workspace = true }
+serde_json = { workspace = true }
+serde = { workspace = true }
+sled = { workspace = true }
+smallvec = { workspace = true }
+tokio = { workspace = true }
+uuid = { workspace = true }
+warp = { workspace = true }
+yats = { version = "0.1", path = "../yats" }

@@ -1,0 +1,10 @@
+---
+description: Propose solution options before coding; implement only after user approval
+alwaysApply: true
+---
+
+# Design workflow
+
+For non-trivial or user-facing behavior changes on this project: **briefly list viable approaches** (trade-offs, risks), **recommend one if appropriate**, and **do not implement** until the user explicitly approves a chosen option.
+
+Bug fixes, reverts, and small clarifications that clearly follow existing instructions may proceed without a separate approval step.

@@ -1,0 +1,14 @@
+dictionary = 
+{
+	["DictKey_descriptionNeutralsTask_4"] = "",
+	["DictKey_sortie_5"] = "caucases80s",
+	["DictKey_descriptionText_1"] = "Welcome to Operation Blue Flag v3 BETA. This is a work in progress translation of caucasus 80s to our new engine. It is for testing only, expect the campaign state to be deleted without warning, and expect bugs. \
+\
+Thank you for helping us advance the original dynamic persistant campaign to the state of the art!\
+\
+This campaign uses code released under the GNU Affero public license version 3, or any later version of that license. As required by the license terms, a link to the code is provided below\
+\
+https://github.com/estokes/bfnext",
+	["DictKey_descriptionBlueTask_3"] = "",
+	["DictKey_descriptionRedTask_2"] = "",
+} -- end of dictionary

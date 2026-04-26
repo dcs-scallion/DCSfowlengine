@@ -1,0 +1,223 @@
+#! /bin/bash
+
+trap quit SIGINT SIGTERM SIGQUIT
+
+function usage() {
+    echo "usage: dcs <name> <git-path> <miz-name> <srs:port> [<cbt>]"
+    exit 1
+}
+
+if test -z "$1" -o -z "$2" -o -z "$3" -o -z "$4" -o -z "$5"; then
+    usage
+fi
+
+if echo "$1" | grep -Eq "[[:space:]]"; then
+    echo "name may not contain white space"
+    exit 2
+fi
+
+if ! test -d "${HOME}/bfnext/${2}"; then
+    echo "git path ${HOME}/bfnext/${2} not found, or not a directory"
+    exit 3
+fi
+
+if ! test -f "${HOME}/bfnext/${2}/${3}"; then
+    echo "mission ${HOME}/bfnext/${2}/${3} not found in ${2}"
+    exit 4
+fi
+
+if test "${4%%:*}" == "true"; then
+    USE_SRS=1
+    SRS_PORT=${4#*:}
+elif test "${4%%:*}" == "false"; then
+    USE_SRS=0
+else
+    echo "expected true or false for srs"
+    usage
+fi
+
+CBT=false
+if test "$5" == "true"; then
+    CBT=true
+elif test "$5" == "false"; then
+    CBT=false
+else
+    echo "expected true or false for cbt"
+    usage
+fi
+
+BLOCK=30
+NAME="$1"
+PFX="${HOME}/.wine_${NAME}/drive_c"
+DCS="${PFX}/Program Files/Eagle Dynamics/DCS World Server"
+DATA="${PFX}/users/dcs/Saved Games/$NAME"
+BFLOG="${DATA}/Logs/bfnext.txt"
+INSTALLED_MIZ="${DATA}/Missions/$(ls "${DATA}"/Missions)"
+INSTALLED_CFG="$(ls "${DATA}"/*_CFG)"
+GIT_PATH="$2"
+GIT_MIZ="$3"
+GIT_CFG="$(ls "${HOME}/bfnext/${GIT_PATH}"/*_CFG)"
+
+if ! test -d "$DCS"; then
+    echo "dcs install directory missing"
+    exit 8
+fi
+
+if ! test -d "$DATA"; then
+    echo "dcs data dir missing, wrong name?"
+    exit 8
+fi
+
+if ! test -f "$INSTALLED_MIZ"; then
+    echo "missing installed miz $INSTALLED_MIZ"
+    exit 9
+fi
+
+if ! test -f "$INSTALLED_CFG"; then
+    echo "missing installed config $INSTALLED_CFG"
+    exit 10
+fi
+
+if test -z "$GIT_CFG" -o ! -f "$GIT_CFG"; then
+    echo "$GIT_CFG not found or not a file"
+    exit 5
+fi
+
+function update_from_git {
+    cd ~/bfnext
+    mkdir -p "${DATA}/Scripts/Hooks"
+    mkdir -p "${DATA}/Config"
+    mkdir -p "${DATA}/Missions"
+    git pull
+    if $CBT == "true"; then
+        cp miz/bflib-cbt.dll "${DATA}/Scripts/bflib.dll"
+    else
+        cp miz/bflib.dll "${DATA}/Scripts"
+    fi
+    cp bflib/lua/hooks.lua "${DATA}/Scripts/Hooks"
+    cp "${GIT_PATH}/DCS-SRS-AutoConnectGameGUI.lua" "${DATA}/Scripts/Hooks"
+    cp "${GIT_PATH}/${GIT_MIZ}" "$INSTALLED_MIZ"
+    cp "${GIT_PATH}/serverSettings.lua" "${DATA}/Config"
+    cp "${GIT_PATH}/autoexec.cfg" "${DATA}/Config"
+    # merge git config changes with the local admin, banned, and rules lists
+    if test -f "$INSTALLED_CFG"; then
+        jq --slurpfile ic "$INSTALLED_CFG" \
+           '($ic[0] | { admins, rules, banned }) as $s | del(.[$s | keys[]]) + $s' \
+           "$GIT_CFG" \
+           >"${INSTALLED_CFG}.tmp"
+        mv "${INSTALLED_CFG}.tmp" "$INSTALLED_CFG"
+    else
+        cp "$GIT_CFG" "$INSTALLED_CFG"
+    fi
+}
+
+function kill_dcs() {
+    PID=$(ps auxwww \
+              | grep "DCS_server.exe -w $NAME" \
+              | grep -v grep \
+              | awk '{print $2}')
+    echo "killing DCS with $PID"
+    if ! test -z $PID; then
+        kill -9 $PID
+    fi
+}
+
+function kill_srs() {
+    PID=$(ps auxwww \
+        | grep "SRS-Server-Commandline-Linux --port ${SRS_PORT}" \
+        | grep -v grep \
+        | awk '{print $2}')
+    echo "killing SRS with $PID"
+    if ! test -z $PID; then
+        kill -9 $PID
+    fi
+}
+
+function quit() {
+    kill_dcs
+    for job in $(jobs -p); do
+        kill $job
+    done
+}
+
+function watchdog() {
+    while true; do
+        TS=$(stat -c "%Y" "$BFLOG")
+        NOW=$(date +%s)
+        if test $((NOW - TS)) -gt 300; then
+            echo "$(date): watchdog kill DCS"
+            kill_dcs
+        fi
+        sleep 60
+    done
+}
+
+function run_srs() {
+    while true; do
+        cd "$SRS"
+        ~/bin/SRS-Server-Commandline-Linux --port ${SRS_PORT} --coalitionSecurity
+        sleep 10
+    done
+}
+
+function dcs_port() {
+   grep -F '["port"]' "${DATA}/Config/serverSettings.lua" | sed -e 's/.*= *//' | sed -e 's/[",]//g'
+}
+
+function block_incoming() {
+    sudo iptables -D INPUT -i eno1 -p tcp --dport $1 -j ACCEPT
+    sudo iptables -D INPUT -i eno1 -p udp --dport $1 -j ACCEPT
+}
+
+function unblock_incoming() {
+    sleep $BLOCK
+    if ! sudo iptables -C INPUT -i eno1 -p tcp --dport $1 -j ACCEPT 2>/dev/null; then
+        sudo iptables -I INPUT -i eno1 -p tcp --dport $1 -j ACCEPT
+    fi
+    if ! sudo iptables -C INPUT -i eno1 -p udp --dport $1 -j ACCEPT 2>/dev/null; then
+        sudo iptables -I INPUT -i eno1 -p udp --dport $1 -j ACCEPT
+    fi
+}
+
+function run_dcs() {
+    while true; do
+        update_from_git
+        # Symlink to the latest version of DCS
+        if test $CBT == "true"; then
+            if test -d ~/testing; then
+                rm "${HOME}/.wine_${NAME}/drive_c/Program Files/Eagle Dynamics"
+                cp -d ~/testing "${HOME}/.wine_${NAME}/drive_c/Program Files/Eagle Dynamics"
+            fi
+        else
+            if test -d ~/current; then
+                rm "${HOME}/.wine_${NAME}/drive_c/Program Files/Eagle Dynamics"
+                cp -d ~/current "${HOME}/.wine_${NAME}/drive_c/Program Files/Eagle Dynamics"
+            fi
+        fi
+        PORT=$(dcs_port)
+        cd "$DCS"
+        block_incoming $PORT
+        unblock_incoming $PORT &
+        PID=$!
+        ST=$(date +%s)
+        WINEPREFIX="${HOME}/.wine_${NAME}" WINEDLLOVERRIDES='wbemprox=n' wine bin/DCS_server.exe -w "$NAME" >>"${DATA}/Logs/winedcs.log" 2>&1
+        EN=$(date +%s)
+        if test $((EN - ST)) -le $((BLOCK + 10)); then
+            # cancel unblock if DCS dies before it runs
+            kill $PID
+        fi
+        if test $USE_SRS -eq 1; then
+            kill_srs
+        fi
+        sleep 10
+    done
+}
+
+# prevent watchdog kill before server start
+touch "$BFLOG"
+watchdog &
+run_dcs &
+if test $USE_SRS -eq 1; then
+    run_srs &
+fi
+wait

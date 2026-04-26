@@ -1,0 +1,34 @@
+BFtools — checklist (námořní audit, DT sloty, PS skripty)
+========================================================
+
+STAV (2026-03): Testování bodů 1–4 záměrně POZASTAVENO do doby, než bude hotový
+základní refaktor skladů / logistiky (BDEFAULT·RDEFAULT, koalice skladů, capture, …).
+Včerejší a související změny pak retestovat až v tom novém kontextu.
+
+---
+
+1) AUDIT NÁMOŘNÍCH LODÍ (pevná pravidla mise)
+   - Skupina lodi se skladem: název = R nebo B + identifikátor trupu (např. RKuznecow, BTarawa),
+     první písmeno = koalice (R=red, B=blue).
+   - V misi musí existovat přesně zóny: TTSN<název_skupiny> a TTDN<název_skupiny>.
+   - Při rozbitém názvu / chybějící zóně: bftools miz musí SKONČIT CHYBOU (exit ≠ 0), v textu
+     všechny problémové lodi + očekávané názvy zón.
+   - Při správné misi: build projde, kopie do Saved Games OK (build-and-copy-mission).
+
+2) CO ZÁMĚRNĚ ZKUSIT
+   - Znovu scénář „rozbitých“ názvů vs. opravená base.miz — chování má být jako v posledním logu.
+   - Ověřit, že u platných lodí zůstává správné nastavení linkDynTempl / naval allow (jen vizuálně v .miz nebo ve hře podle potřeby).
+
+3) MIMO BFTools (už OK, jen připomenutí)
+   - PS skripty: kopírování jen po úspěšném buildu; Fowl stav jen soubory v kořeni DCS (ne Tracks);
+     bflib.dll kopie s čekáním až 5 min.
+
+4) DYNAMICKÉ ŠABLONY vs. SEZNAM SLOTŮ (viz Desktop TXT „viditelné sloty“)
+   - DCS bere Client jednotky jako běžné sloty, pokud je autor „nezneviditelní“.
+   - Doporučení komunity: Slot Password na šabloně, Dyn. Spawn Template (už řeší bftools),
+     Hidden on map na skupině.
+   - V naší výstupní misi mají DT_* skupiny často hidden = false → šablony mohou být v MP seznamu.
+   - Následný krok (mimo dnešní test auditů): zvážit úpravu emit_dynamic_spawn_templates
+     (hidden skupiny + případně slot password), pak ověřit v MP že šablony nejsou volitelné.
+
+Až bude refaktor základu hotový: retestovat tento seznam v novém stavu skladů / logistiky.

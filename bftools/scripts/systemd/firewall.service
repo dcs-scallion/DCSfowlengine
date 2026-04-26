@@ -1,0 +1,10 @@
+[Unit]
+After=network-online.target
+Description=Start the firewall
+
+[Service]
+Type=oneshot
+ExecStart=/etc/firewall start
+
+[Install]
+WantedBy=multi-user.target

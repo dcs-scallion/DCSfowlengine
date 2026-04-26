@@ -1,0 +1,12 @@
+---
+description: Sparse comments; revise only assistant-added noise when editing
+alwaysApply: true
+---
+
+# Code comments
+
+- **New code:** Use **few** comments. Only where something is **non-obvious** (invariant, trap, cross-module contract). **Headline-style** — a short phrase, not prose. No line-by-line or “what this obvious line does” commentary.
+
+- **When editing a file:** In the **same change**, tighten or remove **overly detailed comments that were added in earlier assistant edits** so they match this rule. **Do not** rewrite, rephrase, or remove comments that are **original project / human author** documentation, except where the user explicitly asks.
+
+- **Practical boundary:** Prefer changing comments only on **lines or blocks you are already modifying**. Leave the rest of the file’s comments as-is.

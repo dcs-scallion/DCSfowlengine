@@ -1,0 +1,7 @@
+* text eol=lf
+*.dll binary
+*.exe binary
+*.miz binary
+*.ttf binary
+*.eot binary
+*.7z binary

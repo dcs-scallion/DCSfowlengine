@@ -1,0 +1,14 @@
+---
+alwaysApply: true
+---
+# DCS and Fowl logs (post-test)
+
+When debugging Fowl (`bflib`), mission assembly (`bftools`), or anything that requires runtime evidence **after the user tested in DCS**, proactively read the **newest** relevant logs from:
+
+`C:\Users\Robo\Saved Games\DCS\Logs\`
+
+Do this **even if the user does not paste logs or forgets to mention them**, unless they explicitly say logs are not needed.
+
+**Prefer (in order):** `bfnext.txt`, then `dcs.log`, then `dcs.log.old`, `debrief.log` as needed. Use file modification time or tail/grep to focus on the latest run.
+
+If a path is inaccessible, say so once and ask for a paste or alternate path.

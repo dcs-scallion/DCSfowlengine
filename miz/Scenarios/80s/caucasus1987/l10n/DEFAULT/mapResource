@@ -1,0 +1,7 @@
+mapResource = 
+{
+	["ResKey_ImageBriefing_8"] = "BFv3_005_LOGOs_HD.jpg",
+	["ResKey_ImageBriefing_7"] = "BFv3_005_LOGOs_HD.jpg",
+	["ResKey_ImageBriefing_9"] = "BFv3_005_LOGOs_HD.jpg",
+	["ResKey_initScript_6"] = "mizinit.lua",
+} -- end of mapResource

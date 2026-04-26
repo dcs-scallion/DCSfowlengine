@@ -1,0 +1,142 @@
+O means objective (OABRKOBULETI)
+G means group (GLOGI)
+AB means airbase (OABRKOBULETI)
+FARP means FOB (no slots, but place to refuel/rearm/repair/get crates
+LO means logistics obj (OLOBMukhrani)
+B means blue (starting color)
+R means red (starting color)
+N means neutral (starting color)
+LR means long range (template)
+SR means shorad (template)
+DEP means deployable (player dropped units  via crates)
+
+Basic makeup of OBJs
+Base:
+	LOGI
+	AAA x2
+	SR x2
+	ARMOR
+	LR (home base)
+FOBs:
+	LOGI
+	AAA
+	SR (2 for home OBJ)
+	Armor
+
+
+Template names: (Start with B or R)
+LOGI
+Blue | 1 Outpost 4 HEMTT 4 M939 Heavy 2 m249 1 Vulcan 1 Bofors 40mm
+Red  | 1 Outpost 4 ATZ-10 4 URAL 375, 2 AK74v3, 1 S-60, 1 ZU-23 emplacement
+Neut | 6 Ural 375
+AAA
+Blue | 3 Gepard
+Red  | 3 Shilka
+Neut | 3 Shilka
+SR
+Blue | 1 Linebacker Bradley M6 2 Avengers
+Red  | 2 SA-13, 1 SA-8
+Neut | 1 SA-9, 2 SA-8
+LR
+Blue | Hawk Battery
+Red  | SA-11 Battery
+Neut | SA-2 Battery
+ARMOR 
+Blue | ATGM Stryker / IFV M2A2 Bradley / MBT M1A2 Abrams
+Red  | BMD-1, BMP-3, T-80U
+Neut | 3 BMP-1
+CRATE (DO NOT PUT DEP IN FRONT OF THIS)
+Blue |
+Red  |
+STANDARDTROOP 
+Blue | 2 m249s 1 rpgs 5 m4s
+Red  | 7 AK74v3 1 rpgs
+ATTROOP 
+Blue | 5 rpgs 3 m249s
+Red  | 5 rpgs 3 AK74v3
+STINGERTROOP 
+Blue | 2 m249 2 stingers 2 stinger c2
+RIGLATROOP
+Red  | 2 AK74v3 2 Igla-S, 2 Igla C2
+MORTARTROOP
+Blue | 3 m249   5 2b11 120mm
+Red  | 3 AK74v3 5 2B11 120mm
+
+Deployable Templates via helo/etc
+(Start with DEP, then COLOR IF THEY ARE SHARED - so DEPRoland (as the roland is not shared between red or blue) but DEPBAMMO or DEPRAMMO (as the ammo crate is shared)
+AMMO
+Blue | M939 Heavy
+Red  | Ural-375
+ROLAND
+Blue | Sam Roland ADS
+SA15
+Red  | SA-15 TOR
+AVENGER
+Blue | SAM Avenger (Stinger)
+SA8
+Red  | SA-8 TEL
+SA13
+Red  | SA-13 Strela TEL
+LINEBACKER
+Blue | SAM Linebacker - Bradley M6
+TUNGUSKA
+Red  | SA-19 Tunguska
+GEPARD
+Blue | Gepard
+SHILKA
+Red  | ZSU-23-4 Shilka
+VULKAN
+Blue | Vulcan M163
+ZU23
+Red  | ZU-23 Emplacement
+FIRTINA
+Blue | Artillery > SPH T155 Firtina 155mm
+MSTA
+Red  | Artillery > 2S19 Msta 152mm
+BRADLEY
+Blue | Armor > M2A2 Bradley
+BMP3
+Red  | Armor > BMP-3
+LEOPARD
+Blue | Armor > Leopard-2a6m
+T72
+Red  | Armor > T-72B
+FPS117
+Blue | EWR AN/FPS 117 Radar, EWR AN/FPS-117 ECS
+1L13
+Red  | EWR 55G6
+HAWK
+Blue | Standard HAWK battery
+SA11
+Red  | SA-11 Battery
+SA6
+Red  | SA-6 Battery
+FARP
+Blue | Bofors 40mm M978 HEMTT M939 Heavy 2 M249 inf, Invisible Farp named DEPBFARPPAD, FARP Fuel Depot named DEPBFARPFUEL, FARP Ammo Depot named DEPBFARPAMMO, FARP Tent named DEPBFARPTENT
+Red | S-60, ATZ-10, Ural 375, 2 AK74v3, Invisible Farp named DEPRFARPPAD, FARP Fuel Depot named DEPRFARPFUEL, Farp Ammo Storage named DEPRFARPAMMO, Farp Tent named DEPRFARPTENT
+
+
+Mapfix command to run:
+luae payloadfix.lua "C:\Users\Adam\Documents\GitHub\bfnext\miz\Scenarios\80s\caucasus\Caucasus 0.2.miz" "C:\Users\Adam\Documents\GitHub\bfnext\miz\Scenarios\80s\caucasus\BFConfig.json"
+
+OBJs that Ive created:
+OABRBeslan
+OFORVLADIKAVKAZ
+OFONKAZBEGI (REMOVE TREES)
+OFOBZhinvali
+OABTbilisi
+OLOBMukhrani
+OLORDigora
+
+
+***STEPS TO COMPILE THE DLL (this requires rust and the Visual Studio Build components***
+From terminal:
+Verify LUA_LIB is pointed to *\GitHub\bfnext by using command: echo $env:LUA_LIB
+./setup-build.ps1 (will take a second)
+cargo build --release (will take a long time)
+Once complete, the file will now be in *\GitHub\bfnext\target\release
+Use the copy command to move the file where you need it: cp target/release/bflib.dll 'C:\Users\Adam\Documents\GitHub\bfnext\miz'
+
+
+Preferred start time: 530am in summer
+Preferred weather: High Scattered 3
