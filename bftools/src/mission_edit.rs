@@ -259,6 +259,75 @@ impl Display for LuaSerVal {
     }
 }
 
+/// DCS `getValueDictByKey(mission.sortie)` uses `l10n/DEFAULT/dictionary[ key ]` as the Saved Games stem
+/// (`*_CFG`, state file, `*_fowl_export.json`). Set that string to the `--output` .miz stem.
+fn sync_l10n_dictionary_sortie_stem_to_output_miz(base: &LoadedMiz, output: &Path) -> Result<()> {
+    let stem = output
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .with_context(|| format!("--output has no UTF-8 file stem: {:?}", output))?;
+    let sortie_key = base
+        .mission
+        .sortie()
+        .context("read mission sortie (l10n dictionary key ref)")?;
+    let dict_relpath = base
+        .miz
+        .files
+        .keys()
+        .find(|k| k.replace('\\', "/").ends_with("l10n/DEFAULT/dictionary"))
+        .cloned()
+        .with_context(|| {
+            format!(
+                "base miz has no l10n/DEFAULT/dictionary (first keys: {:?})",
+                base.miz.files.keys().take(8).collect::<Vec<_>>()
+            )
+        })?;
+    let dict_path = base
+        .miz
+        .files
+        .get(&dict_relpath)
+        .with_context(|| format!("missing path for {dict_relpath}"))?;
+    let content = fs::read_to_string(dict_path)
+        .with_context(|| format!("read l10n dictionary {:?}", dict_path))?;
+    let needle = format!("[\"{sortie_key}\"] = \"");
+    let mut new_content = std::string::String::with_capacity(content.len() + 32);
+    let mut replaced = false;
+    for line in content.lines() {
+        if !replaced && line.contains(needle.as_str()) {
+            if let Some(i) = line.find(&needle) {
+                let rest = &line[i + needle.len()..];
+                if let Some(end) = rest.find('"') {
+                    new_content.push_str(&line[..i + needle.len()]);
+                    new_content.push_str(stem);
+                    new_content.push_str(&line[i + needle.len() + end..]);
+                    replaced = true;
+                    new_content.push('\n');
+                    continue;
+                }
+            }
+        }
+        new_content.push_str(line);
+        new_content.push('\n');
+    }
+    if !replaced {
+        bail!(
+            "l10n dictionary: no line with prefix {:?} (mission.sortie = {})",
+            needle,
+            sortie_key
+        );
+    }
+    if !content.ends_with('\n') {
+        new_content.pop();
+    }
+    fs::write(dict_path, new_content)
+        .with_context(|| format!("write l10n dictionary {:?}", dict_path))?;
+    info!(
+        "l10n dictionary: {:?} [\"{}\"] = {:?} (DCS getValueDictByKey; matches --output .miz)",
+        dict_relpath, sortie_key, stem
+    );
+    Ok(())
+}
+
 fn serialize_to_lua(key: &str, value: Value<'static>) -> Result<std::string::String> {
     let res = std::panic::catch_unwind(AssertUnwindSafe(move || {
         use std::fmt::Write;
@@ -1466,6 +1535,32 @@ impl VehicleTemplates {
                         if ws != ZERO {
                             out.insert(ws);
                         }
+                    }
+                }
+            }
+        }
+        out
+    }
+
+    /// `payload.pylons` → `wsType` for one unit (all `weapon*.miz` variants); used to gate `template_restricted`.
+    fn payload_pylon_ws_for_unit_type(
+        &self,
+        br: &weapon_bridge::WeaponBridgeMap,
+        side: Side,
+        unit_type: &str,
+    ) -> HashSet<[i32; 4]> {
+        const ZERO: [i32; 4] = [0, 0, 0, 0];
+        let mut out = HashSet::new();
+        let Some(variants) =
+            self.payload_variants.get(&side).and_then(|by_type| by_type.get(unit_type))
+        else {
+            return out;
+        };
+        for payload in variants {
+            for d in payload_allowlist::collect_pylon_descriptors(payload) {
+                for ws in br.ws_types_for_descriptor_or_key_substring(d.as_str()) {
+                    if ws != ZERO {
+                        out.insert(ws);
                     }
                 }
             }
@@ -3263,6 +3358,8 @@ impl WarehouseTemplate {
             HashMap::new();
         let mut red_default_sources: HashMap<[i32; 4], HashSet<StdString>> =
             HashMap::new();
+        let mut blue_fowl_export_union: Option<HashSet<[i32; 4]>> = None;
+        let mut red_fowl_export_union: Option<HashSet<[i32; 4]>> = None;
         let mut objective_defaults: HashMap<
             StdString,
             bfprotocols::fowl_miz_export::ObjectiveWarehouseDefaults,
@@ -3798,10 +3895,16 @@ impl WarehouseTemplate {
             }
             bws.retain(|w| !payload_ws_blocked(*w, &blue_payload_deny));
             rws.retain(|w| !payload_ws_blocked(*w, &red_payload_deny));
-            // B/RDEFAULT + inventory allowlist: DCS mountable ordnance for `weapon*.miz` types only.
-            // `payload.restricted` is for in-editor loadout rules; do not cull store families at build.
-            let blue_default_deny: HashSet<[i32; 4]> = HashSet::new();
-            let red_default_deny: HashSet<[i32; 4]> = HashSet::new();
+            // B/RDEFAULT: per-airframe `template_restricted` + pylon evidence. B/RINVENTORY: DCS
+            // mount set for coalition `weapon*.miz` types only (no `payload.restricted` cull; AIM-54 etc.).
+            let mut blue_default_deny_exact =
+                br.template_restricted_ws_union_for_side("blue", &blue_slot_types_hs);
+            blue_default_deny_exact.extend(blue_strip_ws.iter().copied());
+            let blue_default_deny = br.expand_ws_alias_family(&blue_default_deny_exact);
+            let mut red_default_deny_exact =
+                br.template_restricted_ws_union_for_side("red", &red_slot_types_hs);
+            red_default_deny_exact.extend(red_strip_ws.iter().copied());
+            let red_default_deny = br.expand_ws_alias_family(&red_default_deny_exact);
             let default_ws_blocked = |w: [i32; 4], deny: &HashSet<[i32; 4]>| -> bool {
                 if deny.contains(&w) {
                     return true;
@@ -3810,7 +3913,7 @@ impl WarehouseTemplate {
                 one.insert(w);
                 br.expand_ws_alias_family(&one).iter().any(|x| deny.contains(x))
             };
-            let side_template_ordnance_cap = |types: &HashSet<StdString>| {
+            let side_cap_inventory_no_restricted = |types: &HashSet<StdString>| {
                 let mut out = HashSet::<[i32; 4]>::new();
                 let mut sources = HashMap::<[i32; 4], HashSet<StdString>>::new();
                 for unit_type in types {
@@ -3824,10 +3927,53 @@ impl WarehouseTemplate {
                 }
                 (out, sources)
             };
-            let (mut blue_side_template_ws, mut blue_side_template_sources) =
-                side_template_ordnance_cap(&blue_payload_types_hs);
-            let (mut red_side_template_ws, mut red_side_template_sources) =
-                side_template_ordnance_cap(&red_payload_types_hs);
+            let side_cap_respects_template_restricted =
+                |side: Side, side_name: &str, types: &HashSet<StdString>| {
+                    let mut out = HashSet::<[i32; 4]>::new();
+                    let mut sources = HashMap::<[i32; 4], HashSet<StdString>>::new();
+                    for unit_type in types {
+                        let restricted =
+                            br.template_restricted_ws_for_side_type(side_name, unit_type);
+                        let pylon_ws = br.expand_ws_alias_family(
+                            &vt.payload_pylon_ws_for_unit_type(
+                                br,
+                                side,
+                                unit_type.as_str(),
+                            ),
+                        );
+                        let mut candidates = br.weapon_ws_for_aircraft_key_only(unit_type);
+                        candidates.extend(pylon_ws.iter().copied());
+                        for ws in candidates {
+                            if !(ws[0] == 4
+                                && ((4..=8).contains(&ws[1]) || ws[1] == 15))
+                            {
+                                continue;
+                            }
+                            if restricted.contains(&ws) && !pylon_ws.contains(&ws) {
+                                continue;
+                            }
+                            out.insert(ws);
+                            sources.entry(ws).or_default().insert(unit_type.clone());
+                        }
+                    }
+                    (out, sources)
+                };
+            let (mut blue_for_default, mut blue_side_template_sources) =
+                side_cap_respects_template_restricted(
+                    Side::Blue,
+                    "blue",
+                    &blue_payload_types_hs,
+                );
+            let (mut red_for_default, mut red_side_template_sources) =
+                side_cap_respects_template_restricted(
+                    Side::Red,
+                    "red",
+                    &red_payload_types_hs,
+                );
+            let (mut blue_for_inv, _blue_inv_sources) =
+                side_cap_inventory_no_restricted(&blue_payload_types_hs);
+            let (mut red_for_inv, _red_inv_sources) =
+                side_cap_inventory_no_restricted(&red_payload_types_hs);
             let blue_default_fuel_ws =
                 campaign_cfg::collect_weapon_ws_types_positive_initial(
                     &self.blue_default_fueltanks,
@@ -3868,14 +4014,16 @@ impl WarehouseTemplate {
                 red_default_fuel_ws.len()
             );
             for ws in blue_default_fuel_ws.iter().copied() {
-                blue_side_template_ws.insert(ws);
+                blue_for_default.insert(ws);
+                blue_for_inv.insert(ws);
                 blue_side_template_sources
                     .entry(ws)
                     .or_default()
                     .insert("BDEFAULTFUELTANKS".to_string());
             }
             for ws in red_default_fuel_ws.iter().copied() {
-                red_side_template_ws.insert(ws);
+                red_for_default.insert(ws);
+                red_for_inv.insert(ws);
                 red_side_template_sources
                     .entry(ws)
                     .or_default()
@@ -3891,12 +4039,12 @@ impl WarehouseTemplate {
             ] {
                 info!(
                     "diag default {label}: blue_cap={} blue_global_blocked={} blue_final={} red_cap={} red_global_blocked={} red_final={}",
-                    blue_side_template_ws.contains(&ws) || br.weapon_ws_for_aircraft_keys_only(&blue_slot_types_hs).contains(&ws),
+                    blue_for_default.contains(&ws) || br.weapon_ws_for_aircraft_keys_only(&blue_slot_types_hs).contains(&ws),
                     default_ws_blocked(ws, &blue_default_deny),
-                    blue_side_template_ws.contains(&ws),
-                    red_side_template_ws.contains(&ws) || br.weapon_ws_for_aircraft_keys_only(&red_slot_types_hs).contains(&ws),
+                    blue_for_default.contains(&ws),
+                    red_for_default.contains(&ws) || br.weapon_ws_for_aircraft_keys_only(&red_slot_types_hs).contains(&ws),
                     default_ws_blocked(ws, &red_default_deny),
-                    red_side_template_ws.contains(&ws),
+                    red_for_default.contains(&ws),
                 );
             }
             let blue_default_plus_ws =
@@ -3908,9 +4056,11 @@ impl WarehouseTemplate {
                     &self.red_default_plus,
                 )?;
 
-            // DEFAULT from DCS mount set for coalition `weapon*.miz` airframes. DEFAULT+ = manual add.
-            let mut blue_default_allowlist = blue_side_template_ws.clone();
-            let mut red_default_allowlist = red_side_template_ws.clone();
+            // DEFAULT+ applies to both lists; fowl export unions DEFAULT ∪ INVENTORY caps.
+            let mut blue_default_allowlist = blue_for_default;
+            let mut red_default_allowlist = red_for_default;
+            let mut blue_inventory_allowlist = blue_for_inv;
+            let mut red_inventory_allowlist = red_for_inv;
             blue_default_sources = blue_side_template_sources;
             red_default_sources = red_side_template_sources;
             for ws in blue_default_plus_ws
@@ -3919,6 +4069,7 @@ impl WarehouseTemplate {
                 .filter(|ws| !(ws[0] == 1 && ws[1] == 3))
             {
                 blue_default_allowlist.insert(ws);
+                blue_inventory_allowlist.insert(ws);
                 blue_default_sources
                     .entry(ws)
                     .or_default()
@@ -3930,6 +4081,7 @@ impl WarehouseTemplate {
                 .filter(|ws| !(ws[0] == 1 && ws[1] == 3))
             {
                 red_default_allowlist.insert(ws);
+                red_inventory_allowlist.insert(ws);
                 red_default_sources
                     .entry(ws)
                     .or_default()
@@ -3977,14 +4129,22 @@ impl WarehouseTemplate {
             blue_allowed_ws = Some(blue_default_allowlist.clone());
             red_allowed_ws = Some(red_default_allowlist.clone());
             info!(
-                "inventory allowlist: using coalition DEFAULT allowlists (blue={} red={}); inventory stock does not whitelist itself",
+                "warehouse allowlist: B/RDEFAULT (template.restricted) blue={} red={}; B/RINVENTORY (DCS for coalition airframes) blue={} red={}; inventory does not self-whitelist",
                 blue_default_allowlist.len(),
-                red_default_allowlist.len()
+                red_default_allowlist.len(),
+                blue_inventory_allowlist.len(),
+                red_inventory_allowlist.len()
             );
             blue_inventory_allowed_ws =
-                Some(br.expand_ws_alias_family(&blue_default_allowlist));
+                Some(br.expand_ws_alias_family(&blue_inventory_allowlist));
             red_inventory_allowed_ws =
-                Some(br.expand_ws_alias_family(&red_default_allowlist));
+                Some(br.expand_ws_alias_family(&red_inventory_allowlist));
+            let mut fowl_b = blue_default_allowlist.clone();
+            fowl_b.extend(blue_inventory_allowlist.iter().copied());
+            blue_fowl_export_union = Some(br.expand_ws_alias_family(&fowl_b));
+            let mut fowl_r = red_default_allowlist.clone();
+            fowl_r.extend(red_inventory_allowlist.iter().copied());
+            red_fowl_export_union = Some(br.expand_ws_alias_family(&fowl_r));
         }
         if let Some(caps) = warehouse_caps {
             if caps.has_any_nonzero_cap() {
@@ -4296,9 +4456,9 @@ impl WarehouseTemplate {
             "RINVENTORY",
         )?;
         log_agm65_diag("after_inventory_finalize", "RINVENTORY", &new_red_inventory)?;
-        let red_weapon_export = if warehouse_allowlist_for_filter(&red_allowed_ws)
-            .is_some()
-        {
+        let red_weapon_export = if red_fowl_export_union.is_some() {
+            sorted_weapon_ws(&red_fowl_export_union)
+        } else if warehouse_allowlist_for_filter(&red_allowed_ws).is_some() {
             sorted_weapon_ws(&red_allowed_ws)
         } else {
             if red_allowed_ws.as_ref().is_some_and(|s| s.is_empty()) {
@@ -4329,10 +4489,10 @@ impl WarehouseTemplate {
             "BINVENTORY",
         )?;
         log_agm65_diag("after_inventory_finalize", "BINVENTORY", &new_blue_inventory)?;
-        // bflib filters by this list; it must cover B/RDEFAULT wsTypes after build (payload/bridge allowlist, minus strip).
-        let blue_weapon_export = if warehouse_allowlist_for_filter(&blue_allowed_ws)
-            .is_some()
-        {
+        // bflib: union of B/RDEFAULT and B/RINVENTORY legal wsTypes (alias-expanded).
+        let blue_weapon_export = if blue_fowl_export_union.is_some() {
+            sorted_weapon_ws(&blue_fowl_export_union)
+        } else if warehouse_allowlist_for_filter(&blue_allowed_ws).is_some() {
             sorted_weapon_ws(&blue_allowed_ws)
         } else {
             if blue_allowed_ws.as_ref().is_some_and(|s| s.is_empty()) {
@@ -5152,6 +5312,8 @@ pub fn run(cfg: &MizCmd) -> Result<()> {
     } else {
         warn!("--weapon equals --base; skipping zzDT-* mirror write to weapon.miz");
     }
+    sync_l10n_dictionary_sortie_stem_to_output_miz(&base, &cfg.output)
+        .context("l10n: set dictionary[mission.sortie] to --output .miz stem (DCS Saved Games / Fowl files)")?;
     let s = serialize_to_lua("mission", Value::Table((&*base.mission).clone()))?;
     fs::write(&base.miz.files["mission"], &s).context("writing mission file")?;
     info!("wrote serialized mission to mission file.");

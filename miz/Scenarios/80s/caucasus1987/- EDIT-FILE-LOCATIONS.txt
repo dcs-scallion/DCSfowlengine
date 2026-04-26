@@ -1,12 +1,14 @@
-###################################################################
-# settings for build mission                                      #
-###################################################################
-# DCS user Saved Games path                                       #
+##################################################################################################
+# settings for build mission                                                                     #
+##################################################################################################
+# DCS user Saved Games path                                                                      #
 $DCS_user_path = "C:\Users\Robo\Saved Games\DCS"
-# Name of the compiled mission output                             #
+# Name of the compiled mission output                                                            #
 $mission_name  = "Rust_Fowl_Engine_2.0_Caucasus1987"
 $target_cfg_name = "${mission_name}_CFG"
-###################################################################
+# DCS/bflib use the "sortie" string from l10n/DEFAULT/dictionary (not the .miz filename alone).  #
+# FowlTools overwrites dictionary[mission.sortie] to match --output .miz stem on each build.     #
+##################################################################################################
 
 
 ###################################################################

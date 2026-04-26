@@ -111,8 +111,9 @@ impl FowlMizExport {
         if !path.exists() {
             bail!(
                 "Fowl: required mission export file is missing: {}\n\
-                 Expected: <sortie>_fowl_export.json in the same folder as *_CFG (Saved Games\\DCS), e.g. Caucasus1987_fowl_export.json next to Caucasus1987_CFG.\n\
-                 Build the mission with FowlTools to generate it; this data is required to filter warehouse stock for Fowl logistics.",
+                 Expected: <sortie_stem>_fowl_export.json next to <sortie_stem>_CFG in Saved Games\\DCS (sortie_stem is from Mission Editor / l10n dictionary for mission.sortie, not the .miz file name by itself).\n\
+                 FowlTools sets dictionary[ sortie key ] to the --output .miz stem; rebuild the mission with FowlTools if you renamed the output file.\n\
+                 This file is required to filter warehouse stock for Fowl logistics.",
                 path.display()
             );
         }
