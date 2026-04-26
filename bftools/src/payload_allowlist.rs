@@ -71,10 +71,7 @@ pub fn collect_module_descriptors(payload: &Table) -> ModuleDescriptors {
         collect_strings_recursive(&t, &mut restricted);
         supported.extend(restricted.iter().cloned());
     }
-    ModuleDescriptors {
-        supported,
-        restricted,
-    }
+    ModuleDescriptors { supported, restricted }
 }
 
 #[cfg(test)]

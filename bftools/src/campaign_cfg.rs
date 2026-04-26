@@ -69,16 +69,16 @@ pub struct CampaignWarehouseOverlay {
 }
 
 pub const ALLOWED_CAMPAIGN_DECADES: &[&str] = &[
-    "1940s", "1950s", "1960s", "1970s", "1980s", "1990s", "2000s", "2010s", "2020s", "2030s",
-    "2040s", "2050s",
+    "1940s", "1950s", "1960s", "1970s", "1980s", "1990s", "2000s", "2010s", "2020s",
+    "2030s", "2040s", "2050s",
 ];
 
 pub fn load_overlay(path: &Path) -> Result<CampaignWarehouseOverlay> {
     let bytes = fs::read(path).with_context(|| format!("read {}", path.display()))?;
     let v: serde_json::Value =
         serde_json::from_slice(&bytes).context("parse campaign cfg as JSON")?;
-    let defaults: WarehouseDefaultsFromCfg =
-        serde_json::from_value(v.clone()).context("decode default_warehouse_* from campaign cfg")?;
+    let defaults: WarehouseDefaultsFromCfg = serde_json::from_value(v.clone())
+        .context("decode default_warehouse_* from campaign cfg")?;
 
     let mut missing_default_warehouse_keys: Vec<&'static str> = Vec::new();
     for (json_key, _field_name) in [
@@ -95,7 +95,10 @@ pub fn load_overlay(path: &Path) -> Result<CampaignWarehouseOverlay> {
         }
     }
 
-    fn parse_u32_int_field(field: &'static str, node: &serde_json::Value) -> Result<Option<u32>> {
+    fn parse_u32_int_field(
+        field: &'static str,
+        node: &serde_json::Value,
+    ) -> Result<Option<u32>> {
         let Some(num) = node.as_f64() else {
             // Not a JSON number => treat as "missing" for multiplier purposes.
             return Ok(None);
@@ -138,15 +141,9 @@ pub fn load_overlay(path: &Path) -> Result<CampaignWarehouseOverlay> {
         }
     }
 
-    let warehouse_multipliers = if any {
-        Some(m)
-    } else {
-        None
-    };
-    let campaign_decade = v
-        .get("campaign_decade")
-        .and_then(|n| n.as_str())
-        .map(|s| s.to_string());
+    let warehouse_multipliers = if any { Some(m) } else { None };
+    let campaign_decade =
+        v.get("campaign_decade").and_then(|n| n.as_str()).map(|s| s.to_string());
     Ok(CampaignWarehouseOverlay {
         defaults,
         warehouse_multipliers,
@@ -160,7 +157,9 @@ fn guided_bomb_l3(l3: i32) -> bool {
 }
 
 /// `wsType` with `initialAmount > 0` only — use for warehouse allowlist seeding (zero-stock rows are not campaign ordnance).
-pub fn collect_weapon_ws_types_positive_initial(row: &Table) -> Result<HashSet<[i32; 4]>> {
+pub fn collect_weapon_ws_types_positive_initial(
+    row: &Table,
+) -> Result<HashSet<[i32; 4]>> {
     let mut out = HashSet::new();
     let Ok(weapons) = row.raw_get::<_, Table>("weapons") else {
         return Ok(out);
@@ -220,7 +219,12 @@ fn read_ws_type4(wst: &Table) -> Result<Option<(i32, i32, i32, i32)>> {
     Ok(Some((l1, l2, l3, l4)))
 }
 
-fn cap_for_weapon_ws_type(l1: i32, l2: i32, l3: i32, caps: &WarehouseDefaultsFromCfg) -> Option<u32> {
+fn cap_for_weapon_ws_type(
+    l1: i32,
+    l2: i32,
+    l3: i32,
+    caps: &WarehouseDefaultsFromCfg,
+) -> Option<u32> {
     if l1 == 1 && l2 == 3 {
         return Some(caps.fueltanks);
     }
@@ -238,13 +242,11 @@ fn cap_for_weapon_ws_type(l1: i32, l2: i32, l3: i32, caps: &WarehouseDefaultsFro
                 Some(caps.misc)
             }
         }
-        5 => Some(
-            if caps.ag_guided_bombs > 0 && guided_bomb_l3(l3) {
-                caps.ag_guided_bombs
-            } else {
-                caps.ag_bombs
-            },
-        ),
+        5 => Some(if caps.ag_guided_bombs > 0 && guided_bomb_l3(l3) {
+            caps.ag_guided_bombs
+        } else {
+            caps.ag_bombs
+        }),
         6 => Some(caps.ag_bombs),
         7 => Some(caps.ag_rockets),
         _ => Some(caps.misc),
@@ -252,7 +254,10 @@ fn cap_for_weapon_ws_type(l1: i32, l2: i32, l3: i32, caps: &WarehouseDefaultsFro
 }
 
 /// Sets `initialAmount` on `weapons` entries from `default_warehouse_*` (BDEFAULT/RDEFAULT rows only).
-pub fn apply_default_counts_to_weapons(row: &Table, caps: &WarehouseDefaultsFromCfg) -> Result<()> {
+pub fn apply_default_counts_to_weapons(
+    row: &Table,
+    caps: &WarehouseDefaultsFromCfg,
+) -> Result<()> {
     let Ok(weapons) = row.raw_get::<_, Table>("weapons") else {
         return Ok(());
     };

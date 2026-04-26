@@ -21,7 +21,9 @@ fn contains_empty_token(s: &str) -> bool {
 
 fn normalize_dash_chars(c: char) -> char {
     match c {
-        '\u{2010}'..='\u{2015}' | '\u{2212}' | '\u{FE58}' | '\u{FE63}' | '\u{FF0D}' => '-',
+        '\u{2010}'..='\u{2015}' | '\u{2212}' | '\u{FE58}' | '\u{FE63}' | '\u{FF0D}' => {
+            '-'
+        }
         _ => c,
     }
 }
@@ -44,16 +46,12 @@ fn descriptor_substring_needle(descriptor: &str) -> Option<(String, bool)> {
             return None;
         }
     }
-    let t = normalize_weapon_descriptor_str(inner)
-        .replace('-', "_")
-        .to_uppercase();
+    let t = normalize_weapon_descriptor_str(inner).replace('-', "_").to_uppercase();
     (t.len() >= 4).then_some((t, is_braced))
 }
 
 fn normalized_bridge_key_upper(k: &str) -> String {
-    normalize_weapon_descriptor_str(k)
-        .replace('-', "_")
-        .to_uppercase()
+    normalize_weapon_descriptor_str(k).replace('-', "_").to_uppercase()
 }
 
 fn normalized_aircraft_key_upper(k: &str) -> String {
@@ -102,7 +100,8 @@ pub struct FowlWeaponPayloadWsFile {
 
 impl FowlWeaponPayloadWsFile {
     pub fn write(&self, path: &Path) -> Result<()> {
-        let json = serde_json::to_vec_pretty(self).context("serialize fowl_weapon_payload_ws.json")?;
+        let json = serde_json::to_vec_pretty(self)
+            .context("serialize fowl_weapon_payload_ws.json")?;
         fs::write(path, json).with_context(|| format!("write {}", path.display()))?;
         Ok(())
     }
@@ -126,7 +125,9 @@ fn flatten_side_aircraft_ws(
     out
 }
 
-fn try_read_payload_ws_sidecar(bridge_path: &Path) -> Result<(HashMap<String, HashSet<[i32; 4]>>, HashMap<String, HashSet<[i32; 4]>>)> {
+fn try_read_payload_ws_sidecar(
+    bridge_path: &Path,
+) -> Result<(HashMap<String, HashSet<[i32; 4]>>, HashMap<String, HashSet<[i32; 4]>>)> {
     let p = bridge_path
         .parent()
         .unwrap_or_else(|| Path::new("."))
@@ -135,8 +136,8 @@ fn try_read_payload_ws_sidecar(bridge_path: &Path) -> Result<(HashMap<String, Ha
         return Ok((HashMap::new(), HashMap::new()));
     }
     let bytes = fs::read(&p).with_context(|| format!("read {}", p.display()))?;
-    let f: FowlWeaponPayloadWsFile =
-        serde_json::from_slice(&bytes).with_context(|| format!("parse {}", p.display()))?;
+    let f: FowlWeaponPayloadWsFile = serde_json::from_slice(&bytes)
+        .with_context(|| format!("parse {}", p.display()))?;
     Ok((
         flatten_side_aircraft_ws(&f.pylon_ws_by_side),
         flatten_side_aircraft_ws(&f.restricted_ws_by_side),
@@ -206,7 +207,8 @@ impl WeaponBridgeMap {
             !s.is_empty() && s.chars().all(|c| c.is_ascii_alphanumeric())
         }
         fn has_alpha_and_digit(s: &str) -> bool {
-            s.chars().any(|c| c.is_ascii_alphabetic()) && s.chars().any(|c| c.is_ascii_digit())
+            s.chars().any(|c| c.is_ascii_alphabetic())
+                && s.chars().any(|c| c.is_ascii_digit())
         }
         fn blocked_prefix(prefix: &str) -> bool {
             matches!(
@@ -246,7 +248,10 @@ impl WeaponBridgeMap {
             if i + 1 < parts.len() {
                 let p0 = parts[i];
                 let p1 = parts[i + 1];
-                if is_alpha_only(p0) && !blocked_prefix(p0) && is_alnum(p1) && has_alpha_and_digit(p1)
+                if is_alpha_only(p0)
+                    && !blocked_prefix(p0)
+                    && is_alnum(p1)
+                    && has_alpha_and_digit(p1)
                 {
                     out.insert(format!("{p0}_{p1}"));
                 }
@@ -294,7 +299,8 @@ impl WeaponBridgeMap {
     }
 
     pub fn load(path: &Path) -> Result<Self> {
-        let bytes = fs::read(path).with_context(|| format!("read weapon bridge {}", path.display()))?;
+        let bytes = fs::read(path)
+            .with_context(|| format!("read weapon bridge {}", path.display()))?;
         let parsed: WeaponBridgeFile =
             serde_json::from_slice(&bytes).context("parse weapon bridge JSON")?;
         let ws_alias_family = Self::build_ws_alias_family(&parsed.by_descriptor);
@@ -322,7 +328,8 @@ impl WeaponBridgeMap {
                 entry.insert(normalized_aircraft_key_upper(typ));
             }
         }
-        let (template_pylon_ws, template_restricted_ws) = try_read_payload_ws_sidecar(path)?;
+        let (template_pylon_ws, template_restricted_ws) =
+            try_read_payload_ws_sidecar(path)?;
         Ok(Self {
             by_descriptor: parsed.by_descriptor,
             fueltank_by_aircraft: parsed.fueltank_by_aircraft,
@@ -408,7 +415,11 @@ impl WeaponBridgeMap {
         self.by_descriptor.len()
     }
 
-    pub fn display_names_for_ws_type(&self, ws: [i32; 4], max_names: usize) -> Vec<String> {
+    pub fn display_names_for_ws_type(
+        &self,
+        ws: [i32; 4],
+        max_names: usize,
+    ) -> Vec<String> {
         fn looks_guid_like(s: &str) -> bool {
             s.len() >= 32
                 && s.chars()
@@ -462,7 +473,10 @@ impl WeaponBridgeMap {
     }
 
     /// Exact map, else every `wsType` whose bridge key contains the token (payload short CLSID vs rack key).
-    pub fn ws_types_for_descriptor_or_key_substring(&self, descriptor: &str) -> HashSet<[i32; 4]> {
+    pub fn ws_types_for_descriptor_or_key_substring(
+        &self,
+        descriptor: &str,
+    ) -> HashSet<[i32; 4]> {
         let mut out = HashSet::new();
         if let Some(ws) = self.ws_type_for_descriptor(descriptor) {
             if ws != ZERO_WS {
@@ -470,7 +484,8 @@ impl WeaponBridgeMap {
             }
             return out;
         }
-        let Some((needle, needle_braced)) = descriptor_substring_needle(descriptor) else {
+        let Some((needle, needle_braced)) = descriptor_substring_needle(descriptor)
+        else {
             return out;
         };
         for (k, v) in &self.by_descriptor {
@@ -526,10 +541,7 @@ impl WeaponBridgeMap {
                 has_non_empty.insert(*v);
             }
         }
-        has_non_empty
-            .into_iter()
-            .filter(|ws| !has_empty_alias.contains(ws))
-            .collect()
+        has_non_empty.into_iter().filter(|ws| !has_empty_alias.contains(ws)).collect()
     }
 
     pub fn fueltank_ws_empty(&self) -> HashSet<[i32; 4]> {
@@ -545,7 +557,10 @@ impl WeaponBridgeMap {
         out
     }
 
-    pub fn fueltank_ws_for_aircrafts(&self, aircraft_types: &HashSet<String>) -> HashSet<[i32; 4]> {
+    pub fn fueltank_ws_for_aircrafts(
+        &self,
+        aircraft_types: &HashSet<String>,
+    ) -> HashSet<[i32; 4]> {
         let mut out = HashSet::new();
         let normalized_index: HashMap<String, &Vec<[i32; 4]>> = self
             .fueltank_by_aircraft
@@ -553,10 +568,9 @@ impl WeaponBridgeMap {
             .map(|(k, v)| (normalized_aircraft_key_upper(k), v))
             .collect();
         for typ in aircraft_types {
-            let v = self
-                .fueltank_by_aircraft
-                .get(typ.as_str())
-                .or_else(|| normalized_index.get(&normalized_aircraft_key_upper(typ)).copied());
+            let v = self.fueltank_by_aircraft.get(typ.as_str()).or_else(|| {
+                normalized_index.get(&normalized_aircraft_key_upper(typ)).copied()
+            });
             let Some(v) = v else {
                 continue;
             };
@@ -581,10 +595,9 @@ impl WeaponBridgeMap {
             .map(|(k, v)| (normalized_aircraft_key_upper(k), v))
             .collect();
         for typ in aircraft_types {
-            let v = self
-                .weapon_ws_by_aircraft
-                .get(typ.as_str())
-                .or_else(|| normalized_index.get(&normalized_aircraft_key_upper(typ)).copied());
+            let v = self.weapon_ws_by_aircraft.get(typ.as_str()).or_else(|| {
+                normalized_index.get(&normalized_aircraft_key_upper(typ)).copied()
+            });
             let Some(v) = v else {
                 continue;
             };
@@ -598,17 +611,18 @@ impl WeaponBridgeMap {
     }
 
     /// Rows from `weapon_ws_by_aircraft` for one unit type string only (no reverse map).
-    pub fn weapon_ws_for_aircraft_key_only(&self, aircraft_type: &str) -> HashSet<[i32; 4]> {
+    pub fn weapon_ws_for_aircraft_key_only(
+        &self,
+        aircraft_type: &str,
+    ) -> HashSet<[i32; 4]> {
         let normalized_index: HashMap<String, &Vec<[i32; 4]>> = self
             .weapon_ws_by_aircraft
             .iter()
             .map(|(k, v)| (normalized_aircraft_key_upper(k), v))
             .collect();
-        let Some(v) = self
-            .weapon_ws_by_aircraft
-            .get(aircraft_type)
-            .or_else(|| normalized_index.get(&normalized_aircraft_key_upper(aircraft_type)).copied())
-        else {
+        let Some(v) = self.weapon_ws_by_aircraft.get(aircraft_type).or_else(|| {
+            normalized_index.get(&normalized_aircraft_key_upper(aircraft_type)).copied()
+        }) else {
             return HashSet::new();
         };
         v.iter().copied().filter(|ws| *ws != ZERO_WS).collect()
@@ -620,18 +634,16 @@ impl WeaponBridgeMap {
         unit_type: &str,
     ) -> HashSet<[i32; 4]> {
         let k = Self::template_payload_key(side, unit_type);
-        self.template_restricted_ws
-            .get(&k)
-            .cloned()
-            .unwrap_or_default()
+        self.template_restricted_ws.get(&k).cloned().unwrap_or_default()
     }
 
-    pub fn weapon_ws_for_aircrafts(&self, aircraft_types: &HashSet<String>) -> HashSet<[i32; 4]> {
+    pub fn weapon_ws_for_aircrafts(
+        &self,
+        aircraft_types: &HashSet<String>,
+    ) -> HashSet<[i32; 4]> {
         let mut out = self.weapon_ws_for_aircraft_keys_only(aircraft_types);
-        let requested_norm: HashSet<String> = aircraft_types
-            .iter()
-            .map(|s| normalized_aircraft_key_upper(s))
-            .collect();
+        let requested_norm: HashSet<String> =
+            aircraft_types.iter().map(|s| normalized_aircraft_key_upper(s)).collect();
         // Reverse mapping from bridge: keep ws when any allowed aircraft can carry it.
         // This catches aliases that might be absent in `weapon_ws_by_aircraft`.
         for (ws, aircrafts) in &self.aircraft_by_ws {
@@ -647,7 +659,10 @@ impl WeaponBridgeMap {
 
     /// Expand ws set by bridge-derived descriptor family aliases.
     /// Example: keep LAU-117 + missile-body variants in the same validation family.
-    pub fn expand_ws_alias_family(&self, ws_set: &HashSet<[i32; 4]>) -> HashSet<[i32; 4]> {
+    pub fn expand_ws_alias_family(
+        &self,
+        ws_set: &HashSet<[i32; 4]>,
+    ) -> HashSet<[i32; 4]> {
         let mut out = ws_set.clone();
         for ws in ws_set {
             if let Some(family) = self.ws_alias_family.get(ws) {
@@ -656,7 +671,6 @@ impl WeaponBridgeMap {
         }
         out
     }
-
 }
 
 #[cfg(test)]
@@ -754,7 +768,6 @@ mod tests {
         assert!(s.contains(&[4, 5, 36, 85]));
     }
 
-
     #[test]
     fn resolve_picks_newest_versioned() {
         let dir = std::env::temp_dir().join("fowl_weapon_bridge_test_ver");
@@ -768,5 +781,4 @@ mod tests {
         assert_eq!(resolve_auto_bridge_path(&dir), Some(newer));
         let _ = fs::remove_dir_all(&dir);
     }
-
 }

@@ -12,10 +12,10 @@
 //edit mission table (crack open templates 1 at a time)
 
 //repack miz
-use crate::MizCmd;
 use crate::campaign_cfg;
 use crate::payload_allowlist;
 use crate::weapon_bridge;
+use crate::MizCmd;
 use anyhow::{bail, Context, Result};
 use bfprotocols::miz_trigger::{
     fowl_trigger_zone_name_valid, FOWL_TRIGGER_ZONE_EXPECTED_PREFIXES_DISPLAY,
@@ -26,9 +26,12 @@ use dcso3::{
     coalition::Side,
     controller::{MissionPoint, PointType},
     country::Country,
-    env::miz::{self, Country as MizCountry, Group, GroupId, GroupKind, Miz, Property, Skill, TriggerZoneTyp},
-    normal2, path, pointing_towards2, value_to_json, DcsTableExt, LuaVec2, Quad2, Sequence, String,
-    Vector2,
+    env::miz::{
+        self, Country as MizCountry, Group, GroupId, GroupKind, Miz, Property, Skill,
+        TriggerZoneTyp,
+    },
+    normal2, path, pointing_towards2, value_to_json, DcsTableExt, LuaVec2, Quad2,
+    Sequence, String, Vector2,
 };
 use log::{info, warn};
 use mlua::{FromLua, IntoLua, Lua, Table, Value};
@@ -115,7 +118,9 @@ impl TriggerZone {
         let pos = self.inner.pos()?;
         match self.inner.typ()? {
             TriggerZoneTyp::Quad(q) => Ok(q.contains(LuaVec2(pos))),
-            TriggerZoneTyp::Circle { radius } => Ok(radius >= na::distance(&v.into(), &pos.into())),
+            TriggerZoneTyp::Circle { radius } => {
+                Ok(radius >= na::distance(&v.into(), &pos.into()))
+            }
         }
     }
 }
@@ -168,9 +173,10 @@ impl UnpackedMiz {
             }
             let mut file = File::open(file_path)
                 .with_context(|| format_compact!("opening file {:?}", file_path))?;
-            let relative_path = file_path.strip_prefix(&self.root).with_context(|| {
-                format_compact!("stripping {:?} from file {file_path:?}", self.root)
-            })?;
+            let relative_path =
+                file_path.strip_prefix(&self.root).with_context(|| {
+                    format_compact!("stripping {:?} from file {file_path:?}", self.root)
+                })?;
             zip_writer
                 .start_file(relative_path.to_string_lossy(), FileOptions::default())
                 .context("starting zip file")?;
@@ -207,14 +213,8 @@ impl Display for LuaSerVal {
             Value::Table(tbl) => {
                 macro_rules! write_elt {
                     ($k:expr, $v:expr) => {
-                        let k = LuaSerVal {
-                            value: $k,
-                            level: self.level + 4,
-                        };
-                        let v = LuaSerVal {
-                            value: $v,
-                            level: self.level + 4,
-                        };
+                        let k = LuaSerVal { value: $k, level: self.level + 4 };
+                        let v = LuaSerVal { value: $v, level: self.level + 4 };
                         k.indented(f).unwrap();
                         if v.value.is_table() {
                             write!(f, "[{k}] = {v}, -- end of [{k}]\n").unwrap();
@@ -252,7 +252,9 @@ impl Display for LuaSerVal {
             | Value::Function(_)
             | Value::LightUserData(_)
             | Value::Thread(_)
-            | Value::UserData(_) => panic!("value type {:?} can't be serialized", self.value),
+            | Value::UserData(_) => {
+                panic!("value type {:?} can't be serialized", self.value)
+            }
         }
     }
 }
@@ -295,12 +297,16 @@ struct LoadedMiz {
 
 impl LoadedMiz {
     fn new(lua: &'static Lua, path: &Path) -> Result<Self> {
-        let miz = UnpackedMiz::new(path).with_context(|| format_compact!("unpacking {path:?}"))?;
+        let miz = UnpackedMiz::new(path)
+            .with_context(|| format_compact!("unpacking {path:?}"))?;
         let mut mission = lua.create_table()?;
         let mut options = lua.create_table()?;
         let mut warehouses = lua.create_table()?;
         for (file_name, file) in &miz.files {
-            if **file_name != "mission" && **file_name != "warehouses" && **file_name != "options" {
+            if **file_name != "mission"
+                && **file_name != "warehouses"
+                && **file_name != "options"
+            {
                 continue;
             }
             info!("processing {file_name}");
@@ -310,10 +316,8 @@ impl LoadedMiz {
                 .exec()
                 .with_context(|| format_compact!("loading {file_name} into lua"))?;
             if **file_name == "mission" {
-                mission = lua
-                    .globals()
-                    .raw_get("mission")
-                    .context("extracting mission")?;
+                mission =
+                    lua.globals().raw_get("mission").context("extracting mission")?;
             }
             if **file_name == "warehouses" {
                 warehouses = lua
@@ -322,10 +326,8 @@ impl LoadedMiz {
                     .context("extracting warehouses")?;
             }
             if **file_name == "options" {
-                options = lua
-                    .globals()
-                    .raw_get("options")
-                    .context("extracting options")?;
+                options =
+                    lua.globals().raw_get("options").context("extracting options")?;
             }
         }
         if mission.is_empty() {
@@ -398,10 +400,7 @@ impl SlotSpec {
         let mut seen_includes: HashSet<String> = HashSet::default();
         for prop in props {
             let prop = prop?;
-            if include_keys
-                .iter()
-                .any(|&k| prop.key.as_ref() == k)
-            {
+            if include_keys.iter().any(|&k| prop.key.as_ref() == k) {
                 if !seen_includes.insert(prop.value.clone()) {
                     continue;
                 }
@@ -438,7 +437,9 @@ impl SlotSpec {
                 match Side::from_str(&prop.key) {
                     Ok(s) => side = Some(s),
                     Err(_) => match side {
-                        None => bail!("expected Blue or Red before airframe declarations"),
+                        None => {
+                            bail!("expected Blue or Red before airframe declarations")
+                        }
                         Some(side) => {
                             let unit_type = prop.key.clone();
                             *slots
@@ -454,12 +455,7 @@ impl SlotSpec {
                 }
             }
         }
-        Ok(Self {
-            slots,
-            naval_units,
-            margin,
-            spacing,
-        })
+        Ok(Self { slots, naval_units, margin, spacing })
     }
 }
 
@@ -511,14 +507,7 @@ impl SlotRadial {
                 }
             }
         }
-        Ok(Self {
-            center,
-            slots,
-            i: 0,
-            j: 0,
-            last_az: PI,
-            name,
-        })
+        Ok(Self { center, slots, i: 0, j: 0, last_az: PI, name })
     }
 }
 
@@ -562,7 +551,12 @@ struct SlotGrid {
 }
 
 impl SlotGrid {
-    fn new(name: String, quad: Quad2, margin: Option<f64>, spacing: Option<f64>) -> Result<Self> {
+    fn new(
+        name: String,
+        quad: Quad2,
+        margin: Option<f64>,
+        spacing: Option<f64>,
+    ) -> Result<Self> {
         let margin = margin.unwrap_or(5.);
         let spacing = spacing.unwrap_or(25.);
         let (p0, p1, _) = quad.longest_edge();
@@ -646,7 +640,8 @@ const WEAPON_DT_MIRROR_OFFSET_NORTH_M: f64 = 1000.0;
 
 #[inline]
 fn is_dynamic_template_group_name(name: &str) -> bool {
-    name.starts_with(DYNAMIC_TEMPLATE_GROUP_PREFIX) || name.starts_with(LEGACY_DYNAMIC_TEMPLATE_PREFIX)
+    name.starts_with(DYNAMIC_TEMPLATE_GROUP_PREFIX)
+        || name.starts_with(LEGACY_DYNAMIC_TEMPLATE_PREFIX)
 }
 
 fn gen_dynamic_template_slot_password_10_digits() -> StdString {
@@ -656,7 +651,10 @@ fn gen_dynamic_template_slot_password_10_digits() -> StdString {
         .collect::<StdString>()
 }
 
-fn apply_dynamic_template_group_visibility(group: &Group<'_>, slot_kind: SlotType) -> Result<()> {
+fn apply_dynamic_template_group_visibility(
+    group: &Group<'_>,
+    slot_kind: SlotType,
+) -> Result<()> {
     match slot_kind {
         SlotType::Plane => {
             group.raw_set("hidden", true)?;
@@ -689,7 +687,10 @@ fn offset_air_group_north_m(group: &Group<'_>, delta_y: f64) -> Result<()> {
     Ok(())
 }
 
-fn strip_dt_prefixed_groups_from_cjtf_air(lua: &'static Lua, mission: &Miz) -> Result<()> {
+fn strip_dt_prefixed_groups_from_cjtf_air(
+    lua: &'static Lua,
+    mission: &Miz,
+) -> Result<()> {
     for side in [Side::Blue, Side::Red] {
         let cname = match side {
             Side::Blue => Country::CJTF_BLUE,
@@ -796,8 +797,9 @@ fn sync_dt_mirror_groups_into_weapon_miz(
     weapon_path: &Path,
     base: &LoadedMiz,
 ) -> Result<()> {
-    let weapon_ld = LoadedMiz::new(lua, weapon_path)
-        .with_context(|| format_compact!("loading weapon.miz for DT mirror: {weapon_path:?}"))?;
+    let weapon_ld = LoadedMiz::new(lua, weapon_path).with_context(|| {
+        format_compact!("loading weapon.miz for DT mirror: {weapon_path:?}")
+    })?;
     strip_dt_prefixed_groups_from_cjtf_air(lua, &weapon_ld.mission)?;
     for side in [Side::Blue, Side::Red] {
         let cname = match side {
@@ -822,7 +824,13 @@ fn sync_dt_mirror_groups_into_weapon_miz(
                 let tmpl: Group<'static> = g.deep_clone(lua)?;
                 offset_air_group_north_m(&tmpl, WEAPON_DT_MIRROR_OFFSET_NORTH_M)?;
                 apply_dynamic_template_group_visibility(&tmpl, slot_kind)?;
-                push_client_air_group_to_cjtf(lua, &weapon_ld.mission, side, slot_kind, tmpl)?;
+                push_client_air_group_to_cjtf(
+                    lua,
+                    &weapon_ld.mission,
+                    side,
+                    slot_kind,
+                    tmpl,
+                )?;
             }
         }
     }
@@ -857,7 +865,9 @@ impl VehicleTemplates {
         let s = raw.trim().to_ascii_lowercase();
         match s.as_str() {
             "1" | "true" | "yes" | "on" | "enable" | "enabled" | "active" => Some(true),
-            "0" | "false" | "no" | "off" | "disable" | "disabled" | "inactive" => Some(false),
+            "0" | "false" | "no" | "off" | "disable" | "disabled" | "inactive" => {
+                Some(false)
+            }
             _ => s.parse::<i64>().ok().map(|n| n != 0),
         }
     }
@@ -894,10 +904,7 @@ impl VehicleTemplates {
     ) -> bool {
         // STRICT mode: only zones explicitly listed in SETTINGS-* are considered.
         // Missing/empty settings => nothing enabled.
-        settings
-            .get(&String::from(full_zone_name))
-            .copied()
-            .unwrap_or(false)
+        settings.get(&String::from(full_zone_name)).copied().unwrap_or(false)
     }
 
     fn normalize_group_route_to_turning(group: &Group<'static>) -> Result<()> {
@@ -918,15 +925,20 @@ impl VehicleTemplates {
 
     /// Patch existing Lua waypoint tables in place (preserves DCS-only fields `IntoLua` might drop).
     /// First point: `TakeOffParking` (ramp) for planes, `TakeOffGround` for helis; rest: `Turning Point`.
-    fn patch_dt_route_points_lua_tables(grp: &Group<'static>, slot_kind: SlotType) -> Result<()> {
+    fn patch_dt_route_points_lua_tables(
+        grp: &Group<'static>,
+        slot_kind: SlotType,
+    ) -> Result<()> {
         let route: Table = grp.raw_get("route").context("DT group missing route")?;
-        let points: Table = route.raw_get("points").context("DT group route missing points")?;
+        let points: Table =
+            route.raw_get("points").context("DT group route missing points")?;
         let n = points.raw_len();
         if n < 1 {
             return Ok(());
         }
         for i in 1..=n {
-            let p: Table = points.raw_get(i).with_context(|| format_compact!("route point {i}"))?;
+            let p: Table =
+                points.raw_get(i).with_context(|| format_compact!("route point {i}"))?;
             let typ = if i == 1 {
                 match slot_kind {
                     SlotType::Plane => "TakeOffParking",
@@ -960,10 +972,12 @@ impl VehicleTemplates {
     fn new(wep: &LoadedMiz) -> Result<Self> {
         let mut plane_slots: HashMap<Side, HashMap<String, Group>> = HashMap::new();
         let mut helicopter_slots: HashMap<Side, HashMap<String, Group>> = HashMap::new();
-        let mut dt_weapon_source: HashMap<(Side, SlotType, String), Group> = HashMap::new();
+        let mut dt_weapon_source: HashMap<(Side, SlotType, String), Group> =
+            HashMap::new();
         let mut payload: HashMap<Side, HashMap<String, Table>> = HashMap::new();
         let mut payload_all: HashMap<Side, Vec<Table>> = HashMap::new();
-        let mut payload_variants: HashMap<Side, HashMap<String, Vec<Table>>> = HashMap::new();
+        let mut payload_variants: HashMap<Side, HashMap<String, Vec<Table>>> =
+            HashMap::new();
         let mut prop_aircraft: HashMap<Side, HashMap<String, Table>> = HashMap::new();
         let mut radio: HashMap<Side, HashMap<String, Table>> = HashMap::new();
         let mut frequency: HashMap<Side, HashMap<String, Value>> = HashMap::new();
@@ -989,10 +1003,9 @@ impl VehicleTemplates {
                 {
                     let group = group?;
                     let gname: String = group.raw_get("name").unwrap_or_default();
-                    let is_dt = group
-                        .raw_get::<_, bool>("dynSpawnTemplate")
-                        .unwrap_or(false)
-                        || is_dynamic_template_group_name(&gname);
+                    let is_dt =
+                        group.raw_get::<_, bool>("dynSpawnTemplate").unwrap_or(false)
+                            || is_dynamic_template_group_name(&gname);
                     if is_dt {
                         for unit in group
                             .raw_get::<_, Table>("units")
@@ -1002,7 +1015,8 @@ impl VehicleTemplates {
                             let unit = unit?.1;
                             let unit_type: String =
                                 unit.raw_get("type").context("getting dt unit type")?;
-                            dt_weapon_source.insert((side, st, unit_type.clone()), group.clone());
+                            dt_weapon_source
+                                .insert((side, st, unit_type.clone()), group.clone());
                             if let Ok(w) = unit.raw_get::<_, Table>("payload") {
                                 payload_all.entry(side).or_default().push(w.clone());
                                 payload_variants
@@ -1011,10 +1025,7 @@ impl VehicleTemplates {
                                     .entry(unit_type.clone())
                                     .or_default()
                                     .push(w.clone());
-                                payload
-                                    .entry(side)
-                                    .or_default()
-                                    .insert(unit_type, w);
+                                payload.entry(side).or_default().insert(unit_type, w);
                             }
                         }
                         info!("registered dynamic template from weapon.miz: {gname}");
@@ -1027,9 +1038,12 @@ impl VehicleTemplates {
                         .pairs::<Value, Table>()
                     {
                         let unit = unit?.1;
-                        let unit_type: String = unit.raw_get("type").context("getting units")?;
+                        let unit_type: String =
+                            unit.raw_get("type").context("getting units")?;
                         match st {
-                            SlotType::Helicopter => helicopter_slots.entry(side).or_default(),
+                            SlotType::Helicopter => {
+                                helicopter_slots.entry(side).or_default()
+                            }
                             SlotType::Plane => plane_slots.entry(side).or_default(),
                         }
                         .insert(unit_type.clone(), group.clone());
@@ -1042,10 +1056,7 @@ impl VehicleTemplates {
                                 .entry(unit_type.clone())
                                 .or_default()
                                 .push(w.clone());
-                            payload
-                                .entry(side)
-                                .or_default()
-                                .insert(unit_type.clone(), w);
+                            payload.entry(side).or_default().insert(unit_type.clone(), w);
                         }
                         if let Ok(w) = unit.raw_get("AddPropAircraft") {
                             prop_aircraft
@@ -1144,6 +1155,14 @@ impl VehicleTemplates {
         out
     }
 
+    fn payload_unit_types(&self, side: Side) -> HashSet<StdString> {
+        let mut out = HashSet::new();
+        if let Some(by_type) = self.payload_variants.get(&side) {
+            out.extend(by_type.keys().map(|k| k.to_string()));
+        }
+        out
+    }
+
     /// Pylon or restricted `wsType` union from **all** `weapon*.miz` payload tables for this coalition
     /// (not only `slot_unit_types`, so e.g. dyn templates still count for strip / alias retain).
     fn payload_ws_for_slot_types(
@@ -1164,7 +1183,9 @@ impl VehicleTemplates {
                     payload_allowlist::collect_restricted_descriptors(payload)
                 };
                 for descriptor in descriptors {
-                    for ws in br.ws_types_for_descriptor_or_key_substring(descriptor.as_str()) {
+                    for ws in
+                        br.ws_types_for_descriptor_or_key_substring(descriptor.as_str())
+                    {
                         if ws != [0, 0, 0, 0] {
                             out.insert(ws);
                         }
@@ -1182,8 +1203,10 @@ impl VehicleTemplates {
     ) -> weapon_bridge::FowlWeaponPayloadWsFile {
         let mut pylon_ws_by_side: HashMap<StdString, HashMap<StdString, Vec<[i32; 4]>>> =
             HashMap::new();
-        let mut restricted_ws_by_side: HashMap<StdString, HashMap<StdString, Vec<[i32; 4]>>> =
-            HashMap::new();
+        let mut restricted_ws_by_side: HashMap<
+            StdString,
+            HashMap<StdString, Vec<[i32; 4]>>,
+        > = HashMap::new();
         for side in [Side::Blue, Side::Red] {
             let side_s = side.to_str().to_string();
             let Some(by_type) = self.payload_variants.get(&side) else {
@@ -1196,10 +1219,14 @@ impl VehicleTemplates {
                 let mut rst_set = HashSet::<[i32; 4]>::new();
                 for payload in variants {
                     for d in payload_allowlist::collect_pylon_descriptors(payload) {
-                        pyl_set.extend(br.ws_types_for_descriptor_or_key_substring(d.as_str()));
+                        pyl_set.extend(
+                            br.ws_types_for_descriptor_or_key_substring(d.as_str()),
+                        );
                     }
                     for d in payload_allowlist::collect_restricted_descriptors(payload) {
-                        rst_set.extend(br.ws_types_for_descriptor_or_key_substring(d.as_str()));
+                        rst_set.extend(
+                            br.ws_types_for_descriptor_or_key_substring(d.as_str()),
+                        );
                     }
                 }
                 pyl_set.retain(|w| *w != [0, 0, 0, 0]);
@@ -1278,11 +1305,8 @@ impl VehicleTemplates {
             }
         }
         let mut out = HashSet::<[i32; 4]>::new();
-        let keys: HashSet<[i32; 4]> = mention_count
-            .keys()
-            .chain(restricted_count.keys())
-            .copied()
-            .collect();
+        let keys: HashSet<[i32; 4]> =
+            mention_count.keys().chain(restricted_count.keys()).copied().collect();
         for ws in keys {
             let p = pylon_count.get(&ws).copied().unwrap_or(0);
             let r = restricted_count.get(&ws).copied().unwrap_or(0);
@@ -1349,11 +1373,8 @@ impl VehicleTemplates {
             }
         }
         let mut out = HashSet::<StdString>::new();
-        let keys: HashSet<StdString> = mention_count
-            .keys()
-            .chain(restricted_count.keys())
-            .cloned()
-            .collect();
+        let keys: HashSet<StdString> =
+            mention_count.keys().chain(restricted_count.keys()).cloned().collect();
         for d in keys {
             let p = pylon_count.get(&d).copied().unwrap_or(0);
             let r = restricted_count.get(&d).copied().unwrap_or(0);
@@ -1416,11 +1437,8 @@ impl VehicleTemplates {
         }
 
         let mut out = HashSet::<[i32; 4]>::new();
-        let keys: HashSet<[i32; 4]> = mention_count
-            .keys()
-            .chain(restricted_count.keys())
-            .copied()
-            .collect();
+        let keys: HashSet<[i32; 4]> =
+            mention_count.keys().chain(restricted_count.keys()).copied().collect();
         for ws in keys {
             let p = pylon_count.get(&ws).copied().unwrap_or(0);
             let r = restricted_count.get(&ws).copied().unwrap_or(0);
@@ -1526,11 +1544,8 @@ impl VehicleTemplates {
         }
 
         let mut out = HashSet::<[i32; 4]>::new();
-        let keys: HashSet<[i32; 4]> = mention_count
-            .keys()
-            .chain(restricted_count.keys())
-            .copied()
-            .collect();
+        let keys: HashSet<[i32; 4]> =
+            mention_count.keys().chain(restricted_count.keys()).copied().collect();
         for ws in keys {
             let p = pylon_count.get(&ws).copied().unwrap_or(0);
             let r = restricted_count.get(&ws).copied().unwrap_or(0);
@@ -1572,18 +1587,23 @@ impl VehicleTemplates {
             if let Ok(Some(dl)) = unit.raw_get::<_, Option<Table>>("datalinks") {
                 let uid = unit.raw_get::<_, i64>("unitId")?;
                 let mut ok = false;
-                if let Ok(ownship) =
-                    dl.raw_get_path::<Table>(&path!["Link16", "network", "teamMembers", 1])
-                {
+                if let Ok(ownship) = dl.raw_get_path::<Table>(&path![
+                    "Link16",
+                    "network",
+                    "teamMembers",
+                    1
+                ]) {
                     ownship.raw_set("missionUnitId", uid)?;
                     ok = true;
                 }
-                if let Ok(presets) =
-                    dl.raw_get_path::<Sequence<Table>>(&path!["IDM", "network", "presets"])
+                if let Ok(presets) = dl
+                    .raw_get_path::<Sequence<Table>>(&path!["IDM", "network", "presets"])
                 {
                     for preset in presets {
                         let preset = preset?;
-                        if let Ok(ownship) = preset.raw_get_path::<Table>(&path!["members", 1]) {
+                        if let Ok(ownship) =
+                            preset.raw_get_path::<Table>(&path!["members", 1])
+                        {
                             ownship.raw_set("missionUnitId", uid)?;
                             ok = true;
                         }
@@ -1648,7 +1668,12 @@ impl VehicleTemplates {
             if !name.starts_with("TS") {
                 continue;
             }
-            let spec = SlotSpec::new(&templates, zone.properties()?, false, INCLUDE_STATIC_SLOT_KEYS)?;
+            let spec = SlotSpec::new(
+                &templates,
+                zone.properties()?,
+                false,
+                INCLUDE_STATIC_SLOT_KEYS,
+            )?;
             for (side, slots) in &spec.slots {
                 let mut posgen: Box<dyn PosGenerator> = match zone.typ()? {
                     TriggerZoneTyp::Quad(quad) => Box::new(SlotGrid::new(
@@ -1711,16 +1736,22 @@ impl VehicleTemplates {
                     }
                 };
                 for (vehicle, n) in slots {
-                    let (seq, tmpl) = match self.plane_slots.get(side).and_then(|s| s.get(vehicle))
-                    {
-                        Some(t) => (&planes, t),
-                        None => {
-                            match self.helicopter_slots.get(side).and_then(|s| s.get(vehicle)) {
-                                Some(t) => (&helicopters, t),
-                                None => bail!("missing required slot template {vehicle}"),
+                    let (seq, tmpl) =
+                        match self.plane_slots.get(side).and_then(|s| s.get(vehicle)) {
+                            Some(t) => (&planes, t),
+                            None => {
+                                match self
+                                    .helicopter_slots
+                                    .get(side)
+                                    .and_then(|s| s.get(vehicle))
+                                {
+                                    Some(t) => (&helicopters, t),
+                                    None => {
+                                        bail!("missing required slot template {vehicle}")
+                                    }
+                                }
                             }
-                        }
-                    };
+                        };
                     for _ in 0..*n {
                         let tmpl = tmpl.deep_clone(lua)?;
                         let pos = posgen.next()?;
@@ -1733,8 +1764,9 @@ impl VehicleTemplates {
                                 .map(|p| {
                                     let mut p = p?;
                                     if first {
-                                        let is_naval =
-                                            spec.naval_units.contains(&(*side, vehicle.clone()));
+                                        let is_naval = spec
+                                            .naval_units
+                                            .contains(&(*side, vehicle.clone()));
                                         p.typ = if is_naval {
                                             PointType::TakeOffParking
                                         } else {
@@ -1760,7 +1792,8 @@ impl VehicleTemplates {
                             u.set_id(uid)?;
                             u.set_heading(posgen.azumith())?;
                             u.set_pos(pos)?;
-                            set_dl_mizuid(&u).with_context(|| format_compact!("unit {u:?}"))?;
+                            set_dl_mizuid(&u)
+                                .with_context(|| format_compact!("unit {u:?}"))?;
                             uid.next();
                         }
                         gid.next();
@@ -1877,16 +1910,10 @@ impl VehicleTemplates {
                 }
             }
         }
-        let land_allow = if have_land_policy_zones {
-            Some(land_allowed_set)
-        } else {
-            None
-        };
-        let naval_allow = if have_naval_policy_zones {
-            Some(naval_allowed_set)
-        } else {
-            None
-        };
+        let land_allow =
+            if have_land_policy_zones { Some(land_allowed_set) } else { None };
+        let naval_allow =
+            if have_naval_policy_zones { Some(naval_allowed_set) } else { None };
 
         let mut specs: Vec<(Side, SlotType, String, Group)> = Vec::new();
         for side in [Side::Red, Side::Blue] {
@@ -1934,35 +1961,31 @@ impl VehicleTemplates {
         // and later merge them into the dynamic templates' payload (keeping `restricted`).
         let mut wanted_types: HashMap<Side, HashSet<String>> = HashMap::default();
         for (side, _, unit_type, _) in &specs {
-            wanted_types
-                .entry(*side)
-                .or_default()
-                .insert(unit_type.clone());
+            wanted_types.entry(*side).or_default().insert(unit_type.clone());
         }
         let mut pylons_by_side_type: HashMap<(Side, String), Table<'static>> =
             HashMap::default();
         for side in [Side::Red, Side::Blue] {
             if let Some(wanted) = wanted_types.get(&side) {
                 let coa = base.mission.coalition(side)?;
-                for country in coa
-                    .raw_get::<_, Table>("country")?
-                    .pairs::<Value, Table>()
+                for country in coa.raw_get::<_, Table>("country")?.pairs::<Value, Table>()
                 {
                     let country = country?.1;
                     for group in vehicle(&country, "plane")?
                         .chain(vehicle(&country, "helicopter")?)
                     {
                         let group = group?;
-                        for unit in group
-                            .raw_get::<_, Table>("units")?
-                            .pairs::<Value, Table>()
+                        for unit in
+                            group.raw_get::<_, Table>("units")?.pairs::<Value, Table>()
                         {
                             let unit = unit?.1;
                             let unit_type: String = unit.raw_get("type")?;
                             if !wanted.contains(&unit_type) {
                                 continue;
                             }
-                            if pylons_by_side_type.contains_key(&(side, unit_type.clone())) {
+                            if pylons_by_side_type
+                                .contains_key(&(side, unit_type.clone()))
+                            {
                                 continue;
                             }
                             let payload: Table<'static> = match unit.raw_get("payload") {
@@ -1975,14 +1998,10 @@ impl VehicleTemplates {
                             };
                             // Use a robust non-empty heuristic.
                             // `payload.pylons` may use different key types depending on source.
-                            let has_any_pylons = pylons
-                                .clone()
-                                .pairs::<Value, Value>()
-                                .next()
-                                .is_some();
+                            let has_any_pylons =
+                                pylons.clone().pairs::<Value, Value>().next().is_some();
                             if has_any_pylons {
-                                pylons_by_side_type
-                                    .insert((side, unit_type), pylons);
+                                pylons_by_side_type.insert((side, unit_type), pylons);
                             }
                         }
                     }
@@ -1995,16 +2014,12 @@ impl VehicleTemplates {
         let slot_password = gen_dynamic_template_slot_password_10_digits();
         info!(
             "dynamic spawn template slot password (all {}* groups this build): {}",
-            DYNAMIC_TEMPLATE_GROUP_PREFIX,
-            slot_password
+            DYNAMIC_TEMPLATE_GROUP_PREFIX, slot_password
         );
 
         for (side, slot_kind, unit_type, src_default) in specs {
             let (src, from_weapon_dt) =
-                match self
-                    .dt_weapon_source
-                    .get(&(side, slot_kind, unit_type.clone()))
-                {
+                match self.dt_weapon_source.get(&(side, slot_kind, unit_type.clone())) {
                     Some(g) => (g, true),
                     None => (&src_default, false),
                 };
@@ -2033,12 +2048,10 @@ impl VehicleTemplates {
                 warn!("skipping dynamic template {group_name}, duplicate in weapon templates");
                 continue;
             }
-            if base
-                .mission
-                .get_group_by_name(&idx, kind, side, &group_name)?
-                .is_some()
-            {
-                warn!("skipping dynamic template {group_name}, group name already exists");
+            if base.mission.get_group_by_name(&idx, kind, side, &group_name)?.is_some() {
+                warn!(
+                    "skipping dynamic template {group_name}, group name already exists"
+                );
                 continue;
             }
 
@@ -2063,7 +2076,9 @@ impl VehicleTemplates {
             for u in tmpl.units()? {
                 let u = u?;
                 if u.skill()? != Skill::Client {
-                    bail!("dynamic template source for {unit_type} must use Client skill");
+                    bail!(
+                        "dynamic template source for {unit_type} must use Client skill"
+                    );
                 }
                 unit_ord += 1;
                 u.set_id(uid)?;
@@ -2086,17 +2101,16 @@ impl VehicleTemplates {
                     let pylons = pylons_by_side_type
                         .get(&(side, unit_type.clone()))
                         .or_else(|| {
-                            pylons_by_side_type
-                                .get(&(side.opposite(), unit_type.clone()))
+                            pylons_by_side_type.get(&(side.opposite(), unit_type.clone()))
                         });
                     if let Some(pylons) = pylons {
-                        payload_tbl
-                            .raw_set("pylons", pylons.deep_clone(lua)?)?;
+                        payload_tbl.raw_set("pylons", pylons.deep_clone(lua)?)?;
                     }
                     u.set("payload", payload_tbl)?;
                 }
 
-                if let Some(v) = self.frequency.get(&side).and_then(|t| t.get(&unit_type)) {
+                if let Some(v) = self.frequency.get(&side).and_then(|t| t.get(&unit_type))
+                {
                     u.set("frequency", v.deep_clone(lua)?)?;
                 }
 
@@ -2117,11 +2131,7 @@ impl VehicleTemplates {
             info!("added dynamic spawn template {}", group_name);
         }
 
-        Ok(DynamicSpawnEmit {
-            link_by_side_type,
-            land_allow,
-            naval_allow,
-        })
+        Ok(DynamicSpawnEmit { link_by_side_type, land_allow, naval_allow })
     }
 
     fn apply(
@@ -2135,17 +2145,15 @@ impl VehicleTemplates {
         let mut stn = 1u64;
         //apply weapon/APA templates to mission table in self
         info!("replacing slots with template payloads");
-        for (side, coa) in Side::ALL
-            .into_iter()
-            .map(|side| (side, base.mission.coalition(side)))
+        for (side, coa) in
+            Side::ALL.into_iter().map(|side| (side, base.mission.coalition(side)))
         {
             let coa = coa?;
             for country in coa.raw_get::<_, Table>("country")?.pairs::<Value, Table>() {
                 let country = country?.1;
-                for group in vehicle(&country, "plane")
-                    .context("getting planes")?
-                    .chain(vehicle(&country, "helicopter").context("getting helicopters")?)
-                {
+                for group in vehicle(&country, "plane").context("getting planes")?.chain(
+                    vehicle(&country, "helicopter").context("getting helicopters")?,
+                ) {
                     let group = group.context("getting group")?;
                     for unit in group
                         .raw_get::<_, Table>("units")
@@ -2158,7 +2166,11 @@ impl VehicleTemplates {
                             continue;
                         }
                         let unit_type: String = unit.raw_get("type")?;
-                        match Self::table_for_side_or_opposite(&self.payload, side, &unit_type) {
+                        match Self::table_for_side_or_opposite(
+                            &self.payload,
+                            side,
+                            &unit_type,
+                        ) {
                             Some(w) => unit.set("payload", w.deep_clone(lua)?)?,
                             None => {
                                 if !unit.contains_key("payload")? {
@@ -2179,7 +2191,10 @@ impl VehicleTemplates {
                                         "STN_L16",
                                         String::from(format_compact!("{:005o}", stn)),
                                     )?;
-                                    let s = String::from(format_compact!(" STN#{:005o}", stn));
+                                    let s = String::from(format_compact!(
+                                        " STN#{:005o}",
+                                        stn
+                                    ));
                                     stn += 1;
                                     s
                                 } else {
@@ -2190,10 +2205,14 @@ impl VehicleTemplates {
                             }
                         };
                         // Radio presets are coalition-specific; do not fall back to opposite side.
-                        if let Some(w) = self.radio.get(&side).and_then(|t| t.get(&unit_type)) {
+                        if let Some(w) =
+                            self.radio.get(&side).and_then(|t| t.get(&unit_type))
+                        {
                             unit.set("Radio", w.deep_clone(lua)?)?
                         }
-                        if let Some(v) = self.frequency.get(&side).and_then(|t| t.get(&unit_type)) {
+                        if let Some(v) =
+                            self.frequency.get(&side).and_then(|t| t.get(&unit_type))
+                        {
                             unit.set("frequency", v.deep_clone(lua)?)?
                         }
                         increment_key(&mut replace_count, &unit_type);
@@ -2203,8 +2222,10 @@ impl VehicleTemplates {
                         for trigger_zone in &mut *objectives {
                             if trigger_zone.contains(Vector2::new(x, y))? {
                                 found = true;
-                                let count =
-                                    increment_key(&mut trigger_zone.spawn_count, &unit_type);
+                                let count = increment_key(
+                                    &mut trigger_zone.spawn_count,
+                                    &unit_type,
+                                );
                                 let new_name = String::from(format_compact!(
                                     "{} {} {}{}",
                                     trigger_zone.objective_name,
@@ -2279,9 +2300,8 @@ struct WarehouseBundle {
 
 /// Red/blue rows get BDEFAULT/RDEFAULT; neutral is left as in base.miz (e.g. civilian airfields).
 fn warehouse_side_for_default_apply(row: &Table) -> Result<Option<Side>> {
-    let s: String = row
-        .raw_get("coalition")
-        .context("warehouse row missing coalition")?;
+    let s: String =
+        row.raw_get("coalition").context("warehouse row missing coalition")?;
     match s.to_lowercase().as_str() {
         "red" => Ok(Some(Side::Red)),
         "blue" => Ok(Some(Side::Blue)),
@@ -2301,7 +2321,9 @@ fn warehouse_lua_key_i64(k: Value) -> Option<i64> {
     }
 }
 
-fn collect_droptank_ws_types_from_warehouse_row(row: &Table) -> Result<HashSet<[i32; 4]>> {
+fn collect_droptank_ws_types_from_warehouse_row(
+    row: &Table,
+) -> Result<HashSet<[i32; 4]>> {
     let mut out = HashSet::new();
     let Ok(weapons) = row.raw_get::<_, Table>("weapons") else {
         return Ok(out);
@@ -2397,18 +2419,16 @@ impl WarehouseStockMultConfig {
 fn production_inventory_unit_ids(base: &LoadedMiz, cfg: &MizCmd) -> Result<(i64, i64)> {
     let mut blue_inventory = 0i64;
     let mut red_inventory = 0i64;
-    for coa in base
-        .mission
-        .raw_get::<_, Table>("coalition")?
-        .pairs::<Value, Table>()
-    {
+    for coa in base.mission.raw_get::<_, Table>("coalition")?.pairs::<Value, Table>() {
         let coa = coa?.1;
         for country in coa.raw_get::<_, Table>("country")?.pairs::<Value, Table>() {
             let country = country?.1;
             if let Ok(iter) = vehicle(&country, "static") {
                 for group in iter {
                     let group = group?;
-                    for unit in group.raw_get::<_, Table>("units")?.pairs::<Value, Table>() {
+                    for unit in
+                        group.raw_get::<_, Table>("units")?.pairs::<Value, Table>()
+                    {
                         let unit = unit?.1;
                         let typ: String = unit.raw_get("type")?;
                         let name: String = unit.raw_get("name")?;
@@ -2495,9 +2515,8 @@ fn apply_weapon_cfg_cap_scale_pass(
         }
         Ok(())
     }
-    let airports = warehouses_root
-        .raw_get::<_, Table>("airports")
-        .context("scale pass airports")?;
+    let airports =
+        warehouses_root.raw_get::<_, Table>("airports").context("scale pass airports")?;
     let warehouses = warehouses_root
         .raw_get::<_, Table>("warehouses")
         .context("scale pass warehouses")?;
@@ -2507,7 +2526,9 @@ fn apply_weapon_cfg_cap_scale_pass(
 }
 
 /// `Some(&set)` only when non-empty. An empty set must not act as allowlist (would remove every row).
-fn warehouse_allowlist_for_filter(opt: &Option<HashSet<[i32; 4]>>) -> Option<&HashSet<[i32; 4]>> {
+fn warehouse_allowlist_for_filter(
+    opt: &Option<HashSet<[i32; 4]>>,
+) -> Option<&HashSet<[i32; 4]>> {
     opt.as_ref().filter(|s| !s.is_empty())
 }
 
@@ -2561,11 +2582,7 @@ fn prune_warehouse_weapons_row(
     if removed > 0 {
         info!(
             "{log_label}: removed {removed} weapon row(s) (restricted-only ws + {})",
-            if allowed_ws.is_some() {
-                "allowlist filter"
-            } else {
-                "no allowlist"
-            }
+            if allowed_ws.is_some() { "allowlist filter" } else { "no allowlist" }
         );
     }
     Ok(removed)
@@ -2583,17 +2600,15 @@ impl WarehouseTemplate {
         let mut red_all_fueltanks_id = 0;
         let mut blue_default_fueltanks_id = 0;
         let mut red_default_fueltanks_id = 0;
-        for coa in wht
-            .mission
-            .raw_get::<_, Table>("coalition")?
-            .pairs::<Value, Table>()
-        {
+        for coa in wht.mission.raw_get::<_, Table>("coalition")?.pairs::<Value, Table>() {
             let coa = coa?.1;
             for country in coa.raw_get::<_, Table>("country")?.pairs::<Value, Table>() {
                 let country = country?.1;
                 for group in vehicle(&country, "static")? {
                     let group = group?;
-                    for unit in group.raw_get::<_, Table>("units")?.pairs::<Value, Table>() {
+                    for unit in
+                        group.raw_get::<_, Table>("units")?.pairs::<Value, Table>()
+                    {
                         let unit = unit?.1;
                         if *unit.raw_get::<_, String>("type")? == "Invisible FARP" {
                             let name = unit.raw_get::<_, String>("name")?;
@@ -2629,10 +2644,7 @@ impl WarehouseTemplate {
             }
         }
         if blue_inventory_id == 0 {
-            bail!(
-                "missing warehouse template {}",
-                cfg.blue_production_template
-            )
+            bail!("missing warehouse template {}", cfg.blue_production_template)
         }
         if red_inventory_id == 0 {
             bail!("missing warehouse template {}", cfg.red_production_template)
@@ -2706,17 +2718,25 @@ impl WarehouseTemplate {
         base: &mut LoadedMiz,
         warehouse_caps: Option<&campaign_cfg::WarehouseDefaultsFromCfg>,
         bridge_gen: Option<(&VehicleTemplates, &weapon_bridge::WeaponBridgeMap)>,
-        objective_aircraft_by_side: &HashMap<StdString, HashMap<Side, HashSet<StdString>>>,
+        objective_aircraft_by_side: &HashMap<
+            StdString,
+            HashMap<Side, HashSet<StdString>>,
+        >,
         _droptank_ws_from_weapon_warehouses: &(HashSet<[i32; 4]>, HashSet<[i32; 4]>),
         mult_cfg: &WarehouseStockMultConfig,
     ) -> Result<bfprotocols::fowl_miz_export::FowlMizExport> {
-        fn copy_weapons_subtable(lua: &Lua, dst_row: &Table, src_row: &Table, label: &str) -> Result<()> {
-            let w = src_row
-                .raw_get::<_, Table>("weapons")
-                .with_context(|| format_compact!("{label}: missing weapons table on generated default row"))?;
-            dst_row
-                .raw_set("weapons", w.deep_clone(lua)?)
-                .with_context(|| format_compact!("{label}: write-back set weapons on template row"))?;
+        fn copy_weapons_subtable(
+            lua: &Lua,
+            dst_row: &Table,
+            src_row: &Table,
+            label: &str,
+        ) -> Result<()> {
+            let w = src_row.raw_get::<_, Table>("weapons").with_context(|| {
+                format_compact!("{label}: missing weapons table on generated default row")
+            })?;
+            dst_row.raw_set("weapons", w.deep_clone(lua)?).with_context(|| {
+                format_compact!("{label}: write-back set weapons on template row")
+            })?;
             Ok(())
         }
         fn sorted_weapon_ws(opt: &Option<HashSet<[i32; 4]>>) -> Vec<[i32; 4]> {
@@ -2729,11 +2749,8 @@ impl WarehouseTemplate {
         }
 
         fn sorted_fueltank_ws(set: &HashSet<[i32; 4]>) -> Vec<[i32; 4]> {
-            let mut v: Vec<_> = set
-                .iter()
-                .copied()
-                .filter(|w| w[0] == 1 && w[1] == 3)
-                .collect();
+            let mut v: Vec<_> =
+                set.iter().copied().filter(|w| w[0] == 1 && w[1] == 3).collect();
             v.sort_by_key(|w| (w[0], w[1], w[2], w[3]));
             v
         }
@@ -2767,9 +2784,13 @@ impl WarehouseTemplate {
                         .and_then(|by_type| by_type.get(unit_type.as_str()))
                     {
                         'payloads: for payload in variants {
-                            for descriptor in payload_allowlist::collect_pylon_descriptors(payload) {
+                            for descriptor in
+                                payload_allowlist::collect_pylon_descriptors(payload)
+                            {
                                 if br
-                                    .ws_types_for_descriptor_or_key_substring(descriptor.as_str())
+                                    .ws_types_for_descriptor_or_key_substring(
+                                        descriptor.as_str(),
+                                    )
                                     .contains(&ws)
                                 {
                                     used = true;
@@ -2846,12 +2867,8 @@ impl WarehouseTemplate {
         }
 
         fn log_agm65_diag(label: &str, row_name: &str, row: &Table) -> Result<()> {
-            const AGM_WS: [[i32; 4]; 4] = [
-                [4, 4, 8, 273],
-                [4, 4, 8, 274],
-                [4, 4, 32, 3097],
-                [4, 4, 32, 3099],
-            ];
+            const AGM_WS: [[i32; 4]; 4] =
+                [[4, 4, 8, 273], [4, 4, 8, 274], [4, 4, 32, 3097], [4, 4, 32, 3099]];
             for ws in AGM_WS {
                 match weapon_amount_for_ws(row, ws)? {
                     Some(amt) => info!(
@@ -2891,9 +2908,7 @@ impl WarehouseTemplate {
                     .map(|sources| sorted_strings(sources).join(","))
                     .filter(|s| !s.is_empty())
                     .unwrap_or_else(|| "unknown".to_string());
-                let item_names = br
-                    .display_names_for_ws_type(ws, 3)
-                    .join(" | ");
+                let item_names = br.display_names_for_ws_type(ws, 3).join(" | ");
                 let item_names = if item_names.is_empty() {
                     "unknown".to_string()
                 } else {
@@ -2970,23 +2985,21 @@ impl WarehouseTemplate {
         ) -> Result<usize> {
             // Only wsTypes with real stock in BINVENTORY/RINVENTORY — zero rows are ME placeholders and
             // must not suppress BDEFAULT/RDEFAULT rows (notably external tanks `[1,3,_,_]` absent from hook bridge JSON).
-            let inv_ws: HashSet<[i32; 4]> = if let Some(expanded) = inventory_positive_block_ws {
-                expanded
-                    .iter()
-                    .copied()
-                    .filter(|ws| !(ws[0] == 1 && ws[1] == 3))
-                    .collect()
-            } else {
-                campaign_cfg::collect_weapon_ws_types_positive_initial(inventory_row)?
-                    .into_iter()
-                    .filter(|ws| !(ws[0] == 1 && ws[1] == 3))
-                    .collect()
-            };
-            let mut list: Vec<[i32; 4]> = allowed_ws
-                .iter()
-                .copied()
-                .filter(|ws| !inv_ws.contains(ws))
-                .collect();
+            let inv_ws: HashSet<[i32; 4]> =
+                if let Some(expanded) = inventory_positive_block_ws {
+                    expanded
+                        .iter()
+                        .copied()
+                        .filter(|ws| !(ws[0] == 1 && ws[1] == 3))
+                        .collect()
+                } else {
+                    campaign_cfg::collect_weapon_ws_types_positive_initial(inventory_row)?
+                        .into_iter()
+                        .filter(|ws| !(ws[0] == 1 && ws[1] == 3))
+                        .collect()
+                };
+            let mut list: Vec<[i32; 4]> =
+                allowed_ws.iter().copied().filter(|ws| !inv_ws.contains(ws)).collect();
             list.sort_by_key(|w| (w[0], w[1], w[2], w[3]));
             let weapons = lua.create_table()?;
             for (i, ws) in list.iter().enumerate() {
@@ -3211,9 +3224,15 @@ impl WarehouseTemplate {
             Ok(zeroed)
         }
 
-        fn preserve_dynamic_flags(lua: &Lua, new_row: &Table, old_row: &Table) -> Result<()> {
-            let dynamic_spawn = old_row.raw_get::<_, bool>("dynamicSpawn").unwrap_or(false);
-            let dynamic_cargo = old_row.raw_get::<_, bool>("dynamicCargo").unwrap_or(false);
+        fn preserve_dynamic_flags(
+            lua: &Lua,
+            new_row: &Table,
+            old_row: &Table,
+        ) -> Result<()> {
+            let dynamic_spawn =
+                old_row.raw_get::<_, bool>("dynamicSpawn").unwrap_or(false);
+            let dynamic_cargo =
+                old_row.raw_get::<_, bool>("dynamicCargo").unwrap_or(false);
             new_row.raw_set("dynamicSpawn", dynamic_spawn)?;
             new_row.raw_set("dynamicCargo", dynamic_cargo)?;
             for key in ["jet_fuel", "gasoline", "diesel", "methanol_mixture"] {
@@ -3240,8 +3259,10 @@ impl WarehouseTemplate {
         let mut red_inventory_positive_block_ws: Option<HashSet<[i32; 4]>> = None;
         let mut blue_strip_ws: HashSet<[i32; 4]> = HashSet::new();
         let mut red_strip_ws: HashSet<[i32; 4]> = HashSet::new();
-        let mut blue_default_sources: HashMap<[i32; 4], HashSet<StdString>> = HashMap::new();
-        let mut red_default_sources: HashMap<[i32; 4], HashSet<StdString>> = HashMap::new();
+        let mut blue_default_sources: HashMap<[i32; 4], HashSet<StdString>> =
+            HashMap::new();
+        let mut red_default_sources: HashMap<[i32; 4], HashSet<StdString>> =
+            HashMap::new();
         let mut objective_defaults: HashMap<
             StdString,
             bfprotocols::fowl_miz_export::ObjectiveWarehouseDefaults,
@@ -3250,14 +3271,10 @@ impl WarehouseTemplate {
             let blue_module_ws = module_weapon_ws_by_side(vt, br, Side::Blue);
             let red_module_ws = module_weapon_ws_by_side(vt, br, Side::Red);
             for (objective_name, by_side) in objective_aircraft_by_side {
-                let blue_aircraft = by_side
-                    .get(&Side::Blue)
-                    .cloned()
-                    .unwrap_or_else(HashSet::default);
-                let red_aircraft = by_side
-                    .get(&Side::Red)
-                    .cloned()
-                    .unwrap_or_else(HashSet::default);
+                let blue_aircraft =
+                    by_side.get(&Side::Blue).cloned().unwrap_or_else(HashSet::default);
+                let red_aircraft =
+                    by_side.get(&Side::Red).cloned().unwrap_or_else(HashSet::default);
                 let mut blue_weapon_ws: HashSet<[i32; 4]> = HashSet::default();
                 let mut red_weapon_ws: HashSet<[i32; 4]> = HashSet::default();
                 blue_weapon_ws.extend(br.weapon_ws_for_aircrafts(&blue_aircraft));
@@ -3286,39 +3303,47 @@ impl WarehouseTemplate {
                 "fowl export objective defaults prepared: {} objective(s)",
                 objective_defaults.len()
             );
-            let configured_empty_fueltanks = warehouse_caps
-                .map(|caps| caps.fueltanks_empty)
-                .unwrap_or(false);
-            let template_fuel_ws_for_descriptor =
-                |descriptor: &str| -> Option<[i32; 4]> {
-                    if let Some(ws) = br.ws_type_for_descriptor(descriptor) {
-                        if ws[0] == 1 && ws[1] == 3 {
-                            return Some(ws);
-                        }
+            let configured_empty_fueltanks =
+                warehouse_caps.map(|caps| caps.fueltanks_empty).unwrap_or(false);
+            let template_fuel_ws_for_descriptor = |descriptor: &str| -> Option<[i32; 4]> {
+                if let Some(ws) = br.ws_type_for_descriptor(descriptor) {
+                    if ws[0] == 1 && ws[1] == 3 {
+                        return Some(ws);
                     }
-                    let fuel: HashSet<[i32; 4]> = br
-                        .ws_types_for_descriptor_or_key_substring(descriptor)
-                        .into_iter()
-                        .filter(|ws| ws[0] == 1 && ws[1] == 3)
-                        .collect();
-                    if fuel.len() == 1 {
-                        return fuel.into_iter().next();
-                    }
-                    None
-                };
+                }
+                let fuel: HashSet<[i32; 4]> = br
+                    .ws_types_for_descriptor_or_key_substring(descriptor)
+                    .into_iter()
+                    .filter(|ws| ws[0] == 1 && ws[1] == 3)
+                    .collect();
+                if fuel.len() == 1 {
+                    return fuel.into_iter().next();
+                }
+                None
+            };
             let bdesc = vt.payload_warehouse_bridge_descriptor_keys(br, Side::Blue);
             let rdesc = vt.payload_warehouse_bridge_descriptor_keys(br, Side::Red);
             let blue_slot_types_hs: HashSet<StdString> =
                 vt.slot_unit_types(Side::Blue).into_iter().collect();
             let red_slot_types_hs: HashSet<StdString> =
                 vt.slot_unit_types(Side::Red).into_iter().collect();
+            let blue_payload_types_hs: HashSet<StdString> =
+                vt.payload_unit_types(Side::Blue).into_iter().collect();
+            let red_payload_types_hs: HashSet<StdString> =
+                vt.payload_unit_types(Side::Red).into_iter().collect();
             let has_payload_sidecar = br.has_template_payload_ws();
             let lua_blue_pylon_ws = vt.payload_ws_for_slot_types(br, Side::Blue, true);
             let lua_red_pylon_ws = vt.payload_ws_for_slot_types(br, Side::Red, true);
-            let blue_tmpl_ord =
-                br.template_ordnance_allow_ws("blue", &blue_slot_types_hs, &lua_blue_pylon_ws);
-            let red_tmpl_ord =
-                br.template_ordnance_allow_ws("red", &red_slot_types_hs, &lua_red_pylon_ws);
+            let blue_tmpl_ord = br.template_ordnance_allow_ws(
+                "blue",
+                &blue_slot_types_hs,
+                &lua_blue_pylon_ws,
+            );
+            let red_tmpl_ord = br.template_ordnance_allow_ws(
+                "red",
+                &red_slot_types_hs,
+                &lua_red_pylon_ws,
+            );
             let blue_tmpl_ord_seed_exp: HashSet<[i32; 4]> = if blue_tmpl_ord.is_empty() {
                 HashSet::new()
             } else {
@@ -3329,7 +3354,8 @@ impl WarehouseTemplate {
             } else {
                 br.expand_ws_alias_family(&red_tmpl_ord)
             };
-            let tmpl_ordnance_effective = !blue_tmpl_ord.is_empty() || !red_tmpl_ord.is_empty();
+            let tmpl_ordnance_effective =
+                !blue_tmpl_ord.is_empty() || !red_tmpl_ord.is_empty();
             if tmpl_ordnance_effective {
                 info!(
                     "warehouse allowlist: ordnance from Lua pylons ∪ fowl_weapon_payload_ws sidecar, ∩ weapon_ws_by_aircraft; strip = payload restricted-only vote (not raw restricted ws union)"
@@ -3422,7 +3448,9 @@ impl WarehouseTemplate {
             }
             let b_after_template = sorted_fueltank_ws(&bws).len();
             let r_after_template = sorted_fueltank_ws(&rws).len();
-            if b_before_template != b_after_template || r_before_template != r_after_template {
+            if b_before_template != b_after_template
+                || r_before_template != r_after_template
+            {
                 info!(
                     "fuel diagnostics: template-aircraft filter removed fuel wsTypes absent in active slot templates (blue -{}, red -{})",
                     b_before_template.saturating_sub(b_after_template),
@@ -3480,17 +3508,17 @@ impl WarehouseTemplate {
             // Pull ws out of the strip set when it is plausibly carried: Lua pylons, sidecar pylons, or
             // `weapon_ws_by_aircraft` for slotted types (no `aircraft_by_ws` reverse). Narrow vs pruning with
             // “allowlist overrides strip” (that kept every `vote ∪ anchor` ws including true restricted-only junk).
-            let mut blue_strip_rescue_seed = vt.payload_ws_for_slot_types(br, Side::Blue, true);
-            let mut red_strip_rescue_seed = vt.payload_ws_for_slot_types(br, Side::Red, true);
+            let mut blue_strip_rescue_seed =
+                vt.payload_ws_for_slot_types(br, Side::Blue, true);
+            let mut red_strip_rescue_seed =
+                vt.payload_ws_for_slot_types(br, Side::Red, true);
             if has_payload_sidecar {
-                blue_strip_rescue_seed.extend(br.template_pylon_ws_union_for_side(
-                    "blue",
-                    &blue_slot_types_hs,
-                ));
-                red_strip_rescue_seed.extend(br.template_pylon_ws_union_for_side(
-                    "red",
-                    &red_slot_types_hs,
-                ));
+                blue_strip_rescue_seed.extend(
+                    br.template_pylon_ws_union_for_side("blue", &blue_slot_types_hs),
+                );
+                red_strip_rescue_seed.extend(
+                    br.template_pylon_ws_union_for_side("red", &red_slot_types_hs),
+                );
             }
             blue_strip_rescue_seed.extend(
                 br.weapon_ws_for_aircraft_keys_only(&blue_slot_types_hs)
@@ -3513,7 +3541,8 @@ impl WarehouseTemplate {
                     }
                     let mut one = HashSet::new();
                     one.insert(*ws);
-                    if br.expand_ws_alias_family(&one)
+                    if br
+                        .expand_ws_alias_family(&one)
                         .iter()
                         .any(|x| blue_tmpl_ord_seed_exp.contains(x))
                     {
@@ -3529,7 +3558,8 @@ impl WarehouseTemplate {
                     }
                     let mut one = HashSet::new();
                     one.insert(*ws);
-                    if br.expand_ws_alias_family(&one)
+                    if br
+                        .expand_ws_alias_family(&one)
                         .iter()
                         .any(|x| red_tmpl_ord_seed_exp.contains(x))
                     {
@@ -3538,34 +3568,26 @@ impl WarehouseTemplate {
                 }
                 rws.remove(ws);
             }
-            let mut blue_payload_deny_seed: HashSet<[i32; 4]> = blue_strip_ws.iter().copied().collect();
-            blue_payload_deny_seed.extend(br.template_restricted_ws_union_for_side(
-                "blue",
-                &blue_slot_types_hs,
-            ));
-            let mut red_payload_deny_seed: HashSet<[i32; 4]> = red_strip_ws.iter().copied().collect();
-            red_payload_deny_seed.extend(br.template_restricted_ws_union_for_side(
-                "red",
-                &red_slot_types_hs,
-            ));
+            let mut blue_payload_deny_seed: HashSet<[i32; 4]> =
+                blue_strip_ws.iter().copied().collect();
+            blue_payload_deny_seed.extend(
+                br.template_restricted_ws_union_for_side("blue", &blue_slot_types_hs),
+            );
+            let mut red_payload_deny_seed: HashSet<[i32; 4]> =
+                red_strip_ws.iter().copied().collect();
+            red_payload_deny_seed.extend(
+                br.template_restricted_ws_union_for_side("red", &red_slot_types_hs),
+            );
             let blue_payload_deny = br.expand_ws_alias_family(&blue_payload_deny_seed);
             let red_payload_deny = br.expand_ws_alias_family(&red_payload_deny_seed);
-            // INVENTORY lists coalition-wide production stock: `template_restricted` is per airframe; unioning
-            // all slotted types removes stores that are blocked on one type but valid on another. DEFAULT rows use
-            // `blue_payload_deny` (hard); inventory allowlist uses strip vote only (soft).
-            let blue_soft_deny = br.expand_ws_alias_family(&blue_strip_ws);
-            let red_soft_deny = br.expand_ws_alias_family(&red_strip_ws);
-            let payload_ws_blocked =
-                |w: [i32; 4], deny: &HashSet<[i32; 4]>| -> bool {
-                    if deny.contains(&w) {
-                        return true;
-                    }
-                    let mut one = HashSet::new();
-                    one.insert(w);
-                    br.expand_ws_alias_family(&one)
-                        .iter()
-                        .any(|x| deny.contains(x))
-                };
+            let payload_ws_blocked = |w: [i32; 4], deny: &HashSet<[i32; 4]>| -> bool {
+                if deny.contains(&w) {
+                    return true;
+                }
+                let mut one = HashSet::new();
+                one.insert(w);
+                br.expand_ws_alias_family(&one).iter().any(|x| deny.contains(x))
+            };
             info!(
                 "fuel diagnostics: after restricted strip -> blue={} red={}",
                 sorted_fueltank_ws(&bws).len(),
@@ -3608,24 +3630,22 @@ impl WarehouseTemplate {
             }
             let bdesc_mapped = bdesc
                 .iter()
-                .filter(|d| !br.ws_types_for_descriptor_or_key_substring(d.as_str()).is_empty())
+                .filter(|d| {
+                    !br.ws_types_for_descriptor_or_key_substring(d.as_str()).is_empty()
+                })
                 .count();
             let rdesc_mapped = rdesc
                 .iter()
-                .filter(|d| !br.ws_types_for_descriptor_or_key_substring(d.as_str()).is_empty())
+                .filter(|d| {
+                    !br.ws_types_for_descriptor_or_key_substring(d.as_str()).is_empty()
+                })
                 .count();
             let low_conf_allowlist = bdesc.len() <= 4 && rdesc.len() <= 4;
             if low_conf_allowlist {
-                let blue_fuel_ws: HashSet<[i32; 4]> = bws
-                    .iter()
-                    .copied()
-                    .filter(|ws| ws[0] == 1 && ws[1] == 3)
-                    .collect();
-                let red_fuel_ws: HashSet<[i32; 4]> = rws
-                    .iter()
-                    .copied()
-                    .filter(|ws| ws[0] == 1 && ws[1] == 3)
-                    .collect();
+                let blue_fuel_ws: HashSet<[i32; 4]> =
+                    bws.iter().copied().filter(|ws| ws[0] == 1 && ws[1] == 3).collect();
+                let red_fuel_ws: HashSet<[i32; 4]> =
+                    rws.iter().copied().filter(|ws| ws[0] == 1 && ws[1] == 3).collect();
                 let blue_slot_types = vt.slot_unit_types(Side::Blue);
                 let red_slot_types = vt.slot_unit_types(Side::Red);
                 let mut blue_from_bridge = br
@@ -3658,37 +3678,32 @@ impl WarehouseTemplate {
                     // Caucasus1987 (AIM-54 / AGM variants vs bridge `wsType`); family expand on each `w` fixes it.
                     let mut blue_pylon_seed: HashSet<[i32; 4]> =
                         lua_blue_pylon_ws.iter().copied().collect();
-                    blue_pylon_seed.extend(br.template_pylon_ws_union_for_side(
-                        "blue",
-                        &blue_slot_types_hs,
-                    ));
-                    blue_pylon_seed.extend(vt.payload_pylon_only_footprint_weapon_ws(
-                        br,
-                        Side::Blue,
-                    ));
+                    blue_pylon_seed.extend(
+                        br.template_pylon_ws_union_for_side("blue", &blue_slot_types_hs),
+                    );
+                    blue_pylon_seed.extend(
+                        vt.payload_pylon_only_footprint_weapon_ws(br, Side::Blue),
+                    );
                     let mut red_pylon_seed: HashSet<[i32; 4]> =
                         lua_red_pylon_ws.iter().copied().collect();
-                    red_pylon_seed.extend(br.template_pylon_ws_union_for_side(
-                        "red",
-                        &red_slot_types_hs,
-                    ));
-                    red_pylon_seed.extend(vt.payload_pylon_only_footprint_weapon_ws(
-                        br,
-                        Side::Red,
-                    ));
+                    red_pylon_seed.extend(
+                        br.template_pylon_ws_union_for_side("red", &red_slot_types_hs),
+                    );
+                    red_pylon_seed
+                        .extend(vt.payload_pylon_only_footprint_weapon_ws(br, Side::Red));
                     let cap_b = br.weapon_ws_for_aircraft_keys_only(&blue_slot_types_hs);
                     let cap_r = br.weapon_ws_for_aircraft_keys_only(&red_slot_types_hs);
                     let mut blue_capped = 0usize;
                     let mut red_capped = 0usize;
-                    let bridge_touches = |w: [i32; 4], gate: &HashSet<[i32; 4]>| -> bool {
+                    let bridge_touches = |w: [i32; 4],
+                                          gate: &HashSet<[i32; 4]>|
+                     -> bool {
                         if gate.contains(&w) {
                             return true;
                         }
                         let mut one = HashSet::new();
                         one.insert(w);
-                        br.expand_ws_alias_family(&one)
-                            .iter()
-                            .any(|x| gate.contains(x))
+                        br.expand_ws_alias_family(&one).iter().any(|x| gate.contains(x))
                     };
                     let merge_capped_pass =
                         |bws: &mut HashSet<[i32; 4]>,
@@ -3781,82 +3796,26 @@ impl WarehouseTemplate {
                     rws = red_from_bridge;
                 }
             }
-            let bws_for_inventory = bws.clone();
-            let rws_for_inventory = rws.clone();
             bws.retain(|w| !payload_ws_blocked(*w, &blue_payload_deny));
             rws.retain(|w| !payload_ws_blocked(*w, &red_payload_deny));
-            // Anchor = **pylon-only** Lua footprint ∪ sidecar pylons (no `weapon_ws_by_aircraft` dump: that
-            // reintroduced every DCS-listed store including payload-blocked ones). Keys-only stays in strip rescue.
-            let blue_core: HashSet<[i32; 4]> = vt
-                .payload_pylon_only_footprint_weapon_ws(br, Side::Blue)
-                .into_iter()
-                .chain(br.template_pylon_ws_union_for_side("blue", &blue_slot_types_hs))
-                .collect();
-            let red_core: HashSet<[i32; 4]> = vt
-                .payload_pylon_only_footprint_weapon_ws(br, Side::Red)
-                .into_iter()
-                .chain(br.template_pylon_ws_union_for_side("red", &red_slot_types_hs))
-                .collect();
-            let blue_anchor_full = br.expand_ws_alias_family(&blue_core);
-            let red_anchor_full = br.expand_ws_alias_family(&red_core);
-            let mut blue_vote_inventory: HashSet<[i32; 4]> = bws_for_inventory
-                .iter()
-                .copied()
-                .chain(blue_anchor_full.iter().copied())
-                .collect();
-            blue_vote_inventory.retain(|w| !payload_ws_blocked(*w, &blue_soft_deny));
-            let mut red_vote_inventory: HashSet<[i32; 4]> = rws_for_inventory
-                .iter()
-                .copied()
-                .chain(red_anchor_full.iter().copied())
-                .collect();
-            red_vote_inventory.retain(|w| !payload_ws_blocked(*w, &red_soft_deny));
-            // Merge positive INVENTORY template wsTypes (soft filter) + alias-expand: vote alone can miss bridge variants.
-            if let Ok(pos) = campaign_cfg::collect_weapon_ws_types_positive_initial(&self.blue_inventory) {
-                for ws in pos {
-                    if !payload_ws_blocked(ws, &blue_soft_deny) {
-                        blue_vote_inventory.insert(ws);
-                    }
+            // B/RDEFAULT + inventory allowlist: DCS mountable ordnance for `weapon*.miz` types only.
+            // `payload.restricted` is for in-editor loadout rules; do not cull store families at build.
+            let blue_default_deny: HashSet<[i32; 4]> = HashSet::new();
+            let red_default_deny: HashSet<[i32; 4]> = HashSet::new();
+            let default_ws_blocked = |w: [i32; 4], deny: &HashSet<[i32; 4]>| -> bool {
+                if deny.contains(&w) {
+                    return true;
                 }
-            }
-            if let Ok(pos) = campaign_cfg::collect_weapon_ws_types_positive_initial(&self.red_inventory) {
-                for ws in pos {
-                    if !payload_ws_blocked(ws, &red_soft_deny) {
-                        red_vote_inventory.insert(ws);
-                    }
-                }
-            }
-            let blue_inventory_allowlist = br.expand_ws_alias_family(&blue_vote_inventory);
-            let red_inventory_allowlist = br.expand_ws_alias_family(&red_vote_inventory);
-            let mut blue_default_deny_exact =
-                br.template_restricted_ws_union_for_side("blue", &blue_slot_types_hs);
-            let mut red_default_deny_exact =
-                br.template_restricted_ws_union_for_side("red", &red_slot_types_hs);
-            blue_default_deny_exact.extend(blue_strip_ws.iter().copied());
-            red_default_deny_exact.extend(red_strip_ws.iter().copied());
-            let blue_default_deny = br.expand_ws_alias_family(&blue_default_deny_exact);
-            let red_default_deny = br.expand_ws_alias_family(&red_default_deny_exact);
-            let default_ws_blocked =
-                |w: [i32; 4], deny: &HashSet<[i32; 4]>| -> bool {
-                    if deny.contains(&w) {
-                        return true;
-                    }
-                    let mut one = HashSet::new();
-                    one.insert(w);
-                    br.expand_ws_alias_family(&one)
-                        .iter()
-                        .any(|x| deny.contains(x))
-                };
-            let side_cap_minus_restricted = |side_name: &str, slot_types: &HashSet<StdString>| {
+                let mut one = HashSet::new();
+                one.insert(w);
+                br.expand_ws_alias_family(&one).iter().any(|x| deny.contains(x))
+            };
+            let side_template_ordnance_cap = |types: &HashSet<StdString>| {
                 let mut out = HashSet::<[i32; 4]>::new();
                 let mut sources = HashMap::<[i32; 4], HashSet<StdString>>::new();
-                for unit_type in slot_types {
-                    let restricted = br.template_restricted_ws_for_side_type(side_name, unit_type);
+                for unit_type in types {
                     for ws in br.weapon_ws_for_aircraft_key_only(unit_type) {
                         if !(ws[0] == 4 && ((4..=8).contains(&ws[1]) || ws[1] == 15)) {
-                            continue;
-                        }
-                        if restricted.contains(&ws) {
                             continue;
                         }
                         out.insert(ws);
@@ -3866,19 +3825,23 @@ impl WarehouseTemplate {
                 (out, sources)
             };
             let (mut blue_side_template_ws, mut blue_side_template_sources) =
-                side_cap_minus_restricted("blue", &blue_slot_types_hs);
+                side_template_ordnance_cap(&blue_payload_types_hs);
             let (mut red_side_template_ws, mut red_side_template_sources) =
-                side_cap_minus_restricted("red", &red_slot_types_hs);
+                side_template_ordnance_cap(&red_payload_types_hs);
             let blue_default_fuel_ws =
-                campaign_cfg::collect_weapon_ws_types_positive_initial(&self.blue_default_fueltanks)?
-                    .into_iter()
-                    .filter(|ws| ws[0] == 1 && ws[1] == 3)
-                    .collect::<HashSet<[i32; 4]>>();
+                campaign_cfg::collect_weapon_ws_types_positive_initial(
+                    &self.blue_default_fueltanks,
+                )?
+                .into_iter()
+                .filter(|ws| ws[0] == 1 && ws[1] == 3)
+                .collect::<HashSet<[i32; 4]>>();
             let red_default_fuel_ws =
-                campaign_cfg::collect_weapon_ws_types_positive_initial(&self.red_default_fueltanks)?
-                    .into_iter()
-                    .filter(|ws| ws[0] == 1 && ws[1] == 3)
-                    .collect::<HashSet<[i32; 4]>>();
+                campaign_cfg::collect_weapon_ws_types_positive_initial(
+                    &self.red_default_fueltanks,
+                )?
+                .into_iter()
+                .filter(|ws| ws[0] == 1 && ws[1] == 3)
+                .collect::<HashSet<[i32; 4]>>();
             let blue_default_fuel_list = sorted_fueltank_ws(&blue_default_fuel_ws);
             let red_default_fuel_list = sorted_fueltank_ws(&red_default_fuel_ws);
             log_fueltank_ws_list(
@@ -3937,12 +3900,15 @@ impl WarehouseTemplate {
                 );
             }
             let blue_default_plus_ws =
-                campaign_cfg::collect_weapon_ws_types_positive_initial(&self.blue_default_plus)?;
+                campaign_cfg::collect_weapon_ws_types_positive_initial(
+                    &self.blue_default_plus,
+                )?;
             let red_default_plus_ws =
-                campaign_cfg::collect_weapon_ws_types_positive_initial(&self.red_default_plus)?;
+                campaign_cfg::collect_weapon_ws_types_positive_initial(
+                    &self.red_default_plus,
+                )?;
 
-            // DEFAULT comes from the side's carry catalog minus exact per-aircraft template restrictions.
-            // DEFAULT+ is a positive manual override for edge wsTypes that auto detection cannot model safely.
+            // DEFAULT from DCS mount set for coalition `weapon*.miz` airframes. DEFAULT+ = manual add.
             let mut blue_default_allowlist = blue_side_template_ws.clone();
             let mut red_default_allowlist = red_side_template_ws.clone();
             blue_default_sources = blue_side_template_sources;
@@ -3989,11 +3955,17 @@ impl WarehouseTemplate {
             .context("RDEFAULT weapons from allowlist")?;
             log_agm65_diag("after_allowlist_rebuild", "BDEFAULT", &blue_master)?;
             log_agm65_diag("after_allowlist_rebuild", "RDEFAULT", &red_master)?;
-            let blue_inv_positive = campaign_cfg::collect_weapon_ws_types_positive_initial(&self.blue_inventory)?
+            let blue_inv_positive =
+                campaign_cfg::collect_weapon_ws_types_positive_initial(
+                    &self.blue_inventory,
+                )?
                 .into_iter()
                 .filter(|ws| !is_zero_ws(*ws))
                 .collect::<HashSet<[i32; 4]>>();
-            let red_inv_positive = campaign_cfg::collect_weapon_ws_types_positive_initial(&self.red_inventory)?
+            let red_inv_positive =
+                campaign_cfg::collect_weapon_ws_types_positive_initial(
+                    &self.red_inventory,
+                )?
                 .into_iter()
                 .filter(|ws| !is_zero_ws(*ws))
                 .collect::<HashSet<[i32; 4]>>();
@@ -4004,8 +3976,15 @@ impl WarehouseTemplate {
             red_inventory_positive_block_ws = Some(red_inv_positive);
             blue_allowed_ws = Some(blue_default_allowlist.clone());
             red_allowed_ws = Some(red_default_allowlist.clone());
-            blue_inventory_allowed_ws = Some(blue_inventory_allowlist);
-            red_inventory_allowed_ws = Some(red_inventory_allowlist);
+            info!(
+                "inventory allowlist: using coalition DEFAULT allowlists (blue={} red={}); inventory stock does not whitelist itself",
+                blue_default_allowlist.len(),
+                red_default_allowlist.len()
+            );
+            blue_inventory_allowed_ws =
+                Some(br.expand_ws_alias_family(&blue_default_allowlist));
+            red_inventory_allowed_ws =
+                Some(br.expand_ws_alias_family(&red_default_allowlist));
         }
         if let Some(caps) = warehouse_caps {
             if caps.has_any_nonzero_cap() {
@@ -4101,10 +4080,7 @@ impl WarehouseTemplate {
         let mut blue_inventory = 0;
         let mut red_inventory = 0;
         let mut whids = vec![];
-        for coa in base
-            .mission
-            .raw_get::<_, Table>("coalition")?
-            .pairs::<Value, Table>()
+        for coa in base.mission.raw_get::<_, Table>("coalition")?.pairs::<Value, Table>()
         {
             let coa = coa?.1;
             for country in coa.raw_get::<_, Table>("country")?.pairs::<Value, Table>() {
@@ -4112,7 +4088,9 @@ impl WarehouseTemplate {
                 if let Ok(iter) = vehicle(&country, "static") {
                     for group in iter {
                         let group = group?;
-                        for unit in group.raw_get::<_, Table>("units")?.pairs::<Value, Table>() {
+                        for unit in
+                            group.raw_get::<_, Table>("units")?.pairs::<Value, Table>()
+                        {
                             let unit = unit?.1;
                             let typ: String = unit.raw_get("type")?;
                             let name: String = unit.raw_get("name")?;
@@ -4152,9 +4130,7 @@ impl WarehouseTemplate {
             let old_row = airports
                 .raw_get::<_, Table>(id)
                 .with_context(|| format_compact!("getting airport {id}"))?;
-            let is_dynamic = old_row
-                .raw_get::<_, bool>("dynamicSpawn")
-                .unwrap_or(false);
+            let is_dynamic = old_row.raw_get::<_, bool>("dynamicSpawn").unwrap_or(false);
             if is_dynamic {
                 // Dynamic airport rows are prefilled later from filtered BINVENTORY/RINVENTORY.
                 continue;
@@ -4184,7 +4160,9 @@ impl WarehouseTemplate {
                 if caps.has_any_nonzero_cap() && !is_dynamic {
                     let m = mult_cfg.mult_airport(id);
                     campaign_cfg::fill_zero_weapon_amounts_from_cfg(&new_row, caps, m)
-                        .with_context(|| format_compact!("fill zero weapons airport {id}"))?;
+                        .with_context(|| {
+                            format_compact!("fill zero weapons airport {id}")
+                        })?;
                     match side {
                         Side::Blue => {
                             prune_warehouse_weapons_row(
@@ -4244,9 +4222,7 @@ impl WarehouseTemplate {
                 Side::Neutral => unreachable!("filtered above"),
             };
             let new_row = src.deep_clone(lua)?;
-            let is_dynamic = old_row
-                .raw_get::<_, bool>("dynamicSpawn")
-                .unwrap_or(false);
+            let is_dynamic = old_row.raw_get::<_, bool>("dynamicSpawn").unwrap_or(false);
             preserve_dynamic_flags(lua, &new_row, &old_row)?;
             let inv_tpl = match side {
                 Side::Blue => &self.blue_inventory,
@@ -4258,7 +4234,9 @@ impl WarehouseTemplate {
                 if caps.has_any_nonzero_cap() && !is_dynamic {
                     let m = mult_cfg.mult_warehouse_row(id);
                     campaign_cfg::fill_zero_weapon_amounts_from_cfg(&new_row, caps, m)
-                        .with_context(|| format_compact!("fill zero weapons warehouse {id}"))?;
+                        .with_context(|| {
+                            format_compact!("fill zero weapons warehouse {id}")
+                        })?;
                     match side {
                         Side::Blue => {
                             prune_warehouse_weapons_row(
@@ -4318,7 +4296,9 @@ impl WarehouseTemplate {
             "RINVENTORY",
         )?;
         log_agm65_diag("after_inventory_finalize", "RINVENTORY", &new_red_inventory)?;
-        let red_weapon_export = if warehouse_allowlist_for_filter(&red_allowed_ws).is_some() {
+        let red_weapon_export = if warehouse_allowlist_for_filter(&red_allowed_ws)
+            .is_some()
+        {
             sorted_weapon_ws(&red_allowed_ws)
         } else {
             if red_allowed_ws.as_ref().is_some_and(|s| s.is_empty()) {
@@ -4350,7 +4330,9 @@ impl WarehouseTemplate {
         )?;
         log_agm65_diag("after_inventory_finalize", "BINVENTORY", &new_blue_inventory)?;
         // bflib filters by this list; it must cover B/RDEFAULT wsTypes after build (payload/bridge allowlist, minus strip).
-        let blue_weapon_export = if warehouse_allowlist_for_filter(&blue_allowed_ws).is_some() {
+        let blue_weapon_export = if warehouse_allowlist_for_filter(&blue_allowed_ws)
+            .is_some()
+        {
             sorted_weapon_ws(&blue_allowed_ws)
         } else {
             if blue_allowed_ws.as_ref().is_some_and(|s| s.is_empty()) {
@@ -4376,8 +4358,18 @@ impl WarehouseTemplate {
                     "--write-back-warehouse-defaults: weapon bridge missing, keep template BDEFAULT/RDEFAULT unchanged"
                 );
             } else {
-                copy_weapons_subtable(lua, &self.blue_default, &blue_master, "BDEFAULT template")?;
-                copy_weapons_subtable(lua, &self.red_default, &red_master, "RDEFAULT template")?;
+                copy_weapons_subtable(
+                    lua,
+                    &self.blue_default,
+                    &blue_master,
+                    "BDEFAULT template",
+                )?;
+                copy_weapons_subtable(
+                    lua,
+                    &self.red_default,
+                    &red_master,
+                    "RDEFAULT template",
+                )?;
             }
             copy_weapons_subtable(
                 lua,
@@ -4412,7 +4404,9 @@ struct DynamicSpawnEmit {
 }
 
 /// Ship `unitId` → coalition side and **group** name (Fowl naval template key).
-fn collect_ship_warehouse_group_map(base: &LoadedMiz) -> Result<HashMap<i64, (Side, String)>> {
+fn collect_ship_warehouse_group_map(
+    base: &LoadedMiz,
+) -> Result<HashMap<i64, (Side, String)>> {
     let warehouses_tbl = base
         .warehouses
         .raw_get::<_, Table>("warehouses")
@@ -4425,10 +4419,7 @@ fn collect_ship_warehouse_group_map(base: &LoadedMiz) -> Result<HashMap<i64, (Si
             for group in vehicle(&country, "ship")? {
                 let group = group?;
                 let group_name: String = group.raw_get("name")?;
-                for unit in group
-                    .raw_get::<_, Table>("units")?
-                    .pairs::<Value, Table>()
-                {
+                for unit in group.raw_get::<_, Table>("units")?.pairs::<Value, Table>() {
                     let unit = unit?.1;
                     let id: i64 = unit.raw_get("unitId")?;
                     if !warehouses_tbl
@@ -4487,7 +4478,9 @@ fn audit_naval_carrier_mission_rules(
                 Side::Neutral => false,
             };
             if !coalition_matches {
-                reasons.push("first letter of group name must match coalition (R=red, B=blue)");
+                reasons.push(
+                    "first letter of group name must match coalition (R=red, B=blue)",
+                );
             }
         }
         let static_zone = format!("TTSN{group_name}");
@@ -4577,16 +4570,16 @@ fn patch_warehouse_dynamic_spawn_links(
                     };
                     for pair in dst_cat.clone().pairs::<String, Table>() {
                         let (unit_type, dst_unit) = pair?;
-                        let Ok(src_unit) = src_cat.raw_get::<_, Table>(unit_type.clone()) else {
+                        let Ok(src_unit) = src_cat.raw_get::<_, Table>(unit_type.clone())
+                        else {
                             continue;
                         };
-                        let Ok(src_amt) = src_unit.raw_get::<_, u32>("initialAmount") else {
+                        let Ok(src_amt) = src_unit.raw_get::<_, u32>("initialAmount")
+                        else {
                             continue;
                         };
-                        dst_unit.raw_set(
-                            "initialAmount",
-                            src_amt.saturating_mul(mult),
-                        )?;
+                        dst_unit
+                            .raw_set("initialAmount", src_amt.saturating_mul(mult))?;
                     }
                 }
             }
@@ -4645,13 +4638,11 @@ fn patch_warehouse_dynamic_spawn_links(
                         .map(|gid| gid.inner())
                         .unwrap_or(0);
                     let allowed = if use_naval_filter {
-                        emit
-                            .naval_allow
+                        emit.naval_allow
                             .as_ref()
                             .map_or(true, |s| s.contains(&(side, unit_type.clone())))
                     } else {
-                        emit
-                            .land_allow
+                        emit.land_allow
                             .as_ref()
                             .map_or(true, |s| s.contains(&(side, unit_type.clone())))
                     };
@@ -4665,9 +4656,8 @@ fn patch_warehouse_dynamic_spawn_links(
         Ok(())
     }
 
-    let airports = warehouses_root
-        .raw_get::<_, Table>("airports")
-        .context("getting airports")?;
+    let airports =
+        warehouses_root.raw_get::<_, Table>("airports").context("getting airports")?;
     patch_table(
         lua,
         &airports,
@@ -4719,10 +4709,10 @@ fn collect_objective_aircraft_by_side(
     base: &LoadedMiz,
     objectives: &[TriggerZone],
 ) -> Result<HashMap<StdString, HashMap<Side, HashSet<StdString>>>> {
-    let mut out: HashMap<StdString, HashMap<Side, HashSet<StdString>>> = HashMap::default();
-    for (side, coa) in Side::ALL
-        .into_iter()
-        .map(|side| (side, base.mission.coalition(side)))
+    let mut out: HashMap<StdString, HashMap<Side, HashSet<StdString>>> =
+        HashMap::default();
+    for (side, coa) in
+        Side::ALL.into_iter().map(|side| (side, base.mission.coalition(side)))
     {
         let coa = coa?;
         for country in coa.raw_get::<_, Table>("country")?.pairs::<Value, Table>() {
@@ -4778,9 +4768,8 @@ fn validate_single_airbase_per_objective(
 
     for obj in objectives {
         let mut airbases: Vec<std::string::String> = vec![];
-        for (side, coa) in Side::ALL
-            .into_iter()
-            .map(|side| (side, base.mission.coalition(side)))
+        for (side, coa) in
+            Side::ALL.into_iter().map(|side| (side, base.mission.coalition(side)))
         {
             let _ = side;
             let coa = coa?;
@@ -4788,9 +4777,8 @@ fn validate_single_airbase_per_objective(
                 let country = country?;
                 for group in country.statics()? {
                     let group = group?;
-                    for unit in group
-                        .raw_get::<_, Table>("units")?
-                        .pairs::<Value, Table>()
+                    for unit in
+                        group.raw_get::<_, Table>("units")?.pairs::<Value, Table>()
                     {
                         let unit = unit?.1;
                         let typ: String = unit.raw_get("type")?;
@@ -4872,10 +4860,7 @@ fn resolve_weapon_template_path(
             format_allowed_campaign_decades()
         );
     }
-    info!(
-        "campaign_decade {:?} -> weapon template {:?}",
-        decade, expected_path
-    );
+    info!("campaign_decade {:?} -> weapon template {:?}", decade, expected_path);
     Ok(expected_path)
 }
 
@@ -4903,11 +4888,8 @@ fn resolve_warehouse_template_path(
             format_allowed_campaign_decades()
         );
     }
-    let anchor = cfg
-        .warehouse
-        .as_ref()
-        .map(|p| p.as_path())
-        .unwrap_or(weapon_template_path);
+    let anchor =
+        cfg.warehouse.as_ref().map(|p| p.as_path()).unwrap_or(weapon_template_path);
     let expected_name = format!("warehouse{decade}.miz");
     let expected_path = anchor.with_file_name(expected_name.clone());
     if !expected_path.exists() {
@@ -4921,10 +4903,7 @@ fn resolve_warehouse_template_path(
             format_allowed_campaign_decades()
         );
     }
-    info!(
-        "campaign_decade {:?} -> warehouse template {:?}",
-        decade, expected_path
-    );
+    info!("campaign_decade {:?} -> warehouse template {:?}", decade, expected_path);
     Ok(expected_path)
 }
 
@@ -4952,15 +4931,17 @@ fn validate_base_fowl_trigger_zone_names(mission: &Miz) -> Result<()> {
 }
 
 pub fn run(cfg: &MizCmd) -> Result<()> {
-    let campaign_overlay: Option<campaign_cfg::CampaignWarehouseOverlay> =
-        match cfg.campaign_cfg.as_ref() {
-            None => None,
-            Some(p) => {
-                let w = campaign_cfg::load_overlay(p)
-                    .with_context(|| format!("loading campaign cfg {:?}", p))?;
-                const YELLOW: &str = "\x1b[33m";
-                const RESET: &str = "\x1b[0m";
-                info!(
+    let campaign_overlay: Option<campaign_cfg::CampaignWarehouseOverlay> = match cfg
+        .campaign_cfg
+        .as_ref()
+    {
+        None => None,
+        Some(p) => {
+            let w = campaign_cfg::load_overlay(p)
+                .with_context(|| format!("loading campaign cfg {:?}", p))?;
+            const YELLOW: &str = "\x1b[33m";
+            const RESET: &str = "\x1b[0m";
+            info!(
                     "campaign warehouse defaults (BDEFAULT/RDEFAULT weapons):\n{YELLOW}aa_missiles: {}\nag_missiles: {}\nag_rockets: {}\nag_bombs: {}\nag_guided_bombs: {}\nfueltanks: {}\nFueltanks_empty: {}\nmisc: {}{RESET}",
                     w.defaults.aa_missiles,
                     w.defaults.ag_missiles,
@@ -4971,26 +4952,18 @@ pub fn run(cfg: &MizCmd) -> Result<()> {
                     w.defaults.fueltanks_empty,
                     w.defaults.misc
                 );
-                if let Some(ref m) = w.warehouse_multipliers {
-                    info!("campaign warehouse multipliers from JSON: {:?}", m);
-                }
-                Some(w)
+            if let Some(ref m) = w.warehouse_multipliers {
+                info!("campaign warehouse multipliers from JSON: {:?}", m);
             }
-        };
+            Some(w)
+        }
+    };
     let warehouse_defaults = campaign_overlay.as_ref().map(|o| &o.defaults);
-    let wm = campaign_overlay
-        .as_ref()
-        .and_then(|o| o.warehouse_multipliers.as_ref());
-    let airbase_max = wm
-        .and_then(|w| w.airbase_max)
-        .unwrap_or(cfg.warehouse_airbase_max);
-    let hub_max = wm
-        .and_then(|w| w.hub_max)
-        .unwrap_or(cfg.warehouse_hub_max);
+    let wm = campaign_overlay.as_ref().and_then(|o| o.warehouse_multipliers.as_ref());
+    let airbase_max = wm.and_then(|w| w.airbase_max).unwrap_or(cfg.warehouse_airbase_max);
+    let hub_max = wm.and_then(|w| w.hub_max).unwrap_or(cfg.warehouse_hub_max);
     let fob_max = wm.and_then(|w| w.fob_max).unwrap_or(1);
-    let carrier_airbase_max = wm
-        .and_then(|w| w.carrier_airbase_max)
-        .unwrap_or(1);
+    let carrier_airbase_max = wm.and_then(|w| w.carrier_airbase_max).unwrap_or(1);
 
     let mut hub_airport_ids: HashSet<i64> = HashSet::default();
     if let Some(ref s) = cfg.warehouse_hub_ids {
@@ -4999,9 +4972,9 @@ pub fn run(cfg: &MizCmd) -> Result<()> {
             if part.is_empty() {
                 continue;
             }
-            let id = part
-                .parse::<i64>()
-                .with_context(|| format_compact!("invalid --warehouse-hub-ids entry {part:?}"))?;
+            let id = part.parse::<i64>().with_context(|| {
+                format_compact!("invalid --warehouse-hub-ids entry {part:?}")
+            })?;
             hub_airport_ids.insert(id);
         }
     }
@@ -5012,9 +4985,9 @@ pub fn run(cfg: &MizCmd) -> Result<()> {
             if part.is_empty() {
                 continue;
             }
-            let id = part
-                .parse::<i64>()
-                .with_context(|| format_compact!("invalid --warehouse-fob-ids entry {part:?}"))?;
+            let id = part.parse::<i64>().with_context(|| {
+                format_compact!("invalid --warehouse-fob-ids entry {part:?}")
+            })?;
             fob_warehouse_ids.insert(id);
         }
     }
@@ -5033,20 +5006,20 @@ pub fn run(cfg: &MizCmd) -> Result<()> {
     let weapon_template_path =
         resolve_weapon_template_path(cfg, campaign_overlay.as_ref())
             .context("resolving weapon template by campaign_decade")?;
-    let resolved_warehouse_path: Option<PathBuf> =
-        if let Some(ref ov) = campaign_overlay {
-            Some(
-                resolve_warehouse_template_path(cfg, ov, weapon_template_path.as_path())
-                    .context("resolving warehouse template by campaign_decade")?,
-            )
-        } else if cfg.warehouse.is_some() {
-            bail!(
+    let resolved_warehouse_path: Option<PathBuf> = if let Some(ref ov) = campaign_overlay
+    {
+        Some(
+            resolve_warehouse_template_path(cfg, ov, weapon_template_path.as_path())
+                .context("resolving warehouse template by campaign_decade")?,
+        )
+    } else if cfg.warehouse.is_some() {
+        bail!(
                 "--warehouse requires --campaign-cfg. FowlTools does not load warehouse.miz; \
                  use warehouse<campaign_decade>.miz (e.g. warehouse1980s.miz) with matching weapon<campaign_decade>.miz and \"campaign_decade\" in the Fowl *_CFG JSON."
             );
-        } else {
-            None
-        };
+    } else {
+        None
+    };
     if cfg.write_back_warehouse_defaults && resolved_warehouse_path.is_none() {
         bail!(
             "--write-back-warehouse-defaults requires --campaign-cfg and warehouse<campaign_decade>.miz beside the weapon template"
@@ -5065,26 +5038,22 @@ pub fn run(cfg: &MizCmd) -> Result<()> {
     };
     let mut weapon_bridge_map: Option<weapon_bridge::WeaponBridgeMap> =
         match weapon_bridge_path.as_ref() {
-        Some(p) => {
-            let m = weapon_bridge::WeaponBridgeMap::load(p)
-                .with_context(|| format!("loading weapon bridge {}", p.display()))?;
-            info!(
-                "weapon bridge: {} descriptors from {}",
-                m.len(),
-                p.display()
-            );
-            Some(m)
-        }
-        None => {
-            info!(
+            Some(p) => {
+                let m = weapon_bridge::WeaponBridgeMap::load(p)
+                    .with_context(|| format!("loading weapon bridge {}", p.display()))?;
+                info!("weapon bridge: {} descriptors from {}", m.len(), p.display());
+                Some(m)
+            }
+            None => {
+                info!(
                 "no weapon bridge JSON (--weapon-bridge, or fowl_weapon_bridge.json / fowl_weapon_bridge-DCS.version.*.json next to resolved weapon template); run Fowl_engine_weapon_bridge_export.lua in DCS Hooks first"
             );
-            None
-        }
-    };
+                None
+            }
+        };
     let (vehicle_templates, droptank_ws_from_weapon_warehouses) = {
-        let wep =
-            LoadedMiz::new(lua, &weapon_template_path).context("loading weapon template")?;
+        let wep = LoadedMiz::new(lua, &weapon_template_path)
+            .context("loading weapon template")?;
         (
             VehicleTemplates::new(&wep).context("loading templates")?,
             collect_droptank_ws_by_coalition_from_warehouses_root(&wep.warehouses)?,
@@ -5101,18 +5070,11 @@ pub fn run(cfg: &MizCmd) -> Result<()> {
         sidecar
             .write(&out_path)
             .with_context(|| format!("write {}", out_path.display()))?;
-        wb.reload_template_payload_ws(bridge_p)
-            .with_context(|| format!("reload template payload ws after {}", out_path.display()))?;
-        let n_pyl: usize = sidecar
-            .pylon_ws_by_side
-            .values()
-            .map(|m| m.len())
-            .sum();
-        let n_rst: usize = sidecar
-            .restricted_ws_by_side
-            .values()
-            .map(|m| m.len())
-            .sum();
+        wb.reload_template_payload_ws(bridge_p).with_context(|| {
+            format!("reload template payload ws after {}", out_path.display())
+        })?;
+        let n_pyl: usize = sidecar.pylon_ws_by_side.values().map(|m| m.len()).sum();
+        let n_rst: usize = sidecar.restricted_ws_by_side.values().map(|m| m.len()).sum();
         info!(
             "wrote {} (template payload wsTypes: {} aircraft pylon map(s), {} aircraft restricted map(s))",
             out_path.display(),
@@ -5129,15 +5091,21 @@ pub fn run(cfg: &MizCmd) -> Result<()> {
             red_vote.len()
         );
         if let Some(ref wb) = weapon_bridge_map {
-            let blue = vehicle_templates.payload_warehouse_bridge_descriptor_keys(wb, Side::Blue);
-            let red = vehicle_templates.payload_warehouse_bridge_descriptor_keys(wb, Side::Red);
+            let blue = vehicle_templates
+                .payload_warehouse_bridge_descriptor_keys(wb, Side::Blue);
+            let red =
+                vehicle_templates.payload_warehouse_bridge_descriptor_keys(wb, Side::Red);
             let rb = blue
                 .iter()
-                .filter(|s| !wb.ws_types_for_descriptor_or_key_substring(s.as_str()).is_empty())
+                .filter(|s| {
+                    !wb.ws_types_for_descriptor_or_key_substring(s.as_str()).is_empty()
+                })
                 .count();
             let rr = red
                 .iter()
-                .filter(|s| !wb.ws_types_for_descriptor_or_key_substring(s.as_str()).is_empty())
+                .filter(|s| {
+                    !wb.ws_types_for_descriptor_or_key_substring(s.as_str()).is_empty()
+                })
                 .count();
             info!(
                 "warehouse bridge descriptor keys (payload vote + pylon-only fuel): blue={} red={}",
@@ -5153,23 +5121,24 @@ pub fn run(cfg: &MizCmd) -> Result<()> {
             );
         }
     }
-    let warehouse_bundle: Option<WarehouseBundle> = match resolved_warehouse_path.as_ref() {
+    let warehouse_bundle: Option<WarehouseBundle> = match resolved_warehouse_path.as_ref()
+    {
         None => None,
         Some(wh) => {
             let path = wh.clone();
             let loaded = LoadedMiz::new(lua, wh).context("loading warehouse template")?;
-            let template = WarehouseTemplate::new(&loaded, cfg).context("compiling warehouse template")?;
+            let template = WarehouseTemplate::new(&loaded, cfg)
+                .context("compiling warehouse template")?;
             Some(WarehouseBundle { path, loaded, template })
         }
     };
-    vehicle_templates
-        .generate_slots(lua, &mut base)
-        .context("generating slots")?;
+    vehicle_templates.generate_slots(lua, &mut base).context("generating slots")?;
     vehicle_templates
         .apply(lua, &mut objectives, &mut base)
         .context("applying vehicle templates")?;
-    let objective_aircraft_by_side = collect_objective_aircraft_by_side(&base, &objectives)
-        .context("collecting objective aircraft module map")?;
+    let objective_aircraft_by_side =
+        collect_objective_aircraft_by_side(&base, &objectives)
+            .context("collecting objective aircraft module map")?;
     info!(
         "objective module map prepared for {} objective(s)",
         objective_aircraft_by_side.len()
@@ -5213,9 +5182,7 @@ pub fn run(cfg: &MizCmd) -> Result<()> {
         .unwrap_or_default();
 
     let fowl_from_warehouse = if let Some(wb) = warehouse_bundle.as_ref() {
-        let bridge_gen = weapon_bridge_map
-            .as_ref()
-            .map(|b| (&vehicle_templates, b));
+        let bridge_gen = weapon_bridge_map.as_ref().map(|b| (&vehicle_templates, b));
         let export = wb
             .template
             .apply(
@@ -5236,12 +5203,18 @@ pub fn run(cfg: &MizCmd) -> Result<()> {
                 .files
                 .get("warehouses")
                 .context("warehouse template miz missing warehouses file entry")?;
-            let s = serialize_to_lua("warehouses", Value::Table(wb.loaded.warehouses.clone()))?;
-            fs::write(wh_file, &*s).context("write-back: serializing template warehouses")?;
-            wb.loaded
-                .miz
-                .pack(&wb.path)
-                .with_context(|| format_compact!("write-back: repacking warehouse template {}", wb.path.display()))?;
+            let s = serialize_to_lua(
+                "warehouses",
+                Value::Table(wb.loaded.warehouses.clone()),
+            )?;
+            fs::write(wh_file, &*s)
+                .context("write-back: serializing template warehouses")?;
+            wb.loaded.miz.pack(&wb.path).with_context(|| {
+                format_compact!(
+                    "write-back: repacking warehouse template {}",
+                    wb.path.display()
+                )
+            })?;
             info!(
                 "write-back: updated BDEFAULT/RDEFAULT/BINVENTORY/RINVENTORY `weapons` in `{}` (mirror of build; edit policy in weapon template, not ME here)",
                 wb.path.display()
@@ -5258,7 +5231,9 @@ pub fn run(cfg: &MizCmd) -> Result<()> {
     }
     if let Some(wb) = warehouse_bundle.as_ref() {
         let (blue_inv_id, red_inv_id) = production_inventory_unit_ids(&base, cfg)
-            .context("production BINVENTORY/RINVENTORY unitIds for dynamic warehouse prefill")?;
+            .context(
+                "production BINVENTORY/RINVENTORY unitIds for dynamic warehouse prefill",
+            )?;
         let airports_tbl: Table<'static> = base
             .warehouses
             .raw_get("airports")
@@ -5270,11 +5245,15 @@ pub fn run(cfg: &MizCmd) -> Result<()> {
         let blue_inv_row: Table<'static> = airports_tbl
             .raw_get(blue_inv_id)
             .or_else(|_| warehouses_tbl.raw_get(blue_inv_id))
-            .with_context(|| format_compact!("getting filtered BINVENTORY row {blue_inv_id}"))?;
+            .with_context(|| {
+                format_compact!("getting filtered BINVENTORY row {blue_inv_id}")
+            })?;
         let red_inv_row: Table<'static> = airports_tbl
             .raw_get(red_inv_id)
             .or_else(|_| warehouses_tbl.raw_get(red_inv_id))
-            .with_context(|| format_compact!("getting filtered RINVENTORY row {red_inv_id}"))?;
+            .with_context(|| {
+                format_compact!("getting filtered RINVENTORY row {red_inv_id}")
+            })?;
         patch_warehouse_dynamic_spawn_links(
             lua,
             &base.warehouses,
@@ -5307,7 +5286,8 @@ pub fn run(cfg: &MizCmd) -> Result<()> {
     }
     if warehouse_bundle.is_some() || !dynamic_emit.link_by_side_type.is_empty() {
         let s = serialize_to_lua("warehouses", Value::Table(base.warehouses.clone()))?;
-        fs::write(&base.miz.files["warehouses"], &*s).context("writing warehouse file")?;
+        fs::write(&base.miz.files["warehouses"], &*s)
+            .context("writing warehouse file")?;
         info!("wrote serialized warehouses to warehouse file.");
     }
     //replace options file
@@ -5320,7 +5300,8 @@ pub fn run(cfg: &MizCmd) -> Result<()> {
     info!("replaced options file from {:?}", &cfg.options);
     */
     // By forcing the addition of modified base.miz - options file to the mission assembly
-    let options_in_base = base.miz.files.get("mission").unwrap().parent().unwrap().join("options");
+    let options_in_base =
+        base.miz.files.get("mission").unwrap().parent().unwrap().join("options");
     if options_in_base.exists() {
         base.miz.files.insert("options".into(), options_in_base);
         info!("force-added base.miz-options from base folder to the final archive.");

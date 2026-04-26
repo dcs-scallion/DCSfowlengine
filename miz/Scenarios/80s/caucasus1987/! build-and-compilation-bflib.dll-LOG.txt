@@ -1814,3 +1814,173 @@ All copy steps completed.
 PowerShell transcript end
 End time: 20260415225332
 **********************
+**********************
+PowerShell transcript start
+Start time: 20260426113357
+Username: PC-OP\Robo
+RunAs User: PC-OP\Robo
+Configuration Name: 
+Machine: PC-OP (Microsoft Windows NT 10.0.26200.0)
+Host Application: C:\Program Files\PowerShell\7\pwsh.dll C:\GitHub\DCSfowlengine\miz\Scenarios\80s\caucasus1987\! build-and-compilation-bflib.dll.ps1
+Process ID: 51392
+PSVersion: 7.6.0
+PSEdition: Core
+GitCommitId: 7.6.0
+OS: Microsoft Windows 10.0.26200
+Platform: Win32NT
+PSCompatibleVersions: 1.0, 2.0, 3.0, 4.0, 5.0, 5.1, 6.0, 7.0
+PSRemotingProtocolVersion: 2.4
+SerializationVersion: 1.1.0.1
+WSManStackVersion: 3.0
+**********************
+Transcript started, output file is C:\GitHub\DCSfowlengine\miz\Scenarios\80s\caucasus1987\! build-and-compilation-bflib.dll-LOG.txt
+
+--- Rust / Lua env (LUA_*) ---
+
+Name                           Value
+----                           -----
+LUA_LIB                        C:\GitHub\DCSfowlengine
+LUA_LINK                       dylib
+LUA_LIB_NAME                   lua
+------------------------------------------
+
+--- bflib.dll build started: 04/26/2026 11:33:57 ---
+
+Running cargo clean...
+     Removed 1643 files, 425.3MiB total
+
+Starting release build: package bflib...
+   Compiling rustls-webpki v0.103.9
+   Compiling dcso3 v0.2.0 (C:\GitHub\DCSfowlengine\dcso3)
+   Compiling tokio-rustls v0.26.4
+   Compiling netidx v0.27.3
+   Compiling netidx-bscript v0.27.2
+   Compiling bfprotocols v0.1.0 (C:\GitHub\DCSfowlengine\bfprotocols)
+   Compiling netidx-protocols v0.27.2
+   Compiling netidx-archive v0.27.3
+   Compiling bflib v0.1.0 (C:\GitHub\DCSfowlengine\bflib)
+    Finished `release` profile [optimized] target(s) in 6m 57s
+
+Build succeeded.
+
+Copying bflib.dll to: C:\GitHub\DCSfowlengine\miz\bflib.dll (repo miz)
+  OK: C:\GitHub\DCSfowlengine\miz\bflib.dll
+
+Copying bflib.dll to: C:\GitHub\DCSfowlengine\miz\Scenarios\80s\caucasus1987\bflib.dll (scenario folder)
+  OK: C:\GitHub\DCSfowlengine\miz\Scenarios\80s\caucasus1987\bflib.dll
+
+Copying bflib.dll to: C:\Users\Robo\Saved Games\DCS\Scripts\bflib.dll (DCS Scripts)
+PS>TerminatingError(Copy-Item): "The running command stopped because the preference variable "ErrorActionPreference" or common parameter is set to Stop: The process cannot access the file 'C:\Users\Robo\Saved Games\DCS\Scripts\bflib.dll' because it is being used by another process."
+Cannot write to: C:\Users\Robo\Saved Games\DCS\Scripts\bflib.dll
+  (The process cannot access the file 'C:\Users\Robo\Saved Games\DCS\Scripts\bflib.dll' because it is being used by another process.)
+  Retrying every 5s for up to 300s (e.g. quit DCS to release bflib.dll).
+PS>TerminatingError(Copy-Item): "The running command stopped because the preference variable "ErrorActionPreference" or common parameter is set to Stop: The process cannot access the file 'C:\Users\Robo\Saved Games\DCS\Scripts\bflib.dll' because it is being used by another process."
+PS>TerminatingError(Copy-Item): "The running command stopped because the preference variable "ErrorActionPreference" or common parameter is set to Stop: The process cannot access the file 'C:\Users\Robo\Saved Games\DCS\Scripts\bflib.dll' because it is being used by another process."
+PS>TerminatingError(Copy-Item): "The running command stopped because the preference variable "ErrorActionPreference" or common parameter is set to Stop: The process cannot access the file 'C:\Users\Robo\Saved Games\DCS\Scripts\bflib.dll' because it is being used by another process."
+PS>TerminatingError(Copy-Item): "The running command stopped because the preference variable "ErrorActionPreference" or common parameter is set to Stop: The process cannot access the file 'C:\Users\Robo\Saved Games\DCS\Scripts\bflib.dll' because it is being used by another process."
+PS>TerminatingError(Copy-Item): "The running command stopped because the preference variable "ErrorActionPreference" or common parameter is set to Stop: The process cannot access the file 'C:\Users\Robo\Saved Games\DCS\Scripts\bflib.dll' because it is being used by another process."
+  Still waiting... ~275 s remaining
+PS>TerminatingError(Copy-Item): "The running command stopped because the preference variable "ErrorActionPreference" or common parameter is set to Stop: The process cannot access the file 'C:\Users\Robo\Saved Games\DCS\Scripts\bflib.dll' because it is being used by another process."
+PS>TerminatingError(Copy-Item): "The running command stopped because the preference variable "ErrorActionPreference" or common parameter is set to Stop: The process cannot access the file 'C:\Users\Robo\Saved Games\DCS\Scripts\bflib.dll' because it is being used by another process."
+PS>TerminatingError(Copy-Item): "The running command stopped because the preference variable "ErrorActionPreference" or common parameter is set to Stop: The process cannot access the file 'C:\Users\Robo\Saved Games\DCS\Scripts\bflib.dll' because it is being used by another process."
+PS>TerminatingError(Copy-Item): "The running command stopped because the preference variable "ErrorActionPreference" or common parameter is set to Stop: The process cannot access the file 'C:\Users\Robo\Saved Games\DCS\Scripts\bflib.dll' because it is being used by another process."
+PS>TerminatingError(Copy-Item): "The running command stopped because the preference variable "ErrorActionPreference" or common parameter is set to Stop: The process cannot access the file 'C:\Users\Robo\Saved Games\DCS\Scripts\bflib.dll' because it is being used by another process."
+PS>TerminatingError(Copy-Item): "The running command stopped because the preference variable "ErrorActionPreference" or common parameter is set to Stop: The process cannot access the file 'C:\Users\Robo\Saved Games\DCS\Scripts\bflib.dll' because it is being used by another process."
+  Still waiting... ~245 s remaining
+PS>TerminatingError(Copy-Item): "The running command stopped because the preference variable "ErrorActionPreference" or common parameter is set to Stop: The process cannot access the file 'C:\Users\Robo\Saved Games\DCS\Scripts\bflib.dll' because it is being used by another process."
+PS>TerminatingError(Copy-Item): "The running command stopped because the preference variable "ErrorActionPreference" or common parameter is set to Stop: The process cannot access the file 'C:\Users\Robo\Saved Games\DCS\Scripts\bflib.dll' because it is being used by another process."
+PS>TerminatingError(Copy-Item): "The running command stopped because the preference variable "ErrorActionPreference" or common parameter is set to Stop: The process cannot access the file 'C:\Users\Robo\Saved Games\DCS\Scripts\bflib.dll' because it is being used by another process."
+PS>TerminatingError(Copy-Item): "The running command stopped because the preference variable "ErrorActionPreference" or common parameter is set to Stop: The process cannot access the file 'C:\Users\Robo\Saved Games\DCS\Scripts\bflib.dll' because it is being used by another process."
+PS>TerminatingError(Copy-Item): "The running command stopped because the preference variable "ErrorActionPreference" or common parameter is set to Stop: The process cannot access the file 'C:\Users\Robo\Saved Games\DCS\Scripts\bflib.dll' because it is being used by another process."
+PS>TerminatingError(Copy-Item): "The running command stopped because the preference variable "ErrorActionPreference" or common parameter is set to Stop: The process cannot access the file 'C:\Users\Robo\Saved Games\DCS\Scripts\bflib.dll' because it is being used by another process."
+  Still waiting... ~215 s remaining
+PS>TerminatingError(Copy-Item): "The running command stopped because the preference variable "ErrorActionPreference" or common parameter is set to Stop: The process cannot access the file 'C:\Users\Robo\Saved Games\DCS\Scripts\bflib.dll' because it is being used by another process."
+PS>TerminatingError(Copy-Item): "The running command stopped because the preference variable "ErrorActionPreference" or common parameter is set to Stop: The process cannot access the file 'C:\Users\Robo\Saved Games\DCS\Scripts\bflib.dll' because it is being used by another process."
+PS>TerminatingError(Copy-Item): "The running command stopped because the preference variable "ErrorActionPreference" or common parameter is set to Stop: The process cannot access the file 'C:\Users\Robo\Saved Games\DCS\Scripts\bflib.dll' because it is being used by another process."
+PS>TerminatingError(Copy-Item): "The running command stopped because the preference variable "ErrorActionPreference" or common parameter is set to Stop: The process cannot access the file 'C:\Users\Robo\Saved Games\DCS\Scripts\bflib.dll' because it is being used by another process."
+PS>TerminatingError(Copy-Item): "The running command stopped because the preference variable "ErrorActionPreference" or common parameter is set to Stop: The process cannot access the file 'C:\Users\Robo\Saved Games\DCS\Scripts\bflib.dll' because it is being used by another process."
+PS>TerminatingError(Copy-Item): "The running command stopped because the preference variable "ErrorActionPreference" or common parameter is set to Stop: The process cannot access the file 'C:\Users\Robo\Saved Games\DCS\Scripts\bflib.dll' because it is being used by another process."
+  Still waiting... ~185 s remaining
+PS>TerminatingError(Copy-Item): "The running command stopped because the preference variable "ErrorActionPreference" or common parameter is set to Stop: The process cannot access the file 'C:\Users\Robo\Saved Games\DCS\Scripts\bflib.dll' because it is being used by another process."
+PS>TerminatingError(Copy-Item): "The running command stopped because the preference variable "ErrorActionPreference" or common parameter is set to Stop: The process cannot access the file 'C:\Users\Robo\Saved Games\DCS\Scripts\bflib.dll' because it is being used by another process."
+PS>TerminatingError(Copy-Item): "The running command stopped because the preference variable "ErrorActionPreference" or common parameter is set to Stop: The process cannot access the file 'C:\Users\Robo\Saved Games\DCS\Scripts\bflib.dll' because it is being used by another process."
+PS>TerminatingError(Copy-Item): "The running command stopped because the preference variable "ErrorActionPreference" or common parameter is set to Stop: The process cannot access the file 'C:\Users\Robo\Saved Games\DCS\Scripts\bflib.dll' because it is being used by another process."
+PS>TerminatingError(Copy-Item): "The running command stopped because the preference variable "ErrorActionPreference" or common parameter is set to Stop: The process cannot access the file 'C:\Users\Robo\Saved Games\DCS\Scripts\bflib.dll' because it is being used by another process."
+PS>TerminatingError(Copy-Item): "The running command stopped because the preference variable "ErrorActionPreference" or common parameter is set to Stop: The process cannot access the file 'C:\Users\Robo\Saved Games\DCS\Scripts\bflib.dll' because it is being used by another process."
+  Still waiting... ~155 s remaining
+PS>TerminatingError(Copy-Item): "The running command stopped because the preference variable "ErrorActionPreference" or common parameter is set to Stop: The process cannot access the file 'C:\Users\Robo\Saved Games\DCS\Scripts\bflib.dll' because it is being used by another process."
+PS>TerminatingError(Copy-Item): "The running command stopped because the preference variable "ErrorActionPreference" or common parameter is set to Stop: The process cannot access the file 'C:\Users\Robo\Saved Games\DCS\Scripts\bflib.dll' because it is being used by another process."
+PS>TerminatingError(Copy-Item): "The running command stopped because the preference variable "ErrorActionPreference" or common parameter is set to Stop: The process cannot access the file 'C:\Users\Robo\Saved Games\DCS\Scripts\bflib.dll' because it is being used by another process."
+PS>TerminatingError(Copy-Item): "The running command stopped because the preference variable "ErrorActionPreference" or common parameter is set to Stop: The process cannot access the file 'C:\Users\Robo\Saved Games\DCS\Scripts\bflib.dll' because it is being used by another process."
+PS>TerminatingError(Copy-Item): "The running command stopped because the preference variable "ErrorActionPreference" or common parameter is set to Stop: The process cannot access the file 'C:\Users\Robo\Saved Games\DCS\Scripts\bflib.dll' because it is being used by another process."
+PS>TerminatingError(Copy-Item): "The running command stopped because the preference variable "ErrorActionPreference" or common parameter is set to Stop: The process cannot access the file 'C:\Users\Robo\Saved Games\DCS\Scripts\bflib.dll' because it is being used by another process."
+  Still waiting... ~124 s remaining
+PS>TerminatingError(Copy-Item): "The running command stopped because the preference variable "ErrorActionPreference" or common parameter is set to Stop: The process cannot access the file 'C:\Users\Robo\Saved Games\DCS\Scripts\bflib.dll' because it is being used by another process."
+PS>TerminatingError(Copy-Item): "The running command stopped because the preference variable "ErrorActionPreference" or common parameter is set to Stop: The process cannot access the file 'C:\Users\Robo\Saved Games\DCS\Scripts\bflib.dll' because it is being used by another process."
+PS>TerminatingError(Copy-Item): "The running command stopped because the preference variable "ErrorActionPreference" or common parameter is set to Stop: The process cannot access the file 'C:\Users\Robo\Saved Games\DCS\Scripts\bflib.dll' because it is being used by another process."
+PS>TerminatingError(Copy-Item): "The running command stopped because the preference variable "ErrorActionPreference" or common parameter is set to Stop: The process cannot access the file 'C:\Users\Robo\Saved Games\DCS\Scripts\bflib.dll' because it is being used by another process."
+PS>TerminatingError(Copy-Item): "The running command stopped because the preference variable "ErrorActionPreference" or common parameter is set to Stop: The process cannot access the file 'C:\Users\Robo\Saved Games\DCS\Scripts\bflib.dll' because it is being used by another process."
+PS>TerminatingError(Copy-Item): "The running command stopped because the preference variable "ErrorActionPreference" or common parameter is set to Stop: The process cannot access the file 'C:\Users\Robo\Saved Games\DCS\Scripts\bflib.dll' because it is being used by another process."
+  Still waiting... ~94 s remaining
+PS>TerminatingError(Copy-Item): "The running command stopped because the preference variable "ErrorActionPreference" or common parameter is set to Stop: The process cannot access the file 'C:\Users\Robo\Saved Games\DCS\Scripts\bflib.dll' because it is being used by another process."
+PS>TerminatingError(Copy-Item): "The running command stopped because the preference variable "ErrorActionPreference" or common parameter is set to Stop: The process cannot access the file 'C:\Users\Robo\Saved Games\DCS\Scripts\bflib.dll' because it is being used by another process."
+PS>TerminatingError(Copy-Item): "The running command stopped because the preference variable "ErrorActionPreference" or common parameter is set to Stop: The process cannot access the file 'C:\Users\Robo\Saved Games\DCS\Scripts\bflib.dll' because it is being used by another process."
+PS>TerminatingError(Copy-Item): "The running command stopped because the preference variable "ErrorActionPreference" or common parameter is set to Stop: The process cannot access the file 'C:\Users\Robo\Saved Games\DCS\Scripts\bflib.dll' because it is being used by another process."
+PS>TerminatingError(Copy-Item): "The running command stopped because the preference variable "ErrorActionPreference" or common parameter is set to Stop: The process cannot access the file 'C:\Users\Robo\Saved Games\DCS\Scripts\bflib.dll' because it is being used by another process."
+PS>TerminatingError(Copy-Item): "The running command stopped because the preference variable "ErrorActionPreference" or common parameter is set to Stop: The process cannot access the file 'C:\Users\Robo\Saved Games\DCS\Scripts\bflib.dll' because it is being used by another process."
+  Still waiting... ~64 s remaining
+PS>TerminatingError(Copy-Item): "The running command stopped because the preference variable "ErrorActionPreference" or common parameter is set to Stop: The process cannot access the file 'C:\Users\Robo\Saved Games\DCS\Scripts\bflib.dll' because it is being used by another process."
+PS>TerminatingError(Copy-Item): "The running command stopped because the preference variable "ErrorActionPreference" or common parameter is set to Stop: The process cannot access the file 'C:\Users\Robo\Saved Games\DCS\Scripts\bflib.dll' because it is being used by another process."
+PS>TerminatingError(Copy-Item): "The running command stopped because the preference variable "ErrorActionPreference" or common parameter is set to Stop: The process cannot access the file 'C:\Users\Robo\Saved Games\DCS\Scripts\bflib.dll' because it is being used by another process."
+PS>TerminatingError(Copy-Item): "The running command stopped because the preference variable "ErrorActionPreference" or common parameter is set to Stop: The process cannot access the file 'C:\Users\Robo\Saved Games\DCS\Scripts\bflib.dll' because it is being used by another process."
+PS>TerminatingError(Copy-Item): "The running command stopped because the preference variable "ErrorActionPreference" or common parameter is set to Stop: The process cannot access the file 'C:\Users\Robo\Saved Games\DCS\Scripts\bflib.dll' because it is being used by another process."
+PS>TerminatingError(Copy-Item): "The running command stopped because the preference variable "ErrorActionPreference" or common parameter is set to Stop: The process cannot access the file 'C:\Users\Robo\Saved Games\DCS\Scripts\bflib.dll' because it is being used by another process."
+  Still waiting... ~34 s remaining
+PS>TerminatingError(Copy-Item): "The running command stopped because the preference variable "ErrorActionPreference" or common parameter is set to Stop: The process cannot access the file 'C:\Users\Robo\Saved Games\DCS\Scripts\bflib.dll' because it is being used by another process."
+PS>TerminatingError(Copy-Item): "The running command stopped because the preference variable "ErrorActionPreference" or common parameter is set to Stop: The process cannot access the file 'C:\Users\Robo\Saved Games\DCS\Scripts\bflib.dll' because it is being used by another process."
+PS>TerminatingError(Copy-Item): "The running command stopped because the preference variable "ErrorActionPreference" or common parameter is set to Stop: The process cannot access the file 'C:\Users\Robo\Saved Games\DCS\Scripts\bflib.dll' because it is being used by another process."
+PS>TerminatingError(Copy-Item): "The running command stopped because the preference variable "ErrorActionPreference" or common parameter is set to Stop: The process cannot access the file 'C:\Users\Robo\Saved Games\DCS\Scripts\bflib.dll' because it is being used by another process."
+PS>TerminatingError(Copy-Item): "The running command stopped because the preference variable "ErrorActionPreference" or common parameter is set to Stop: The process cannot access the file 'C:\Users\Robo\Saved Games\DCS\Scripts\bflib.dll' because it is being used by another process."
+PS>TerminatingError(Copy-Item): "The running command stopped because the preference variable "ErrorActionPreference" or common parameter is set to Stop: The process cannot access the file 'C:\Users\Robo\Saved Games\DCS\Scripts\bflib.dll' because it is being used by another process."
+  Still waiting... ~4 s remaining
+PS>TerminatingError(Copy-Item): "The running command stopped because the preference variable "ErrorActionPreference" or common parameter is set to Stop: The process cannot access the file 'C:\Users\Robo\Saved Games\DCS\Scripts\bflib.dll' because it is being used by another process."
+PS>TerminatingError(): "Could not copy bflib.dll to at least one destination after waiting 300 seconds (file still locked or busy).
+
+Built DLL (source — copy this file manually when nothing is using it):
+  C:\GitHub\DCSfowlengine\target\release\bflib.dll
+
+Copy it to all of these (close DCS first if the Scripts copy fails):
+  1) Repo miz folder:
+     C:\GitHub\DCSfowlengine\miz\bflib.dll
+  2) This scenario folder:
+     C:\GitHub\DCSfowlengine\miz\Scenarios\80s\caucasus1987\bflib.dll
+  3) DCS user Scripts (used at runtime):
+     C:\Users\Robo\Saved Games\DCS\Scripts\bflib.dll
+
+Timed out while writing to:
+  C:\Users\Robo\Saved Games\DCS\Scripts\bflib.dll"
+
+ERROR:
+Could not copy bflib.dll to at least one destination after waiting 300 seconds (file still locked or busy).
+
+Built DLL (source — copy this file manually when nothing is using it):
+  C:\GitHub\DCSfowlengine\target\release\bflib.dll
+
+Copy it to all of these (close DCS first if the Scripts copy fails):
+  1) Repo miz folder:
+     C:\GitHub\DCSfowlengine\miz\bflib.dll
+  2) This scenario folder:
+     C:\GitHub\DCSfowlengine\miz\Scenarios\80s\caucasus1987\bflib.dll
+  3) DCS user Scripts (used at runtime):
+     C:\Users\Robo\Saved Games\DCS\Scripts\bflib.dll
+
+Timed out while writing to:
+  C:\Users\Robo\Saved Games\DCS\Scripts\bflib.dll
+
+Script stopped early.
+
+--- Process finished: 04/26/2026 11:45:57 ---
+**********************
+PowerShell transcript end
+End time: 20260426114557
+**********************
