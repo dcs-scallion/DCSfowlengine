@@ -104,3 +104,13 @@ version.texi
 !src/vendor/**
 /src/target/
 no_llvm_build
+
+# DCS / mission: local archives & scratch (not versioned; use backup disk or release assets)
+*.7z
+*.rar
+*.zip
+# Editor / miz work dirs (e.g. temporary unpacks)
+**/.tmp_*/
+**/.tmp*/
+# Local scratch in a named folder (create next to mission / miz as needed)
+**/-pracovní_soubory-možno_smazat/
