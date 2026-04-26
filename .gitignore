@@ -109,6 +109,8 @@ no_llvm_build
 *.7z
 *.rar
 *.zip
+# Build / local run logs (e.g. ! build-and-copy-mission-LOG.txt)
+*-LOG.txt
 # Editor / miz work dirs (e.g. temporary unpacks)
 **/.tmp_*/
 **/.tmp*/
