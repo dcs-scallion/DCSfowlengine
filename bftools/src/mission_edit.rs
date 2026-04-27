@@ -36,7 +36,6 @@ use dcso3::{
 use log::{info, warn};
 use mlua::{FromLua, IntoLua, Lua, Table, Value};
 use nalgebra as na;
-use rand::Rng;
 use std::{
     collections::{HashMap, HashSet},
     f64::consts::PI,
@@ -713,25 +712,18 @@ fn is_dynamic_template_group_name(name: &str) -> bool {
         || name.starts_with(LEGACY_DYNAMIC_TEMPLATE_PREFIX)
 }
 
-fn gen_dynamic_template_slot_password_10_digits() -> StdString {
-    let mut rng = rand::thread_rng();
-    (0..10)
-        .map(|_| char::from_digit(rng.gen_range(0..10), 10).unwrap())
-        .collect::<StdString>()
-}
+const DYNAMIC_TEMPLATE_SLOT_PASSWORD: &str =
+    "7ciAoh5eaeP:p3JJGYR5-nG5YZe0YhTgY1ArpqUsDShe-T0-li3VaL0";
 
 fn apply_dynamic_template_group_visibility(
     group: &Group<'_>,
     slot_kind: SlotType,
 ) -> Result<()> {
     match slot_kind {
-        SlotType::Plane => {
+        SlotType::Plane | SlotType::Helicopter => {
             group.raw_set("hidden", true)?;
             group.raw_set("hiddenOnPlanner", true)?;
             group.raw_set("hiddenOnMFD", true)?;
-        }
-        SlotType::Helicopter => {
-            group.raw_set("hidden", true)?;
         }
     }
     Ok(())
@@ -993,10 +985,10 @@ impl VehicleTemplates {
     }
 
     /// Patch existing Lua waypoint tables in place (preserves DCS-only fields `IntoLua` might drop).
-    /// First point: `TakeOffParking` (ramp) for planes, `TakeOffGround` for helis; rest: `Turning Point`.
+    /// First point is forced to parking takeoff with locked ETA/speed and fixed barometric alt.
     fn patch_dt_route_points_lua_tables(
         grp: &Group<'static>,
-        slot_kind: SlotType,
+        _slot_kind: SlotType,
     ) -> Result<()> {
         let route: Table = grp.raw_get("route").context("DT group missing route")?;
         let points: Table =
@@ -1009,15 +1001,18 @@ impl VehicleTemplates {
             let p: Table =
                 points.raw_get(i).with_context(|| format_compact!("route point {i}"))?;
             let typ = if i == 1 {
-                match slot_kind {
-                    SlotType::Plane => "TakeOffParking",
-                    SlotType::Helicopter => "TakeOffGround",
-                }
+                "TakeOffParking"
             } else {
                 "Turning Point"
             };
             p.raw_set("type", typ)?;
             if i == 1 {
+                p.raw_set("alt", 10)?;
+                p.raw_set("action", "From Parking Area")?;
+                p.raw_set("alt_type", "BARO")?;
+                p.raw_set("ETA", 0)?;
+                p.raw_set("ETA_locked", true)?;
+                p.raw_set("speed_locked", true)?;
                 p.raw_set("airdromId", Value::Nil)?;
                 p.raw_set("helipadId", Value::Nil)?;
                 p.raw_set("linkUnit", Value::Nil)?;
@@ -2106,7 +2101,7 @@ impl VehicleTemplates {
 
         let mut link_by_side_type: HashMap<(Side, String), GroupId> = HashMap::new();
         let mut emitted_names: HashSet<String> = HashSet::new();
-        let slot_password = gen_dynamic_template_slot_password_10_digits();
+        let slot_password = String::from(DYNAMIC_TEMPLATE_SLOT_PASSWORD);
         info!(
             "dynamic spawn template slot password (all {}* groups this build): {}",
             DYNAMIC_TEMPLATE_GROUP_PREFIX, slot_password
@@ -2153,16 +2148,17 @@ impl VehicleTemplates {
             let tmpl: Group<'static> = src.deep_clone(lua)?;
             // DCS + Fowl warehouse `linkDynTempl` require this flag on the template group.
             tmpl.raw_set("dynSpawnTemplate", true)?;
+            tmpl.raw_set("lateActivation", false)?;
+            tmpl.raw_set("uncontrolled", false)?;
             if from_weapon_dt {
                 info!(
                     "{}{unit_type}-{}: using route from weapon.miz template",
                     DYNAMIC_TEMPLATE_GROUP_PREFIX,
                     side.to_str()
                 );
-            } else {
-                // Synthesized from slot template: set types on existing Lua waypoint tables (ME strings).
-                Self::patch_dt_route_points_lua_tables(&tmpl, slot_kind)?;
             }
+            // Force first-point route fields required by DCS dynamic templates.
+            Self::patch_dt_route_points_lua_tables(&tmpl, slot_kind)?;
 
             tmpl.set_name(group_name.clone())?;
             tmpl.set_id(gid)?;
@@ -2178,7 +2174,9 @@ impl VehicleTemplates {
                 unit_ord += 1;
                 u.set_id(uid)?;
                 u.set_name(String::from(format_compact!("{group_name}-{unit_ord}")))?;
+                u.raw_set("skill", "Client")?;
                 u.raw_set("password", slot_password.clone())?;
+                u.raw_set("fuel", 0)?;
 
                 // Keep DT_* units small. These templates are only used to populate the
                 // dynamic-spawn payload UI; large avionics/radio/datalink blobs can make
