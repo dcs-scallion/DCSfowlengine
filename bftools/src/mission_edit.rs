@@ -2162,6 +2162,8 @@ impl VehicleTemplates {
 
             tmpl.set_name(group_name.clone())?;
             tmpl.set_id(gid)?;
+            // DCS/ME read slot lock password on the **group** (after groupId in mission Lua), not on units.
+            tmpl.raw_set("password", slot_password.clone())?;
 
             let mut unit_ord = 0;
             for u in tmpl.units()? {
@@ -2175,7 +2177,7 @@ impl VehicleTemplates {
                 u.set_id(uid)?;
                 u.set_name(String::from(format_compact!("{group_name}-{unit_ord}")))?;
                 u.raw_set("skill", "Client")?;
-                u.raw_set("password", slot_password.clone())?;
+                u.raw_set("password", Value::Nil)?;
                 u.raw_set("fuel", 0)?;
 
                 // Keep DT_* units small. These templates are only used to populate the
