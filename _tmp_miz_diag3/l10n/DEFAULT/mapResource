@@ -1,0 +1,17 @@
+mapResource = 
+{
+	["ResKey_ImageBriefing_220"] = "Caucasus1987-0.jpg",
+	["ResKey_ImageBriefing_222"] = "Caucasus1987-3.jpg",
+	["ResKey_ImageBriefing_229"] = "Caucasus1987-2.jpg",
+	["ResKey_ImageBriefing_232"] = "Caucasus1987-0.jpg",
+	["ResKey_initScript_6"] = "mizinit.lua",
+	["ResKey_ImageBriefing_228"] = "Caucasus1987-1b.jpg",
+	["ResKey_ImageBriefing_226"] = "Caucasus1987-3.jpg",
+	["ResKey_ImageBriefing_224"] = "Caucasus1987-1a.jpg",
+	["ResKey_ImageBriefing_227"] = "Caucasus1987-4.jpg",
+	["ResKey_ImageBriefing_230"] = "Caucasus1987-3.jpg",
+	["ResKey_ImageBriefing_223"] = "Caucasus1987-4.jpg",
+	["ResKey_ImageBriefing_221"] = "Caucasus1987-2.jpg",
+	["ResKey_ImageBriefing_231"] = "Caucasus1987-4.jpg",
+	["ResKey_ImageBriefing_225"] = "Caucasus1987-2.jpg",
+} -- end of mapResource

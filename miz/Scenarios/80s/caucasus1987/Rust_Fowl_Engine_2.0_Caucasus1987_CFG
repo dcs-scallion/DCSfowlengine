@@ -77,6 +77,7 @@
     "carrier_airbase_max": 3, 
     "airbase_max": 4,
     "hub_max": 10,
+    "dynamicFARPs_InitialStockPercentage": 20,
     "tick": 5,
     "supply_transfer_size": 25,
     "ticks_per_delivery": 100,

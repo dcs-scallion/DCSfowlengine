@@ -491,6 +491,13 @@ pub struct WarehouseConfig {
     /// warehouse check
     #[serde(default)]
     pub exempt_airframes: FxHashSet<String>,
+    /// Initial stock percentage (0-100) for player-deployed dynamic FARPs.
+    /// Applied to both equipment and liquids at FARP creation time.
+    #[serde(
+        default = "default_dynamic_farps_initial_stock_percentage",
+        rename = "dynamicFARPs_InitialStockPercentage"
+    )]
+    pub dynamic_farps_initial_stock_percentage: u8,
 }
 
 fn default_fob_max() -> u32 {
@@ -499,6 +506,10 @@ fn default_fob_max() -> u32 {
 
 fn default_carrier_airbase_max() -> u32 {
     1
+}
+
+fn default_dynamic_farps_initial_stock_percentage() -> u8 {
+    100
 }
 
 impl WarehouseConfig {
@@ -514,7 +525,8 @@ impl WarehouseConfig {
                     self.airbase_max
                 }
             }
-            ObjectiveKind::Farp { .. } => self.airbase_max,
+            // FARPs (incl. player-deployed) use the same stock multiple as FOBs, not airfields.
+            ObjectiveKind::Farp { .. } => self.fob_max,
         }
     }
 

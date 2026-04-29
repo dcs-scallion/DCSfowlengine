@@ -57,6 +57,10 @@ fn objective_airbase_on_water(lua: MizLua, obj: &Objective) -> Result<bool> {
         SurfaceType::Water | SurfaceType::ShallowWater
     ))
 }
+
+fn scale_capacity_by_percent_floor(capacity: u32, pct: u8) -> u32 {
+    capacity.saturating_mul(pct as u32) / 100
+}
 use std::{
     cmp::{max, min},
     collections::hash_map::Entry,
@@ -497,25 +501,41 @@ impl Db {
             Some(cfg) => cfg,
             None => return Ok(()),
         };
+        let initial_stock_pct = self
+            .ephemeral
+            .cfg
+            .warehouse
+            .as_ref()
+            .map(|w| w.dynamic_farps_initial_stock_percentage)
+            .unwrap_or(100)
+            .min(100);
         let obj = objective_mut!(self, oid)?;
         let production = match self.ephemeral.production_by_side.get(&obj.owner) {
             Some(q) => Arc::clone(q),
             None => return Ok(()),
         };
         for (name, equip) in &production.equipment {
+            let capacity = whcfg.capacity(&obj.kind, false, equip.production);
             let inv = Inventory {
-                stored: 0,
-                capacity: whcfg.capacity(&obj.kind, false, equip.production),
+                // Equipment includes airframes; percent uses floor (e.g. 2.8 -> 2).
+                stored: scale_capacity_by_percent_floor(capacity, initial_stock_pct),
+                capacity,
             };
             obj.warehouse.equipment.insert_cow(name.clone(), inv);
         }
         for (name, qty) in &production.liquids {
+            let capacity = whcfg.capacity(&obj.kind, false, *qty);
             let inv = Inventory {
-                stored: 0,
-                capacity: whcfg.capacity(&obj.kind, false, *qty),
+                stored: scale_capacity_by_percent_floor(capacity, initial_stock_pct),
+                capacity,
             };
             obj.warehouse.liquids.insert_cow(*name, inv);
         }
+        log::info!(
+            "dynamic FARP {:?}: initialized warehouse stock to {}% of capacity",
+            oid,
+            initial_stock_pct
+        );
         Ok(())
     }
 

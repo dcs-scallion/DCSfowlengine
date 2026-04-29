@@ -97,6 +97,16 @@ try {
     }
 
     $exe_path = "../../../../bftools/bftools.exe"
+    $missionEditPath = "../../../../bftools/src/mission_edit.rs"
+    if ((Test-Path -LiteralPath $exe_path) -and (Test-Path -LiteralPath $missionEditPath)) {
+        $exeTs = (Get-Item -LiteralPath $exe_path).LastWriteTimeUtc
+        $srcTs = (Get-Item -LiteralPath $missionEditPath).LastWriteTimeUtc
+        if ($exeTs -lt $srcTs) {
+            $staleWarn = "WARNING: bftools.exe is older than bftools/src/mission_edit.rs. Build may use stale binary. Run '! build-and-compilation-bftools.ps1' first."
+            Write-Host $staleWarn -ForegroundColor Yellow
+            $staleWarn | Out-File -FilePath $log_file -Append
+        }
+    }
 
     # Local *_CFG: clone from another *_CFG if the expected name is missing (before bftools --campaign-cfg)
     if (-not (Test-Path "./$target_cfg_name")) {
@@ -143,7 +153,7 @@ try {
         $ccMsg | Out-File -FilePath $log_file -Append
     }
     else {
-        $noCfg = "No ./$target_cfg_name — bftools runs without --campaign-cfg."
+        $noCfg = "No ./$target_cfg_name - bftools runs without --campaign-cfg."
         Write-Host $noCfg -ForegroundColor DarkYellow
         $noCfg | Out-File -FilePath $log_file -Append
     }
@@ -212,7 +222,7 @@ try {
     if ($buildSuccess) {
         $fowlExport = "${mission_name}_fowl_export.json"
         if (-not (Test-Path -LiteralPath $fowlExport)) {
-            $export_abort = "ERROR: $fowlExport missing next to ./$mission_name.miz — bflib needs it beside *_CFG. Aborting copy (CFG/Missions left unchanged)."
+            $export_abort = "ERROR: $fowlExport missing next to ./$mission_name.miz - bflib needs it beside *_CFG. Aborting copy (CFG/Missions left unchanged)."
             Write-Host $export_abort -ForegroundColor Red
             $export_abort | Out-File -FilePath $log_file -Append
             throw $export_abort
@@ -255,7 +265,7 @@ finally {
     Write-Host $endMsg
     $endMsg | Out-File -FilePath $log_file -Append
 
-    # Optional: remove Fowl/bflib persisted state only (same folder DCS uses as writedir — no recurse; Tracks etc. untouched)
+    # Optional: remove Fowl/bflib persisted state only (same folder DCS uses as writedir - no recurse; Tracks etc. untouched)
     # Matches bflib bg::save: <writedir>\<sortie>, <sortie>.tmp, rotated <sortie><unix_timestamp>
     if (Test-Path -LiteralPath $DCS_user_path) {
         Write-Host "`n--- Fowl persisted state scan ($mission_name) ---" -ForegroundColor Cyan

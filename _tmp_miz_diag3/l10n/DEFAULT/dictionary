@@ -1,0 +1,89 @@
+dictionary = 
+{
+	["DictKey_ActionText_10"] = "true",
+	["DictKey_subtitle_166"] = "",
+	["DictKey_subtitle_164"] = "",
+	["DictKey_descriptionBlueTask_3"] = "Destroy all enemy bases and aircraft carriers.\
+--------------------------------------------------------------\
+BLUE Team Radio Frequencies :\
+\
+240 MHz AM   Main / GCI\
+243 MHz AM   Guard\
+231 MHz AM   Drone 1 (Enfield)\
+232 MHz AM   Drone 2 (Pontiac)\
+233 MHz AM   Drone 3 (Ford)\
+241 MHz AM   Tactical 1\
+242 MHz AM   Tactical 2\
+244 MHz AM   Tactical 3\
+246 MHz AM   AWACS E-2C (Wizard)\
+275 MHz AM   AWACS E-3A (Overlord)\
+276 MHz AM   Tanker boom KC-135 (Texaco)\
+277 MHz AM   Tanker basket KC-135MPRS (Shell)\
+278 MHz AM   Carrier CV-59 Forrestal (TACAN 78X, ICLS 15)\
+279 MHz AM   Carrier LHA-1 Tarawa (TACAN 79X, ICLS 16)\
+\
+  60 MHz FM    Helicopters Main\
+  61 MHz FM    Helicopters Tactical 1\
+  62 MHz FM    Helicopters Tactical 2\
+  63 MHz FM    Helicopters Tactical 3\
+",
+	["DictKey_descriptionNeutralsTask_4"] = "",
+	["DictKey_sortie_5"] = "Rust_Fowl_Engine_2.0_Caucasus1987",
+	["DictKey_subtitle_168"] = "",
+	["DictKey_descriptionText_1"] = "Welcome to The Coop - Caucasus 1987\
+\
+DCS server IP: 78.80.144.178:10308\
+\
+SRS server IP: 78.80.144.178:5002\
+\
+Discord: https://discord.gg/GFpKeduHA7\
+\
+RED  Main Comms: 120 MHz AM\
+BLUE Main Comms: 240 MHz AM\
+\
+  This is a Capture and Hold mission with limited lives and a large focus on logistics. \
+\
+  Players choose a side upon first login by typing either \"red\" or \"blue\" in chat; with the ability to switch sides once per campaign with the command \"-switch\".\
+\
+  Player lives are reset every 6 hours on client independent timers; timers start upon loss of first life.\
+\
+Player Life Allocations:\
+4 Standard\
+4 Attack\
+4 Intercept\
+5 Logistics\
+5 Recon\
+\
+  Please be considerate of your teammates with regard to the limited resources that your team has and the use of rarer ordnances.\
+\
+Use \"-help\" and other help-base commands (EG: \"-action help\") to get information on the Combined Arms and CTLD integration features.\
+\
+  Please report any bugs or toxic behavior on the discord via appropriate channels.\
+\
+  This campaign uses code released under the GNU Affero public license version 3, or any later version of that license. As required by the license terms, a link to the code is provided below\
+\
+https://github.com/estokes/bfnext",
+	["DictKey_subtitle_170"] = "",
+	["DictKey_descriptionRedTask_2"] = "Destroy all enemy bases and aircraft carriers.\
+--------------------------------------------------------------\
+RED Team Radio Frequencies :\
+\
+120 MHz AM   Main / GCI\
+121.5 MHz AM   Guard\
+146 MHz AM   Drone 1 (Uzi)\
+147 MHz AM   Drone 2 (Chevy)\
+148 MHz AM   Drone 3 (Springfield)\
+142 MHz AM   Tactical 1\
+143 MHz AM   Tactical 2\
+144 MHz AM   Tactical 3\
+145 MHz AM   AWACS A-50 (Focus)\
+230 MHz AM   Tanker IL-78M (Arco)\
+225 MHz AM   Carrier V-2 Veinticinco de Mayo (TACAN 14X, ICLS 22)\
+226 MHz AM   Carrier 1143.5 Admiral Kuznecow\
+\
+  30 MHz FM    Helicopters Main\
+  31 MHz FM    Helicopters Tactical 1\
+  32 MHz FM    Helicopters Tactical 2\
+  33 MHz FM    Helicopters Tactical 3\
+",
+} -- end of dictionary

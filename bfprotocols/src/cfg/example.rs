@@ -1914,6 +1914,7 @@ impl Default for Cfg {
                     (Side::Red, "RINVENTORY".into()),
                 ]),
                 exempt_airframes: FxHashSet::from_iter(["Su-30SM".into()]),
+                dynamic_farps_initial_stock_percentage: 100,
             }),
             virtual_resupply: false,
             campaign_decade: None,
