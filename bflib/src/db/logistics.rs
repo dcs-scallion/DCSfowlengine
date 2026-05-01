@@ -602,6 +602,9 @@ impl Db {
         let export = self.ephemeral.fowl_miz_export.as_ref();
         let _map = warehouse::Warehouse::get_resource_map(lua).context("getting resource map")?;
         let world = World::singleton(lua).context("getting world")?;
+        self.ephemeral.airbase_by_oid.clear();
+        self.ephemeral.airbases_by_oid.clear();
+        let mut objective_whid: FxHashMap<ObjectiveId, String> = FxHashMap::default();
         let mut load_and_sync_airbases = || -> Result<()> {
             world
                 .get_airbases()
@@ -623,9 +626,10 @@ impl Db {
                         .objectives
                         .into_iter()
                         .find(|(_, obj)| obj.zone.contains(pos));
-                    let _w = airbase
+                    let w = airbase
                         .get_warehouse()
                         .context("getting airbase warehouse")?;
+                    let whid = w.whid().context("getting airbase warehouse id")?;
                     let (oid, obj) = match oid {
                         Some((oid, obj)) => {
                             airbase
@@ -645,10 +649,36 @@ impl Db {
                     };
                     match self.ephemeral.airbase_by_oid.entry(oid) {
                         Entry::Vacant(e) => {
-                            e.insert(airbase.object_id().context("getting airbase object_id")?);
+                            let airbase_oid =
+                                airbase.object_id().context("getting airbase object_id")?;
+                            e.insert(airbase_oid.clone());
+                            self.ephemeral
+                                .airbases_by_oid
+                                .insert(oid, smallvec![airbase_oid]);
+                            objective_whid.insert(oid, whid);
                         }
                         Entry::Occupied(_) => {
-                            bail!("multiple airbases inside the trigger zone of {}", obj.name)
+                            match objective_whid.get(&oid) {
+                                Some(expected) if expected == &whid => {
+                                    let airbase_oid =
+                                        airbase.object_id().context("getting airbase object_id")?;
+                                    let oairbases = self
+                                        .ephemeral
+                                        .airbases_by_oid
+                                        .entry(oid)
+                                        .or_insert_with(|| smallvec![]);
+                                    if !oairbases.contains(&airbase_oid) {
+                                        oairbases.push(airbase_oid);
+                                    }
+                                }
+                                Some(_) => {
+                                    bail!(
+                                        "multiple warehouses inside the trigger zone of {}",
+                                        obj.name
+                                    )
+                                }
+                                None => bail!("missing warehouse key while processing {}", obj.name),
+                            }
                         }
                     }
                     Ok(())

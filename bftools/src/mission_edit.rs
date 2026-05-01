@@ -114,14 +114,54 @@ impl TriggerZone {
     }
 
     pub fn contains(&self, v: Vector2) -> Result<bool> {
-        let pos = self.inner.pos()?;
+        let center = self.inner.pos()?;
         match self.inner.typ()? {
-            TriggerZoneTyp::Quad(q) => Ok(q.contains(LuaVec2(pos))),
-            TriggerZoneTyp::Circle { radius } => {
-                Ok(radius >= na::distance(&v.into(), &pos.into()))
-            }
+            TriggerZoneTyp::Quad(q) => Ok(q.contains(LuaVec2(v))),
+            TriggerZoneTyp::Circle { radius } => Ok(
+                radius.powi(2) >= na::distance_squared(&v.into(), &center.into()),
+            ),
         }
     }
+}
+
+/// Build-only overlay: client aircraft inside get internal fuel cleared (must match bflib `Zone::contains` idea).
+struct TzfPlaneFuelZone {
+    inner: miz::TriggerZone<'static>,
+}
+
+impl TzfPlaneFuelZone {
+    fn try_from_trigger_table(zone: &Table<'static>) -> Result<Option<Self>> {
+        let inner = miz::TriggerZone::from_lua(
+            Value::Table(zone.clone()),
+            unsafe { &*LUA },
+        )?;
+        let name = inner.name()?;
+        if !name.starts_with("TZF") {
+            return Ok(None);
+        }
+        info!("TZF plane fuel strip overlay: {}", name.as_str());
+        Ok(Some(Self { inner }))
+    }
+
+    fn contains(&self, v: Vector2) -> Result<bool> {
+        let center = self.inner.pos()?;
+        match self.inner.typ()? {
+            TriggerZoneTyp::Quad(q) => Ok(q.contains(LuaVec2(v))),
+            TriggerZoneTyp::Circle { radius } => Ok(
+                radius.powi(2) >= na::distance_squared(&v.into(), &center.into()),
+            ),
+        }
+    }
+}
+
+fn strip_client_plane_internal_fuel_lua(unit: &Table) -> Result<()> {
+    unit.raw_set("fuel", Value::Integer(0))?;
+    if let Ok(pl) = unit.raw_get::<_, Table>("payload") {
+        if matches!(pl.raw_get::<_, Value>("fuel"), Ok(v) if !v.is_nil()) {
+            pl.raw_set("fuel", Value::Number(0.0))?;
+        }
+    }
+    Ok(())
 }
 
 struct UnpackedMiz {
@@ -1149,6 +1189,24 @@ impl VehicleTemplates {
             radio,
             frequency,
         })
+    }
+
+    /// Slot-group or DT template present in weapon.miz for this coalition (inventory `aircrafts` rows must match).
+    fn has_airframe_template_for_side(&self, side: Side, unit_type: &str) -> bool {
+        let k: String = unit_type.to_string().into();
+        self.plane_slots
+            .get(&side)
+            .is_some_and(|m| m.contains_key(&k))
+            || self
+                .helicopter_slots
+                .get(&side)
+                .is_some_and(|m| m.contains_key(&k))
+            || self
+                .dt_weapon_source
+                .contains_key(&(side, SlotType::Plane, k.clone()))
+            || self
+                .dt_weapon_source
+                .contains_key(&(side, SlotType::Helicopter, k))
     }
 
     /// Coalition-wide descriptor allowlist for ordnance (vote over templates; `restricted` = blocked).
@@ -2234,6 +2292,7 @@ impl VehicleTemplates {
         lua: &Lua,
         objectives: &mut Vec<TriggerZone>,
         base: &mut LoadedMiz,
+        tzf_plane_fuel: &[TzfPlaneFuelZone],
     ) -> Result<()> {
         let mut slots: HashMap<String, HashMap<String, usize>> = HashMap::default();
         let mut replace_count: HashMap<String, isize> = HashMap::new();
@@ -2313,9 +2372,17 @@ impl VehicleTemplates {
                         increment_key(&mut replace_count, &unit_type);
                         let x = unit.get("x")?;
                         let y = unit.get("y")?;
+                        let unit_pos = Vector2::new(x, y);
+                        let mut strip_internal_fuel_plane = false;
+                        for tzf in tzf_plane_fuel {
+                            if tzf.contains(unit_pos)? {
+                                strip_internal_fuel_plane = true;
+                                break;
+                            }
+                        }
                         let mut found = false;
                         for trigger_zone in &mut *objectives {
-                            if trigger_zone.contains(Vector2::new(x, y))? {
+                            if trigger_zone.contains(unit_pos)? {
                                 found = true;
                                 let count = increment_key(
                                     &mut trigger_zone.spawn_count,
@@ -2347,6 +2414,9 @@ impl VehicleTemplates {
                                 }
                                 break;
                             }
+                        }
+                        if strip_internal_fuel_plane {
+                            strip_client_plane_internal_fuel_lua(&unit)?;
                         }
                         if !found {
                             bail!(
@@ -2391,6 +2461,161 @@ struct WarehouseBundle {
     path: PathBuf,
     loaded: LoadedMiz,
     template: WarehouseTemplate,
+}
+
+/// Rows zeroed during build (`aircrafts` stock without weapon.miz template for that coalition).
+#[derive(Debug, Clone)]
+struct InventoryAircraftOrphanSanitized {
+    row_name: StdString,
+    side: Side,
+    unit_type: StdString,
+    category: StdString,
+    previous_amount: u32,
+}
+
+fn zero_inventory_aircraft_rows_missing_weapon_template(
+    vt: &VehicleTemplates,
+    inv: &Table,
+    side: Side,
+    row_name: &str,
+    out: &mut Vec<InventoryAircraftOrphanSanitized>,
+) -> Result<()> {
+    let Ok(aircrafts) = inv.raw_get::<_, Table>("aircrafts") else {
+        return Ok(());
+    };
+    for cat in ["helicopters", "planes"] {
+        let Ok(cat_tbl) = aircrafts.raw_get::<_, Table>(cat) else {
+            continue;
+        };
+        for pair in cat_tbl.clone().pairs::<String, Table>() {
+            let (unit_type, row) = pair?;
+            let Ok(amt) = row.raw_get::<_, u32>("initialAmount") else {
+                continue;
+            };
+            if amt == 0 {
+                continue;
+            }
+            if vt.has_airframe_template_for_side(side, unit_type.as_str()) {
+                continue;
+            }
+            row.raw_set("initialAmount", 0u32)?;
+            warn!(
+                "{}: '{}' [{}] initialAmount={} — no {:?} weapon.miz template; zeroed",
+                row_name,
+                unit_type,
+                cat,
+                amt,
+                side
+            );
+            out.push(InventoryAircraftOrphanSanitized {
+                row_name: row_name.to_string(),
+                side,
+                unit_type: unit_type.to_string(),
+                category: cat.to_string(),
+                previous_amount: amt,
+            });
+        }
+    }
+    Ok(())
+}
+
+fn sanitize_both_production_inventory_aircraft_templates(
+    vt: &VehicleTemplates,
+    blue_inv: &Table,
+    red_inv: &Table,
+) -> Result<Vec<InventoryAircraftOrphanSanitized>> {
+    let mut out = Vec::new();
+    zero_inventory_aircraft_rows_missing_weapon_template(
+        vt,
+        blue_inv,
+        Side::Blue,
+        "BINVENTORY",
+        &mut out,
+    )?;
+    zero_inventory_aircraft_rows_missing_weapon_template(
+        vt,
+        red_inv,
+        Side::Red,
+        "RINVENTORY",
+        &mut out,
+    )?;
+    Ok(out)
+}
+
+fn pack_warehouse_bundle_to_path(wb: &WarehouseBundle) -> Result<()> {
+    let wh_file = wb
+        .loaded
+        .miz
+        .files
+        .get("warehouses")
+        .context("warehouse bundle: missing unpacked warehouses file path")?;
+    let s = serialize_to_lua(
+        "warehouses",
+        Value::Table(wb.loaded.warehouses.clone()),
+    )?;
+    fs::write(wh_file, &*s).context("serializing warehouse template warehouses")?;
+    wb.loaded
+        .miz
+        .pack(&wb.path)
+        .with_context(|| format_compact!("pack warehouse template {}", wb.path.display()))?;
+    Ok(())
+}
+
+fn print_inventory_aircraft_orphan_editor_notice(
+    cleared: &[InventoryAircraftOrphanSanitized],
+    warehouse_miz_path: &Path,
+    weapon_miz_path: &Path,
+) {
+    if cleared.is_empty() {
+        return;
+    }
+    fn side_word(side: Side) -> &'static str {
+        match side {
+            Side::Blue => "BLUE (BINVENTORY)",
+            Side::Red => "RED (RINVENTORY)",
+            Side::Neutral => "NEUTRAL",
+        }
+    }
+    println!();
+    println!("****************************************************************");
+    println!("*  NOTICE — B/RINVENTORY vs weapon*.miz (AUTO-ZERO)");
+    println!("****************************************************************");
+    println!();
+    println!(
+        "These types had non-zero stock under aircrafts (planes / helicopters) but no matching"
+    );
+    println!(
+        "coalition airframe template in the weapon template (slot or zzDT/DT / dynSpawnTemplate)."
+    );
+    println!("`initialAmount` was set to 0 in the warehouse template on disk:");
+    println!("  {}", warehouse_miz_path.display());
+    println!();
+    println!("ROWS ZEROED (previous initialAmount):");
+    for e in cleared {
+        println!(
+            "  * {} | {} | type={} [{}] had {}",
+            e.row_name,
+            side_word(e.side),
+            e.unit_type,
+            e.category,
+            e.previous_amount
+        );
+    }
+    println!();
+    println!("----------------------------------------------------------------");
+    println!("EDITOR WORKFLOW — FOLLOW THIS ORDER:");
+    println!();
+    println!("  1) FIRST — add to weapon template:");
+    println!("       {}", weapon_miz_path.display());
+    println!("     a playable slot group or dynamic-template group per missing type");
+    println!("     (dynSpawnTemplate / zzDT-* / DT-*).");
+    println!();
+    println!("  2) THEN — reopen warehouse template BINVENTORY / RINVENTORY and restore counts:");
+    println!("       {}", warehouse_miz_path.display());
+    println!();
+    println!("  3) REBUILD the mission.");
+    println!("****************************************************************");
+    println!();
 }
 
 fn lua_value_truthy(v: &Value) -> bool {
@@ -2909,13 +3134,15 @@ impl WarehouseTemplate {
         base: &mut LoadedMiz,
         warehouse_caps: Option<&campaign_cfg::WarehouseDefaultsFromCfg>,
         bridge_gen: Option<(&VehicleTemplates, &weapon_bridge::WeaponBridgeMap)>,
+        weapon_airframes: &VehicleTemplates,
         objective_aircraft_by_side: &HashMap<
             StdString,
             HashMap<Side, HashSet<StdString>>,
         >,
         _droptank_ws_from_weapon_warehouses: &(HashSet<[i32; 4]>, HashSet<[i32; 4]>),
         mult_cfg: &WarehouseStockMultConfig,
-    ) -> Result<bfprotocols::fowl_miz_export::FowlMizExport> {
+    ) -> Result<(bfprotocols::fowl_miz_export::FowlMizExport, Vec<InventoryAircraftOrphanSanitized>)>
+    {
         fn copy_weapons_subtable(
             lua: &Lua,
             dst_row: &Table,
@@ -3443,6 +3670,12 @@ impl WarehouseTemplate {
             }
             Ok(())
         }
+
+        let inventory_aircraft_orphans_cleared = sanitize_both_production_inventory_aircraft_templates(
+            weapon_airframes,
+            &self.blue_inventory,
+            &self.red_inventory,
+        )?;
 
         let blue_master = self.blue_default.deep_clone(lua)?;
         let red_master = self.red_default.deep_clone(lua)?;
@@ -4470,9 +4703,22 @@ impl WarehouseTemplate {
                 .with_context(|| format_compact!("setting airport {id}"))?;
         }
         for id in whids {
-            let old_row = warehouses
-                .raw_get::<_, Table>(id)
-                .with_context(|| format_compact!("getting warehouse {id}"))?;
+            let old_row = match warehouses
+                .raw_get::<_, Value>(id)
+                .with_context(|| format_compact!("getting warehouse {id}"))?
+            {
+                Value::Nil => {
+                    info!(
+                        "pad unitId {id}: no warehouses.warehouses row (multi-pad hub shares one warehouse); skipping default apply",
+                    );
+                    continue;
+                }
+                Value::Table(t) => t,
+                other => bail!(
+                    "getting warehouse {id}: expected table or nil, got {:?}",
+                    other
+                ),
+            };
             let side_opt = warehouse_side_for_default_apply(&old_row)
                 .with_context(|| format_compact!("warehouse {id}"))?;
             if side_opt.is_none() {
@@ -4487,7 +4733,7 @@ impl WarehouseTemplate {
             let side = side_opt.unwrap();
             let is_dynamic = warehouse_dynamic_spawn_enabled(&old_row);
             if is_dynamic {
-                // Stejně jako u `airports`: dynamické řádky jen v `patch_warehouse_dynamic_spawn_links`.
+                // Dynamic hubs: patched only in `patch_warehouse_dynamic_spawn_links`.
                 continue;
             }
             let src = match side {
@@ -4657,13 +4903,16 @@ impl WarehouseTemplate {
                 "RINVENTORY template",
             )?;
         }
-        Ok(bfprotocols::fowl_miz_export::FowlMizExport {
-            schema_version: 3,
-            weapon_bridge_used,
-            blue_weapon_ws: blue_weapon_export,
-            red_weapon_ws: red_weapon_export,
-            objective_defaults,
-        })
+        Ok((
+            bfprotocols::fowl_miz_export::FowlMizExport {
+                schema_version: 3,
+                weapon_bridge_used,
+                blue_weapon_ws: blue_weapon_export,
+                red_weapon_ws: red_weapon_export,
+                objective_defaults,
+            },
+            inventory_aircraft_orphans_cleared,
+        ))
     }
 }
 
@@ -4850,7 +5099,7 @@ fn patch_warehouse_dynamic_spawn_links(
             dst_row: &Table<'static>,
             src_row: &Table<'static>,
             mult: u32,
-            warehouse_caps: Option<&campaign_cfg::WarehouseDefaultsFromCfg>,
+            _warehouse_caps: Option<&campaign_cfg::WarehouseDefaultsFromCfg>,
         ) -> Result<()> {
             // Prefill dynamic warehouses: same base counts as BINVENTORY/RINVENTORY, scaled like Fowl capacity.
             if let (Ok(dst_aircrafts), Ok(src_aircrafts)) = (
@@ -5011,6 +5260,24 @@ fn compile_objectives(base: &LoadedMiz) -> Result<Vec<TriggerZone>> {
         }
     }
     Ok(objectives)
+}
+
+fn compile_tzf_plane_fuel_zones(base: &LoadedMiz) -> Result<Vec<TzfPlaneFuelZone>> {
+    let mut out = Vec::new();
+    for zone in base
+        .mission
+        .raw_get::<_, Table>("triggers")
+        .context("getting triggers")?
+        .raw_get::<_, Table>("zones")
+        .context("getting zones")?
+        .pairs::<Value, Table>()
+    {
+        let zone = zone?.1;
+        if let Some(z) = TzfPlaneFuelZone::try_from_trigger_table(&zone)? {
+            out.push(z);
+        }
+    }
+    Ok(out)
 }
 
 fn collect_objective_aircraft_by_side(
@@ -5438,6 +5705,14 @@ pub fn run(cfg: &MizCmd) -> Result<()> {
     validate_base_fowl_trigger_zone_names(&base.mission)
         .context("validating Fowl trigger zone names (must match runtime)")?;
     let mut objectives = compile_objectives(&base).context("compiling objectives")?;
+    let tzf_plane_fuel =
+        compile_tzf_plane_fuel_zones(&base).context("compiling TZF plane fuel overlays")?;
+    if !tzf_plane_fuel.is_empty() {
+        info!(
+            "TZF: {} overlay zone(s) — client aircraft inside get internal fuel stripped at build (remove overlays to keep weapon*.miz fuel)",
+            tzf_plane_fuel.len(),
+        );
+    }
     validate_single_airbase_per_objective(&objectives, &base)
         .context("validating single airbase per objective")?;
     let mut hub_warehouse_ids = collect_hub_warehouse_ids_from_objectives(&objectives, &base)
@@ -5573,7 +5848,7 @@ pub fn run(cfg: &MizCmd) -> Result<()> {
     };
     vehicle_templates.generate_slots(lua, &mut base).context("generating slots")?;
     vehicle_templates
-        .apply(lua, &mut objectives, &mut base)
+        .apply(lua, &mut objectives, &mut base, &tzf_plane_fuel)
         .context("applying vehicle templates")?;
     let objective_aircraft_by_side =
         collect_objective_aircraft_by_side(&base, &objectives)
@@ -5637,7 +5912,7 @@ pub fn run(cfg: &MizCmd) -> Result<()> {
 
     let fowl_from_warehouse = if let Some(wb) = warehouse_bundle.as_ref() {
         let bridge_gen = weapon_bridge_map.as_ref().map(|b| (&vehicle_templates, b));
-        let export = wb
+        let (export, inventory_aircraft_orphans_cleared) = wb
             .template
             .apply(
                 lua,
@@ -5645,25 +5920,34 @@ pub fn run(cfg: &MizCmd) -> Result<()> {
                 &mut base,
                 warehouse_defaults,
                 bridge_gen,
+                &vehicle_templates,
                 &objective_aircraft_by_side,
                 &droptank_ws_from_weapon_warehouses,
                 &mult_cfg,
             )
             .context("applying warehouse template")?;
+
+        if !inventory_aircraft_orphans_cleared.is_empty() {
+            pack_warehouse_bundle_to_path(wb).with_context(|| {
+                format_compact!(
+                    "persist warehouse template after BINVENTORY/RINVENTORY aircraft orphan zeroing ({})",
+                    wb.path.display()
+                )
+            })?;
+            print_inventory_aircraft_orphan_editor_notice(
+                &inventory_aircraft_orphans_cleared,
+                wb.path.as_path(),
+                weapon_template_path.as_path(),
+            );
+            warn!(
+                "warehouse template `{}`: wrote {} zeroed production inventory aircraft row(s) (no weapon.miz template)",
+                wb.path.display(),
+                inventory_aircraft_orphans_cleared.len(),
+            );
+        }
+
         if cfg.write_back_warehouse_defaults && weapon_bridge_map.is_some() {
-            let wh_file = wb
-                .loaded
-                .miz
-                .files
-                .get("warehouses")
-                .context("warehouse template miz missing warehouses file entry")?;
-            let s = serialize_to_lua(
-                "warehouses",
-                Value::Table(wb.loaded.warehouses.clone()),
-            )?;
-            fs::write(wh_file, &*s)
-                .context("write-back: serializing template warehouses")?;
-            wb.loaded.miz.pack(&wb.path).with_context(|| {
+            pack_warehouse_bundle_to_path(wb).with_context(|| {
                 format_compact!(
                     "write-back: repacking warehouse template {}",
                     wb.path.display()

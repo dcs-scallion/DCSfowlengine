@@ -458,6 +458,7 @@ impl Db {
         }
         self.persisted.farps.remove_cow(oid);
         self.ephemeral.airbase_by_oid.remove(oid);
+        self.ephemeral.airbases_by_oid.remove(oid);
         self.ephemeral.remove_objective_markup(oid);
         self.ephemeral.stat(Stat::ObjectiveDestroyed { id: *oid });
         self.ephemeral.dirty();
@@ -667,7 +668,10 @@ impl Db {
         let airbase = airbase
             .object_id()
             .with_context(|| format_compact!("getting airbase {pad_template} object id"))?;
-        self.ephemeral.airbase_by_oid.insert(oid, airbase);
+        self.ephemeral.airbase_by_oid.insert(oid, airbase.clone());
+        self.ephemeral
+            .airbases_by_oid
+            .insert(oid, smallvec![airbase]);
         self.init_farp_warehouse(&oid)
             .context("initializing farp warehouse")?;
         self.setup_supply_lines().context("setup supply lines")?;
@@ -1192,16 +1196,29 @@ impl Db {
                         }
                     }
                 }
-                let abid = self
-                    .ephemeral
-                    .airbase_by_oid
-                    .get(&oid)
-                    .ok_or_else(|| anyhow!("no airbase for objective {}", obj.name))?;
-                let airbase =
-                    Airbase::get_instance(lua, abid).context("getting captured airbase")?;
-                airbase
-                    .set_coalition(*side)
-                    .context("setting airbase coalition")?;
+                let set_owner = || -> Result<()> {
+                    if let Some(abids) = self.ephemeral.airbases_by_oid.get(&oid) {
+                        for abid in abids {
+                            let airbase = Airbase::get_instance(lua, abid)
+                                .context("getting captured airbase")?;
+                            airbase
+                                .set_coalition(*side)
+                                .context("setting airbase coalition")?;
+                        }
+                        return Ok(());
+                    }
+                    let abid = self
+                        .ephemeral
+                        .airbase_by_oid
+                        .get(&oid)
+                        .ok_or_else(|| anyhow!("no airbase for objective {}", obj.name))?;
+                    let airbase =
+                        Airbase::get_instance(lua, abid).context("getting captured airbase")?;
+                    airbase
+                        .set_coalition(*side)
+                        .context("setting airbase coalition")
+                };
+                set_owner()?;
                 self.repair_one_logi_step(*side, now, oid)
                     .context("repairing captured airbase logi")?;
                 self.repair_services(*side, now, oid)
