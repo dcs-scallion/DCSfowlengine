@@ -5334,19 +5334,54 @@ fn collect_objective_aircraft_by_side(
     Ok(out)
 }
 
+/// Fallback grouping when pads have no `warehouses.warehouses` rows (slave-only / odd exports).
+fn logistics_hub_logical_name(display_name: &str) -> StdString {
+    match display_name.rsplit_once('-') {
+        Some((base, suf))
+            if !suf.is_empty() && suf.chars().all(|c| c.is_ascii_digit()) =>
+        {
+            base.to_string()
+        }
+        _ => display_name.to_string(),
+    }
+}
+
+/// `warehouses.warehouses` key for this pad (`unitId`), or `Nil` → shares another pad's row (`whids` apply loop).
+fn farp_own_warehouse_key(
+    wh_warehouse: &Table<'static>,
+    unit_id: i64,
+) -> Result<Option<i64>> {
+    match wh_warehouse
+        .raw_get::<_, Value>(unit_id)
+        .with_context(|| format_compact!("warehouses.warehouses[{unit_id}]"))?
+    {
+        Value::Table(_) => Ok(Some(unit_id)),
+        Value::Nil => Ok(None),
+        other => bail!(
+            "warehouses.warehouses[{unit_id}]: expected table or nil, got {:?}",
+            other
+        ),
+    }
+}
+
 fn validate_single_airbase_per_objective(
     objectives: &[TriggerZone],
     base: &LoadedMiz,
 ) -> Result<()> {
-    // Objective zones must map to exactly one airbase/warehouse hub to keep supply logic unambiguous.
+    // Prefer distinct `warehouses.warehouses` backend keys — matches ME/shared-stock semantics (see `for id in whids`).
+    let wh_warehouse = base
+        .warehouses
+        .raw_get::<_, Table>("warehouses")
+        .context("getting warehouses.warehouses for objective airbase audit")?;
+
     let mut errors: Vec<std::string::String> = vec![];
 
     for obj in objectives {
-        let mut airbases: Vec<std::string::String> = vec![];
-        for (side, coa) in
+        let mut backends: Vec<(i64, StdString)> = vec![];
+        let mut display_names_in_zone: Vec<StdString> = vec![];
+        for (_side, coa) in
             Side::ALL.into_iter().map(|side| (side, base.mission.coalition(side)))
         {
-            let _ = side;
             let coa = coa?;
             for country in coa.countries()? {
                 let country = country?;
@@ -5366,23 +5401,56 @@ fn validate_single_airbase_per_objective(
                             continue;
                         }
                         let name: String = unit.raw_get("name")?;
+                        let unit_id: i64 = unit.raw_get("unitId")?;
                         let x: f64 = unit.raw_get("x")?;
                         let y: f64 = unit.raw_get("y")?;
                         if obj.contains(Vector2::new(x, y))? {
-                            airbases.push(name.to_string());
+                            display_names_in_zone.push(name.as_str().to_string());
+                            if let Some(key) =
+                                farp_own_warehouse_key(&wh_warehouse, unit_id)?
+                            {
+                                backends.push((key, name.as_str().to_string()));
+                            }
                         }
                     }
                 }
             }
         }
 
-        if airbases.len() > 1 {
-            airbases.sort();
-            airbases.dedup();
+        backends.sort_by_key(|(id, _)| *id);
+        backends.dedup_by_key(|(id, _)| *id);
+
+        let multiple_backends = backends.len() > 1;
+        let mut ambiguous_by_name_only = false;
+        if backends.is_empty() && !display_names_in_zone.is_empty() {
+            let mut labs = display_names_in_zone
+                .iter()
+                .map(|s| logistics_hub_logical_name(s.as_str()))
+                .collect::<Vec<_>>();
+            labs.sort();
+            labs.dedup();
+            ambiguous_by_name_only = labs.len() > 1;
+        }
+
+        if multiple_backends || ambiguous_by_name_only {
+            let detail = if multiple_backends {
+                backends
+                    .iter()
+                    .map(|(id, n)| format!("{} [warehouses.key={id}]", n))
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            } else {
+                let mut labs = display_names_in_zone
+                    .iter()
+                    .map(|s| logistics_hub_logical_name(s.as_str()))
+                    .collect::<Vec<_>>();
+                labs.sort();
+                labs.dedup();
+                labs.join(", ")
+            };
             errors.push(format!(
                 "objective {} has multiple airbases inside the trigger zone: {}",
-                obj.objective_name,
-                airbases.join(", ")
+                obj.objective_name, detail
             ));
         }
     }
