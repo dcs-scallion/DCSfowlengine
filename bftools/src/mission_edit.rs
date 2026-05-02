@@ -2868,10 +2868,24 @@ fn apply_inventory_liquids_scaled(dst: &Table, src: &Table, lua: &Lua, mult: u32
 
 #[derive(Clone, Copy)]
 enum NeutralWarehouseBuildKind {
-    /// Neutral airports: when DS is enabled, `aircrafts`/`weapons` are cleared in `patch_neutral_airport_dynamic_template_links`.
+    /// Neutral airports without DS: cleared here. Neutral + DS: see `neutral_dynamic_spawn_airport_zero_stock_link_templates`.
     Airport,
     /// `warehouses.warehouses` neutral FARP etc.: `linkDynTempl` zeroed at build.
     Other,
+}
+
+/// Neutral + `dynamicSpawn`: ME flags + level fields from campaign B4 / variant-A chat spec.
+fn apply_neutral_dynamic_spawn_warehouse_flags(lua: &Lua, row: &Table) -> Result<()> {
+    row.raw_set("dynamicCargo", true)?;
+    row.raw_set("unlimitedFuel", false)?;
+    row.raw_set("unlimitedMunitions", false)?;
+    row.raw_set("unlimitedAircrafts", false)?;
+    row.raw_set("OperatingLevel_Eqp", 0i64)?;
+    row.raw_set("OperatingLevel_Air", 0i64)?;
+    row.raw_set("OperatingLevel_Fuel", 10i64)?;
+    row.raw_set("size", 0i64)?;
+    row.raw_set("equipment", lua.create_table()?)?;
+    Ok(())
 }
 
 /// Build-time only: neutral coalition rows start with no stock (runtime capture rules stay separate).
@@ -2880,6 +2894,9 @@ fn empty_neutral_build_warehouse_row(
     row: &Table,
     kind: NeutralWarehouseBuildKind,
 ) -> Result<()> {
+    if warehouse_dynamic_spawn_enabled(row) {
+        apply_neutral_dynamic_spawn_warehouse_flags(lua, row)?;
+    }
     row.raw_set("weapons", lua.create_table()?)?;
     if let Ok(aircrafts) = row.raw_get::<_, Table>("aircrafts") {
         for cat in ["helicopters", "planes"] {
@@ -4642,12 +4659,18 @@ impl WarehouseTemplate {
             let side_opt = warehouse_side_for_default_apply(&old_row)
                 .with_context(|| format_compact!("airport warehouse {id}"))?;
             if side_opt.is_none() {
-                empty_neutral_build_warehouse_row(
-                    lua,
-                    &old_row,
-                    NeutralWarehouseBuildKind::Airport,
-                )?;
-                info!("airport warehouse {id}: neutral — cleared build stock");
+                if warehouse_dynamic_spawn_enabled(&old_row) {
+                    info!(
+                        "airport warehouse {id}: neutral + dynamic spawn — stock/templates deferred to patch_warehouse_dynamic_spawn_links"
+                    );
+                } else {
+                    empty_neutral_build_warehouse_row(
+                        lua,
+                        &old_row,
+                        NeutralWarehouseBuildKind::Airport,
+                    )?;
+                    info!("airport warehouse {id}: neutral — cleared build stock");
+                }
                 continue;
             }
             let side = side_opt.unwrap();
@@ -5049,71 +5072,105 @@ fn audit_naval_carrier_mission_rules(
     Ok(())
 }
 
-/// Neutral `warehouses.airports` with ME **Dynamic Spawn**: empty `weapons` + zero `initialAmount`, then
-/// `linkDynTempl` as a Lua array of blue then red zzDT group ids (same TTD/TTDN allow rules as `patch_warehouse_dynamic_spawn_links`).
-fn patch_neutral_airport_dynamic_template_links(
+fn inventory_aircraft_type_names(inv: &Table, cat: &str) -> Result<HashSet<StdString>> {
+    let mut out: HashSet<StdString> = HashSet::default();
+    let Ok(aircrafts) = inv.raw_get::<_, Table>("aircrafts") else {
+        return Ok(out);
+    };
+    let Ok(cat_tbl) = aircrafts.raw_get::<_, Table>(cat) else {
+        return Ok(out);
+    };
+    for pair in cat_tbl.clone().pairs::<String, Table>() {
+        let (ut, _) = pair?;
+        out.insert(ut.to_string());
+    }
+    Ok(out)
+}
+
+/// B4: neutral + Dynamic Spawn **airport** row — empty weapons/fuel, `aircrafts` rows from BINVENTORY ∪ RINVENTORY
+/// (all `initialAmount` 0), `linkDynTempl` like coalition DS (prefer blue template, else red).
+fn neutral_dynamic_spawn_airport_zero_stock_link_templates(
     lua: &Lua,
-    airports: &Table<'static>,
+    wh: &Table<'static>,
+    wid: i64,
     emit: &DynamicSpawnEmit,
     mult_cfg: &WarehouseStockMultConfig,
+    blue_inv: &Table<'static>,
+    red_inv: &Table<'static>,
 ) -> Result<()> {
-    for pair in airports.clone().pairs::<Value, Table>() {
-        let (k, row) = pair?;
-        let Some(wid) = warehouse_lua_key_i64(k) else {
+    apply_neutral_dynamic_spawn_warehouse_flags(lua, wh)?;
+    wh.raw_set("weapons", lua.create_table()?)?;
+    for key in ["jet_fuel", "gasoline", "diesel", "methanol_mixture"] {
+        let Ok(t) = wh.raw_get::<_, Table>(key) else {
             continue;
         };
-        let coa: String = row.raw_get("coalition").unwrap_or_default();
-        if coa.to_lowercase() != "neutral" {
-            continue;
+        if t.raw_get::<_, f64>("InitFuel").is_ok() {
+            t.raw_set("InitFuel", 0.0f64)?;
+        } else if t.raw_get::<_, i64>("InitFuel").is_ok() {
+            t.raw_set("InitFuel", 0i64)?;
+        } else {
+            t.raw_set("InitFuel", 0.0f64)?;
         }
-        if !warehouse_dynamic_spawn_enabled(&row) {
-            continue;
+    }
+    let aircrafts = lua.create_table()?;
+    for cat in ["helicopters", "planes"] {
+        let mut names = inventory_aircraft_type_names(blue_inv, cat)?;
+        names.extend(inventory_aircraft_type_names(red_inv, cat)?);
+        let mut sorted: Vec<StdString> = names.into_iter().collect();
+        sorted.sort();
+        let cat_tbl = lua.create_table()?;
+        for ut in &sorted {
+            let row = lua.create_table()?;
+            row.raw_set("initialAmount", 0u32)?;
+            cat_tbl.raw_set(ut.as_str(), row)?;
         }
-        row.raw_set("weapons", lua.create_table()?)?;
-        let Ok(aircrafts) = row.raw_get::<_, Table>("aircrafts") else {
+        aircrafts.raw_set(cat, cat_tbl)?;
+    }
+    wh.raw_set("aircrafts", aircrafts)?;
+    let aircrafts: Table = wh.raw_get("aircrafts")?;
+    let use_naval_filter = mult_cfg.naval_warehouse_ids.contains(&wid);
+    for cat in ["helicopters", "planes"] {
+        let Ok(cat_tbl) = aircrafts.raw_get::<_, Table>(cat) else {
             continue;
         };
-        let use_naval_filter = mult_cfg.naval_warehouse_ids.contains(&wid);
-        for cat in ["helicopters", "planes"] {
-            let Ok(cat_tbl) = aircrafts.raw_get::<_, Table>(cat) else {
-                continue;
+        for pair in cat_tbl.clone().pairs::<String, Table>() {
+            let (unit_type, row) = pair?;
+            let link_blue = emit
+                .link_by_side_type
+                .get(&(Side::Blue, unit_type.clone()))
+                .map(|g| g.inner())
+                .unwrap_or(0);
+            let link_red = emit
+                .link_by_side_type
+                .get(&(Side::Red, unit_type.clone()))
+                .map(|g| g.inner())
+                .unwrap_or(0);
+            let allowed_b = if use_naval_filter {
+                emit.naval_allow.as_ref().map_or(true, |s| {
+                    s.contains(&(Side::Blue, unit_type.clone()))
+                })
+            } else {
+                emit.land_allow
+                    .as_ref()
+                    .map_or(true, |s| s.contains(&(Side::Blue, unit_type.clone())))
             };
-            for pair in cat_tbl.clone().pairs::<String, Table>() {
-                let (unit_type, u) = pair?;
-                u.raw_set("initialAmount", 0u32)?;
-                u.raw_set("linkDynTempl", Value::Nil)?;
-                let links = lua.create_table()?;
-                let mut next = 1u32;
-                for side in [Side::Blue, Side::Red] {
-                    let Some(gid) = emit.link_by_side_type.get(&(side, unit_type.clone()))
-                    else {
-                        continue;
-                    };
-                    let n = gid.inner();
-                    if n == 0 {
-                        continue;
-                    }
-                    let allowed = if use_naval_filter {
-                        emit.naval_allow.as_ref().map_or(true, |s| {
-                            s.contains(&(side, unit_type.clone()))
-                        })
-                    } else {
-                        emit.land_allow
-                            .as_ref()
-                            .map_or(true, |s| s.contains(&(side, unit_type.clone())))
-                    };
-                    if !allowed {
-                        continue;
-                    }
-                    links.raw_set(next, n)?;
-                    next = next.saturating_add(1);
-                }
-                if next > 1 {
-                    u.raw_set("linkDynTempl", links)?;
-                } else {
-                    u.raw_set("linkDynTempl", 0i64)?;
-                }
-            }
+            let allowed_r = if use_naval_filter {
+                emit.naval_allow.as_ref().map_or(true, |s| {
+                    s.contains(&(Side::Red, unit_type.clone()))
+                })
+            } else {
+                emit.land_allow
+                    .as_ref()
+                    .map_or(true, |s| s.contains(&(Side::Red, unit_type.clone())))
+            };
+            let link = if allowed_b && link_blue != 0 {
+                link_blue
+            } else if allowed_r && link_red != 0 {
+                link_red
+            } else {
+                0i64
+            };
+            row.raw_set("linkDynTempl", link)?;
         }
     }
     Ok(())
@@ -5222,15 +5279,23 @@ fn patch_warehouse_dynamic_spawn_links(
                 "red" => Side::Red,
                 "blue" => Side::Blue,
                 _ => {
-                    empty_neutral_build_warehouse_row(
-                        lua,
-                        &wh,
-                        if is_airports_table {
-                            NeutralWarehouseBuildKind::Airport
-                        } else {
-                            NeutralWarehouseBuildKind::Other
-                        },
-                    )?;
+                    if is_airports_table {
+                        let blue_inv = blue_inventory.context(
+                            "BINVENTORY required for neutral Dynamic Spawn airports",
+                        )?;
+                        let red_inv = red_inventory.context(
+                            "RINVENTORY required for neutral Dynamic Spawn airports",
+                        )?;
+                        neutral_dynamic_spawn_airport_zero_stock_link_templates(
+                            lua, &wh, wid, emit, mult_cfg, blue_inv, red_inv,
+                        )?;
+                    } else {
+                        empty_neutral_build_warehouse_row(
+                            lua,
+                            &wh,
+                            NeutralWarehouseBuildKind::Other,
+                        )?;
+                    }
                     continue;
                 }
             };
@@ -6127,16 +6192,6 @@ pub fn run(cfg: &MizCmd) -> Result<()> {
                     .context("scaling default_warehouse_* caps by stock multiplier")?;
             }
         }
-    }
-
-    if let Ok(airports_tbl) = base.warehouses.raw_get::<_, Table>("airports") {
-        patch_neutral_airport_dynamic_template_links(
-            lua,
-            &airports_tbl,
-            &dynamic_emit,
-            &mult_cfg,
-        )
-        .context("patching neutral Dynamic Spawn airport linkDynTempl (blue+red zzDT)")?;
     }
 
     if !missing_default_warehouse_keys.is_empty() {
