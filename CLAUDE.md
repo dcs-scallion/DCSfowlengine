@@ -211,6 +211,11 @@ This is a Cargo workspace with 5 main crates:
 - When editing a file, **trim or remove verbose comments from prior assistant edits** in the same change; **do not** rewrite original human/project comments unless the user asks.
 - Prefer touching comments only on **lines or blocks already being modified**.
 
+## Repository language (AI / assistants)
+
+- **Code, comments, docstrings, user-facing CLI/log strings, and commit messages** in this repo: **English only** (prefer ASCII punctuation in user-visible text unless a proper name requires otherwise).
+- Cursor enforces the same via `.cursor/rules/english-project-text.mdc` (`alwaysApply`).
+
 ## Important Notes
 
 - **Lua linking**: Always use release builds for bflib due to mlua's linking requirements

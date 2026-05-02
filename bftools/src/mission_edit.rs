@@ -2565,10 +2565,17 @@ fn print_inventory_aircraft_orphan_editor_notice(
     cleared: &[InventoryAircraftOrphanSanitized],
     warehouse_miz_path: &Path,
     weapon_miz_path: &Path,
+    campaign_decade: &str,
 ) {
     if cleared.is_empty() {
         return;
     }
+    const RED: &str = "\x1b[31;1m";
+    const RESET: &str = "\x1b[0m";
+    let ln = |s: &str| println!("{RED}{s}{RESET}");
+    let weapon_file = format!("weapon{campaign_decade}.miz");
+    let warehouse_file = format!("warehouse{campaign_decade}.miz");
+
     fn side_word(side: Side) -> &'static str {
         match side {
             Side::Blue => "BLUE (BINVENTORY)",
@@ -2577,44 +2584,52 @@ fn print_inventory_aircraft_orphan_editor_notice(
         }
     }
     println!();
-    println!("****************************************************************");
-    println!("*  NOTICE — B/RINVENTORY vs weapon*.miz (AUTO-ZERO)");
-    println!("****************************************************************");
+    ln("****************************************************************");
+    ln(&format!(
+        "*  NOTICE - B/RINVENTORY vs {weapon_file} (AUTO-ZERO; mission build stopped)"
+    ));
+    ln("****************************************************************");
     println!();
-    println!(
-        "These types had non-zero stock under aircrafts (planes / helicopters) but no matching"
-    );
-    println!(
-        "coalition airframe template in the weapon template (slot or zzDT/DT / dynSpawnTemplate)."
-    );
-    println!("`initialAmount` was set to 0 in the warehouse template on disk:");
-    println!("  {}", warehouse_miz_path.display());
+    ln("These types had non-zero stock under aircrafts (planes / helicopters) but no matching");
+    ln(&format!(
+        "coalition airframe template in `{weapon_file}` for this campaign (CFG campaign_decade={campaign_decade})."
+    ));
+    ln("`initialAmount` was set to 0 in the warehouse template on disk; output .miz was NOT written.");
+    ln(&format!("  {}", warehouse_miz_path.display()));
     println!();
-    println!("ROWS ZEROED (previous initialAmount):");
+    ln("ROWS ZEROED (previous initialAmount):");
     for e in cleared {
-        println!(
+        ln(&format!(
             "  * {} | {} | type={} [{}] had {}",
             e.row_name,
             side_word(e.side),
             e.unit_type,
             e.category,
             e.previous_amount
-        );
+        ));
     }
     println!();
-    println!("----------------------------------------------------------------");
-    println!("EDITOR WORKFLOW — FOLLOW THIS ORDER:");
+    ln("----------------------------------------------------------------");
+    ln("EDITOR WORKFLOW - FOLLOW THIS ORDER:");
     println!();
-    println!("  1) FIRST — add to weapon template:");
-    println!("       {}", weapon_miz_path.display());
-    println!("     a playable slot group or dynamic-template group per missing type");
-    println!("     (dynSpawnTemplate / zzDT-* / DT-*).");
+    ln(&format!(
+        "  1) FIRST - add airframe templates for each missing type in `{weapon_file}`:"
+    ));
+    ln(&format!("       {}", weapon_miz_path.display()));
     println!();
-    println!("  2) THEN — reopen warehouse template BINVENTORY / RINVENTORY and restore counts:");
-    println!("       {}", warehouse_miz_path.display());
+    ln(&format!(
+        "  2) THEN - reopen `{warehouse_file}` BINVENTORY / RINVENTORY and restore counts:"
+    ));
+    ln(&format!("       {}", warehouse_miz_path.display()));
     println!();
-    println!("  3) REBUILD the mission.");
-    println!("****************************************************************");
+    ln("  3) REBUILD the mission.");
+    ln("----------------------------------------------------------------");
+    ln("If you did not intentionally add new B/RINVENTORY rows in");
+    ln(&format!(
+        "`{weapon_file}`, the extra types may have come from a DCS update (new modules in the"
+    ));
+    ln("aircraft list). To add them to the campaign correctly, repeat from step 1.");
+    ln("****************************************************************");
     println!();
 }
 
@@ -2634,7 +2649,7 @@ fn lua_value_truthy(v: &Value) -> bool {
     }
 }
 
-/// ME „Dynamic Spawn“ is often stored as `1`/`0`, not a Lua boolean.
+/// ME `dynamicSpawn` is often stored as `1`/`0`, not a Lua boolean.
 fn warehouse_dynamic_spawn_enabled(row: &Table) -> bool {
     row.raw_get::<_, Value>("dynamicSpawn")
         .map(|v| lua_value_truthy(&v))
@@ -2853,7 +2868,7 @@ fn apply_inventory_liquids_scaled(dst: &Table, src: &Table, lua: &Lua, mult: u32
 
 #[derive(Clone, Copy)]
 enum NeutralWarehouseBuildKind {
-    /// Neutrální letiště: u DS se `aircrafts`/`weapons` vyčistí v `patch_neutral_airport_dynamic_template_links`.
+    /// Neutral airports: when DS is enabled, `aircrafts`/`weapons` are cleared in `patch_neutral_airport_dynamic_template_links`.
     Airport,
     /// `warehouses.warehouses` neutral FARP etc.: `linkDynTempl` zeroed at build.
     Other,
@@ -5034,13 +5049,19 @@ fn audit_naval_carrier_mission_rules(
     Ok(())
 }
 
-/// Neutrální letiště s ME **Dynamic Spawn**: před startem kampaně žádný sklad ani šablony — hráči si dopraví sami.
-fn patch_neutral_airport_dynamic_template_links(lua: &Lua, airports: &Table<'static>) -> Result<()> {
+/// Neutral `warehouses.airports` with ME **Dynamic Spawn**: empty `weapons` + zero `initialAmount`, then
+/// `linkDynTempl` as a Lua array of blue then red zzDT group ids (same TTD/TTDN allow rules as `patch_warehouse_dynamic_spawn_links`).
+fn patch_neutral_airport_dynamic_template_links(
+    lua: &Lua,
+    airports: &Table<'static>,
+    emit: &DynamicSpawnEmit,
+    mult_cfg: &WarehouseStockMultConfig,
+) -> Result<()> {
     for pair in airports.clone().pairs::<Value, Table>() {
         let (k, row) = pair?;
-        if warehouse_lua_key_i64(k).is_none() {
+        let Some(wid) = warehouse_lua_key_i64(k) else {
             continue;
-        }
+        };
         let coa: String = row.raw_get("coalition").unwrap_or_default();
         if coa.to_lowercase() != "neutral" {
             continue;
@@ -5049,10 +5070,51 @@ fn patch_neutral_airport_dynamic_template_links(lua: &Lua, airports: &Table<'sta
             continue;
         }
         row.raw_set("weapons", lua.create_table()?)?;
-        let aircrafts = lua.create_table()?;
-        aircrafts.raw_set("helicopters", lua.create_table()?)?;
-        aircrafts.raw_set("planes", lua.create_table()?)?;
-        row.raw_set("aircrafts", aircrafts)?;
+        let Ok(aircrafts) = row.raw_get::<_, Table>("aircrafts") else {
+            continue;
+        };
+        let use_naval_filter = mult_cfg.naval_warehouse_ids.contains(&wid);
+        for cat in ["helicopters", "planes"] {
+            let Ok(cat_tbl) = aircrafts.raw_get::<_, Table>(cat) else {
+                continue;
+            };
+            for pair in cat_tbl.clone().pairs::<String, Table>() {
+                let (unit_type, u) = pair?;
+                u.raw_set("initialAmount", 0u32)?;
+                u.raw_set("linkDynTempl", Value::Nil)?;
+                let links = lua.create_table()?;
+                let mut next = 1u32;
+                for side in [Side::Blue, Side::Red] {
+                    let Some(gid) = emit.link_by_side_type.get(&(side, unit_type.clone()))
+                    else {
+                        continue;
+                    };
+                    let n = gid.inner();
+                    if n == 0 {
+                        continue;
+                    }
+                    let allowed = if use_naval_filter {
+                        emit.naval_allow.as_ref().map_or(true, |s| {
+                            s.contains(&(side, unit_type.clone()))
+                        })
+                    } else {
+                        emit.land_allow
+                            .as_ref()
+                            .map_or(true, |s| s.contains(&(side, unit_type.clone())))
+                    };
+                    if !allowed {
+                        continue;
+                    }
+                    links.raw_set(next, n)?;
+                    next = next.saturating_add(1);
+                }
+                if next > 1 {
+                    u.raw_set("linkDynTempl", links)?;
+                } else {
+                    u.raw_set("linkDynTempl", 0i64)?;
+                }
+            }
+        }
     }
     Ok(())
 }
@@ -6002,15 +6064,21 @@ pub fn run(cfg: &MizCmd) -> Result<()> {
                     wb.path.display()
                 )
             })?;
+            let campaign_decade = campaign_overlay
+                .as_ref()
+                .and_then(|o| o.campaign_decade.as_deref())
+                .unwrap_or("?");
             print_inventory_aircraft_orphan_editor_notice(
                 &inventory_aircraft_orphans_cleared,
                 wb.path.as_path(),
                 weapon_template_path.as_path(),
+                campaign_decade,
             );
-            warn!(
-                "warehouse template `{}`: wrote {} zeroed production inventory aircraft row(s) (no weapon.miz template)",
+            bail!(
+                "warehouse template {}: {} BINVENTORY/RINVENTORY aircraft row(s) have no matching airframe in weapon{}.miz; zeros were saved to the warehouse .miz; fix weapon template then rebuild (output mission .miz not written)",
                 wb.path.display(),
                 inventory_aircraft_orphans_cleared.len(),
+                campaign_decade,
             );
         }
 
@@ -6062,8 +6130,13 @@ pub fn run(cfg: &MizCmd) -> Result<()> {
     }
 
     if let Ok(airports_tbl) = base.warehouses.raw_get::<_, Table>("airports") {
-        patch_neutral_airport_dynamic_template_links(lua, &airports_tbl)
-            .context("clearing neutral Dynamic Spawn airport build stock")?;
+        patch_neutral_airport_dynamic_template_links(
+            lua,
+            &airports_tbl,
+            &dynamic_emit,
+            &mult_cfg,
+        )
+        .context("patching neutral Dynamic Spawn airport linkDynTempl (blue+red zzDT)")?;
     }
 
     if !missing_default_warehouse_keys.is_empty() {
