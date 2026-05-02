@@ -276,8 +276,11 @@ impl Display for LuaSerVal {
                 }
                 tbl.for_each(|k: Value, v: Value| {
                     if let Some(max) = seq_max {
-                        if k.is_integer() && k.as_integer().unwrap() <= max {
-                            return Ok(());
+                        if let Some(ki) = k.as_integer() {
+                            // Only skip 1..=max (sequence_values). Preserve [0], etc.
+                            if (1..=max).contains(&ki) {
+                                return Ok(());
+                            }
                         }
                     }
                     write_elt!(k, v);
