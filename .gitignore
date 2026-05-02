@@ -116,3 +116,5 @@ no_llvm_build
 **/.tmp*/
 # Local scratch in a named folder (create next to mission / miz as needed)
 **/-pracovní_soubory-možno_smazat/
+# Chat exports / saved threads (e.g. scenario `.../- chat/`)
+**/- chat/

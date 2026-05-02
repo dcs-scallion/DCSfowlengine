@@ -2456,7 +2456,7 @@ struct WarehouseTemplate {
     red_default_fueltanks: Table<'static>,
 }
 
-/// Keeps `LoadedMiz` alive so template warehouse tables remain valid for optional write-back pack.
+/// Keeps `LoadedMiz` alive so template warehouse tables stay valid until repacking `warehouse<campaign_decade>.miz`.
 struct WarehouseBundle {
     path: PathBuf,
     loaded: LoadedMiz,
@@ -3185,7 +3185,7 @@ impl WarehouseTemplate {
                 format_compact!("{label}: missing weapons table on generated default row")
             })?;
             dst_row.raw_set("weapons", w.deep_clone(lua)?).with_context(|| {
-                format_compact!("{label}: write-back set weapons on template row")
+                format_compact!("{label}: mirror weapons onto template row")
             })?;
             Ok(())
         }
@@ -4909,38 +4909,37 @@ impl WarehouseTemplate {
             .context("setting blue inventory")?;
         base.warehouses.set("airports", airports)?;
         base.warehouses.set("warehouses", warehouses)?;
-        if cfg.write_back_warehouse_defaults {
-            if !weapon_bridge_used {
-                warn!(
-                    "--write-back-warehouse-defaults: weapon bridge missing, keep template BDEFAULT/RDEFAULT unchanged"
-                );
-            } else {
-                copy_weapons_subtable(
-                    lua,
-                    &self.blue_default,
-                    &blue_master,
-                    "BDEFAULT template",
-                )?;
-                copy_weapons_subtable(
-                    lua,
-                    &self.red_default,
-                    &red_master,
-                    "RDEFAULT template",
-                )?;
-            }
+        // Mirror computed `weapons` into unpacked warehouse template (`warehouse_bundle` → repack below).
+        if !weapon_bridge_used {
+            warn!(
+                "weapon bridge missing: template BDEFAULT/RDEFAULT `weapons` not mirrored; BINVENTORY/RINVENTORY mirrored"
+            );
+        } else {
             copy_weapons_subtable(
                 lua,
-                &self.blue_inventory,
-                &new_blue_inventory,
-                "BINVENTORY template",
+                &self.blue_default,
+                &blue_master,
+                "BDEFAULT template",
             )?;
             copy_weapons_subtable(
                 lua,
-                &self.red_inventory,
-                &new_red_inventory,
-                "RINVENTORY template",
+                &self.red_default,
+                &red_master,
+                "RDEFAULT template",
             )?;
         }
+        copy_weapons_subtable(
+            lua,
+            &self.blue_inventory,
+            &new_blue_inventory,
+            "BINVENTORY template",
+        )?;
+        copy_weapons_subtable(
+            lua,
+            &self.red_inventory,
+            &new_red_inventory,
+            "RINVENTORY template",
+        )?;
         Ok((
             bfprotocols::fowl_miz_export::FowlMizExport {
                 schema_version: 3,
@@ -5929,11 +5928,6 @@ pub fn run(cfg: &MizCmd) -> Result<()> {
     } else {
         None
     };
-    if cfg.write_back_warehouse_defaults && resolved_warehouse_path.is_none() {
-        bail!(
-            "--write-back-warehouse-defaults requires --campaign-cfg and warehouse<campaign_decade>.miz beside the weapon template"
-        );
-    }
     let weapon_bridge_path = if let Some(ref p) = cfg.weapon_bridge {
         if p.exists() {
             Some(p.clone())
@@ -6147,18 +6141,13 @@ pub fn run(cfg: &MizCmd) -> Result<()> {
             );
         }
 
-        if cfg.write_back_warehouse_defaults && weapon_bridge_map.is_some() {
-            pack_warehouse_bundle_to_path(wb).with_context(|| {
-                format_compact!(
-                    "write-back: repacking warehouse template {}",
-                    wb.path.display()
-                )
-            })?;
-            info!(
-                "write-back: updated BDEFAULT/RDEFAULT/BINVENTORY/RINVENTORY `weapons` in `{}` (mirror of build; edit policy in weapon template, not ME here)",
-                wb.path.display()
-            );
-        }
+        pack_warehouse_bundle_to_path(wb).with_context(|| {
+            format_compact!("repack warehouse template {}", wb.path.display())
+        })?;
+        info!(
+            "repacked `{}`: mirrored BINVENTORY/RINVENTORY `weapons` from build; BDEFAULT/RDEFAULT mirrored when weapon bridge loaded (ME reference — ordnance policy in weapon<campaign_decade>.miz)",
+            wb.path.display()
+        );
         export
     } else {
         bfprotocols::fowl_miz_export::FowlMizExport::default()

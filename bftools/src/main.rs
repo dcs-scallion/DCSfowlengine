@@ -47,9 +47,6 @@ struct MizCmd {
     /// Weapon bridge JSON from DCS hook (Fowl engine 2.0). If omitted: `fowl_weapon_bridge.json` next to `--weapon`, else newest `fowl_weapon_bridge-DCS.version.*.json` there.
     #[clap(long)]
     weapon_bridge: Option<PathBuf>,
-    /// After a successful build, overwrite the resolved `warehouse<campaign_decade>.miz` on disk: copy final generated `weapons` from BDEFAULT/RDEFAULT into that template (ME reference only; edit ordnance policy in `weapon*.miz` + rebuild).
-    #[clap(long, default_value_t = false)]
-    write_back_warehouse_defaults: bool,
 }
 
 #[derive(Subcommand, Clone, Debug, Serialize)]

@@ -146,8 +146,6 @@ try {
     if (Test-Path "./$target_cfg_name") {
         $bftoolsArgs += "--campaign-cfg"
         $bftoolsArgs += "./$target_cfg_name"
-        # Mirror generated BDEFAULT/RDEFAULT `weapons` into warehouse<decade>.miz (ME read-only reference; policy = weapon template).
-        $bftoolsArgs += "--write-back-warehouse-defaults"
         $ccMsg = "Using --campaign-cfg ./$target_cfg_name (decade templates: $weaponArg, $warehouseArg)."
         Write-Host $ccMsg -ForegroundColor Cyan
         $ccMsg | Out-File -FilePath $log_file -Append

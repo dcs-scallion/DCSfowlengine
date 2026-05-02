@@ -1,0 +1,10 @@
+---
+description: Do not add CLI flags without explicit user approval (bftools and project binaries).
+alwaysApply: true
+---
+
+# CLI / command-line flags
+
+- **Do not add** new command-line flags, subcommands, or env-gated “hidden switches” unless the user has **explicitly approved** adding one and it is **strictly necessary** for the requested feature.
+- Prefer extending existing config (e.g. JSON CFG), existing flags, or build-time behavior without new user-facing switches.
+- When a new flag is unavoidable, state **why** alternatives are insufficient and wait for **explicit approval** before implementing.
