@@ -369,16 +369,17 @@ fn equipment_allowed_for_objective(
     export: &FowlMizExport,
     objective_name: &str,
     side: Side,
-    name: &str,
+    _name: &str,
     meta: Option<ResourceMeta>,
 ) -> bool {
-    let Some((allowed_aircraft, allowed_ws)) = objective_defaults_for_side(export, objective_name, side)
+    let Some((_, allowed_ws)) = objective_defaults_for_side(export, objective_name, side)
     else {
         return true;
     };
     if let Some(meta) = meta {
+        // Aircraft allowlist is enforced by DCS linkDynTempl per helipad; skip here.
         if meta.is_aircraft {
-            return allowed_aircraft.iter().any(|v| v.as_str() == name);
+            return true;
         }
         if let Some(quad) = meta.quad {
             if row_subject_to_weapon_allowlist(export, &quad) {

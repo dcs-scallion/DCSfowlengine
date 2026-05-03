@@ -66,6 +66,14 @@ fn default_cost_fraction() -> f32 {
     1.
 }
 
+fn vehicle_type_for_dynamic_slot(unit: &Unit) -> Result<Vehicle> {
+    let desc = unit.get_desc().context("dynamic slot unit getDesc")?;
+    match desc.raw_get::<_, String>("typeName") {
+        Ok(tn) if !tn.trim().is_empty() => Ok(Vehicle::from(tn)),
+        _ => Ok(Vehicle::from(unit.get_type_name()?)),
+    }
+}
+
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub enum DeployKind {
     #[serde(rename = "Objective")]
@@ -865,11 +873,10 @@ impl Db {
             Some(si) => (si, false),
             None => {
                 // it's a dynamic slot
-                let typ = Vehicle::from(unit.as_object()?.get_type_name()?);
+                let typ = vehicle_type_for_dynamic_slot(unit)?;
                 let pos = unit.get_ground_position()?;
                 let obj =
-                    Db::objective_near_point(&self.persisted.objectives, pos.0, |_| true)
-                        .map(|(_, _, o)| o)
+                    Db::objective_for_dynamic_slot_pos(&self.persisted.objectives, pos.0)
                         .ok_or_else(|| anyhow!("dynamic slot not near any objective"))?;
                 let gid = unit.get_group()?.id()?;
                 let gid = miz::GroupId::from(gid.inner());

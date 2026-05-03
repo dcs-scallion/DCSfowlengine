@@ -206,6 +206,21 @@ impl Default for Zone {
     }
 }
 
+fn dist_sq_point_to_segment(
+    p: na::Vector2<f64>,
+    a: na::Vector2<f64>,
+    b: na::Vector2<f64>,
+) -> f64 {
+    let ab = b - a;
+    let ab2 = ab.norm_squared();
+    if ab2 < 1e-24 {
+        return (a - p).norm_squared();
+    }
+    let t = ((p - a).dot(&ab) / ab2).clamp(0., 1.);
+    let c = a + ab * t;
+    (c - p).norm_squared()
+}
+
 impl Zone {
     pub fn contains(&self, pos: Vector2) -> bool {
         match self {
@@ -264,6 +279,37 @@ impl Zone {
             Self::Circle { pos, radius: r } => {
                 let d = na::distance(&center.into(), &(*pos).into());
                 *r >= radius + d
+            }
+        }
+    }
+
+    /// `0` if `pos` is inside the trigger; otherwise squared distance to the zone boundary (nearest
+    /// point on circle ring or quad edge). For ramps/heliports outside tight `O` quads after ME edits.
+    pub fn non_containment_distance_sq(&self, pos: Vector2) -> f64 {
+        let p: na::Vector2<f64> = pos.into();
+        match self {
+            Self::Circle { pos: center, radius } => {
+                let c: na::Vector2<f64> = (*center).into();
+                let r = *radius;
+                let d = (c - p).norm();
+                if d <= r {
+                    0.
+                } else {
+                    (d - r).powi(2)
+                }
+            }
+            Self::Quad { points, .. } => {
+                if points.contains(LuaVec2(pos)) {
+                    return 0.;
+                }
+                let p0 = points.p0.0;
+                let p1 = points.p1.0;
+                let p2 = points.p2.0;
+                let p3 = points.p3.0;
+                dist_sq_point_to_segment(p, p0, p1)
+                    .min(dist_sq_point_to_segment(p, p1, p2))
+                    .min(dist_sq_point_to_segment(p, p2, p3))
+                    .min(dist_sq_point_to_segment(p, p3, p0))
             }
         }
     }
@@ -387,6 +433,60 @@ impl Db {
                     }
                 });
         obj.map(|obj| (dist.sqrt(), azumith2d_to(obj.zone.pos(), pos), obj))
+    }
+
+    /// Prefer objectives whose **`O` trigger contains** the spawn (tie: nearest zone center).
+    /// If the ramp/heli lies **outside** every `O` quad (common after tight zone edits), pick the
+    /// objective whose trigger boundary is **closest** (edge distance), not centroid distance.
+    pub fn objective_for_dynamic_slot_pos(
+        obj: &MapM<ObjectiveId, Objective>,
+        pos: Vector2,
+    ) -> Option<&Objective> {
+        let mut best: Option<(&Objective, f64)> = None;
+        for (_, o) in obj.into_iter() {
+            if !o.zone.contains(pos) {
+                continue;
+            }
+            let dsq = na::distance_squared(&o.zone.pos().into(), &pos.into());
+            match best {
+                None => best = Some((o, dsq)),
+                Some((cur, cd)) => {
+                    match dsq
+                        .partial_cmp(&cd)
+                        .unwrap_or(std::cmp::Ordering::Equal)
+                    {
+                        std::cmp::Ordering::Less => best = Some((o, dsq)),
+                        std::cmp::Ordering::Equal if o.id < cur.id => {
+                            best = Some((o, dsq))
+                        }
+                        _ => (),
+                    }
+                }
+            }
+        }
+        if let Some((o, _)) = best {
+            return Some(o);
+        }
+        let mut best_out: Option<(&Objective, f64)> = None;
+        for (_, o) in obj.into_iter() {
+            let dsq = o.zone.non_containment_distance_sq(pos);
+            match best_out {
+                None => best_out = Some((o, dsq)),
+                Some((cur, cd)) => {
+                    match dsq
+                        .partial_cmp(&cd)
+                        .unwrap_or(std::cmp::Ordering::Equal)
+                    {
+                        std::cmp::Ordering::Less => best_out = Some((o, dsq)),
+                        std::cmp::Ordering::Equal if o.id < cur.id => {
+                            best_out = Some((o, dsq))
+                        }
+                        _ => (),
+                    }
+                }
+            }
+        }
+        best_out.map(|(o, _)| o)
     }
 
     fn compute_objective_status(&self, obj: &Objective) -> Result<(u8, u8)> {
