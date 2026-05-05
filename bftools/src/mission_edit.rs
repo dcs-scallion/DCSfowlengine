@@ -489,6 +489,67 @@ const INCLUDE_STATIC_SLOT_KEYS: &[&str] = &["include", "include_dyn_slots"];
 /// `include` kept for older missions).
 const INCLUDE_DYNAMIC_SLOT_KEYS: &[&str] = &["include_dyn_slots", "include"];
 
+fn parse_trigger_slot_quantity(value: &str) -> Result<usize> {
+    let t = value.trim();
+    if t.eq_ignore_ascii_case("x") {
+        return Ok(1);
+    }
+    t.parse::<usize>().with_context(|| {
+        format!("expected non-negative quantity or X for zone slot entry, got {t:?}")
+    })
+}
+
+/// Emission: `(side,type)` must appear on at least one policy list when that axis is active.
+fn ttd_policy_allows_emitted_type(
+    land_allow: Option<&HashSet<(Side, String)>>,
+    naval_allow: Option<&HashSet<(Side, String)>>,
+    side: Side,
+    unit_type: &String,
+) -> bool {
+    match (land_allow, naval_allow) {
+        (None, None) => true,
+        (Some(l), None) => l.contains(&(side, unit_type.clone())),
+        (None, Some(n)) => n.contains(&(side, unit_type.clone())),
+        (Some(l), Some(n)) => {
+            l.contains(&(side, unit_type.clone())) || n.contains(&(side, unit_type.clone()))
+        }
+    }
+}
+
+/// Coalition DS row: ship rows use `TTDN*` membership; others use `TTD*`. Open if that axis has no policy zones.
+fn ttd_policy_allows_coalition_warehouse_row(
+    land_allow: Option<&HashSet<(Side, String)>>,
+    naval_allow: Option<&HashSet<(Side, String)>>,
+    naval_warehouse_row: bool,
+    side: Side,
+    unit_type: &String,
+) -> bool {
+    match (land_allow, naval_allow) {
+        (None, None) => true,
+        (Some(l), None) => {
+            if naval_warehouse_row {
+                true
+            } else {
+                l.contains(&(side, unit_type.clone()))
+            }
+        }
+        (None, Some(n)) => {
+            if naval_warehouse_row {
+                n.contains(&(side, unit_type.clone()))
+            } else {
+                true
+            }
+        }
+        (Some(l), Some(n)) => {
+            if naval_warehouse_row {
+                n.contains(&(side, unit_type.clone()))
+            } else {
+                l.contains(&(side, unit_type.clone()))
+            }
+        }
+    }
+}
+
 struct SlotSpec {
     slots: HashMap<Side, HashMap<String, usize>>,
     naval_units: HashSet<(Side, String)>,
@@ -557,7 +618,7 @@ impl SlotSpec {
                                 .entry(side)
                                 .or_default()
                                 .entry(unit_type.clone())
-                                .or_default() += prop.value.parse::<usize>()?;
+                                .or_default() += parse_trigger_slot_quantity(prop.value.as_ref())?;
                             if mark_naval {
                                 naval_units.insert((side, unit_type));
                             }
@@ -2014,8 +2075,8 @@ impl VehicleTemplates {
                 );
             }
         }
-        // Land policy: enabled zones named `TTD*` except `TTDN*`. Naval: enabled `TTDN*` only.
-        // If no zones of a kind exist, that side of the policy is "open" (all types get links where applicable).
+        // Land: enabled `TTD*` (not `TTDN*`). Naval: enabled `TTDN*`.
+        // Listed `(side,type)` only (`X` or positive qty); SETTINGS-* gates zones by name.
         let mut land_allowed_set: HashSet<(Side, String)> = HashSet::default();
         let mut naval_allowed_set: HashSet<(Side, String)> = HashSet::default();
         let mut have_land_policy_zones = false;
@@ -2070,31 +2131,11 @@ impl VehicleTemplates {
         for side in [Side::Red, Side::Blue] {
             if let Some(m) = self.plane_slots.get(&side) {
                 for (unit_type, g) in m {
-                    let include = match (&land_allow, &naval_allow) {
-                        (Some(l), Some(n)) => {
-                            l.contains(&(side, unit_type.clone()))
-                                || n.contains(&(side, unit_type.clone()))
-                        }
-                        _ => true,
-                    };
-                    if !include {
-                        continue;
-                    }
                     specs.push((side, SlotType::Plane, unit_type.clone(), g.clone()));
                 }
             }
             if let Some(m) = self.helicopter_slots.get(&side) {
                 for (unit_type, g) in m {
-                    let include = match (&land_allow, &naval_allow) {
-                        (Some(l), Some(n)) => {
-                            l.contains(&(side, unit_type.clone()))
-                                || n.contains(&(side, unit_type.clone()))
-                        }
-                        _ => true,
-                    };
-                    if !include {
-                        continue;
-                    }
                     specs.push((
                         side,
                         SlotType::Helicopter,
@@ -2105,6 +2146,11 @@ impl VehicleTemplates {
             }
         }
         specs.sort_by(|a, b| a.0.to_str().cmp(b.0.to_str()).then(a.2.cmp(&b.2)));
+        let land_a = land_allow.as_ref();
+        let naval_a = naval_allow.as_ref();
+        specs.retain(|(side, _, ut, _)| {
+            ttd_policy_allows_emitted_type(land_a, naval_a, *side, ut)
+        });
 
         // Dynamic templates are created off-map, so we cannot reuse their pylons directly.
         // However, DCS expects `payload.pylons` to be present for weapon selection UI.
@@ -2287,7 +2333,12 @@ impl VehicleTemplates {
             info!("added dynamic spawn template {}", group_name);
         }
 
-        Ok(DynamicSpawnEmit { link_by_side_type, land_allow, naval_allow })
+        Ok(DynamicSpawnEmit {
+            link_by_side_type,
+            land_allow,
+            naval_allow,
+            dyn_templates,
+        })
     }
 
     fn apply(
@@ -4959,10 +5010,12 @@ impl WarehouseTemplate {
 /// Emitted `DT_*` templates and allow-lists for where each type may offer dynamic spawn.
 struct DynamicSpawnEmit {
     link_by_side_type: HashMap<(Side, String), GroupId>,
-    /// `None` if no enabled `TTD*` zones (excluding `TTDN*`) → land airports / FARPs allow every emitted type.
+    /// `Some` when any enabled `TTD*` policy zone exists (membership list for land / non-ship DS).
     land_allow: Option<HashSet<(Side, String)>>,
-    /// `None` if no enabled `TTDN*` zones → ship warehouses allow every emitted type.
+    /// `Some` when any enabled `TTDN*` policy zone exists (ship warehouse DS).
     naval_allow: Option<HashSet<(Side, String)>>,
+    /// All loaded TTD* / TTDN* templates (name-without-prefix → spec); needed for per-base zone filtering.
+    dyn_templates: HashMap<String, SlotSpec>,
 }
 
 /// Ship `unitId` → coalition side and **group** name (Fowl naval template key).
@@ -5178,12 +5231,171 @@ fn neutral_dynamic_spawn_airport_zero_stock_link_templates(
     Ok(())
 }
 
+/// Geometry extracted from a trigger zone (owns no Lua state).
+enum ObjectiveZoneGeom {
+    Circle { center: Vector2, radius: f64 },
+    Quad(Quad2),
+}
+
+/// Per-objective (O*) zone: extracted geometry + side → allowed unit types.
+///
+/// Zone coalition is read from the 4th character of the zone name: 'R' = Red, 'B' = Blue.
+struct ObjectiveDynAllow {
+    geom: ObjectiveZoneGeom,
+    /// Coalition this base belongs to (from 4th letter of O* zone name).
+    side: Side,
+    per_side: HashMap<Side, HashSet<StdString>>,
+}
+
+impl ObjectiveDynAllow {
+    fn contains(&self, v: Vector2) -> bool {
+        match &self.geom {
+            ObjectiveZoneGeom::Circle { center, radius } => {
+                radius.powi(2) >= na::distance_squared(&v.into(), &(*center).into())
+            }
+            ObjectiveZoneGeom::Quad(q) => q.contains(LuaVec2(v)),
+        }
+    }
+}
+
+/// Build per-objective zone dynamic allow map from O* zones that have `include_dyn_slots`.
+///
+/// Each O* zone's `include_dyn_slots` values are TTD template names (without `TTD` prefix).
+/// Resolved via `dyn_templates`; union across all referenced templates, per side.
+fn build_objective_dyn_allow(
+    base: &LoadedMiz,
+    dyn_templates: &HashMap<String, SlotSpec>,
+) -> Result<Vec<ObjectiveDynAllow>> {
+    let mut out: Vec<ObjectiveDynAllow> = Vec::new();
+    for zone in base.mission.triggers()? {
+        let zone = zone?;
+        let name = zone.name()?;
+        if !name.starts_with('O') {
+            continue;
+        }
+        // 4th character (index 3) of O* zone name: 'R' = Red, 'B' = Blue.
+        let base_side = match name.chars().nth(3) {
+            Some('R') | Some('r') => Side::Red,
+            Some('B') | Some('b') => Side::Blue,
+            other => {
+                warn!(
+                    "O* zone {:?} has unknown coalition letter at pos 4 ({:?}), skipping",
+                    name.as_str(),
+                    other
+                );
+                continue;
+            }
+        };
+        let mut per_side: HashMap<Side, HashSet<StdString>> = HashMap::default();
+        for prop in zone.properties()? {
+            let prop = prop?;
+            if INCLUDE_DYNAMIC_SLOT_KEYS.iter().any(|&k| prop.key.as_ref() == k) {
+                let tmpl_name = prop.value.as_str();
+                if let Some(spec) = dyn_templates.get(tmpl_name) {
+                    for (side, m) in &spec.slots {
+                        let entry = per_side.entry(*side).or_default();
+                        for (ut, count) in m {
+                            if *count > 0 {
+                                entry.insert(StdString::from(ut.as_str()));
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        let center = zone.pos()?;
+        let geom = match zone.typ()? {
+            TriggerZoneTyp::Circle { radius } => {
+                ObjectiveZoneGeom::Circle { center, radius }
+            }
+            TriggerZoneTyp::Quad(q) => ObjectiveZoneGeom::Quad(q),
+        };
+        out.push(ObjectiveDynAllow { geom, side: base_side, per_side });
+    }
+    info!(
+        "per-base dyn-allow: {} O* zone(s) with include_dyn_slots TTD refs",
+        out.len()
+    );
+    Ok(out)
+}
+
+/// FARP/FOB warehouse unit positions from mission data (keyed by unitId = warehouse key).
+fn collect_warehouse_unit_positions(
+    base: &LoadedMiz,
+    warehouse_ids: &HashSet<i64>,
+) -> Result<HashMap<i64, Vector2>> {
+    let mut out: HashMap<i64, Vector2> = HashMap::default();
+    for side in Side::ALL {
+        let coa = base.mission.coalition(side)?;
+        for country in coa.raw_get::<_, Table>("country")?.pairs::<Value, Table>() {
+            let country = country?.1;
+            for kind in ["static", "plane", "helicopter", "ship"] {
+                let Ok(vt) = country.raw_get::<_, Table>(kind) else { continue };
+                let Ok(groups) = vt.raw_get::<_, Table>("group") else { continue };
+                for group in groups.clone().pairs::<Value, Table>() {
+                    let group = group?.1;
+                    let Ok(units) = group.raw_get::<_, Table>("units") else { continue };
+                    for unit in units.clone().pairs::<Value, Table>() {
+                        let unit = unit?.1;
+                        let Ok(uid) = unit.raw_get::<_, i64>("unitId") else { continue };
+                        if !warehouse_ids.contains(&uid) {
+                            continue;
+                        }
+                        if let (Ok(x), Ok(y)) =
+                            (unit.raw_get::<_, f64>("x"), unit.raw_get::<_, f64>("y"))
+                        {
+                            out.insert(uid, Vector2::new(x, y));
+                        }
+                    }
+                }
+            }
+        }
+    }
+    Ok(out)
+}
+
+/// Approximate airport positions from groups whose first route waypoint carries `airdromId`.
+///
+/// A parking-spot position is sufficient — it will be inside the O* zone covering the airfield.
+fn collect_airport_positions_from_groups(
+    base: &LoadedMiz,
+    airport_ids: &HashSet<i64>,
+) -> Result<HashMap<i64, Vector2>> {
+    let mut out: HashMap<i64, Vector2> = HashMap::default();
+    for side in Side::ALL {
+        let coa = base.mission.coalition(side)?;
+        for country in coa.raw_get::<_, Table>("country")?.pairs::<Value, Table>() {
+            let country = country?.1;
+            for kind in ["plane", "helicopter"] {
+                let Ok(vt) = country.raw_get::<_, Table>(kind) else { continue };
+                let Ok(groups) = vt.raw_get::<_, Table>("group") else { continue };
+                for group in groups.clone().pairs::<Value, Table>() {
+                    let group = group?.1;
+                    let Ok(route) = group.raw_get::<_, Table>("route") else { continue };
+                    let Ok(points) = route.raw_get::<_, Table>("points") else { continue };
+                    let Ok(first) = points.raw_get::<_, Table>(1) else { continue };
+                    let Ok(aid) = first.raw_get::<_, i64>("airdromId") else { continue };
+                    if !airport_ids.contains(&aid) || out.contains_key(&aid) {
+                        continue;
+                    }
+                    if let (Ok(x), Ok(y)) =
+                        (first.raw_get::<_, f64>("x"), first.raw_get::<_, f64>("y"))
+                    {
+                        out.insert(aid, Vector2::new(x, y));
+                    }
+                }
+            }
+        }
+    }
+    Ok(out)
+}
+
 /// Wire `linkDynTempl` to emitted dynamic template group ids (`zzDT-*`, `dynSpawnTemplate`).
 /// Scales BINVENTORY/RINVENTORY `initialAmount` like Fowl `WarehouseConfig::capacity`
 /// (airport hub vs airbase; `warehouses` naval vs FOB vs airbase).
 ///
-/// `TTD*` (but not `TTDN*`) allow-lists apply to **airports** and non-ship `warehouses` (e.g. FARP).
-/// `TTDN*` allow-lists apply only to **ship** warehouses (unitId keys present in both mission ships and `warehouses`).
+/// `TTD*` / `TTDN*`: listed `(side,type)` (quantity `X` or positive number) participates; omitted types do not,
+/// when that axis has policy zones. SETTINGS-dynamic-slots-creation still gates each zone by name.
 ///
 /// --- Planned carrier-specific pipeline (per-ship, not global naval union) ---
 /// 1. For each ship warehouse (coalition side), prefill `aircrafts` rows from `BINVENTORY` / `RINVENTORY`
@@ -5204,6 +5416,8 @@ fn patch_warehouse_dynamic_spawn_links(
     red_inventory: Option<&Table<'static>>,
     mult_cfg: &WarehouseStockMultConfig,
     warehouse_caps: Option<&campaign_cfg::WarehouseDefaultsFromCfg>,
+    obj_dyn_allow: &[ObjectiveDynAllow],
+    warehouse_positions: &HashMap<i64, Vector2>,
 ) -> Result<()> {
     fn patch_table(
         lua: &Lua,
@@ -5214,6 +5428,8 @@ fn patch_warehouse_dynamic_spawn_links(
         mult_cfg: &WarehouseStockMultConfig,
         is_airports_table: bool,
         warehouse_caps: Option<&campaign_cfg::WarehouseDefaultsFromCfg>,
+        obj_dyn_allow: &[ObjectiveDynAllow],
+        warehouse_positions: &HashMap<i64, Vector2>,
     ) -> Result<()> {
         fn copy_initial_amounts_scaled(
             lua: &Lua,
@@ -5276,11 +5492,25 @@ fn patch_warehouse_dynamic_spawn_links(
                 continue;
             }
             let mult = mult_cfg.mult_dynamic_row(wid, is_airports_table);
+
+            // Resolve the authoritative side from the containing O* zone (4th letter R/B).
+            // Falls back to the warehouse coalition field when no zone is found.
+            let obj_zone: Option<&ObjectiveDynAllow> =
+                warehouse_positions.get(&wid).and_then(|&pos| {
+                    obj_dyn_allow.iter().find(|o| o.contains(pos))
+                });
             let coa: String = wh.raw_get("coalition")?;
-            let side = match coa.to_lowercase().as_str() {
-                "red" => Side::Red,
-                "blue" => Side::Blue,
-                _ => {
+            let side_from_wh = match coa.to_lowercase().as_str() {
+                "red" => Some(Side::Red),
+                "blue" => Some(Side::Blue),
+                _ => None,
+            };
+            let side = obj_zone.map(|o| o.side).or(side_from_wh);
+
+            let side = match side {
+                Some(s) => s,
+                None => {
+                    // No O* zone and warehouse coalition is neutral.
                     if is_airports_table {
                         let blue_inv = blue_inventory.context(
                             "BINVENTORY required for neutral Dynamic Spawn airports",
@@ -5301,6 +5531,7 @@ fn patch_warehouse_dynamic_spawn_links(
                     continue;
                 }
             };
+
             let inv = match side {
                 Side::Blue => blue_inventory,
                 Side::Red => red_inventory,
@@ -5311,7 +5542,7 @@ fn patch_warehouse_dynamic_spawn_links(
                 apply_inventory_liquids_scaled(&wh, inv, lua, mult)?;
             }
             let aircrafts: Table = wh.raw_get("aircrafts")?;
-            let use_naval_filter = mult_cfg.naval_warehouse_ids.contains(&wid);
+            let naval_row = mult_cfg.naval_warehouse_ids.contains(&wid);
             for cat in ["helicopters", "planes"] {
                 let Ok(cat_tbl) = aircrafts.raw_get::<_, Table>(cat) else {
                     continue;
@@ -5323,19 +5554,44 @@ fn patch_warehouse_dynamic_spawn_links(
                         .get(&(side, unit_type.clone()))
                         .map(|gid| gid.inner())
                         .unwrap_or(0);
-                    let allowed = if use_naval_filter {
-                        emit.naval_allow
-                            .as_ref()
-                            .map_or(true, |s| s.contains(&(side, unit_type.clone())))
-                    } else {
-                        emit.land_allow
-                            .as_ref()
-                            .map_or(true, |s| s.contains(&(side, unit_type.clone())))
+                    let allowed = ttd_policy_allows_coalition_warehouse_row(
+                        emit.land_allow.as_ref(),
+                        emit.naval_allow.as_ref(),
+                        naval_row,
+                        side,
+                        &unit_type,
+                    );
+                    let use_link = link != 0 && allowed;
+                    row.raw_set("linkDynTempl", if use_link { link } else { 0 })?;
+                    if !allowed {
+                        row.raw_set("initialAmount", 0u32)?;
+                    }
+                }
+            }
+            // Per-base O* zone filter: zero initialAmount for types not in this base's
+            // TTD allow list (derived from include_dyn_slots in its objective zone).
+            // linkDynTempl is intentionally left as-is.
+            if let Some(obj) = obj_zone {
+                let allowed_types = obj.per_side.get(&obj.side);
+                let aircrafts: Table = wh.raw_get("aircrafts")?;
+                for cat in ["helicopters", "planes"] {
+                    let Ok(cat_tbl) = aircrafts.raw_get::<_, Table>(cat) else {
+                        continue;
                     };
-                    row.raw_set(
-                        "linkDynTempl",
-                        if allowed && link != 0 { link } else { 0 },
-                    )?;
+                    for pair in cat_tbl.pairs::<String, Table>() {
+                        let (unit_type, row) = pair?;
+                        let in_zone =
+                            allowed_types.is_some_and(|s| s.contains(unit_type.as_str()));
+                        if !in_zone {
+                            let cur = row.raw_get::<_, u32>("initialAmount").unwrap_or(0);
+                            if cur != 0 {
+                                info!(
+                                    "warehouse {wid}: zeroing {unit_type} amount={cur} (not in O* zone TTD allow)"
+                                );
+                                row.raw_set("initialAmount", 0u32)?;
+                            }
+                        }
+                    }
                 }
             }
         }
@@ -5353,6 +5609,8 @@ fn patch_warehouse_dynamic_spawn_links(
         mult_cfg,
         true,
         warehouse_caps,
+        obj_dyn_allow,
+        warehouse_positions,
     )
     .context("patching airport linkDynTempl")?;
 
@@ -5368,6 +5626,8 @@ fn patch_warehouse_dynamic_spawn_links(
         mult_cfg,
         false,
         warehouse_caps,
+        obj_dyn_allow,
+        warehouse_positions,
     )
     .context("patching warehouse linkDynTempl")?;
     Ok(())
@@ -6165,6 +6425,41 @@ pub fn run(cfg: &MizCmd) -> Result<()> {
             .context(
                 "production BINVENTORY/RINVENTORY unitIds for dynamic warehouse prefill",
             )?;
+        let obj_dyn_allow = build_objective_dyn_allow(&base, &dynamic_emit.dyn_templates)
+            .context("building per-base objective dyn allow map")?;
+        // Collect positions for all dynamic warehouse rows so per-zone filtering can find
+        // their containing O* zone. Airport positions come from groups with airdromId;
+        // FARP/FOB positions come from the unit with the matching unitId.
+        let (airport_wids, farp_wids): (HashSet<i64>, HashSet<i64>) = {
+            let airports = base
+                .warehouses
+                .raw_get::<_, Table>("airports")
+                .unwrap_or_else(|_| lua.create_table().unwrap());
+            let warehouses = base
+                .warehouses
+                .raw_get::<_, Table>("warehouses")
+                .unwrap_or_else(|_| lua.create_table().unwrap());
+            let a: HashSet<i64> = airports
+                .clone()
+                .pairs::<Value, Table>()
+                .filter_map(|p| p.ok())
+                .filter_map(|(k, _)| warehouse_lua_key_i64(k))
+                .collect();
+            let w: HashSet<i64> = warehouses
+                .clone()
+                .pairs::<Value, Table>()
+                .filter_map(|p| p.ok())
+                .filter_map(|(k, _)| warehouse_lua_key_i64(k))
+                .collect();
+            (a, w)
+        };
+        let mut warehouse_positions: HashMap<i64, Vector2> =
+            collect_warehouse_unit_positions(&base, &farp_wids)
+                .context("collecting FARP warehouse unit positions")?;
+        let airport_positions =
+            collect_airport_positions_from_groups(&base, &airport_wids)
+                .context("collecting airport positions from groups")?;
+        warehouse_positions.extend(airport_positions);
         patch_warehouse_dynamic_spawn_links(
             lua,
             &base.warehouses,
@@ -6173,6 +6468,8 @@ pub fn run(cfg: &MizCmd) -> Result<()> {
             Some(&wb.template.red_inventory),
             &mult_cfg,
             warehouse_defaults,
+            &obj_dyn_allow,
+            &warehouse_positions,
         )
         .context("patching warehouse linkDynTempl")?;
         if let Some(caps) = warehouse_defaults {
