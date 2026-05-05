@@ -570,6 +570,17 @@ fn on_event(lua: MizLua, ev: Event) -> Result<()> {
                 match ctx.db.unit_born(lua, &unit, &ctx.connected) {
                     Ok(BirthRes::None) => (),
                     Ok(BirthRes::OccupiedSlot(slot)) => {
+                        if ctx.db.ephemeral.cfg.limited_lives && ctx.db.ephemeral.cfg.lives_birth {
+                            let typ = ctx
+                                .db
+                                .ephemeral
+                                .get_slot_info(&slot)
+                                .and_then(|sifo| ctx.db.ephemeral.cfg.life_types.get(&sifo.typ))
+                                .copied();
+                            if let Err(e) = message_life(ctx, &slot, typ, "life taken\n") {
+                                error!("could not display life taken message {:?}", e)
+                            }
+                        }
                         ctx.menu_init_queue.insert(slot);
                     }
                     Ok(BirthRes::DynamicSlotDenied(ucid, rej)) => {
@@ -600,8 +611,37 @@ fn on_event(lua: MizLua, ev: Event) -> Result<()> {
                         }
                     }
                 }
-                if let Err(e) = ctx.db.player_left_unit(lua, start_ts, &initiator) {
-                    error!("player left unit failed {:?}", e)
+                match ctx.db.player_left_unit(lua, start_ts, &initiator) {
+                    Ok((_, Some((ucid, slot, typ)), deslot_ucid)) => {
+                        let mut msg = CompactString::new("life returned\n");
+                        if let Ok(l) = lives(&mut ctx.db, &ucid, Some(typ)) {
+                            msg.push_str(&l);
+                        }
+                        // Synchronous call while player is still in the DCS group
+                        if let Some(miz_gid) =
+                            ctx.db.ephemeral.get_slot_info(&slot).map(|sifo| sifo.miz_gid)
+                        {
+                            if let Ok(trigger) = Trigger::singleton(lua) {
+                                if let Ok(action) = trigger.action() {
+                                    let _ = action.out_text_for_group(
+                                        miz_gid,
+                                        msg.clone().into(),
+                                        10,
+                                        false,
+                                    );
+                                }
+                            }
+                        }
+                        if let Some(ucid) = deslot_ucid.as_ref() {
+                            ctx.db.player_deslot(ucid);
+                        }
+                    }
+                    Ok((_, None, deslot_ucid)) => {
+                        if let Some(ucid) = deslot_ucid.as_ref() {
+                            ctx.db.player_deslot(ucid);
+                        }
+                    }
+                    Err(e) => error!("player left unit failed {:?}", e),
                 }
             } else {
                 error!("player leave unit with no unit")
@@ -737,19 +777,36 @@ fn lives(db: &mut Db, ucid: &Ucid, typfilter: Option<LifeType>) -> Result<Compac
     let cfg = &db.ephemeral.cfg;
     let lives = &player.lives;
     let mut msg = CompactString::new("");
+    let active_life_type = player
+        .current_slot
+        .as_ref()
+        .and_then(|(slot, _)| db.ephemeral.get_slot_info(slot))
+        .and_then(|sifo| cfg.life_types.get(&sifo.typ))
+        .copied();
     let now = Utc::now();
+    let mut first = true;
     for (typ, (n, reset_after)) in &cfg.default_lives {
         if typfilter.is_none() || Some(*typ) == typfilter {
+            if !first {
+                msg.push_str(" | ");
+            }
+            first = false;
             match lives.get(typ) {
-                None => msg.push_str(&format_compact!("{typ} {n}/{n}\n")),
+                None => msg.push_str(&format_compact!("{typ} {n}/{n}")),
                 Some((reset, cur)) => {
                     let since_reset = now - *reset;
                     let reset = chatcmd::format_duration(
                         Duration::seconds(*reset_after as i64) - since_reset,
                     );
-                    msg.push_str(&format_compact!(
-                        "{typ} {cur}/{n} resetting in {reset}\n"
-                    ));
+                    if cfg.limited_lives && cfg.lives_birth && active_life_type == Some(*typ) {
+                        msg.push_str(&format_compact!(
+                            "{typ} 1+{cur}/{n} resetting in {reset}"
+                        ));
+                    } else {
+                        msg.push_str(&format_compact!(
+                            "{typ} {cur}/{n} resetting in {reset}"
+                        ));
+                    }
                 }
             }
         }
@@ -788,24 +845,17 @@ fn return_lives(lua: MizLua, ctx: &mut Context, ts: DateTime<Utc>) {
         };
     }
     let db = &mut ctx.db;
-    let mut returned: SmallVec<[(LifeType, SlotId); 4]> = smallvec![];
     ctx.recently_landed.retain(|id, landed_ts| {
         if ts - *landed_ts >= Duration::seconds(10) {
             let unit = or_false!(Unit::get_instance(lua, id));
             let pos = or_false!(unit.get_ground_position());
             let slot = or_false!(unit.slot());
-            if let Some(typ) = db.land(slot.clone(), pos.0, &unit) {
-                returned.push((typ, slot));
+            if db.land(slot, pos.0, &unit) {
                 return false;
             }
         }
         true
     });
-    for (typ, slot) in returned {
-        if let Err(e) = message_life(ctx, &slot, Some(typ), "life returned\n") {
-            error!("failed to send life returned message to {:?} {}", slot, e);
-        }
-    }
 }
 
 fn advise_captureable(ctx: &mut Context) -> Result<()> {
@@ -1339,6 +1389,35 @@ fn delayed_init_miz(lua: MizLua) -> Result<()> {
     }));
     info!("spawning units");
     ctx.respawn_groups(lua, &miz).context("setting up the mission after load")?;
+    // Register players who were already connected before the mission loaded
+    let net = Net::singleton(lua)?;
+    for id in net.get_player_list()? {
+        let id = match id { Ok(id) => id, Err(_) => continue };
+        let ifo = match net.get_player_info(id) {
+            Ok(ifo) => ifo,
+            Err(e) => { error!("failed to get player info for {:?}: {:?}", id, e); continue; }
+        };
+        let ucid = match ifo.ucid() {
+            Ok(Some(u)) => u,
+            _ => continue,
+        };
+        let name = match ifo.name() {
+            Ok(n) => n,
+            Err(_) => continue,
+        };
+        let addr = ifo.ip().ok().flatten();
+        let _ = ctx.connected.player_connected(id, PlayerInfo { name: name.clone(), addr, ucid });
+        ctx.db.player_connected(ucid, name.clone());
+        let welcome = if let Some(player) = ctx.db.player(&ucid) {
+            format_compact!(
+                "Welcome back, {}! You are on the {:?} team. Type -help for commands.",
+                name, player.side
+            )
+        } else {
+            format_compact!("Welcome, {}! Type 'blue' or 'red' to join a team.", name)
+        };
+        ctx.db.ephemeral.msgs().send(MsgTyp::Chat(Some(id)), welcome);
+    }
     info!("starting timed events");
     start_timed_events(ctx, lua, path).context("starting the timed events loop")?;
     Ok(())

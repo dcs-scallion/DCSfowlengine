@@ -260,6 +260,7 @@
     ]
   },
   "limited_lives": true,
+  "lives_birth": true,
   "actions": {
     "Red": {
       "attack-helicopters": {

@@ -791,6 +791,10 @@ fn default_limited_lives() -> bool {
     true
 }
 
+fn default_lives_birth() -> bool {
+    false
+}
+
 fn default_ewr_delay() -> u32 {
     60
 }
@@ -915,6 +919,10 @@ pub struct Cfg {
     /// and life_types specification
     #[serde(default = "default_limited_lives")]
     pub limited_lives: bool,
+    /// If true, a life is consumed when entering a flyable slot (Birth)
+    /// instead of on takeoff.
+    #[serde(default = "default_lives_birth")]
+    pub lives_birth: bool,
     /// Available actions per side
     #[serde(default)]
     pub actions: FxHashMap<Side, IndexMap<String, Action, FxBuildHasher>>,

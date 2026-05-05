@@ -344,6 +344,10 @@ impl Db {
             player.airborne = Some(life_type);
             self.ephemeral.dirty();
             Ok(TakeoffRes::NoLifeTaken)
+        } else if self.ephemeral.cfg.lives_birth {
+            player.airborne = Some(life_type);
+            self.ephemeral.dirty();
+            Ok(TakeoffRes::NoLifeTaken)
         } else if owned_objective.is_some() {
             // paranoia
             if *player_lives == 0 {
@@ -419,10 +423,10 @@ impl Db {
         self.adjust_points(ucid, cost, msg);
     }
 
-    pub fn land(&mut self, slot: SlotId, position: Vector2, unit: &Unit) -> Option<LifeType> {
+    pub fn land(&mut self, slot: SlotId, position: Vector2, unit: &Unit) -> bool {
         let sifo = match self.ephemeral.slot_info.get(&slot) {
             Some(sifo) => sifo,
-            None => return None,
+            None => return false,
         };
         let (cost, _, cost_msg) = match self.compute_flight_cost(&sifo, unit) {
             Ok(cost) => cost,
@@ -438,12 +442,7 @@ impl Db {
             .and_then(|ucid| self.persisted.players.get_mut_cow(ucid).map(|p| (*ucid, p)))
         {
             Some(player) => player,
-            None => return None,
-        };
-        let life_type = self.ephemeral.cfg.life_types[&sifo.typ];
-        let (_, player_lives) = match player.lives.get_mut_cow(&life_type) {
-            Some(l) => l,
-            None => return None,
+            None => return false,
         };
         let owned_objective = self.persisted.objectives.into_iter().find_map(|(oid, o)| {
             if o.owner == player.side && o.zone.contains(position) {
@@ -454,11 +453,7 @@ impl Db {
         });
         self.ephemeral.stat(Stat::Land { id: ucid });
         if let Some(oid) = owned_objective {
-            *player_lives += 1;
             player.airborne = None;
-            if *player_lives >= self.ephemeral.cfg.default_lives[&life_type].0 {
-                player.lives.remove_cow(&life_type);
-            }
             let mut frac = 1.;
             if let Some((_, Some(inst))) = &mut player.current_slot {
                 inst.position.p.x = position.x;
@@ -466,7 +461,6 @@ impl Db {
                 inst.landed_at_objective = Some(oid);
                 frac = inst.cost_fraction;
             }
-            let lives = player.lives.clone();
             if let Some(points) = self.ephemeral.cfg.points.as_ref() {
                 let is_provisional = points.provisional;
                 let provisional_points = player.provisional_points;
@@ -483,14 +477,9 @@ impl Db {
                 }
             }
             self.ephemeral.dirty();
-            if !self.ephemeral.cfg.limited_lives {
-                None
-            } else {
-                self.ephemeral.stat(Stat::Life { id: ucid, lives });
-                Some(life_type)
-            }
+            true
         } else {
-            None
+            false
         }
     }
 
@@ -884,7 +873,7 @@ impl Db {
             }
         }
         let obj = objective_mut!(self, oid)?;
-        let sifo = maybe!(self.ephemeral.slot_info, slot, "slot")?;
+        let sifo = maybe!(self.ephemeral.slot_info, slot, "slot")?.clone();
         let player = maybe!(self.persisted.players, ucid, "player")?;
         let life_typ = self.ephemeral.cfg.life_types[&sifo.typ];
         match player.lives.get(&life_typ) {
@@ -895,6 +884,28 @@ impl Db {
                 return Ok(());
             }
             None | Some((_, _)) => (),
+        }
+        if self.ephemeral.cfg.limited_lives && self.ephemeral.cfg.lives_birth {
+            let player = maybe_mut!(self.persisted.players, ucid, "player")?;
+            let (_, player_lives) = player.lives.get_or_insert_cow(life_typ, || {
+                (Utc::now(), self.ephemeral.cfg.default_lives[&life_typ].0)
+            });
+            if *player_lives == 0 {
+                info!("player {ucid} has no lives for this unit type");
+                self.player_deslot(&ucid);
+                unit.clone().destroy()?;
+                return Ok(());
+            }
+            *player_lives -= 1;
+            info!(
+                "life taken on slot entry for {ucid} ({life_typ}), remaining {}",
+                *player_lives
+            );
+            self.ephemeral.stat(Stat::Life {
+                id: ucid,
+                lives: player.lives.clone(),
+            });
+            self.ephemeral.dirty();
         }
         self.ephemeral.players_by_slot.insert(slot, ucid);
         self.ephemeral
@@ -966,8 +977,14 @@ impl Db {
         lua: MizLua,
         now: DateTime<Utc>,
         objid: &DcsOid<ClassUnit>,
-    ) -> Result<Vec<DcsOid<ClassUnit>>> {
+    ) -> Result<(
+        Vec<DcsOid<ClassUnit>>,
+        Option<(Ucid, SlotId, LifeType)>,
+        Option<Ucid>,
+    )> {
         let mut dead = vec![];
+        let mut returned_life = None;
+        let mut deslot_ucid = None;
         if let Some(uid) = self.ephemeral.uid_by_object_id.get(objid) {
             let uid = *uid;
             match self.update_unit_positions(lua, now, &[uid]) {
@@ -979,10 +996,31 @@ impl Db {
         if let Some(slot) = self.ephemeral.slot_by_object_id.get(&objid) {
             if let Some(ucid) = self.ephemeral.player_in_slot(slot) {
                 let ucid = ucid.clone();
+                deslot_ucid = Some(ucid);
                 let player = maybe_mut!(self.persisted.players, ucid, "player")?;
                 if let Some((_, Some(inst))) = player.current_slot.as_mut() {
                     let typ = inst.typ.clone();
                     if let Some(oid) = inst.landed_at_objective {
+                        if self.ephemeral.cfg.limited_lives {
+                            if let Some(life_type) = self.ephemeral.cfg.life_types.get(&typ).copied()
+                            {
+                                if let Some((_, player_lives)) = player.lives.get_mut_cow(&life_type)
+                                {
+                                    *player_lives += 1;
+                                    if *player_lives
+                                        >= self.ephemeral.cfg.default_lives[&life_type].0
+                                    {
+                                        player.lives.remove_cow(&life_type);
+                                    }
+                                    self.ephemeral.stat(Stat::Life {
+                                        id: ucid,
+                                        lives: player.lives.clone(),
+                                    });
+                                    returned_life = Some((ucid, *slot, life_type));
+                                    self.ephemeral.dirty();
+                                }
+                            }
+                        }
                         let mut fix_warehouse = || -> Result<()> {
                             let obj = objective_mut!(self, oid).context("get objective")?;
                             let id = maybe!(self.ephemeral.airbase_by_oid, oid, "airbase")?;
@@ -1018,10 +1056,9 @@ impl Db {
                         }
                     }
                 }
-                self.player_deslot(&ucid)
             }
         }
-        Ok(dead)
+        Ok((dead, returned_life, deslot_ucid))
     }
 
     pub fn player_disconnected(&mut self, ucid: &Ucid) {
