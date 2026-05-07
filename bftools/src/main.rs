@@ -47,6 +47,9 @@ struct MizCmd {
     /// Weapon bridge JSON from DCS hook (Fowl engine 2.0). If omitted: `fowl_weapon_bridge.json` next to `--weapon`, else newest `fowl_weapon_bridge-DCS.version.*.json` there.
     #[clap(long)]
     weapon_bridge: Option<PathBuf>,
+    /// Runtime airbase export from bflib `airbaseexport`. If omitted: newest `fowl_airbase_export-DCS.version.*.json` next to `--base`, else next to `--weapon`.
+    #[clap(long)]
+    airbase_export: Option<PathBuf>,
 }
 
 #[derive(Subcommand, Clone, Debug, Serialize)]

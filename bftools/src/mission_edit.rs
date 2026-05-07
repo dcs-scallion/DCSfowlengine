@@ -5413,22 +5413,19 @@ fn collect_airport_positions_from_groups(
     Ok(out)
 }
 
-/// Informational dump: airport warehouse ids paired with OAB*/OLO* objective zones.
+/// Dump airport warehouse rows joined to OAB*/OLO* zones via each zone's `airbaseID` property.
 ///
-/// base.miz has no `airdromId` in waypoints so exact position matching is impossible.
-/// Instead, pairing is done by nearest O* zone center (using zone positions from triggers).
-/// Airports whose warehouse coalition matches the zone coalition are candidates; the closest
-/// zone center wins. Each line shows: airbaseID, coalition, dynamicSpawn, zone name.
-fn log_all_airbase_ids(base: &LoadedMiz) -> Result<()> {
+/// Run after `apply_objective_airbase_ids_from_export` so lines reflect export/manual mapping.
+/// Coalition and dynamicSpawn come from `warehouses.airports[id]` when present.
+fn log_airbase_objective_zone_mapping(base: &LoadedMiz) -> Result<()> {
     let airports = match base.warehouses.raw_get::<_, Table>("airports") {
         Ok(t) => t,
         Err(_) => {
-            warn!("airbase-id dump: warehouses.airports table not found");
+            warn!("airbase-zone mapping: warehouses.airports table not found");
             return Ok(());
         }
     };
-    // Collect airport warehouse rows.
-    let mut airport_rows: Vec<(i64, StdString, bool)> = Vec::new();
+    let mut airport_rows: HashMap<i64, (StdString, bool)> = HashMap::default();
     for pair in airports.clone().pairs::<Value, Table>() {
         let (k, row) = pair?;
         let Some(id) = warehouse_lua_key_i64(k) else { continue };
@@ -5437,94 +5434,93 @@ fn log_all_airbase_ids(base: &LoadedMiz) -> Result<()> {
             .map(|s| StdString::from(s.as_str().to_uppercase()))
             .unwrap_or_else(|_| StdString::from("UNKNOWN"));
         let dyn_spawn = warehouse_dynamic_spawn_enabled(&row);
-        airport_rows.push((id, coalition, dyn_spawn));
+        airport_rows.insert(id, (coalition, dyn_spawn));
     }
-    airport_rows.sort_by_key(|(id, _, _)| *id);
-    // Collect OAB*/OLO* zone centers and names.
-    // Each entry: (zone_name, coalition_str, center_pos)
-    let mut zones: Vec<(StdString, StdString, Vector2)> = Vec::new();
+
+    let mut mapped: Vec<(i64, StdString, StdString, StdString)> = Vec::new();
+    let mut zones_without_id: Vec<StdString> = Vec::new();
+
     for zone in base.mission.triggers()? {
         let zone = zone?;
         let name = zone.name()?;
         if !(name.starts_with("OAB") || name.starts_with("OLO")) {
             continue;
         }
-        let coa = match name.chars().nth(3) {
-            Some('R') | Some('r') => StdString::from("RED"),
-            Some('B') | Some('b') => StdString::from("BLUE"),
-            _ => StdString::from("?"),
-        };
-        let pos = zone.pos().unwrap_or(Vector2::new(0.0, 0.0));
-        zones.push((StdString::from(name.as_str()), coa, pos));
-    }
-    // For each airport warehouse ID, also collect a candidate position using
-    // the airport ID as a proxy from any group whose takeoff airdromeId matches.
-    // Falls back to "nearest zone of same coalition by index" when unavailable.
-    let airport_ids_set: HashSet<i64> =
-        airport_rows.iter().map(|(id, _, _)| *id).collect();
-    let airport_positions =
-        collect_airport_positions_from_groups(base, &airport_ids_set).unwrap_or_default();
-    // Build matched pairs.
-    // For each airport, find nearest OAB*/OLO* zone of same coalition using position if available,
-    // otherwise fall back to closest-by-index within coalition group.
-    info!("=== AIRBASE ID <-> ZONE MAPPING (set airbaseID in each OAB*/OLO* zone in base.miz) ===");
-    info!(
-        "  {:>6}  {:<8}  {:<14}  zone name",
-        "ID", "coalition", "dynamicSpawn"
-    );
-    let mut used_zones: HashSet<usize> = HashSet::default();
-    for (id, coa, dyn_spawn) in &airport_rows {
-        // Filter candidate zones by coalition.
-        let candidates: Vec<(usize, &(StdString, StdString, Vector2))> = zones
-            .iter()
-            .enumerate()
-            .filter(|(zi, (_, zcoa, _))| {
-                !used_zones.contains(zi) && zcoa.as_str() == coa.as_str()
-            })
-            .collect();
-        let best_zone: Option<(usize, &StdString)> =
-            if let Some(&pos) = airport_positions.get(id) {
-                // Have position: pick nearest zone center.
-                candidates
-                    .iter()
-                    .min_by(|(_, (_, _, pa)), (_, (_, _, pb))| {
-                        let da = na::distance_squared(&pos.into(), &(*pa).into());
-                        let db = na::distance_squared(&pos.into(), &(*pb).into());
-                        da.partial_cmp(&db).unwrap_or(std::cmp::Ordering::Equal)
-                    })
-                    .map(|(zi, (zname, _, _))| (*zi, zname))
-            } else {
-                // No position: pick first alphabetically among same-coalition candidates.
-                candidates
-                    .iter()
-                    .min_by(|(_, (za, _, _)), (_, (zb, _, _))| za.cmp(zb))
-                    .map(|(zi, (zname, _, _))| (*zi, zname))
-            };
-        match best_zone {
-            Some((zi, zone_name)) => {
-                used_zones.insert(zi);
-                info!(
-                    "  {:>6}  {:<8}  {:<14}  {}  (verify manually)",
-                    id, coa, dyn_spawn, zone_name
-                );
+        let zname = StdString::from(name.as_str());
+        let mut aid: Option<i64> = None;
+        for prop in zone.properties()? {
+            let prop = prop?;
+            if !prop.key.eq_ignore_ascii_case("airbaseID") {
+                continue;
             }
-            None => {
-                info!(
-                    "  {:>6}  {:<8}  {:<14}  <no matching zone found>",
-                    id, coa, dyn_spawn
-                );
+            let raw = prop.value.trim();
+            if raw.is_empty() {
+                break;
             }
+            if let Ok(id) = raw.parse::<i64>() {
+                if id > 0 {
+                    aid = Some(id);
+                }
+            }
+            break;
+        }
+        match aid {
+            Some(id) => {
+                let (coalition, dyn_label) = match airport_rows.get(&id) {
+                    Some((c, d)) => (
+                        c.clone(),
+                        StdString::from(if *d { "true" } else { "false" }),
+                    ),
+                    None => (
+                        StdString::from("(missing row)"),
+                        StdString::from("n/a"),
+                    ),
+                };
+                mapped.push((id, coalition, dyn_label, zname));
+            }
+            None => zones_without_id.push(zname),
         }
     }
-    // Show any unmatched zones.
-    let unmatched: Vec<&StdString> = zones
-        .iter()
-        .enumerate()
-        .filter(|(zi, _)| !used_zones.contains(zi))
-        .map(|(_, (name, _, _))| name)
+
+    mapped.sort_by(|a, b| a.0.cmp(&b.0));
+    zones_without_id.sort_unstable();
+
+    let claimed_ids: HashSet<i64> = mapped.iter().map(|(id, _, _, _)| *id).collect();
+
+    info!(
+        "=== AIRBASE ID <-> OAB*/OLO* ZONE (from zone airbaseID property; coalition/dynamicSpawn from warehouses.airports) ==="
+    );
+    info!(
+        "  {:>6}  {:<12}  {:<14}  zone name",
+        "ID", "coalition", "dynamicSpawn"
+    );
+    for (id, coalition, dyn_label, zname) in &mapped {
+        info!(
+            "  {:>6}  {:<12}  {:<14}  {}",
+            id,
+            coalition.as_str(),
+            dyn_label.as_str(),
+            zname.as_str()
+        );
+    }
+
+    let mut orphans: Vec<i64> = airport_rows
+        .keys()
+        .copied()
+        .filter(|id| !claimed_ids.contains(id))
         .collect();
-    if !unmatched.is_empty() {
-        info!("  Unmatched OAB*/OLO* zones (no airport warehouse row): {:?}", unmatched);
+    orphans.sort_unstable();
+    if !orphans.is_empty() {
+        info!(
+            "  Airport warehouse id(s) not referenced by any OAB*/OLO* zone airbaseID: {:?}",
+            orphans
+        );
+    }
+    if !zones_without_id.is_empty() {
+        info!(
+            "  OAB*/OLO* zone(s) missing airbaseID property: {:?}",
+            zones_without_id
+        );
     }
     info!("=== END OF AIRBASE ID MAPPING ===");
     Ok(())
@@ -5534,6 +5530,10 @@ fn log_all_airbase_ids(base: &LoadedMiz) -> Result<()> {
 struct AirbaseExportRow {
     id: i64,
     name: StdString,
+    #[serde(default)]
+    trigger_zone_name: Option<StdString>,
+    #[serde(default)]
+    airbase_name: Option<StdString>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -5544,7 +5544,8 @@ struct AirbaseExportDoc {
 #[derive(Debug, Default)]
 struct ObjectiveAirbaseApplySummary {
     export_path: Option<PathBuf>,
-    filled: Vec<(StdString, i64, StdString)>,
+    /// `(zone name, export id, export airbase name, previous parsed id if any)`
+    filled: Vec<(StdString, i64, StdString, Option<i64>)>,
     unresolved: Vec<StdString>,
 }
 
@@ -5553,6 +5554,156 @@ fn normalize_airbase_name(s: &str) -> StdString {
         .filter(|c| c.is_ascii_alphanumeric())
         .map(|c| c.to_ascii_lowercase())
         .collect()
+}
+
+/// Matches `bflib::admin::slugify(_, allow_dot: false)` for theatre filenames.
+fn slugify_airbase_export_theatre(raw: &str) -> StdString {
+    let mut out = StdString::with_capacity(raw.len());
+    for ch in raw.chars() {
+        if ch.is_ascii_alphanumeric() || ch == '_' || ch == '-' {
+            out.push(ch);
+        } else {
+            out.push('_');
+        }
+    }
+    let trimmed = out.trim_matches(|c| c == '.' || c == '_');
+    if trimmed.is_empty() {
+        StdString::from("unknown")
+    } else {
+        StdString::from(trimmed)
+    }
+}
+
+fn pick_mission_theatre_raw(val: Value) -> Option<StdString> {
+    match val {
+        Value::String(s) => {
+            let t = s.to_str().ok()?.trim();
+            if t.is_empty() {
+                None
+            } else {
+                Some(StdString::from(t))
+            }
+        }
+        Value::Table(tbl) => {
+            for key in ["name", "id", "code"] {
+                if let Ok(Value::String(s)) = tbl.raw_get::<_, Value>(key) {
+                    let t = s.to_str().ok()?.trim();
+                    if !t.is_empty() {
+                        return Some(StdString::from(t));
+                    }
+                }
+            }
+            None
+        }
+        _ => None,
+    }
+}
+
+fn mission_theatre_slug_for_export_check(mission: &Miz<'_>) -> StdString {
+    let label = mission
+        .raw_get::<_, Value>("theatre")
+        .ok()
+        .and_then(pick_mission_theatre_raw)
+        .or_else(|| {
+            mission
+                .raw_get::<_, Value>("theater")
+                .ok()
+                .and_then(pick_mission_theatre_raw)
+        })
+        .or_else(|| {
+            mission
+                .raw_get::<_, Value>("terrain")
+                .ok()
+                .and_then(pick_mission_theatre_raw)
+        })
+        .unwrap_or_else(|| StdString::from("unknown"));
+    slugify_airbase_export_theatre(&label)
+}
+
+/// Theatre segment after first `_` in `fowl_airbase_export-DCS.version.{version}_{theatre}.json`.
+/// Assumes the DCS version slug contains no `_` (same as current bflib exporter output).
+fn airbase_export_filename_theatre_slug(path: &Path) -> Option<StdString> {
+    let name = path.file_name()?.to_str()?;
+    const PREFIX: &str = "fowl_airbase_export-DCS.version.";
+    const SUFFIX: &str = ".json";
+    if !name.starts_with(PREFIX) || !name.ends_with(SUFFIX) {
+        return None;
+    }
+    let stem = &name[PREFIX.len()..name.len() - SUFFIX.len()];
+    let (_, theatre) = stem.split_once('_')?;
+    if theatre.is_empty() {
+        return None;
+    }
+    Some(StdString::from(theatre))
+}
+
+fn warn_airbase_export_theatre_mismatch(mission: &Miz<'_>, export_path: &Path) {
+    let mission_slug = mission_theatre_slug_for_export_check(mission);
+    if mission_slug == "unknown" {
+        warn!(
+            "airbase export {:?}: mission theatre not found (expected mission.theatre / theater / terrain); skipping theatre check vs export filename.",
+            export_path.display(),
+        );
+        return;
+    }
+    let Some(file_slug) = airbase_export_filename_theatre_slug(export_path) else {
+        warn!(
+            "airbase export {:?}: filename must contain \"_<theatre>\" after the DCS version (example: fowl_airbase_export-DCS.version.2.9.26.23303_Caucasus.json); cannot verify theatre.",
+            export_path.display(),
+        );
+        warn!(
+            "Fix: run this scenario on the intended map in DCS, ensure your UCID is listed under \"admins\" in the mission CFG, start the mission, chat \"-admin airbaseexport\", then move fowl_airbase_export-DCS.version.*_<map>.json from Saved Games\\DCS next to your base or weapon .miz and rebuild.",
+        );
+        return;
+    };
+    if file_slug.eq_ignore_ascii_case(mission_slug.as_str()) {
+        return;
+    }
+    warn!(
+        "airbase export {:?}: theatre slug {:?} (from filename) does not match mission theatre slug {:?}; this file is probably from a different map.",
+        export_path.display(),
+        file_slug.as_str(),
+        mission_slug.as_str(),
+    );
+    warn!(
+        "Fix: run this scenario on the correct map in DCS, ensure your UCID is listed under \"admins\" in the mission CFG, start the mission, chat \"-admin airbaseexport\", then replace this JSON with the new fowl_airbase_export-DCS.version.*_<map>.json from Saved Games\\DCS (copy it into this mission folder next to the base or weapon .miz) and rebuild.",
+    );
+}
+
+fn resolve_airbase_export_path(cfg: &MizCmd) -> Result<Option<PathBuf>> {
+    if let Some(ref p) = cfg.airbase_export {
+        if p.is_file() {
+            return Ok(Some(p.clone()));
+        }
+        bail!(
+            "--airbase-export path does not exist or is not a file: {}",
+            p.display()
+        );
+    }
+    let mut dirs: Vec<PathBuf> = Vec::new();
+    if let Some(d) = cfg.base.parent() {
+        dirs.push(d.to_path_buf());
+    }
+    if let Some(d) = cfg.weapon.parent() {
+        let pb = d.to_path_buf();
+        if dirs.iter().all(|x| x != &pb) {
+            dirs.push(pb);
+        }
+    }
+    let mut latest: Option<(std::time::SystemTime, PathBuf)> = None;
+    for dir in dirs {
+        let Some(path) = find_latest_airbase_export_json(&dir)? else {
+            continue;
+        };
+        let modified = fs::metadata(&path)
+            .and_then(|m| m.modified())
+            .unwrap_or(std::time::SystemTime::UNIX_EPOCH);
+        match &latest {
+            Some((t, _)) if *t >= modified => (),
+            _ => latest = Some((modified, path)),
+        }
+    }
+    Ok(latest.map(|(_, p)| p))
 }
 
 fn find_latest_airbase_export_json(mission_dir: &Path) -> Result<Option<PathBuf>> {
@@ -5580,32 +5731,69 @@ fn find_latest_airbase_export_json(mission_dir: &Path) -> Result<Option<PathBuf>
     Ok(latest.map(|(_, p)| p))
 }
 
-fn set_zone_airbase_id_property(zone: &miz::TriggerZone, id: i64) -> Result<()> {
-    let props: Table = zone.raw_get("properties")?;
-    for pair in props.clone().pairs::<Value, Table>() {
-        let (_k, prop) = pair?;
-        let key: String = prop.raw_get("key").unwrap_or_else(|_| String::from(""));
-        if key.eq_ignore_ascii_case("airbaseID") {
-            prop.raw_set("value", String::from(format_compact!("{id}")))?;
-            return Ok(());
+/// Reads first positive integer from `airbaseID` props and counts how many such props exist.
+fn zone_airbase_id_scan(zone: &miz::TriggerZone) -> Result<(Option<i64>, usize)> {
+    let mut count = 0usize;
+    let mut parsed: Option<i64> = None;
+    for prop in zone.properties()? {
+        let prop = prop?;
+        if !prop.key.eq_ignore_ascii_case("airbaseID") {
+            continue;
+        }
+        count += 1;
+        if parsed.is_none() {
+            let raw = prop.value.trim();
+            if let Ok(v) = raw.parse::<i64>() {
+                if v > 0 {
+                    parsed = Some(v);
+                }
+            }
         }
     }
-    let t = unsafe { &*LUA }.create_table()?;
-    t.raw_set("key", String::from("airbaseID"))?;
-    t.raw_set("value", String::from(format_compact!("{id}")))?;
-    props.raw_set(props.raw_len() + 1, t)?;
+    Ok((parsed, count))
+}
+
+/// Single canonical trigger property row: `key` = `airbaseID`, `value` = warehouse airport id.
+/// Drops every existing `airbaseID` row (fixes duplicates / stale ME edits), appends one new row.
+fn set_zone_airbase_id_property(zone: &miz::TriggerZone, id: i64) -> Result<()> {
+    let lua = unsafe { &*LUA };
+    let props: Table = zone.raw_get("properties")?;
+    let mut keep: Vec<(StdString, StdString)> = Vec::new();
+    for pair in props.clone().pairs::<Value, Table>() {
+        let (_idx, prop) = pair?;
+        let key: String = prop.raw_get("key").unwrap_or_else(|_| String::from(""));
+        let val: String = prop.raw_get("value").unwrap_or_else(|_| String::from(""));
+        if key.eq_ignore_ascii_case("airbaseID") {
+            continue;
+        }
+        keep.push((
+            StdString::from(key.as_str()),
+            StdString::from(val.as_str()),
+        ));
+    }
+    keep.push((
+        StdString::from("airbaseID"),
+        StdString::from(format_compact!("{id}").as_str()),
+    ));
+    let new_props = lua.create_table()?;
+    for (i, (k, v)) in keep.into_iter().enumerate() {
+        let row = lua.create_table()?;
+        row.raw_set("key", String::from(k.as_str()))?;
+        row.raw_set("value", String::from(v.as_str()))?;
+        new_props.raw_set(i + 1, row)?;
+    }
+    zone.raw_set("properties", new_props)?;
     Ok(())
 }
 
 fn apply_objective_airbase_ids_from_export(
     base: &mut LoadedMiz,
-    mission_dir: &Path,
+    export_path: Option<&Path>,
 ) -> Result<ObjectiveAirbaseApplySummary> {
     let mut summary = ObjectiveAirbaseApplySummary::default();
-    let Some(export_path) = find_latest_airbase_export_json(mission_dir)? else {
+    let Some(export_path) = export_path else {
         warn!(
-            "airbase export JSON not found in mission dir {}; continuing without auto-fill",
-            mission_dir.display()
+            "airbase export JSON not found (use --airbase-export or place fowl_airbase_export-DCS.version.*.json next to --base or --weapon); continuing without auto-fill",
         );
         return Ok(summary);
     };
@@ -5613,8 +5801,9 @@ fn apply_objective_airbase_ids_from_export(
         .with_context(|| format_compact!("reading {}", export_path.display()))?;
     let doc: AirbaseExportDoc = serde_json::from_str(&s)
         .with_context(|| format_compact!("parsing {}", export_path.display()))?;
-    summary.export_path = Some(export_path.clone());
+    summary.export_path = Some(export_path.to_path_buf());
 
+    let mut by_trigger_lc: HashMap<StdString, Vec<&AirbaseExportRow>> = HashMap::default();
     let mut by_norm: HashMap<StdString, Vec<&AirbaseExportRow>> = HashMap::default();
     for row in &doc.airbases {
         if row.id <= 0 {
@@ -5624,6 +5813,10 @@ fn apply_objective_airbase_ids_from_export(
             .entry(normalize_airbase_name(row.name.as_str()))
             .or_default()
             .push(row);
+        if let Some(ref tz) = row.trigger_zone_name {
+            let lc: StdString = tz.as_str().to_ascii_lowercase();
+            by_trigger_lc.entry(lc).or_default().push(row);
+        }
     }
 
     for zone in base.mission.triggers()? {
@@ -5632,60 +5825,81 @@ fn apply_objective_airbase_ids_from_export(
         if !(name.starts_with("OAB") || name.starts_with("OLO")) {
             continue;
         }
-        let mut has_valid = false;
-        for prop in zone.properties()? {
-            let prop = prop?;
-            if !prop.key.eq_ignore_ascii_case("airbaseID") {
-                continue;
+        let zname = StdString::from(name.as_str());
+        let (parsed_id, airbase_prop_count) = zone_airbase_id_scan(&zone)?;
+        let lc_key: StdString = zname.to_ascii_lowercase();
+
+        let mut row_pick: Option<&AirbaseExportRow> = None;
+
+        if let Some(cands) = by_trigger_lc.get(&lc_key) {
+            match cands.len() {
+                1 => row_pick = Some(cands[0]),
+                _ => {
+                    warn!(
+                        "objective zone {:?}: ambiguous trigger_zone_name match -> {:?}",
+                        zname.as_str(),
+                        cands.iter().map(|r| r.name.clone()).collect::<Vec<_>>()
+                    );
+                    summary.unresolved.push(zname);
+                    continue;
+                }
             }
-            if prop
-                .value
-                .trim()
-                .parse::<i64>()
-                .ok()
-                .map(|v| v > 0)
-                .unwrap_or(false)
-            {
-                has_valid = true;
+        }
+
+        if row_pick.is_none() {
+            let objective_name = name.as_str().get(4..).unwrap_or("");
+            let norm = normalize_airbase_name(objective_name);
+            if let Some(cands) = by_norm.get(&norm) {
+                match cands.len() {
+                    1 => row_pick = Some(cands[0]),
+                    _ => {
+                        warn!(
+                            "objective zone {:?}: ambiguous export match for label {:?} -> {:?}",
+                            zname.as_str(),
+                            objective_name,
+                            cands.iter().map(|r| r.name.clone()).collect::<Vec<_>>()
+                        );
+                        summary.unresolved.push(zname);
+                        continue;
+                    }
+                }
             }
-            break;
         }
-        if has_valid {
-            continue;
-        }
-        let objective_name = StdString::from(&name.as_str()[4..]);
-        let norm = normalize_airbase_name(objective_name.as_str());
-        let Some(cands) = by_norm.get(&norm) else {
-            summary.unresolved.push(StdString::from(name.as_str()));
+
+        let Some(row) = row_pick else {
+            summary.unresolved.push(zname);
             continue;
         };
-        if cands.len() != 1 {
-            warn!(
-                "objective zone {:?}: ambiguous export match for {:?} -> {:?}",
-                name.as_str(),
-                objective_name,
-                cands.iter().map(|r| r.name.clone()).collect::<Vec<_>>()
-            );
-            summary.unresolved.push(StdString::from(name.as_str()));
+
+        let already_ok =
+            parsed_id == Some(row.id) && airbase_prop_count == 1;
+        if already_ok {
             continue;
         }
-        let row = cands[0];
+
         set_zone_airbase_id_property(&zone, row.id)?;
-        summary.filled.push((
-            StdString::from(name.as_str()),
-            row.id,
-            row.name.clone(),
-        ));
+        summary
+            .filled
+            .push((zname.clone(), row.id, row.name.clone(), parsed_id));
     }
 
     if !summary.filled.is_empty() {
         info!(
-            "airbase export {} auto-filled airbaseID on {} objective zone(s)",
+            "airbase export {} wrote airbaseID on {} objective zone(s) (new, corrected, or deduped)",
             export_path.display(),
             summary.filled.len()
         );
-        for (zone, id, src) in &summary.filled {
-            info!("  {:?} -> airbaseID={} (export name {:?})", zone, id, src);
+        for (zone, id, src, prev) in &summary.filled {
+            match prev {
+                None => info!("  {:?} -> airbaseID={} (export {:?})", zone, id, src),
+                Some(p) if *p != *id => {
+                    info!(
+                        "  {:?} -> airbaseID={} (replaced {}; export {:?})",
+                        zone, id, p, src
+                    );
+                }
+                Some(_) => info!("  {:?} -> airbaseID={} (deduped props; export {:?})", zone, id, src),
+            }
         }
     } else {
         warn!(
@@ -6527,10 +6741,19 @@ pub fn run(cfg: &MizCmd) -> Result<()> {
     let mut base = LoadedMiz::new(lua, &cfg.base).context("loading base mission")?;
     validate_base_fowl_trigger_zone_names(&base.mission)
         .context("validating Fowl trigger zone names (must match runtime)")?;
-    log_all_airbase_ids(&base).context("logging all airbase ids from base.miz")?;
-    let mission_dir = cfg.base.parent().unwrap_or_else(|| Path::new("."));
-    let apply_summary = apply_objective_airbase_ids_from_export(&mut base, mission_dir)
+    let airbase_export_path = resolve_airbase_export_path(cfg)
+        .context("resolving fowl_airbase_export JSON path")?;
+    if let Some(ref p) = airbase_export_path {
+        info!("using airbase export {}", p.display());
+        warn_airbase_export_theatre_mismatch(&base.mission, p);
+    }
+    let apply_summary = apply_objective_airbase_ids_from_export(
+        &mut base,
+        airbase_export_path.as_deref(),
+    )
         .context("applying objective airbaseID values from fowl_airbase_export-DCS.version.*.json")?;
+    log_airbase_objective_zone_mapping(&base)
+        .context("logging airbase ID / OAB-OLO zone mapping from zone properties")?;
     let (missing_airbase, invalid_airbase) = validate_objective_airbase_ids(&base)
         .context("validating objective airbaseID requirements (OAB*/OLO*)")?;
     if !missing_airbase.is_empty() || !invalid_airbase.is_empty() || !apply_summary.unresolved.is_empty() {
