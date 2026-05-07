@@ -17,7 +17,7 @@ if (Test-Path $log_file) { Remove-Item $log_file -Force }
 
 # Skip Start-Transcript (it duplicates lines); log manually instead.
 
-function Ensure-WeaponBridgeHookRemoved {
+function Ensure-FowlExportHooksRemoved {
     param(
         [Parameter(Mandatory = $true)][string]$DcsUserPath,
         [Parameter(Mandatory = $true)][string]$LogFile,
@@ -25,49 +25,57 @@ function Ensure-WeaponBridgeHookRemoved {
         [int]$PollSeconds = 5
     )
 
-    $hookPath = Join-Path $DcsUserPath "Scripts\Hooks\Fowl_engine_weapon_bridge_export.lua"
-    if (-not (Test-Path -LiteralPath $hookPath -PathType Leaf)) {
+    $hooksFolder = Join-Path $DcsUserPath "Scripts\Hooks"
+    $candidateHookPaths = @(
+        (Join-Path $hooksFolder "Fowl_engine_export.lua"),
+        (Join-Path $hooksFolder "Fowl_engine_weapon_bridge_export.lua")
+    )
+    $hookPaths = @( $candidateHookPaths | Where-Object { Test-Path -LiteralPath $_ -PathType Leaf } )
+
+    if ($hookPaths.Count -eq 0) {
         return
     }
 
-    $startMsg = "Detected temporary Lua hook in Hooks: $hookPath"
-    Write-Host $startMsg -ForegroundColor Yellow
-    $startMsg | Out-File -FilePath $LogFile -Append
+    foreach ($hookPath in $hookPaths) {
+        $startMsg = "Detected temporary Lua hook in Hooks: $hookPath"
+        Write-Host $startMsg -ForegroundColor Yellow
+        $startMsg | Out-File -FilePath $LogFile -Append
 
-    $deadline = (Get-Date).AddSeconds($MaxWaitSeconds)
-    while ($true) {
-        try {
-            if (Test-Path -LiteralPath $hookPath -PathType Leaf) {
-                Remove-Item -LiteralPath $hookPath -Force -ErrorAction Stop
+        $deadline = (Get-Date).AddSeconds($MaxWaitSeconds)
+        while ($true) {
+            try {
+                if (Test-Path -LiteralPath $hookPath -PathType Leaf) {
+                    Remove-Item -LiteralPath $hookPath -Force -ErrorAction Stop
+                }
+                if (-not (Test-Path -LiteralPath $hookPath -PathType Leaf)) {
+                    $ok = "Temporary Lua hook removed: $hookPath"
+                    Write-Host $ok -ForegroundColor Green
+                    $ok | Out-File -FilePath $LogFile -Append
+                    break
+                }
             }
-            if (-not (Test-Path -LiteralPath $hookPath -PathType Leaf)) {
-                $ok = "Temporary Lua hook removed: $hookPath"
-                Write-Host $ok -ForegroundColor Green
-                $ok | Out-File -FilePath $LogFile -Append
-                return
+            catch {
+                # most often file lock because DCS is still running; handled by wait loop below
             }
-        }
-        catch {
-            # most often file lock because DCS is still running; handled by wait loop below
-        }
 
-        if ((Get-Date) -ge $deadline) {
-            $timeout = @"
-ERROR: Mission build aborted. DCS must be closed and this Lua hook removed before build:
+            if ((Get-Date) -ge $deadline) {
+                $timeout = @"
+ERROR: Mission build aborted. DCS must be closed and these Lua hooks removed before build:
   $hookPath
 
 Close DCS, delete the hook, then run '! build-and-copy-mission.ps1' again.
 "@
-            Write-Host $timeout -ForegroundColor Red
-            $timeout | Out-File -FilePath $LogFile -Append
-            throw "Lua hook cleanup timed out (5 minutes): $hookPath"
-        }
+                Write-Host $timeout -ForegroundColor Red
+                $timeout | Out-File -FilePath $LogFile -Append
+                throw "Lua hook cleanup timed out (5 minutes): $hookPath"
+            }
 
-        $remaining = [int][math]::Ceiling([math]::Max(0, ($deadline - (Get-Date)).TotalSeconds))
-        $waitMsg = "Waiting for hook removal (close DCS if running). Retrying in ${PollSeconds}s; ~${remaining}s left."
-        Write-Host $waitMsg -ForegroundColor Yellow
-        $waitMsg | Out-File -FilePath $LogFile -Append
-        Start-Sleep -Seconds $PollSeconds
+            $remaining = [int][math]::Ceiling([math]::Max(0, ($deadline - (Get-Date)).TotalSeconds))
+            $waitMsg = "Waiting for hook removal (close DCS if running). Retrying in ${PollSeconds}s; ~${remaining}s left."
+            Write-Host $waitMsg -ForegroundColor Yellow
+            $waitMsg | Out-File -FilePath $LogFile -Append
+            Start-Sleep -Seconds $PollSeconds
+        }
     }
 }
 
@@ -81,7 +89,7 @@ try {
             throw "Configuration variable '$name' is missing or empty in '- EDIT-FILE-LOCATIONS.txt'."
         }
     }
-    Ensure-WeaponBridgeHookRemoved -DcsUserPath $DCS_user_path -LogFile $log_file
+    Ensure-FowlExportHooksRemoved -DcsUserPath $DCS_user_path -LogFile $log_file
 
     $env:RUST_LOG = "trace"
     Set-Location -Path $PSScriptRoot -ErrorAction Stop

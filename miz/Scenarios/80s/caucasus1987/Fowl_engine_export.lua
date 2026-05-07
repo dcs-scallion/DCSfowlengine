@@ -1,37 +1,30 @@
 --[[
-  Fowl engine 2.0 — export CLSID (a příbuzných klíčů) → wsType [l1,l2,l3,l4] z DCS.
-  Při sestavení mise načte FowlTools.exe výstup (viz FowlTools --help):
-  buď `fowl_weapon_bridge.json`, nebo nejnovější `fowl_weapon_bridge-DCS.version.<verze>.json`.
+  Fowl engine — Lua Hooks weapon bridge export (single file).
 
-  Nasazení (jednorázově před exportem; pak hook vypni — DCS.setUserCallbacks přepisuje jiné hooky):
-    1) Zkopíruj tento soubor do:
-       Saved Games\DCS\Scripts\Hooks\
-    2) Níže nastav OUTPUT_DIR na složku scenáře (tam kde leží weapon.miz).
-    3) Spusť DCS, načti misi a vstup do 3D (spustí se onSimulationStart).
-    4) Log: Saved Games\DCS\Logs\fowl_weapon_bridge_export.log
-    5) JSON: OUTPUT_DIR\fowl_weapon_bridge-DCS.version.<verze_DCS>.json (verze v názvu = zdroj dat)
-    6) Soubor z Hooks smaž nebo přejmenuj.
+  Writes weapon bridge JSON into OUTPUT_DIR when set (mission folder recommended), otherwise Logs:
 
-  Obsah JSON ≠ seznam povolené munice z warehouse*.miz: hook exportuje celý DCS strom db
-  (CLSID → wsType), aby FowlTools uměl přeložit libovolný řetězec z payloadů. Zakázané položky
-  z leteckých šablon (payload.restricted) se při sestavení vyhodnocují zvlášť — viz
-  payload_weapon_descriptor_union / weapon bridge v bftools.
+    fowl_weapon_bridge-DCS.version.<version>.json  (CLSID descriptors -> wsType, pylons / fueltank maps)
 
-  _G.db se v misi může lišit od plné DB; hook běží v GUI stavu při startu simulace.
+  FowlTools loads fowl_weapon_bridge.json if present, else newest fowl_weapon_bridge-DCS.version.*.json next to weapon.miz.
+
+  Airbase / airport warehouse IDs: use bflib admin command `airbaseexport` in mission (not this hook).
+
+  Usage (one-time per export; remove hook after — DCS.setUserCallbacks replaces other hooks):
+    1) Copy Fowl_engine_export.lua to Saved Games\DCS\Scripts\Hooks\
+    2) Set OUTPUT_DIR to the scenario directory (weapon.miz / base.miz folder).
+    3) Start DCS, load mission, enter 3D (export runs on onSimulationStart).
+    4) Log: Saved Games\DCS\Logs\fowl_engine_export.log
+    5) Remove this file from Hooks after export.
+
+  _G.db in hook sandbox must expose Weapons DB on sim start.
 ]]
 
--- ==== KONFIGURACE — absolutní cesta ke složce scenáře (weapon.miz) ====
--- Nech prázdné → JSON půjde do Saved Games\DCS\Logs\ (viz log).
---
--- DŮLEŽITÉ (Lua): v obyčejných uvozovkách "\" začíná escape — "\b" je backspace,
--- "\f" je formfeed, atd. Cesta se pak rozpadne (viz log „can't open C:fnext-...“).
--- Bezpečné varianty:
---   local OUTPUT_DIR = [[C:\bfnext-pracovni_DYNAMIC_UPDATE\miz\Scenarios\80s\caucasus1987]]
---   local OUTPUT_DIR = "C:/bfnext-pracovni_DYNAMIC_UPDATE/miz/Scenarios/80s/caucasus1987"
-local OUTPUT_DIR = [[C:\bfnext-pracovni_DYNAMIC_UPDATE\miz\Scenarios\80s\caucasus1987]]
+-- ==== CONFIGURATION - absolute path to scenario directory ====
+-- IMPORTANT (Lua): backslash in plain quotes starts escapes; use [[...]] or forward slashes.
+local OUTPUT_DIR = [[C:\GitHub\DCSfowlengine\miz\Scenarios\80s\caucasus1987]]
 -- =======================================================================
 
-local LOG_NAME = "fowl_weapon_bridge_export.log"
+local LOG_NAME = "fowl_engine_export.log"
 
 local function version_like(s)
     if type(s) == "number" then
@@ -55,6 +48,33 @@ local function read_file(path)
     local s = f:read("*a")
     f:close()
     return s
+end
+
+-- net.dostring_in does not reliably return chunk results; long-bracket avoids broken chunks on Windows paths.
+local function lua_long_string_literal(s)
+    local level = 0
+    repeat
+        local close = "]" .. string.rep("=", level) .. "]"
+        if not string.find(s, close, 1, true) then
+            break
+        end
+        level = level + 1
+        if level > 200 then
+            return nil
+        end
+    until false
+    local eq = string.rep("=", level)
+    return "[" .. eq .. "[" .. s .. "]" .. eq .. "]"
+end
+
+local function log_line(msg)
+    local p = lfs.writedir() .. "Logs/" .. LOG_NAME
+    local f = io.open(p, "a")
+    if not f then
+        return
+    end
+    f:write(os.date("!%Y-%m-%dT%H:%M:%SZ ") .. tostring(msg) .. "\n")
+    f:close()
 end
 
 local function package_path_roots()
@@ -163,28 +183,33 @@ local function output_json_filename()
     return "fowl_weapon_bridge-DCS.version." .. filename_safe_version(dcs_version_string()) .. ".json"
 end
 
-local function log_line(msg)
-    local p = lfs.writedir() .. "Logs/" .. LOG_NAME
-    local f = io.open(p, "a")
-    if not f then
-        return
-    end
-    f:write(os.date("!%Y-%m-%dT%H:%M:%SZ ") .. tostring(msg) .. "\n")
-    f:close()
-end
-
+-- Hooks have no trigger.action; MP clients often ignore net.dostring_in("mission", ...). Chat + net.log are reliable.
 local function notify_user(msg)
     log_line(msg)
-    if type(trigger) == "table" and type(trigger.action) == "table" and type(trigger.action.outText) == "function" then
-        pcall(trigger.action.outText, msg, 15)
+    if type(net) ~= "table" then
         return
     end
-    if type(net) == "table" and type(net.log) == "function" then
-        pcall(net.log, msg)
-        return
+    local line = "[FOWL EXPORT] " .. tostring(msg):gsub("\r\n", " "):gsub("\n", " ")
+    if #line > 240 then
+        line = line:sub(1, 237) .. "..."
     end
-    if type(env) == "table" and type(env.info) == "function" then
-        pcall(env.info, msg)
+    if type(net.send_chat) == "function" then
+        pcall(net.send_chat, line, true)
+    end
+    if type(net.log) == "function" then
+        pcall(net.log, line)
+    end
+    if type(net.dostring_in) == "function" then
+        local lit = lua_long_string_literal(tostring(msg))
+        if lit then
+            local chunk = "if trigger and trigger.action and trigger.action.outText then trigger.action.outText("
+                .. lit
+                .. ", 25) end"
+            local ok, err = pcall(net.dostring_in, "mission", chunk)
+            if not ok then
+                log_line("INFO: mission outText skipped: " .. tostring(err))
+            end
+        end
     end
 end
 
@@ -195,6 +220,43 @@ local function json_escape(s)
     s = s:gsub("\n", "\\n")
     s = s:gsub("\r", "\\r")
     return s
+end
+
+local function split_dir_and_name(path)
+    local dir, name = path:match("^(.*)[/\\]([^/\\]+)$")
+    if not dir or dir == "" then
+        return ".", path
+    end
+    return dir, name
+end
+
+local function cleanup_old_weapon_bridge_jsons(export_dir, keep_weapon_name)
+    if type(lfs) ~= "table" or type(lfs.dir) ~= "function" then
+        log_line("WARN: lfs.dir unavailable; old weapon bridge JSON cleanup skipped")
+        return
+    end
+    local keep = {}
+    keep[keep_weapon_name] = true
+    for file in lfs.dir(export_dir) do
+        if file ~= "." and file ~= ".." then
+            local is_weapon = file:match("^fowl_weapon_bridge%-DCS%.version%..+%.json$") ~= nil
+            if is_weapon and not keep[file] then
+                local full = export_dir .. "\\" .. file
+                local ok_remove, err_remove = os.remove(full)
+                if ok_remove then
+                    log_line("removed old weapon bridge JSON: " .. full)
+                else
+                    log_line(
+                        "WARN: failed to remove old weapon bridge JSON "
+                            .. full
+                            .. " ("
+                            .. tostring(err_remove)
+                            .. ")"
+                    )
+                end
+            end
+        end
+    end
 end
 
 local ws_key
@@ -705,16 +767,17 @@ local function write_json(path, map, all_fueltank_ws, fueltank_by_aircraft, weap
     return true
 end
 
-local done = false
+local done_weapon = false
+
 local handler = {}
 
 function handler.onSimulationStart()
-    if done then
+    if done_weapon then
         return
     end
-    done = true
-    notify_user("Fowl bridge export: started")
-    log_line("Fowl_engine_weapon_bridge_export: onSimulationStart")
+    done_weapon = true
+    notify_user("FOWL WEAPON EXPORT STARTED - scanning weapon DB")
+    log_line("Fowl_engine_export: onSimulationStart (weapon export)")
     if type(DCS) == "table" then
         local okVer, rawVer = pcall(DCS.getVersion)
         local okBuild, rawBuild = pcall(DCS.getBuildNumber)
@@ -788,20 +851,30 @@ function handler.onSimulationStart()
             .. " aircraft_weapon_maps=" .. tostring(n_weapon_aircraft)
             .. " ws_aircraft_backrefs=" .. tostring(n_ws_backrefs)
     )
-    local out_path
+    local weapon_out_path
     if OUTPUT_DIR and OUTPUT_DIR ~= "" then
         local dir = OUTPUT_DIR:gsub("\\", "/"):gsub("/+$", "")
-        out_path = (dir .. "/" .. OUTPUT_NAME):gsub("/", "\\")
+        weapon_out_path = (dir .. "/" .. OUTPUT_NAME):gsub("/", "\\")
     else
-        out_path = (lfs.writedir() .. "Logs/" .. OUTPUT_NAME):gsub("/", "\\")
+        weapon_out_path = (lfs.writedir() .. "Logs/" .. OUTPUT_NAME):gsub("/", "\\")
         log_line("OUTPUT_DIR empty: writing to Logs; set OUTPUT_DIR to copy JSON next to weapon.miz")
     end
-    if write_json(out_path, map, all_fueltank_ws, fueltank_by_aircraft, weapon_ws_by_aircraft, aircraft_by_ws, ver) then
-        log_line("wrote " .. out_path)
+    if write_json(weapon_out_path, map, all_fueltank_ws, fueltank_by_aircraft, weapon_ws_by_aircraft, aircraft_by_ws, ver) then
+        log_line("wrote " .. weapon_out_path)
         notify_user("Fowl bridge export: done (entries=" .. tostring(n) .. ")")
     else
-        notify_user("Fowl bridge export: failed (check fowl_weapon_bridge_export.log)")
+        notify_user("Fowl bridge export: failed (check fowl_engine_export.log)")
     end
+    local export_dir, weapon_json_name = split_dir_and_name(weapon_out_path)
+    cleanup_old_weapon_bridge_jsons(export_dir, weapon_json_name)
+    local hooks_folder = (lfs.writedir() .. "Scripts/Hooks/"):gsub("/", "\\")
+    notify_user(
+        "FOWL WEAPON EXPORT FINISHED - remove hook Scripts/Hooks/Fowl_engine_export.lua. "
+            .. "Airbase list: bflib admin airbaseexport (Saved Games). JSON: "
+            .. weapon_out_path
+            .. " | Hooks folder: "
+            .. hooks_folder
+    )
 end
 
 DCS.setUserCallbacks(handler)

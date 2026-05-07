@@ -17,7 +17,11 @@ for more details.
 use crate::{
     Context,
     bg::Task,
-    db::{Db, SetS, group::DeployKind},
+    db::{
+        Db, SetS,
+        group::DeployKind,
+        objective::Objective,
+    },
     msgq::MsgTyp,
     objective_mut, return_lives,
     spawnctx::{SpawnCtx, SpawnLoc},
@@ -32,7 +36,8 @@ use bfprotocols::{
 use chrono::prelude::*;
 use compact_str::format_compact;
 use dcso3::{
-    MizLua, String, Vector2,
+    LuaEnv, MizLua, String, Vector2,
+    airbase::Airbase,
     coalition::Side,
     degrees_to_radians,
     net::{Net, PlayerId, Ucid},
@@ -50,9 +55,11 @@ use mlua::Value;
 use netidx::publisher::Value as NetIdxValue;
 use parking_lot::{Condvar, Mutex};
 use regex::{Regex, RegexBuilder};
+use serde_json::{Value as JsonValue, json};
 use smallvec::{SmallVec, smallvec};
 use std::{
     mem,
+    path::PathBuf,
     str::FromStr,
     sync::Arc,
     time::{Duration, Instant},
@@ -160,6 +167,7 @@ pub enum AdminCommand {
         winner: Option<Side>,
     },
     Shutdown,
+    AirbaseExport,
 }
 
 impl AdminCommand {
@@ -191,6 +199,7 @@ impl AdminCommand {
             "remark <obj>: force refresh the markup on objective",
             "reset [winner]: shutdown the server and reset the campaign state",
             "shutdown: shutdown the server",
+            "airbaseexport: export runtime airbase IDs and warehouse links",
         ]
     }
 }
@@ -307,6 +316,8 @@ impl FromStr for AdminCommand {
             Ok(Self::ResetLives { player: s.into() })
         } else if let Some(_) = s.strip_prefix("shutdown") {
             Ok(Self::Shutdown)
+        } else if s.trim() == "airbaseexport" {
+            Ok(Self::AirbaseExport)
         } else if let Some(s) = s.strip_prefix("add-admin ") {
             Ok(Self::AddAdmin { player: s.into() })
         } else if let Some(s) = s.strip_prefix("remove-admin ") {
@@ -823,6 +834,353 @@ fn remark(ctx: &mut Context, objective: &String) -> Result<()> {
     Ok(())
 }
 
+fn slugify(raw: &str, allow_dot: bool) -> std::string::String {
+    let mut out = std::string::String::with_capacity(raw.len());
+    for ch in raw.chars() {
+        if ch.is_ascii_alphanumeric() || ch == '_' || ch == '-' || (allow_dot && ch == '.') {
+            out.push(ch);
+        } else {
+            out.push('_');
+        }
+    }
+    let out = out.trim_matches(|c| c == '.' || c == '_').to_string();
+    if out.is_empty() { "unknown".into() } else { out }
+}
+
+fn extract_version_like(raw: &str) -> Option<std::string::String> {
+    let mut best4: Option<&str> = None;
+    let mut best3: Option<&str> = None;
+    for token in raw.split(|c: char| !(c.is_ascii_digit() || c == '.')) {
+        if token.is_empty() {
+            continue;
+        }
+        if token.starts_with('.') || token.ends_with('.') || token.contains("..") {
+            continue;
+        }
+        let dots = token.chars().filter(|c| *c == '.').count();
+        if dots >= 3 && best4.is_none() {
+            best4 = Some(token);
+            continue;
+        }
+        if dots >= 2 && best3.is_none() {
+            best3 = Some(token);
+        }
+    }
+    best4.or(best3).map(std::string::String::from)
+}
+
+fn dcs_version_from_logs(ctx: &Context) -> Option<std::string::String> {
+    let root = ctx.miz_state_path.parent()?;
+    let mut latest: Option<(std::time::SystemTime, PathBuf)> = None;
+    for rel in ["Logs\\dcs.log", "Logs\\dcs.log.old"] {
+        let p = root.join(rel);
+        let modified = std::fs::metadata(&p).and_then(|m| m.modified()).ok()?;
+        match &latest {
+            Some((t, _)) if *t >= modified => (),
+            _ => latest = Some((modified, p)),
+        }
+    }
+    let (_, path) = latest?;
+    let body = std::fs::read_to_string(path).ok()?;
+    let dcs_re = Regex::new(r"DCS/(\d+\.\d+\.\d+\.\d+)").ok()?;
+    if let Some(caps) = dcs_re.captures_iter(&body).last() {
+        return Some(std::string::String::from(&caps[1]));
+    }
+    let fallback_re = Regex::new(r"\b\d+\.\d+\.\d+\.\d+\b").ok()?;
+    fallback_re
+        .find_iter(&body)
+        .last()
+        .map(|m| std::string::String::from(m.as_str()))
+}
+
+fn dcs_version_slug(ctx: &Context, lua: MizLua) -> std::string::String {
+    let l = lua.inner();
+    let raw_ver: std::string::String = match l
+        .load(
+            r#"local function r()
+          local function version_like(v)
+            if type(v) ~= "string" then return nil end
+            local m = v:match("(%d+%.%d+%.%d+%.%d+)")
+            if m and m ~= "" then return m end
+            m = v:match("(%d+%.%d+%.%d+)")
+            if m and m ~= "" then return m end
+            return nil
+          end
+          if type(DCS) == "table" and type(DCS.getVersion) == "function" then
+            local okv, v = pcall(DCS.getVersion)
+            local okb, b = pcall(DCS.getBuildNumber)
+            if okv then
+              if type(v) == "table" then
+                v = v.version or v.Version or v.productVersion or v.ProductVersion or v[1]
+              end
+              if type(v) == "number" then v = tostring(v) end
+              if type(v) == "string" and v ~= "" then
+                local vv = version_like(v) or v
+                if okb and b ~= nil and tostring(b) ~= "" then
+                  return tostring(vv) .. "-build." .. tostring(b)
+                end
+                return tostring(vv)
+              end
+            end
+          end
+          local g = _G or {}
+          local direct = g.__DCS_VERSION__ or g.DCS_VERSION or g.ED_FINAL_VERSION
+          if type(direct) == "string" or type(direct) == "number" then
+            local s = tostring(direct)
+            if s ~= "" then return s end
+          end
+          if DCS ~= nil and type(DCS) == "table" and type(DCS.version) == "string" and DCS.version ~= "" then
+            return DCS.version
+          end
+          if LoGetVersion ~= nil and type(LoGetVersion) == "function" then
+            local ok, t = pcall(LoGetVersion)
+            if ok and type(t) == "table" then
+              local v = t.short_txt or t.short or t.file_version or t.product_version
+                or t.revision or t.ProductVersion or t.ProductVersion_txt
+              if type(v) == "string" and v ~= "" then return v end
+            end
+          end
+          return "unknown"
+        end
+        return r()"#,
+        )
+        .eval()
+    {
+        Ok(s) => s,
+        Err(_) => "unknown".into(),
+    };
+    let ver = extract_version_like(&raw_ver)
+        .or_else(|| dcs_version_from_logs(ctx))
+        .unwrap_or_else(|| "unknown".into());
+    slugify(&ver, true)
+}
+
+fn theatre_slug(lua: MizLua) -> std::string::String {
+    let l = lua.inner();
+    let theatre: std::string::String = match l
+        .load(
+            r#"local function pick_theatre(src)
+          if type(src) ~= "table" then return nil end
+          local t = src.theatre or src.theater or src.terrain
+          if type(t) == "table" then
+            t = t.name or t.id or t.code
+          end
+          if type(t) == "string" and t ~= "" then
+            return t
+          end
+          return nil
+        end
+        local function r()
+          local m = rawget(_G, "mission")
+          local t = pick_theatre(m)
+          if t ~= nil then return t end
+          if env ~= nil and type(env) == "table" then
+            t = pick_theatre(env.mission)
+            if t ~= nil then return t end
+          end
+          return "unknown"
+        end
+        return r()"#,
+        )
+        .eval()
+    {
+        Ok(s) => s,
+        Err(_) => "unknown".into(),
+    };
+    slugify(&theatre, false)
+}
+
+fn airbase_export_category(ab: &Airbase<'_>) -> i64 {
+    ab.get_desc()
+        .ok()
+        .and_then(|d| d.get::<_, i64>("category").ok())
+        .unwrap_or(-1)
+}
+
+fn dist_sq_airbase_xz(a: Vector2, b: Vector2) -> f64 {
+    let dx = a.x - b.x;
+    let dy = a.y - b.y;
+    dx * dx + dy * dy
+}
+
+fn should_export_airport_warehouse_objective(obj: &Objective) -> bool {
+    let n = obj.name();
+    // Miz zones are OAB*/OLO* in the editor; mizinit strips the O+type+coalition prefix (see
+    // init_objective) so persisted names are usually display-only — OLO hubs are `Logistics`.
+    n.starts_with("OAB") || n.starts_with("OLO") || obj.is_airbase() || obj.is_logistics()
+}
+
+/// Pairing matches `setup_warehouses_after_load`: airbase `getPoint` must fall in the objective
+/// trigger zone. `getByName(objective label)` is only a fallback when nothing lies in-zone.
+fn airbase_for_objective_zone_export<'lua>(
+    lua: MizLua<'lua>,
+    obj: &Objective,
+    objective_name: &str,
+) -> Result<Option<Airbase<'lua>>> {
+    let world = World::singleton(lua)?;
+    let zone_center = obj.zone().pos();
+    let mut in_zone: Vec<(f64, Airbase<'lua>)> = Vec::new();
+
+    for ab_res in world.get_airbases()? {
+        let ab = ab_res?;
+        if !ab.is_exist()? {
+            continue;
+        }
+        if airbase_export_category(&ab) == 2 {
+            continue;
+        }
+        let pt = match ab.get_point() {
+            Ok(p) => p,
+            Err(_) => continue,
+        };
+        let p2 = Vector2::new(pt.x, pt.z);
+        if !obj.zone().contains(p2) {
+            continue;
+        }
+        in_zone.push((dist_sq_airbase_xz(p2, zone_center), ab));
+    }
+
+    if !in_zone.is_empty() {
+        in_zone.sort_by(|a, b| {
+            a.0.partial_cmp(&b.0)
+                .unwrap_or(std::cmp::Ordering::Equal)
+        });
+        let first_id = in_zone[0].1.get_id().ok().map(|id| id.inner());
+        for (_, ab) in in_zone.iter().skip(1) {
+            if let Ok(id) = ab.get_id() {
+                if first_id != Some(id.inner()) {
+                    warn!(
+                        "airbaseexport: {:?} zone contains airbases with differing getId(); using closest to zone center",
+                        objective_name
+                    );
+                    break;
+                }
+            }
+        }
+        return Ok(Some(in_zone[0].1.clone()));
+    }
+
+    match Airbase::get_by_name(lua, String::from(objective_name)) {
+        Ok(ab) => {
+            if !ab.is_exist()? {
+                warn!(
+                    "airbaseexport: getByName({:?}) invalid for objective {:?}",
+                    objective_name, objective_name
+                );
+                return Ok(None);
+            }
+            if airbase_export_category(&ab) == 2 {
+                warn!(
+                    "airbaseexport: getByName({:?}) resolved to category 2; skipped",
+                    objective_name
+                );
+                return Ok(None);
+            }
+            warn!(
+                "airbaseexport: no airbase point in {:?} zone; using getByName fallback",
+                objective_name
+            );
+            Ok(Some(ab))
+        }
+        Err(e) => {
+            warn!(
+                "airbaseexport: no airbase in zone and getByName({:?}) failed: {:?}",
+                objective_name, e
+            );
+            Ok(None)
+        }
+    }
+}
+
+fn export_runtime_airbases(ctx: &Context, lua: MizLua) -> Result<PathBuf> {
+    let mut rows: Vec<JsonValue> = Vec::new();
+    for obj in ctx
+        .db
+        .persisted
+        .objectives
+        .into_iter()
+        .map(|(_, o)| o)
+        .filter(|o| should_export_airport_warehouse_objective(o))
+    {
+        let objective_name = obj.name().to_string();
+        let ab = match airbase_for_objective_zone_export(lua, &obj, objective_name.as_str())? {
+            Some(ab) => ab,
+            None => continue,
+        };
+        let pt = match ab.get_point() {
+            Ok(p) => p,
+            Err(_) => continue,
+        };
+        let category = ab
+            .get_desc()
+            .ok()
+            .and_then(|d| d.get::<_, i64>("category").ok())
+            .unwrap_or(-1);
+        if category == 2 {
+            continue;
+        }
+        let airbase_name = ab
+            .as_object()
+            .and_then(|o| o.get_name())
+            .unwrap_or_else(|_| "unknown".into());
+        let warehouse_whid = ab.get_warehouse().ok().and_then(|w| w.whid().ok());
+        let airport_warehouse_id = match ab.get_id() {
+            Ok(id) => {
+                let n = id.inner();
+                if n > 0 {
+                    Some(n)
+                } else {
+                    None
+                }
+            }
+            Err(e) => {
+                warn!(
+                    "airbaseexport: getId for {:?} (DCS {:?}): {:?}",
+                    objective_name, airbase_name.as_str(), e
+                );
+                None
+            }
+        };
+        let Some(export_id) = airport_warehouse_id else {
+            continue;
+        };
+        rows.push(json!({
+            "id": export_id,
+            "name": objective_name,
+            "trigger_zone_name": obj
+                .fowl_o_trigger_zone_name()
+                .unwrap_or_else(|| objective_name.clone()),
+            "objective_kind": obj.kind_name(),
+            "airbase_name": airbase_name,
+            "category": category,
+            "warehouse_whid": warehouse_whid,
+            "x": (pt.x * 10.0).round() / 10.0,
+            "z": (pt.z * 10.0).round() / 10.0,
+        }));
+    }
+    rows.sort_by(|a, b| {
+        let ia = a.get("id").and_then(|v| v.as_i64()).unwrap_or(0);
+        let ib = b.get("id").and_then(|v| v.as_i64()).unwrap_or(0);
+        ia.cmp(&ib).then_with(|| {
+            let sa = a.get("name").and_then(|v| v.as_str()).unwrap_or("");
+            let sb = b.get("name").and_then(|v| v.as_str()).unwrap_or("");
+            sa.cmp(sb)
+        })
+    });
+    let doc = json!({
+        "schema_version": 1,
+        "source": "bflib admin airbaseexport (Airbase or Logistics objective: zone contains airbase point -> getId; else getByName; optional legacy OAB*/OLO* name prefixes)",
+        "airbases": rows,
+    });
+    let slug = dcs_version_slug(ctx, lua);
+    let theatre = theatre_slug(lua);
+    let out = ctx
+        .miz_state_path
+        .with_file_name(format!("fowl_airbase_export-DCS.version.{slug}_{theatre}.json"));
+    std::fs::write(&out, serde_json::to_string_pretty(&doc)?)?;
+    Ok(out)
+}
+
 #[derive(Debug)]
 pub(super) enum Caller {
     Player(PlayerId),
@@ -1000,6 +1358,10 @@ pub(super) fn run_admin_commands(ctx: &mut Context, lua: MizLua) -> Result<Admin
                     reply_ok!("shutting down")
                 }
                 Err(e) => reply_err!("failed to shutdown {:?}", e),
+            },
+            AdminCommand::AirbaseExport => match export_runtime_airbases(ctx, lua) {
+                Ok(path) => reply_ok!("airbase export written to {:?}", path),
+                Err(e) => reply_err!("airbase export failed {:?}", e),
             },
             AdminCommand::AddAdmin { player } => match add_admin(ctx, &player) {
                 Ok(()) => reply_ok!("{player} is now an admin"),

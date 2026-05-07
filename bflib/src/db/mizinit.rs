@@ -109,9 +109,12 @@ impl Db {
                 } else {
                     bail!("invalid value of LOGISTICS_DETACHED {v}")
                 }
-            } else if &*pr.key == "include" || &*pr.key == "include_dyn_slots" {
-                // `include` / `include_dyn_slots` are used by bftools on objective-adjacent trigger
-                // zones (slot templates). bflib doesn't consume them here — ignore so missions start.
+            } else if &*pr.key == "include"
+                || &*pr.key == "include_dyn_slots"
+                || pr.key.eq_ignore_ascii_case("airbaseID")
+            {
+                // `include*` / `include_dyn_slots` / `airbaseID` are consumed by bftools (offline
+                // assembly + editor hints). bflib ignores them here so missions start.
                 continue;
             } else {
                 bail!("invalid objective property {pr:?}")

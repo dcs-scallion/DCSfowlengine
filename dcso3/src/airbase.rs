@@ -84,7 +84,14 @@ impl<'lua> Airbase<'lua> {
     }
 
     pub fn get_id(&self) -> Result<AirbaseId> {
-        Ok(self.t.call_method("getId", ())?)
+        for method in ["getId", "getID"] {
+            if let Ok(id) = self.t.call_method::<_, AirbaseId>(method, ()) {
+                if id.inner() > 0 {
+                    return Ok(id);
+                }
+            }
+        }
+        bail!("Airbase.getId/getID failed or returned 0")
     }
 
     pub fn get_parking(&self, available: bool) -> Result<Parking<'lua>> {

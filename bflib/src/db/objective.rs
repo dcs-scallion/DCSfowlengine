@@ -354,6 +354,10 @@ impl Objective {
         self.name.as_str()
     }
 
+    pub fn zone(&self) -> &Zone {
+        &self.zone
+    }
+
     #[allow(dead_code)]
     pub fn health(&self) -> u8 {
         self.health
@@ -371,6 +375,23 @@ impl Objective {
         self.owner
     }
 
+    /// `O…` trigger zone name in the `.miz` (`mizinit::init_objective`): `O` + kind (`AB` / `FO` / `LO`)
+    /// + default-owner letter + label. Deployed FARPs are not `O` triggers → `None`.
+    pub fn fowl_o_trigger_zone_name(&self) -> Option<std::string::String> {
+        let kind = match &self.kind {
+            ObjectiveKind::Airbase => "AB",
+            ObjectiveKind::Fob => "FO",
+            ObjectiveKind::Logistics => "LO",
+            ObjectiveKind::Farp { .. } => return None,
+        };
+        let owner = match self.owner {
+            Side::Blue => "B",
+            Side::Red => "R",
+            Side::Neutral => "N",
+        };
+        Some(format!("O{}{}{}", kind, owner, self.name.as_str()))
+    }
+
     pub fn is_farp(&self) -> bool {
         match &self.kind {
             ObjectiveKind::Farp { .. } => true,
@@ -383,6 +404,14 @@ impl Objective {
             ObjectiveKind::Airbase => true,
             ObjectiveKind::Farp { .. } | ObjectiveKind::Fob | ObjectiveKind::Logistics => false,
         }
+    }
+
+    pub fn is_logistics(&self) -> bool {
+        matches!(&self.kind, ObjectiveKind::Logistics)
+    }
+
+    pub fn kind_name(&self) -> &'static str {
+        self.kind.name()
     }
 
     pub fn get_equipment(&self, name: &str) -> Inventory {
