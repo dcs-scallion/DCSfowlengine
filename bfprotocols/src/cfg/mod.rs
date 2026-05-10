@@ -472,6 +472,9 @@ pub struct WarehouseConfig {
     /// FOB (OFO objectives): stock multiple of delivery amount (typically lower than airfields).
     #[serde(default = "default_fob_max")]
     pub fob_max: u32,
+    /// FARP objectives (incl. DEP* template / player-deployed FARPs): stock multiple vs base row.
+    #[serde(default = "default_fob_max")]
+    pub farp_max: u32,
     /// Airbase on water / carrier deck (OAB with surface water under zone center): multiple of delivery.
     #[serde(default = "default_carrier_airbase_max")]
     pub carrier_airbase_max: u32,
@@ -525,8 +528,7 @@ impl WarehouseConfig {
                     self.airbase_max
                 }
             }
-            // FARPs (incl. player-deployed) use the same stock multiple as FOBs, not airfields.
-            ObjectiveKind::Farp { .. } => self.fob_max,
+            ObjectiveKind::Farp { .. } => self.farp_max,
         }
     }
 

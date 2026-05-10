@@ -49,13 +49,15 @@ pub fn load(path: &Path) -> Result<WarehouseDefaultsFromCfg> {
     Ok(load_overlay(path)?.defaults)
 }
 
-/// Optional `warehouse.{hub_max,airbase_max,fob_max,carrier_airbase_max}` from Fowl campaign JSON
-/// (same file as `default_warehouse_*`). Also accepts those four keys at JSON root if `warehouse` is absent.
+/// Optional `warehouse.{hub_max,airbase_max,fob_max,farp_max,carrier_airbase_max}` from Fowl campaign JSON
+/// (same file as `default_warehouse_*`). Also accepts those keys at JSON root if `warehouse` is absent.
 #[derive(Debug, Clone, Default, Deserialize)]
 pub struct WarehouseMultipliersFromCfg {
     pub hub_max: Option<u32>,
     pub airbase_max: Option<u32>,
     pub fob_max: Option<u32>,
+    /// Deployed / template dynamic FARP rows under `BDEPFARP*` / `RDEPFARP*` / `NDEPFARP*` placement zones.
+    pub farp_max: Option<u32>,
     pub carrier_airbase_max: Option<u32>,
 }
 
@@ -130,6 +132,7 @@ pub fn load_overlay(path: &Path) -> Result<CampaignWarehouseOverlay> {
         ("hub_max", &mut m.hub_max),
         ("airbase_max", &mut m.airbase_max),
         ("fob_max", &mut m.fob_max),
+        ("farp_max", &mut m.farp_max),
         ("carrier_airbase_max", &mut m.carrier_airbase_max),
     ] {
         let Some(node) = source.get(field) else {

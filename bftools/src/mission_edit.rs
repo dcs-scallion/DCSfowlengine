@@ -490,6 +490,9 @@ const INCLUDE_STATIC_SLOT_KEYS: &[&str] = &["include", "include_dyn_slots"];
 /// `include` kept for older missions).
 const INCLUDE_DYNAMIC_SLOT_KEYS: &[&str] = &["include_dyn_slots", "include"];
 
+/// DEP* dynamic FARP aircraft allowlist (SETTINGS-dynamic-slots-creation); not part of general land TTD policy merge.
+const TTD_DYN_FARP_POLICY_ZONE: &str = "TTDdynFARP";
+
 fn parse_trigger_slot_quantity(value: &str) -> Result<usize> {
     let t = value.trim();
     if t.eq_ignore_ascii_case("x") {
@@ -2062,6 +2065,9 @@ impl VehicleTemplates {
                     )?,
                 );
             } else if let Some(s) = name.strip_prefix("TTD") {
+                if name.as_str() == TTD_DYN_FARP_POLICY_ZONE {
+                    continue;
+                }
                 if !Self::zone_enabled_by_settings(&dynamic_creation_settings, &name) {
                     continue;
                 }
@@ -2104,6 +2110,9 @@ impl VehicleTemplates {
                     }
                 }
             } else if name.starts_with("TTD") {
+                if name.as_str() == TTD_DYN_FARP_POLICY_ZONE {
+                    continue;
+                }
                 if !Self::zone_enabled_by_settings(&dynamic_creation_settings, &name) {
                     continue;
                 }
@@ -2147,11 +2156,8 @@ impl VehicleTemplates {
             }
         }
         specs.sort_by(|a, b| a.0.to_str().cmp(b.0.to_str()).then(a.2.cmp(&b.2)));
-        let land_a = land_allow.as_ref();
-        let naval_a = naval_allow.as_ref();
-        specs.retain(|(side, _, ut, _)| {
-            ttd_policy_allows_emitted_type(land_a, naval_a, *side, ut)
-        });
+        // Emit dynamic templates for every aircraft/helicopter template present in weapon.miz.
+        // Per-objective TTD/TTDN policy is applied later when warehouse rows are filled/pruned.
 
         // Dynamic templates are created off-map, so we cannot reuse their pylons directly.
         // However, DCS expects `payload.pylons` to be present for weapon selection UI.
@@ -2795,10 +2801,13 @@ struct WarehouseStockMultConfig {
     airbase_max: u32,
     hub_max: u32,
     fob_max: u32,
+    farp_max: u32,
     carrier_airbase_max: u32,
     hub_airport_ids: HashSet<i64>,
     hub_warehouse_ids: HashSet<i64>,
     fob_warehouse_ids: HashSet<i64>,
+    /// `warehouses` keys whose FARP/Invisible pad sits in a `BDEPFARP*`/`RDEPFARP*`/`NDEPFARP*` placement zone.
+    dep_farp_warehouse_ids: HashSet<i64>,
     naval_warehouse_ids: HashSet<i64>,
 }
 
@@ -2812,7 +2821,9 @@ impl WarehouseStockMultConfig {
     }
 
     fn mult_warehouse_row(&self, id: i64) -> u32 {
-        if self.hub_warehouse_ids.contains(&id) {
+        if self.dep_farp_warehouse_ids.contains(&id) {
+            self.farp_max.max(1)
+        } else if self.hub_warehouse_ids.contains(&id) {
             self.hub_max.max(1)
         } else if self.naval_warehouse_ids.contains(&id) {
             self.carrier_airbase_max.max(1)
@@ -2824,6 +2835,9 @@ impl WarehouseStockMultConfig {
     }
 
     fn mult_dynamic_row(&self, id: i64, is_airports_table: bool) -> u32 {
+        if self.dep_farp_warehouse_ids.contains(&id) {
+            return self.farp_max.max(1);
+        }
         if is_airports_table {
             self.mult_airport(id)
         } else if self.hub_warehouse_ids.contains(&id) {
@@ -2831,7 +2845,6 @@ impl WarehouseStockMultConfig {
         } else if self.naval_warehouse_ids.contains(&id) {
             self.carrier_airbase_max.max(1)
         } else {
-            // Dynamic rows in `warehouses` are FARPs/FOBs, so use fob_max by default.
             self.fob_max.max(1)
         }
     }
@@ -5245,6 +5258,8 @@ struct ObjectiveDynAllow {
     geom: ObjectiveZoneGeom,
     /// Coalition this base belongs to (from 4th letter of O* zone name).
     side: Side,
+    /// OLO* logistics hubs keep full coalition A/C stock (no include_dyn_slots pruning).
+    is_logistics_hub: bool,
     /// Optional explicit airport warehouse id (for `warehouses.airports` keys).
     airbase_id: Option<i64>,
     per_side: HashMap<Side, HashSet<StdString>>,
@@ -5259,6 +5274,112 @@ impl ObjectiveDynAllow {
             ObjectiveZoneGeom::Quad(q) => q.contains(LuaVec2(v)),
         }
     }
+}
+
+/// Allowed `(Side, aircraft type)` for **`warehouses.warehouses`** dynamic rows on DEP template FARPs (`BDEPFARP*`/`…`).
+/// Controlled only by zone `TTDdynFARP` (+ `SETTINGS-dynamic-slots-creation`); excludes overlap with objective `TTDLogi` pruning.
+fn build_dyn_farp_aircraft_allow(
+    base: &LoadedMiz,
+    dyn_templates: &HashMap<String, SlotSpec>,
+) -> Result<Option<HashSet<(Side, StdString)>>> {
+    let dynamic_creation_settings =
+        VehicleTemplates::load_zone_creation_settings(base, "SETTINGS-dynamic-slots-creation")?;
+    if !VehicleTemplates::zone_enabled_by_settings(&dynamic_creation_settings, TTD_DYN_FARP_POLICY_ZONE)
+    {
+        return Ok(None);
+    }
+    let mut found = false;
+    let mut allowed: HashSet<(Side, StdString)> = HashSet::default();
+    for zone in base.mission.triggers()? {
+        let zone = zone?;
+        let name = zone.name()?;
+        if name.as_str() != TTD_DYN_FARP_POLICY_ZONE {
+            continue;
+        }
+        found = true;
+        let spec = SlotSpec::new(
+            dyn_templates,
+            zone.properties()?,
+            false,
+            INCLUDE_DYNAMIC_SLOT_KEYS,
+        )?;
+        for (side, m) in spec.slots {
+            for (unit_type, count) in m {
+                if count > 0 {
+                    allowed.insert((side, StdString::from(unit_type.as_str())));
+                }
+            }
+        }
+    }
+    if !found {
+        bail!(
+            "{} is enabled in SETTINGS-dynamic-slots-creation but no trigger zone with this exact name exists",
+            TTD_DYN_FARP_POLICY_ZONE
+        );
+    }
+    info!(
+        "{}: {} allowed (coalition, aircraft type) pair(s) for DEP dynamic FARP A/C stock",
+        TTD_DYN_FARP_POLICY_ZONE,
+        allowed.len()
+    );
+    Ok(Some(allowed))
+}
+
+/// Per-ship warehouse `unitId` → allowed `(Side, aircraft type)` from **`TTDN` + ship group name**
+/// (e.g. group `RKuznecow` → zone `TTDNRKuznecow`). Only hulls with that zone **enabled** in
+/// `SETTINGS-dynamic-slots-creation` get an entry; others keep full coalition inventory copy.
+fn build_ship_warehouse_aircraft_allow(
+    base: &LoadedMiz,
+    dyn_templates: &HashMap<String, SlotSpec>,
+    ship_wh_map: &HashMap<i64, (Side, String)>,
+) -> Result<HashMap<i64, HashSet<(Side, StdString)>>> {
+    let settings =
+        VehicleTemplates::load_zone_creation_settings(base, "SETTINGS-dynamic-slots-creation")?;
+    let mut out: HashMap<i64, HashSet<(Side, StdString)>> = HashMap::default();
+    for (&wid, (_side_unit, group_name)) in ship_wh_map {
+        let zone_full = format!("TTDN{}", group_name);
+        if !VehicleTemplates::zone_enabled_by_settings(&settings, &zone_full) {
+            continue;
+        }
+        let mut found = false;
+        for zone in base.mission.triggers()? {
+            let zone = zone?;
+            if zone.name()?.as_str() != zone_full.as_str() {
+                continue;
+            }
+            found = true;
+            let spec = SlotSpec::new(
+                dyn_templates,
+                zone.properties()?,
+                false,
+                INCLUDE_DYNAMIC_SLOT_KEYS,
+            )?;
+            let mut allowed: HashSet<(Side, StdString)> = HashSet::default();
+            for (side, m) in spec.slots {
+                for (unit_type, count) in m {
+                    if count > 0 {
+                        allowed.insert((side, StdString::from(unit_type.as_str())));
+                    }
+                }
+            }
+            let n = allowed.len();
+            out.insert(wid, allowed);
+            info!(
+                "TTDN + {:?}: {} allowed (coalition, aircraft type) pair(s) for ship warehouse {}",
+                group_name,
+                n,
+                wid
+            );
+            break;
+        }
+        if !found {
+            bail!(
+                "{} is enabled in SETTINGS-dynamic-slots-creation but no trigger zone with this exact name exists",
+                zone_full
+            );
+        }
+    }
+    Ok(out)
 }
 
 /// Build per-objective zone dynamic allow map from O* zones that have `include_dyn_slots`.
@@ -5276,6 +5397,7 @@ fn build_objective_dyn_allow(
         if !name.starts_with('O') {
             continue;
         }
+        let is_logistics_hub = name.starts_with("OLO");
         // 4th character (index 3) of O* zone name: 'R' = Red, 'B' = Blue.
         let base_side = match name.chars().nth(3) {
             Some('R') | Some('r') => Side::Red,
@@ -5329,6 +5451,7 @@ fn build_objective_dyn_allow(
         out.push(ObjectiveDynAllow {
             geom,
             side: base_side,
+            is_logistics_hub,
             airbase_id,
             per_side,
         });
@@ -5983,9 +6106,9 @@ fn validate_objective_airbase_ids(base: &LoadedMiz) -> Result<(Vec<StdString>, V
 ///    (same shape as today’s template merge).
 /// 2. Set `linkDynTempl` only for rows with non-zero stock and a matching dynamic template group for `(side, type)`.
 /// 3. For warehouse id tied to ship template key `K` (e.g. group name `RKuznecow` → zones `TTSNRKuznecow`,
-///    `TTDNRKuznecow`), set `initialAmount = 0` and `linkDynTempl = 0` for any aircraft type not listed in
-///    the merged slot specs from those zones (static ∪ dynamic allowlist for that hull only).
-///    SETTINGS-* filters become redundant for carriers if every hull always has matching `TTSN*` + `TTDN*`.
+///    `TTDNRKuznecow`), set `initialAmount = 0` for aircraft types not listed in that hull’s `TTDN*` zone
+///    (stock caps the air wing). Keep `linkDynTempl` from DT_* emit for other coalition types so landed
+///    aircraft can be warehoused and slotted later.
 /// If ground bases still misbehave, consider generalising this 3-step pattern to airports / FARPs.
 ///
 /// Carrier naming / zones are validated earlier by `audit_naval_carrier_mission_rules` (build fails if invalid).
@@ -5999,6 +6122,8 @@ fn patch_warehouse_dynamic_spawn_links(
     warehouse_caps: Option<&campaign_cfg::WarehouseDefaultsFromCfg>,
     obj_dyn_allow: &[ObjectiveDynAllow],
     warehouse_positions: &HashMap<i64, Vector2>,
+    dyn_farp_aircraft_allow: Option<&HashSet<(Side, StdString)>>,
+    ship_wh_aircraft_allow: Option<&HashMap<i64, HashSet<(Side, StdString)>>>,
 ) -> Result<()> {
     fn patch_table(
         lua: &Lua,
@@ -6011,6 +6136,8 @@ fn patch_warehouse_dynamic_spawn_links(
         warehouse_caps: Option<&campaign_cfg::WarehouseDefaultsFromCfg>,
         obj_dyn_allow: &[ObjectiveDynAllow],
         warehouse_positions: &HashMap<i64, Vector2>,
+        dyn_farp_aircraft_allow: Option<&HashSet<(Side, StdString)>>,
+        ship_wh_aircraft_allow: Option<&HashMap<i64, HashSet<(Side, StdString)>>>,
     ) -> Result<()> {
         fn copy_initial_amounts_scaled(
             lua: &Lua,
@@ -6152,6 +6279,15 @@ fn patch_warehouse_dynamic_spawn_links(
             // TTD allow list (derived from include_dyn_slots in its objective zone).
             // linkDynTempl is intentionally left as-is.
             if let Some(obj) = obj_zone {
+                if obj.is_logistics_hub {
+                    continue;
+                }
+                if mult_cfg.dep_farp_warehouse_ids.contains(&wid) {
+                    continue;
+                }
+                if mult_cfg.naval_warehouse_ids.contains(&wid) {
+                    continue;
+                }
                 let allowed_types = obj.per_side.get(&obj.side);
                 let aircrafts: Table = wh.raw_get("aircrafts")?;
                 for cat in ["helicopters", "planes"] {
@@ -6174,6 +6310,66 @@ fn patch_warehouse_dynamic_spawn_links(
                     }
                 }
             }
+            // DEP* dynamic FARP template stocks: prune A/C rows by `TTDdynFARP` allowlist only.
+            if mult_cfg.dep_farp_warehouse_ids.contains(&wid) {
+                if let Some(dyn_allow) = dyn_farp_aircraft_allow {
+                    let aircrafts: Table = wh.raw_get("aircrafts")?;
+                    for cat in ["helicopters", "planes"] {
+                        let Ok(cat_tbl) = aircrafts.raw_get::<_, Table>(cat) else {
+                            continue;
+                        };
+                        for pair in cat_tbl.pairs::<String, Table>() {
+                            let (unit_type, row) = pair?;
+                            let key = (
+                                side,
+                                StdString::from(unit_type.as_str()),
+                            );
+                            let in_dyn = dyn_allow.contains(&key);
+                            if !in_dyn {
+                                let cur = row.raw_get::<_, u32>("initialAmount").unwrap_or(0);
+                                if cur != 0 {
+                                    info!(
+                                        "warehouse {wid}: zeroing {unit_type} amount={cur} (not in {})",
+                                        TTD_DYN_FARP_POLICY_ZONE
+                                    );
+                                    row.raw_set("initialAmount", 0u32)?;
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            // Ship warehouse: `TTDN` + hull caps **initialAmount** only; leave `linkDynTempl` from DT_* emit so
+            // types outside the hull air-wing list still carry dynamic templates (receive landed aircraft / slot later).
+            if mult_cfg.naval_warehouse_ids.contains(&wid) {
+                if let Some(m) = ship_wh_aircraft_allow {
+                    if let Some(allow) = m.get(&wid) {
+                        let aircrafts: Table = wh.raw_get("aircrafts")?;
+                        for cat in ["helicopters", "planes"] {
+                            let Ok(cat_tbl) = aircrafts.raw_get::<_, Table>(cat) else {
+                                continue;
+                            };
+                            for pair in cat_tbl.pairs::<String, Table>() {
+                                let (unit_type, row) = pair?;
+                                let key = (
+                                    side,
+                                    StdString::from(unit_type.as_str()),
+                                );
+                                if !allow.contains(&key) {
+                                    let cur =
+                                        row.raw_get::<_, u32>("initialAmount").unwrap_or(0);
+                                    if cur != 0 {
+                                        info!(
+                                            "warehouse {wid}: zeroing {unit_type} amount={cur} (not in TTDN ship allow for this hull)"
+                                        );
+                                        row.raw_set("initialAmount", 0u32)?;
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
         }
         Ok(())
     }
@@ -6191,6 +6387,8 @@ fn patch_warehouse_dynamic_spawn_links(
         warehouse_caps,
         obj_dyn_allow,
         warehouse_positions,
+        dyn_farp_aircraft_allow,
+        ship_wh_aircraft_allow,
     )
     .context("patching airport linkDynTempl")?;
 
@@ -6208,6 +6406,8 @@ fn patch_warehouse_dynamic_spawn_links(
         warehouse_caps,
         obj_dyn_allow,
         warehouse_positions,
+        dyn_farp_aircraft_allow,
+        ship_wh_aircraft_allow,
     )
     .context("patching warehouse linkDynTempl")?;
     Ok(())
@@ -6315,6 +6515,46 @@ fn logistics_hub_logical_name(display_name: &str) -> StdString {
     }
 }
 
+/// Same key as warehouse backend when `warehouses.airports[id]` owns a dynamic spawn row (`dynamicSpawn`).
+fn airports_dynamic_spawn_backend_key(ap: &Table<'static>, unit_id: i64) -> Result<Option<i64>> {
+    match ap
+        .raw_get::<_, Value>(unit_id)
+        .with_context(|| format_compact!("warehouses.airports[{unit_id}]"))?
+    {
+        Value::Table(t) => {
+            if warehouse_dynamic_spawn_enabled(&t) {
+                Ok(Some(unit_id))
+            } else {
+                Ok(None)
+            }
+        }
+        Value::Nil => Ok(None),
+        other => bail!(
+            "warehouses.airports[{unit_id}]: expected table or nil, got {:?}",
+            other
+        ),
+    }
+}
+
+/// Resolve DEP pad `unitId` → backend key scanning template then `--base`.
+fn dep_farp_backend_key_for_pad(
+    unit_id: i64,
+    warehouse_row_tables: &[&Table<'static>],
+    airports_row_tables: &[&Table<'static>],
+) -> Result<Option<i64>> {
+    for wh in warehouse_row_tables {
+        if farp_own_warehouse_key(wh, unit_id)?.is_some() {
+            return Ok(Some(unit_id));
+        }
+    }
+    for ap in airports_row_tables {
+        if airports_dynamic_spawn_backend_key(ap, unit_id)?.is_some() {
+            return Ok(Some(unit_id));
+        }
+    }
+    Ok(None)
+}
+
 /// `warehouses.warehouses` key for this pad (`unitId`), or `Nil` → shares another pad's row (`whids` apply loop).
 fn farp_own_warehouse_key(
     wh_warehouse: &Table<'static>,
@@ -6331,6 +6571,165 @@ fn farp_own_warehouse_key(
             other
         ),
     }
+}
+
+fn mission_trigger_zone_contains(
+    zone: &miz::TriggerZone<'_>,
+    v: Vector2,
+) -> Result<bool> {
+    let center = zone.pos()?;
+    Ok(match zone.typ()? {
+        TriggerZoneTyp::Circle { radius } => {
+            radius.powi(2) >= na::distance_squared(&v.into(), &center.into())
+        }
+        TriggerZoneTyp::Quad(q) => q.contains(LuaVec2(v)),
+    })
+}
+
+fn is_dep_farp_placement_zone(name: impl AsRef<str>) -> bool {
+    let n = name.as_ref();
+    n.starts_with("BDEPFARP")
+        || n.starts_with("RDEPFARP")
+        || n.starts_with("NDEPFARP")
+}
+
+/// Pad groups for the shipped DEP FARP theatre template (`DEPBFARPPAD0`, …) — naming does not match `BDEPFARP*` triggers.
+fn is_dep_named_template_pad_group(group_name: &str) -> bool {
+    group_name.starts_with("DEPBFARP")
+        || group_name.starts_with("DEPRFARP")
+        || group_name.starts_with("DEPNFARP")
+}
+
+/// When `--base` omitted trigger placement zones (`BDEPFARP*`/`…`), classify pads via template group naming.
+fn extend_dep_farp_backend_ids_from_template_named_groups(
+    base: &LoadedMiz,
+    warehouse_row_tables: &[&Table<'static>],
+    airports_row_tables: &[&Table<'static>],
+    out: &mut HashSet<i64>,
+) -> Result<()> {
+    for (_side, coa) in Side::ALL.into_iter().map(|side| (side, base.mission.coalition(side))) {
+        let coa = coa?;
+        for country in coa.countries()? {
+            let country = country?;
+            for group in vehicle(&country, "static")?
+                .chain(vehicle(&country, "plane")?)
+                .chain(vehicle(&country, "helicopter")?)
+            {
+                let group = group?;
+                let Ok(group_name) = group.raw_get::<_, String>("name") else {
+                    continue;
+                };
+                if !is_dep_named_template_pad_group(&group_name) {
+                    continue;
+                }
+                let Ok(units) = group.raw_get::<_, Table>("units") else {
+                    continue;
+                };
+                for unit in units.clone().pairs::<Value, Table>() {
+                    let unit = unit?.1;
+                    let typ: String = unit.raw_get("type")?;
+                    let typ_s = typ.as_str();
+                    if typ_s != "FARP"
+                        && typ_s != "SINGLE_HELIPAD"
+                        && typ_s != "FARP_SINGLE_01"
+                        && typ_s != "Invisible FARP"
+                    {
+                        continue;
+                    }
+                    let unit_id: i64 = unit.raw_get("unitId")?;
+                    if dep_farp_backend_key_for_pad(
+                        unit_id,
+                        warehouse_row_tables,
+                        airports_row_tables,
+                    )?
+                    .is_some()
+                    {
+                        out.insert(unit_id);
+                    }
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Backend keys (`warehouses.warehouses` or `warehouses.airports`) for DEP FARP template pads.
+///
+/// (1) FARP-type units inside optional trigger zones `BDEPFARP*` / `RDEPFARP*` / `NDEPFARP*`.
+/// (2) FARP-type units in static groups named `DEPBFARP*` / `DEPRFARP*` / `DEPNFARP*` (Caucasus-style template).
+///
+/// Rows may appear only under `--base` OR only under `warehouse<campaign_decade>.miz`; pass both lookups.
+fn collect_dep_farp_warehouse_ids(
+    base: &LoadedMiz,
+    warehouse_row_tables: &[&Table<'static>],
+    airports_row_tables: &[&Table<'static>],
+) -> Result<HashSet<i64>> {
+    let mut out: HashSet<i64> = HashSet::default();
+    for zr in base.mission.triggers()? {
+        let zone = zr?;
+        let name = zone.name()?;
+        if !is_dep_farp_placement_zone(name.as_str()) {
+            continue;
+        }
+        for (_side, coa) in
+            Side::ALL.into_iter().map(|side| (side, base.mission.coalition(side)))
+        {
+            let coa = coa?;
+            for country in coa.countries()? {
+                let country = country?;
+                for group in vehicle(&country, "static")?
+                    .chain(vehicle(&country, "plane")?)
+                    .chain(vehicle(&country, "helicopter")?)
+                {
+                    let group = group?;
+                    for unit in
+                        group.raw_get::<_, Table>("units")?.pairs::<Value, Table>()
+                    {
+                        let unit = unit?.1;
+                        let typ: String = unit.raw_get("type")?;
+                        let typ_s = typ.as_str();
+                        if typ_s != "FARP"
+                            && typ_s != "SINGLE_HELIPAD"
+                            && typ_s != "FARP_SINGLE_01"
+                            && typ_s != "Invisible FARP"
+                        {
+                            continue;
+                        }
+                        let x: f64 = unit.raw_get("x")?;
+                        let y: f64 = unit.raw_get("y")?;
+                        if !mission_trigger_zone_contains(&zone, Vector2::new(x, y))? {
+                            continue;
+                        }
+                        let unit_id: i64 = unit.raw_get("unitId")?;
+                        if dep_farp_backend_key_for_pad(
+                            unit_id,
+                            warehouse_row_tables,
+                            airports_row_tables,
+                        )?
+                        .is_some()
+                        {
+                            out.insert(unit_id);
+                        }
+                    }
+                }
+            }
+        }
+    }
+    let n_from_triggers = out.len();
+    extend_dep_farp_backend_ids_from_template_named_groups(
+        base,
+        warehouse_row_tables,
+        airports_row_tables,
+        &mut out,
+    )?;
+    let n_from_groups = out.len().saturating_sub(n_from_triggers);
+    info!(
+        "DEP FARP backend keys: {} from B/R/NDEPFARP placement trigger zone(s), +{} from DEPBFARP*/DEPRFARP*/DEPNFARP* pad group name(s), {} unique total",
+        n_from_triggers,
+        n_from_groups,
+        out.len()
+    );
+    Ok(out)
 }
 
 fn validate_single_airbase_per_objective(
@@ -6473,6 +6872,37 @@ fn collect_hub_warehouse_ids_from_objectives(
                     }
                 }
             }
+        }
+    }
+    Ok(out)
+}
+
+/// Deterministic OLO* hub airport ids from objective zone `airbaseID` properties.
+fn collect_hub_airport_ids_from_olo_airbase_props(
+    base: &LoadedMiz,
+) -> Result<HashSet<i64>> {
+    let mut out: HashSet<i64> = HashSet::default();
+    for zone in base.mission.triggers()? {
+        let zone = zone?;
+        let name = zone.name()?;
+        if !name.starts_with("OLO") {
+            continue;
+        }
+        for prop in zone.properties()? {
+            let prop = prop?;
+            if !prop.key.eq_ignore_ascii_case("airbaseID") {
+                continue;
+            }
+            let raw = prop.value.trim();
+            if raw.is_empty() {
+                break;
+            }
+            if let Ok(id) = raw.parse::<i64>() {
+                if id > 0 {
+                    out.insert(id);
+                }
+            }
+            break;
         }
     }
     Ok(out)
@@ -6704,6 +7134,7 @@ pub fn run(cfg: &MizCmd) -> Result<()> {
     let airbase_max = wm.and_then(|w| w.airbase_max).unwrap_or(cfg.warehouse_airbase_max);
     let hub_max = wm.and_then(|w| w.hub_max).unwrap_or(cfg.warehouse_hub_max);
     let fob_max = wm.and_then(|w| w.fob_max).unwrap_or(1);
+    let farp_max = wm.and_then(|w| w.farp_max).unwrap_or(fob_max);
     let carrier_airbase_max = wm.and_then(|w| w.carrier_airbase_max).unwrap_or(1);
 
     let mut hub_airport_ids: HashSet<i64> = HashSet::default();
@@ -6933,6 +7364,9 @@ pub fn run(cfg: &MizCmd) -> Result<()> {
     info!("wrote serialized mission to mission file.");
     let ship_wh_map = collect_ship_warehouse_group_map(&base)?;
     let naval_warehouse_ids: HashSet<i64> = ship_wh_map.keys().copied().collect();
+    let olo_hub_airport_ids = collect_hub_airport_ids_from_olo_airbase_props(&base)
+        .context("collecting OLO* hub airport ids from objective airbaseID props")?;
+    hub_airport_ids.extend(olo_hub_airport_ids);
     let inferred_hub_airport_ids = infer_hub_airport_ids_from_objectives(
         &objectives,
         &objective_aircraft_by_side,
@@ -6944,25 +7378,74 @@ pub fn run(cfg: &MizCmd) -> Result<()> {
         .difference(&hub_airport_ids)
         .copied()
         .collect();
+    let tpl_wh_tbl: Option<Table<'static>> = match warehouse_bundle.as_ref() {
+        Some(wb) => Some(
+            wb.loaded
+                .warehouses
+                .raw_get::<_, Table>("warehouses")
+                .with_context(|| {
+                    format_compact!(
+                        "warehouse template `{}` warehouses.warehouses for DEP* FARP key detection",
+                        wb.path.display()
+                    )
+                })?,
+        ),
+        None => None,
+    };
+    let base_wh_tbl = base
+        .warehouses
+        .raw_get::<_, Table>("warehouses")
+        .context("--base warehouses.warehouses for DEP* FARP key detection")?;
+    let mut dep_ww_candidate_tables: Vec<&Table<'static>> = Vec::new();
+    if let Some(ref t) = tpl_wh_tbl {
+        dep_ww_candidate_tables.push(t);
+    }
+    dep_ww_candidate_tables.push(&base_wh_tbl);
+
+    let tpl_air_tbl: Option<Table<'static>> = warehouse_bundle
+        .as_ref()
+        .and_then(|wb| wb.loaded.warehouses.raw_get::<_, Table>("airports").ok());
+    let base_air_tbl: Option<Table<'static>> =
+        base.warehouses.raw_get::<_, Table>("airports").ok();
+    let mut dep_air_candidate_tables: Vec<&Table<'static>> = Vec::new();
+    if let Some(ref t) = tpl_air_tbl {
+        dep_air_candidate_tables.push(t);
+    }
+    if let Some(ref t) = base_air_tbl {
+        dep_air_candidate_tables.push(t);
+    }
+
+    let dep_farp_warehouse_ids = collect_dep_farp_warehouse_ids(
+        &base,
+        &dep_ww_candidate_tables,
+        &dep_air_candidate_tables,
+    )
+    .context(
+        "collecting DEP* (BDEPFARP*/RDEPFARP*/NDEPFARP*) dynamic FARP template warehouse ids",
+    )?;
     let mult_cfg = WarehouseStockMultConfig {
         airbase_max,
         hub_max,
         fob_max,
+        farp_max,
         carrier_airbase_max,
         hub_airport_ids,
         hub_warehouse_ids,
         fob_warehouse_ids,
+        dep_farp_warehouse_ids,
         naval_warehouse_ids,
     };
     warn!(
-        "warehouse stock multipliers: airbase_max={} hub_max={} fob_max={} carrier_airbase_max={}; hub airport keys {:?}; hub warehouse keys {:?}; fob warehouse keys {:?}; {} naval warehouse id(s)",
+        "warehouse stock multipliers: airbase_max={} hub_max={} fob_max={} farp_max={} carrier_airbase_max={}; hub airport keys {:?}; hub warehouse keys {:?}; fob warehouse keys {:?}; DEP FARP template keys {:?}; {} naval warehouse id(s)",
         mult_cfg.airbase_max,
         mult_cfg.hub_max,
         mult_cfg.fob_max,
+        mult_cfg.farp_max,
         mult_cfg.carrier_airbase_max,
         mult_cfg.hub_airport_ids,
         mult_cfg.hub_warehouse_ids,
         mult_cfg.fob_warehouse_ids,
+        mult_cfg.dep_farp_warehouse_ids,
         mult_cfg.naval_warehouse_ids.len()
     );
     let missing_default_warehouse_keys = campaign_overlay
@@ -7035,6 +7518,22 @@ pub fn run(cfg: &MizCmd) -> Result<()> {
             )?;
         let obj_dyn_allow = build_objective_dyn_allow(&base, &dynamic_emit.dyn_templates)
             .context("building per-base objective dyn allow map")?;
+        let dyn_farp_allow =
+            build_dyn_farp_aircraft_allow(&base, &dynamic_emit.dyn_templates).context(
+                "building TTDdynFARP allowlist for DEP dynamic FARP warehouse A/C stocks",
+            )?;
+        if !mult_cfg.dep_farp_warehouse_ids.is_empty() && dyn_farp_allow.is_none() {
+            warn!(
+                "DEP dynamic FARP template warehouse rows exist but `{}` is not enabled in SETTINGS-dynamic-slots-creation; A/C allowlist pruning for those rows is skipped (full coalition inventory copy still applies).",
+                TTD_DYN_FARP_POLICY_ZONE,
+            );
+        }
+        let ship_wh_allow = build_ship_warehouse_aircraft_allow(
+            &base,
+            &dynamic_emit.dyn_templates,
+            &ship_wh_map,
+        )
+        .context("building per-ship TTDN aircraft allowlists for naval warehouse rows")?;
         // Collect positions for all dynamic warehouse rows so per-zone filtering can find
         // their containing O* zone. Airport positions come from groups with airdromId;
         // FARP/FOB positions come from the unit with the matching unitId.
@@ -7096,6 +7595,8 @@ pub fn run(cfg: &MizCmd) -> Result<()> {
             warehouse_defaults,
             &obj_dyn_allow,
             &warehouse_positions,
+            dyn_farp_allow.as_ref(),
+            Some(&ship_wh_allow),
         )
         .context("patching warehouse linkDynTempl")?;
         if let Some(caps) = warehouse_defaults {

@@ -1904,6 +1904,7 @@ impl Default for Cfg {
                 hub_max: 25,
                 airbase_max: 5,
                 fob_max: 1,
+                farp_max: 1,
                 carrier_airbase_max: 1,
                 tick: 10,
                 ticks_per_delivery: 6,

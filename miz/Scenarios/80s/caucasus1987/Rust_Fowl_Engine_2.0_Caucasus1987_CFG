@@ -23,7 +23,7 @@
   "max_msgs_per_second": 5,
   "shutdown": 12,
   "points": {
-    "new_player_join": 190,
+    "new_player_join": 190000,
     "air_kill": 25,
     "ground_kill": 2,
     "lr_sam_bonus": 5,
@@ -73,9 +73,10 @@
   "default_warehouse_Fueltanks": 50,
   "default_warehouse_Misc": 100,
   "warehouse": {
-    "fob_max": 2,
-    "carrier_airbase_max": 3, 
-    "airbase_max": 4,
+    "farp_max": 100,
+    "fob_max": 3,
+    "carrier_airbase_max": 4, 
+    "airbase_max": 5,
     "hub_max": 10,
     "dynamicFARPs_InitialStockPercentage": 20,
     "tick": 5,
@@ -3581,7 +3582,7 @@
       "EngagesWeapons",
       "Driveable"
     ],
-    "ATZ-5": [
+    "ATZ-10": [
       "Logistics",
       "Unarmed"
     ],
