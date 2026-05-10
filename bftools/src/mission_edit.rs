@@ -6109,6 +6109,8 @@ fn validate_objective_airbase_ids(base: &LoadedMiz) -> Result<(Vec<StdString>, V
 ///    `TTDNRKuznecow`), set `initialAmount = 0` for aircraft types not listed in that hull’s `TTDN*` zone
 ///    (stock caps the air wing). Keep `linkDynTempl` from DT_* emit for other coalition types so landed
 ///    aircraft can be warehoused and slotted later.
+/// 4. `weapons` from B/RINVENTORY: when a weapon bridge is loaded, drop rows whose `wsType` is not carried
+///    by any aircraft type allowed for the same hub policy as A/C (`O*`, `TTDdynFARP`, per-hull `TTDN*`).
 /// If ground bases still misbehave, consider generalising this 3-step pattern to airports / FARPs.
 ///
 /// Carrier naming / zones are validated earlier by `audit_naval_carrier_mission_rules` (build fails if invalid).
@@ -6124,6 +6126,7 @@ fn patch_warehouse_dynamic_spawn_links(
     warehouse_positions: &HashMap<i64, Vector2>,
     dyn_farp_aircraft_allow: Option<&HashSet<(Side, StdString)>>,
     ship_wh_aircraft_allow: Option<&HashMap<i64, HashSet<(Side, StdString)>>>,
+    weapon_bridge: Option<&weapon_bridge::WeaponBridgeMap>,
 ) -> Result<()> {
     fn patch_table(
         lua: &Lua,
@@ -6138,6 +6141,7 @@ fn patch_warehouse_dynamic_spawn_links(
         warehouse_positions: &HashMap<i64, Vector2>,
         dyn_farp_aircraft_allow: Option<&HashSet<(Side, StdString)>>,
         ship_wh_aircraft_allow: Option<&HashMap<i64, HashSet<(Side, StdString)>>>,
+        weapon_bridge: Option<&weapon_bridge::WeaponBridgeMap>,
     ) -> Result<()> {
         fn copy_initial_amounts_scaled(
             lua: &Lua,
@@ -6370,6 +6374,57 @@ fn patch_warehouse_dynamic_spawn_links(
                     }
                 }
             }
+
+            if let Some(br) = weapon_bridge {
+                let mut policy_types: Option<HashSet<StdString>> = None;
+                if mult_cfg.naval_warehouse_ids.contains(&wid) {
+                    if let Some(m) = ship_wh_aircraft_allow {
+                        if let Some(allow) = m.get(&wid) {
+                            let mut hs = HashSet::<StdString>::default();
+                            for (s, ut) in allow {
+                                if *s == side {
+                                    hs.insert(ut.clone());
+                                }
+                            }
+                            policy_types = Some(hs);
+                        }
+                    }
+                } else if mult_cfg.dep_farp_warehouse_ids.contains(&wid) {
+                    if let Some(da) = dyn_farp_aircraft_allow {
+                        let hs: HashSet<StdString> = da
+                            .iter()
+                            .filter(|(s, _)| *s == side)
+                            .map(|(_, ut)| ut.clone())
+                            .collect();
+                        policy_types = Some(hs);
+                    }
+                } else if let Some(obj) = obj_zone {
+                    if !obj.is_logistics_hub
+                        && !mult_cfg.dep_farp_warehouse_ids.contains(&wid)
+                        && !mult_cfg.naval_warehouse_ids.contains(&wid)
+                    {
+                        if let Some(ts) = obj.per_side.get(&obj.side) {
+                            policy_types = Some(ts.iter().cloned().collect());
+                        }
+                    }
+                }
+
+                if let Some(names) = policy_types {
+                    let empty_strip = HashSet::<[i32; 4]>::new();
+                    let seed = br.weapon_ws_for_aircrafts(&names);
+                    let allowed_ws = br.expand_ws_alias_family(&seed);
+                    let wlog = format!(
+                        "warehouse {wid} weapons (B/RINVENTORY filtered to allowed-aircraft wsTypes)"
+                    );
+                    prune_warehouse_weapons_row(
+                        lua,
+                        &wh,
+                        &empty_strip,
+                        Some(&allowed_ws),
+                        &wlog,
+                    )?;
+                }
+            }
         }
         Ok(())
     }
@@ -6389,6 +6444,7 @@ fn patch_warehouse_dynamic_spawn_links(
         warehouse_positions,
         dyn_farp_aircraft_allow,
         ship_wh_aircraft_allow,
+        weapon_bridge,
     )
     .context("patching airport linkDynTempl")?;
 
@@ -6408,6 +6464,7 @@ fn patch_warehouse_dynamic_spawn_links(
         warehouse_positions,
         dyn_farp_aircraft_allow,
         ship_wh_aircraft_allow,
+        weapon_bridge,
     )
     .context("patching warehouse linkDynTempl")?;
     Ok(())
@@ -7597,6 +7654,7 @@ pub fn run(cfg: &MizCmd) -> Result<()> {
             &warehouse_positions,
             dyn_farp_allow.as_ref(),
             Some(&ship_wh_allow),
+            weapon_bridge_map.as_ref(),
         )
         .context("patching warehouse linkDynTempl")?;
         if let Some(caps) = warehouse_defaults {
