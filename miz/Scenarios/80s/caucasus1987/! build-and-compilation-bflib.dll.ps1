@@ -1,3 +1,8 @@
+param(
+    # When set, skips the prompt and runs without cargo clean (same as pressing any key other than Y).
+    [switch]$SkipClean
+)
+
 ############################################################
 # Load shared file/location configuration                  #
 ############################################################
@@ -83,6 +88,28 @@ try {
         }
     }
 
+    $runSkipClean = $false
+    if ($PSBoundParameters.ContainsKey('SkipClean')) {
+        $runSkipClean = [bool]$SkipClean
+        Write-Host "SkipClean from command line: skip cargo clean = $runSkipClean (no prompt)." -ForegroundColor DarkGray
+    }
+    else {
+        Write-Host ""
+        Write-Host "Press Y to run cargo clean, then cargo build --release --package=bflib (full rebuild)." -ForegroundColor Cyan
+        Write-Host "Press any other key to skip cargo clean and run cargo build --release --package=bflib only." -ForegroundColor Cyan
+        Write-Host ""
+        Write-Host "Waiting for a key press..." -ForegroundColor DarkGray
+        $k = [Console]::ReadKey($true)
+        if ($k.KeyChar -eq 'y' -or $k.KeyChar -eq 'Y') {
+            $runSkipClean = $false
+            Write-Host "Selected: cargo clean + release build." -ForegroundColor Green
+        }
+        else {
+            $runSkipClean = $true
+            Write-Host "Selected: skip cargo clean (release build only)." -ForegroundColor Green
+        }
+    }
+
     Set-Location -Path "$work_path_engine" -ErrorAction Stop
 
     $env:LUA_LIB = Get-Location
@@ -95,10 +122,15 @@ try {
 
     Write-Host "`n--- bflib.dll build started: $(Get-Date) ---" -ForegroundColor Cyan
 
-    Write-Host "`nRunning cargo clean..."
-    cargo clean
-    if ($LASTEXITCODE -ne 0) {
-        Write-Host "WARNING: cargo clean failed (files under target\ may be locked by IDE, another cargo, or AV). Continuing with release build without clean." -ForegroundColor Yellow
+    if ($runSkipClean) {
+        Write-Host "Skipping cargo clean (not Y, or -SkipClean)." -ForegroundColor Yellow
+    }
+    else {
+        Write-Host "`nRunning cargo clean..."
+        cargo clean
+        if ($LASTEXITCODE -ne 0) {
+            Write-Host "WARNING: cargo clean failed (files under target\ may be locked by IDE, another cargo, or AV). Continuing with release build without clean." -ForegroundColor Yellow
+        }
     }
 
     Write-Host "`nStarting release build: package bflib..." -ForegroundColor Yellow

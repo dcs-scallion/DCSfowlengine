@@ -6,8 +6,7 @@ edition = "2021"
 [profile.release]
 codegen-units = 1
 opt-level = 3
-# Full LTO + aws-lc-sys (rustls) can make lib.exe fail on Windows (e.g. exit 1114) after a clean rebuild.
-lto = "thin"
+lto = true
 debug = false
 
 [[bin]]

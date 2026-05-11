@@ -1,5 +1,5 @@
 param(
-    # Full `cargo clean` before release build can hit locked files or stress link; skip for faster iteration.
+    # When set, skips the prompt and runs without cargo clean (same as pressing any key other than Y).
     [switch]$SkipClean
 )
 
@@ -34,6 +34,28 @@ try {
         }
     }
 
+    $runSkipClean = $false
+    if ($PSBoundParameters.ContainsKey('SkipClean')) {
+        $runSkipClean = [bool]$SkipClean
+        Write-Host "SkipClean from command line: skip cargo clean = $runSkipClean (no prompt)." -ForegroundColor DarkGray
+    }
+    else {
+        Write-Host ""
+        Write-Host "Press Y to run cargo clean, then cargo build --release (full rebuild)." -ForegroundColor Cyan
+        Write-Host "Press any other key to skip cargo clean and run cargo build --release only." -ForegroundColor Cyan
+        Write-Host ""
+        Write-Host "Waiting for a key press..." -ForegroundColor DarkGray
+        $k = [Console]::ReadKey($true)
+        if ($k.KeyChar -eq 'y' -or $k.KeyChar -eq 'Y') {
+            $runSkipClean = $false
+            Write-Host "Selected: cargo clean + release build." -ForegroundColor Green
+        }
+        else {
+            $runSkipClean = $true
+            Write-Host "Selected: skip cargo clean (release build only)." -ForegroundColor Green
+        }
+    }
+
     $bftoolsRel = if ($null -eq $bftools) { '' } else { $bftools.TrimStart('\') }
     $bftoolsDir = Join-Path $work_path_engine $bftoolsRel
     Set-Location -Path $bftoolsDir -ErrorAction Stop
@@ -45,8 +67,8 @@ try {
         ""
     ) | Set-Content -Path $CargoLogFile -Encoding utf8
 
-    if ($SkipClean) {
-        Write-Host "Skipping cargo clean (-SkipClean)." -ForegroundColor Yellow
+    if ($runSkipClean) {
+        Write-Host "Skipping cargo clean (not Y, or -SkipClean)." -ForegroundColor Yellow
     }
     else {
         Write-Host "Running cargo clean..."
