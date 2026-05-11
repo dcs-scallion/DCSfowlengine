@@ -6411,8 +6411,8 @@ fn patch_warehouse_dynamic_spawn_links(
 
                 if let Some(names) = policy_types {
                     let empty_strip = HashSet::<[i32; 4]>::new();
-                    let seed = br.weapon_ws_for_aircrafts(&names);
-                    let allowed_ws = br.expand_ws_alias_family(&seed);
+                    // No expand_ws_alias_family: token families merge unrelated ordnance (e.g. heli FOB vs jet bombs).
+                    let allowed_ws = br.weapon_ws_for_aircrafts(&names);
                     let wlog = format!(
                         "warehouse {wid} weapons (B/RINVENTORY filtered to allowed-aircraft wsTypes)"
                     );
