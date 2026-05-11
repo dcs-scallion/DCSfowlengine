@@ -2507,6 +2507,12 @@ impl VehicleTemplates {
 struct WarehouseTemplate {
     blue_inventory: Table<'static>,
     red_inventory: Table<'static>,
+    /// Optional Invisible FARP warehouse rows: merged into B/RINVENTORY after validation (stock by `wsType`).
+    blue_inventory_plus: Option<Table<'static>>,
+    red_inventory_plus: Option<Table<'static>>,
+    /// Trigger zone `BINVENTORY+` / `RINVENTORY+`: module-only rows (Key = warehouse item label, Value = airframe module type) to supplement inventory allowlist.
+    zone_plus_blue: Vec<InventoryZonePlusModuleEntry>,
+    zone_plus_red: Vec<InventoryZonePlusModuleEntry>,
     blue_default: Table<'static>,
     red_default: Table<'static>,
     blue_default_plus: Table<'static>,
@@ -2522,6 +2528,9 @@ struct WarehouseBundle {
     path: PathBuf,
     loaded: LoadedMiz,
     template: WarehouseTemplate,
+    /// wsTypes added to the allowlist by BINVENTORY+/RINVENTORY+ zone module links (not in weapon bridge).
+    zone_extra_ws_blue: HashSet<[i32; 4]>,
+    zone_extra_ws_red: HashSet<[i32; 4]>,
 }
 
 /// Rows zeroed during build (`aircrafts` stock without weapon.miz template for that coalition).
@@ -3048,13 +3057,303 @@ fn warehouse_allowlist_for_filter(
     opt.as_ref().filter(|s| !s.is_empty())
 }
 
+fn warehouse_weapon_display_name(w: &Table) -> StdString {
+    for key in ["name", "desc", "displayName", "Name"] {
+        if let Ok(s) = w.raw_get::<_, String>(key) {
+            if !s.is_empty() {
+                return StdString::from(s.as_str());
+            }
+        }
+    }
+    if let Ok(wst) = w.raw_get::<_, Table>("wsType") {
+        let a = wst.raw_get::<_, i32>(1).unwrap_or(0);
+        let b = wst.raw_get::<_, i32>(2).unwrap_or(0);
+        let c = wst.raw_get::<_, i32>(3).unwrap_or(0);
+        let d = wst.raw_get::<_, i32>(4).unwrap_or(0);
+        return format!("wsType [{a},{b},{c},{d}]").into();
+    }
+    StdString::from("weapon row (no wsType)")
+}
+
+fn read_weapon_ws_type(w: &Table) -> Option<[i32; 4]> {
+    let wst: Table = w.raw_get("wsType").ok()?;
+    Some([
+        wst.raw_get(1).ok()?,
+        wst.raw_get(2).ok()?,
+        wst.raw_get(3).ok()?,
+        wst.raw_get(4).ok()?,
+    ])
+}
+
+#[derive(Clone, Debug)]
+struct InventoryZonePlusModuleEntry {
+    item_name: StdString,
+    module: StdString,
+}
+
+fn collect_inventory_weapon_display_name_to_ws(
+    inv_row: &Table,
+) -> Result<HashMap<StdString, [i32; 4]>> {
+    let mut out: HashMap<StdString, [i32; 4]> = HashMap::new();
+    let Ok(weapons) = inv_row.raw_get::<_, Table>("weapons") else {
+        return Ok(out);
+    };
+    for pair in weapons.clone().pairs::<Value, Table>() {
+        let (_, w) = pair?;
+        let Some(ws) = read_weapon_ws_type(&w) else {
+            continue;
+        };
+        if ws == [0, 0, 0, 0] {
+            continue;
+        }
+        let disp = warehouse_weapon_display_name(&w);
+        if disp.starts_with("wsType [") || disp == "weapon row (no wsType)" {
+            continue;
+        }
+        if let Some(existing) = out.get(&disp) {
+            if *existing != ws {
+                warn!(
+                    "warehouse inventory name conflict: `{}` maps to multiple wsTypes; keeping first [{}, {}, {}, {}]",
+                    disp, existing[0], existing[1], existing[2], existing[3]
+                );
+            }
+            continue;
+        }
+        out.insert(disp, ws);
+    }
+    Ok(out)
+}
+
+/// B/RINVENTORY+ FARP rows (hybrid stock) are not in main inventory until merge; include them for
+/// zone Key→wsType resolution and substring narrowing.
+fn merge_inventory_plus_weapon_resolution_hints(
+    inv_name_to_ws: &mut HashMap<StdString, [i32; 4]>,
+    inv_weapon_ws: &mut HashSet<[i32; 4]>,
+    plus: Option<&Table<'static>>,
+) -> Result<()> {
+    let Some(row) = plus else {
+        return Ok(());
+    };
+    inv_weapon_ws.extend(collect_inventory_weapon_ws_set(row)?);
+    for (k, v) in collect_inventory_weapon_display_name_to_ws(row)? {
+        inv_name_to_ws.entry(k).or_insert(v);
+    }
+    Ok(())
+}
+
+fn compile_inventory_zone_plus_directives(
+    mission: &Miz,
+) -> Result<(Vec<InventoryZonePlusModuleEntry>, Vec<InventoryZonePlusModuleEntry>)> {
+    let mut blue = Vec::new();
+    let mut red = Vec::new();
+    for zone_r in mission.triggers()? {
+        let zone = zone_r?;
+        let zname = zone.name()?;
+        let zname_ref = zname.as_ref();
+        let target = if zname_ref == "BINVENTORY+" {
+            &mut blue
+        } else if zname_ref == "RINVENTORY+" {
+            &mut red
+        } else {
+            continue;
+        };
+        for prop_r in zone.properties()? {
+            let prop = prop_r?;
+            let item = prop.key.as_ref().trim();
+            if item.is_empty() {
+                continue;
+            }
+            let val = prop.value.as_ref().trim();
+            if val.is_empty() {
+                warn!(
+                    "{zname_ref} zone: skip property with empty Value for item `{item}`"
+                );
+                continue;
+            }
+            if val.parse::<u32>().is_ok() {
+                info!(
+                    "{zname_ref} zone: skip `{item}` = `{val}` (quantities: use Invisible FARP BINVENTORY+ / RINVENTORY+ warehouse rows; zones are module links only: Value = airframe module type)"
+                );
+                continue;
+            }
+            target.push(InventoryZonePlusModuleEntry {
+                item_name: StdString::from(item),
+                module: StdString::from(val),
+            });
+        }
+    }
+    if !blue.is_empty() {
+        info!(
+            "BINVENTORY+ trigger zone: {} module link row(s) (allowlist supplement)",
+            blue.len()
+        );
+    }
+    if !red.is_empty() {
+        info!(
+            "RINVENTORY+ trigger zone: {} module link row(s) (allowlist supplement)",
+            red.len()
+        );
+    }
+    Ok((blue, red))
+}
+
+fn collect_inventory_weapon_ws_set(inv_row: &Table) -> Result<HashSet<[i32; 4]>> {
+    let mut out = HashSet::new();
+    let Ok(weapons) = inv_row.raw_get::<_, Table>("weapons") else {
+        return Ok(out);
+    };
+    for pair in weapons.clone().pairs::<Value, Table>() {
+        let (_, w) = pair?;
+        if let Some(ws) = read_weapon_ws_type(&w) {
+            if ws != [0, 0, 0, 0] {
+                out.insert(ws);
+            }
+        }
+    }
+    Ok(out)
+}
+
+fn resolve_zone_link_ws_list(
+    item_name: &str,
+    inv_map: &HashMap<StdString, [i32; 4]>,
+    inv_weapon_ws: Option<&HashSet<[i32; 4]>>,
+    br: &weapon_bridge::WeaponBridgeMap,
+) -> Vec<[i32; 4]> {
+    if let Some(ws) = inv_map.get(item_name) {
+        return vec![*ws];
+    }
+    let needle = item_name.trim();
+    if !needle.is_empty() {
+        let mut sub_ws: Vec<[i32; 4]> = inv_map
+            .iter()
+            .filter(|(k, _)| {
+                let ks = k.as_str();
+                ks.contains(needle) || needle.contains(ks)
+            })
+            .map(|(_, ws)| *ws)
+            .collect();
+        sub_ws.sort_by_key(|w| (w[0], w[1], w[2], w[3]));
+        sub_ws.dedup();
+        if sub_ws.len() == 1 {
+            return sub_ws;
+        }
+        if sub_ws.len() > 1 {
+            let n_amb = sub_ws.len();
+            if let Some(inv) = inv_weapon_ws {
+                let narrowed: Vec<[i32; 4]> =
+                    sub_ws.into_iter().filter(|w| inv.contains(w)).collect();
+                if narrowed.len() == 1 {
+                    return narrowed;
+                }
+                if !narrowed.is_empty() {
+                    return narrowed;
+                }
+            }
+            warn!(
+                "BINVENTORY+/RINVENTORY+ zone: ambiguous inventory label match for `{item_name}` ({n_amb} distinct wsType(s) from display-name substring; use exact warehouse display name as Key or one B/RINVENTORY row)",
+            );
+            return Vec::new();
+        }
+    }
+    if let Some(ws) = br.ws_type_for_descriptor(item_name) {
+        if ws != [0, 0, 0, 0] {
+            return vec![ws];
+        }
+    }
+    let cand = br.ws_types_for_descriptor_or_key_substring(item_name);
+    if cand.is_empty() {
+        return Vec::new();
+    }
+    if cand.len() == 1 {
+        return cand.into_iter().collect();
+    }
+    if let Some(inv) = inv_weapon_ws {
+        let mut narrowed: Vec<[i32; 4]> = cand
+            .iter()
+            .copied()
+            .filter(|w| inv.contains(w))
+            .collect();
+        if !narrowed.is_empty() {
+            narrowed.sort_by_key(|w| (w[0], w[1], w[2], w[3]));
+            narrowed.dedup();
+            return narrowed;
+        }
+    }
+    warn!(
+        "BINVENTORY+/RINVENTORY+ zone: no inventory wsType match for `{item_name}` ({} bridge candidates; add a matching weapon row in B/RINVENTORY or use an exact bridge key)",
+        cand.len()
+    );
+    Vec::new()
+}
+
+fn merge_inventory_zone_plus_into_allowlist(
+    br: Option<&weapon_bridge::WeaponBridgeMap>,
+    entries: &[InventoryZonePlusModuleEntry],
+    inv_name_to_ws: &HashMap<StdString, [i32; 4]>,
+    inv_weapon_ws: Option<&HashSet<[i32; 4]>>,
+    into_allowlist: &mut HashSet<[i32; 4]>,
+    label: &str,
+) -> Result<HashSet<[i32; 4]>> {
+    let mut added: HashSet<[i32; 4]> = HashSet::default();
+    let Some(br) = br else {
+        if !entries.is_empty() {
+            warn!(
+                "{label} zone: {} module link row(s) ignored (weapon bridge required)",
+                entries.len()
+            );
+        }
+        return Ok(added);
+    };
+    for e in entries {
+        let wss = resolve_zone_link_ws_list(
+            e.item_name.as_str(),
+            inv_name_to_ws,
+            inv_weapon_ws,
+            br,
+        );
+        if wss.is_empty() {
+            warn!(
+                "{label} zone: skip `{}` -> `{}` (could not resolve warehouse item to wsType(s))",
+                e.item_name, e.module,
+            );
+            continue;
+        }
+        let mut one = HashSet::new();
+        one.insert(e.module.clone());
+        let implied = br.weapon_ws_for_aircrafts(&one);
+        for ws in wss {
+            if !(ws[0] == 4 && ((4..=8).contains(&ws[1]) || ws[1] == 15)) {
+                continue;
+            }
+            if implied.contains(&ws) {
+                info!(
+                    "{label} zone: wsType [{}, {}, {}, {}] for `{}` module `{}` already in bridge for that module string (inventory allowlist unchanged); still recording for dynamic hub weapon hint (TTD policy keys can differ from zone Value spelling)",
+                    ws[0], ws[1], ws[2], ws[3], e.item_name, e.module
+                );
+            } else {
+                into_allowlist.insert(ws);
+                info!(
+                    "{label} zone: allowlist + wsType [{}, {}, {}, {}] for `{}` module `{}` (manual link)",
+                    ws[0], ws[1], ws[2], ws[3], e.item_name, e.module
+                );
+            }
+            // Dynamic-spawn prune uses TTD template type strings; zone `Value` can spell the same
+            // module differently than `include_dyn_slots` — always keep resolved ws for hub hint.
+            added.insert(ws);
+        }
+    }
+    Ok(added)
+}
+
 /// Drops `row.weapons` whose `wsType` is in `strip_ws`; if `allowed_ws` is set, keeps only rows in allowlist.
+/// When `inventory_allowlist_plus_hint` is set and a row is dropped by allowlist, logs `warn!` for mission editors.
 fn prune_warehouse_weapons_row(
     lua: &Lua,
     row: &Table,
     strip_ws: &HashSet<[i32; 4]>,
     allowed_ws: Option<&HashSet<[i32; 4]>>,
     log_label: &str,
+    inventory_allowlist_plus_hint: Option<&'static str>,
 ) -> Result<usize> {
     let Ok(weapons) = row.raw_get::<_, Table>("weapons") else {
         return Ok(0);
@@ -3087,6 +3386,19 @@ fn prune_warehouse_weapons_row(
         }
         if let Some(allowed) = allowed_ws {
             if !allowed.contains(&ws) {
+                if let Some(plus) = inventory_allowlist_plus_hint {
+                    let disp = warehouse_weapon_display_name(&w);
+                        warn!(
+                            "{}: removed {} (wsType [{}, {}, {}, {}]): not allowed by weapon.miz coalition slot templates; add Invisible FARP B/RINVENTORY+ warehouse rows for extra stock, or trigger zone B/RINVENTORY+ module links (Key=item label, Value=airframe module type). Hint: {}.",
+                            log_label,
+                            disp,
+                            ws[0],
+                            ws[1],
+                            ws[2],
+                            ws[3],
+                            plus,
+                        );
+                }
                 removed += 1;
                 continue;
             }
@@ -3108,6 +3420,8 @@ impl WarehouseTemplate {
     fn new(wht: &LoadedMiz, cfg: &MizCmd) -> Result<Self> {
         let mut blue_inventory_id = 0;
         let mut red_inventory_id = 0;
+        let mut blue_inventory_plus_id: Option<i64> = None;
+        let mut red_inventory_plus_id: Option<i64> = None;
         let mut blue_default_id = 0;
         let mut red_default_id = 0;
         let mut blue_default_plus_id = 0;
@@ -3145,6 +3459,10 @@ impl WarehouseTemplate {
                                 blue_default_fueltanks_id = id;
                             } else if *name == "RDEFAULTFUELTANKS" {
                                 red_default_fueltanks_id = id;
+                            } else if *name == "BINVENTORY+" {
+                                blue_inventory_plus_id = Some(id);
+                            } else if *name == "RINVENTORY+" {
+                                red_inventory_plus_id = Some(id);
                             } else if *name == cfg.blue_production_template {
                                 blue_inventory_id = id;
                             } else if *name == cfg.red_production_template {
@@ -3193,6 +3511,26 @@ impl WarehouseTemplate {
             .warehouses
             .raw_get::<_, Table>("warehouses")
             .context("getting warehouses")?;
+        let blue_inventory_plus = if let Some(id) = blue_inventory_plus_id {
+            Some(
+                warehouses
+                    .raw_get(id)
+                    .with_context(|| format!("getting BINVENTORY+ warehouse row id {id}"))?,
+            )
+        } else {
+            None
+        };
+        let red_inventory_plus = if let Some(id) = red_inventory_plus_id {
+            Some(
+                warehouses
+                    .raw_get(id)
+                    .with_context(|| format!("getting RINVENTORY+ warehouse row id {id}"))?,
+            )
+        } else {
+            None
+        };
+        let (zone_plus_blue, zone_plus_red) =
+            compile_inventory_zone_plus_directives(&wht.mission)?;
         Ok(Self {
             blue_inventory: warehouses
                 .raw_get(blue_inventory_id)
@@ -3200,6 +3538,10 @@ impl WarehouseTemplate {
             red_inventory: warehouses
                 .raw_get(red_inventory_id)
                 .context("getting red inventory")?,
+            blue_inventory_plus,
+            red_inventory_plus,
+            zone_plus_blue,
+            zone_plus_red,
             blue_default: warehouses
                 .raw_get(blue_default_id)
                 .context("getting BDEFAULT inventory")?,
@@ -3241,7 +3583,7 @@ impl WarehouseTemplate {
         >,
         _droptank_ws_from_weapon_warehouses: &(HashSet<[i32; 4]>, HashSet<[i32; 4]>),
         mult_cfg: &WarehouseStockMultConfig,
-    ) -> Result<(bfprotocols::fowl_miz_export::FowlMizExport, Vec<InventoryAircraftOrphanSanitized>)>
+    ) -> Result<(bfprotocols::fowl_miz_export::FowlMizExport, Vec<InventoryAircraftOrphanSanitized>, HashSet<[i32; 4]>, HashSet<[i32; 4]>)>
     {
         fn copy_weapons_subtable(
             lua: &Lua,
@@ -3571,6 +3913,7 @@ impl WarehouseTemplate {
             row: &Table,
             allowed_ws: Option<&HashSet<[i32; 4]>>,
             row_name: &str,
+            manual_plus_unit: Option<&'static str>,
         ) -> Result<()> {
             let Some(allowed_ws) = allowed_ws else {
                 warn!("{row_name}: weapon bridge missing; skipping BINVENTORY/RINVENTORY validation");
@@ -3597,10 +3940,25 @@ impl WarehouseTemplate {
                 } else {
                     weapon.raw_set("initialAmount", 0u32)?;
                     zeroed += 1;
-                    info!(
-                        "{row_name}: zeroed forbidden weapon wsType [{}, {}, {}, {}] amount {}",
-                        ws[0], ws[1], ws[2], ws[3], cur
-                    );
+                    if let Some(plus) = manual_plus_unit {
+                        let disp = warehouse_weapon_display_name(&weapon);
+                        warn!(
+                            "{}: zeroed {} (wsType [{}, {}, {}, {}]) initialAmount={}: not allowed by weapon.miz coalition slot templates; add extra stock on Invisible FARP B/RINVENTORY+ warehouse rows (merged after validation), or add allowlist module links via trigger zone B/RINVENTORY+ (Key=item label, Value=airframe module type). Editor hint: {}.",
+                            row_name,
+                            disp,
+                            ws[0],
+                            ws[1],
+                            ws[2],
+                            ws[3],
+                            cur,
+                            plus,
+                        );
+                    } else {
+                        info!(
+                            "{row_name}: zeroed forbidden weapon wsType [{}, {}, {}, {}] amount {}",
+                            ws[0], ws[1], ws[2], ws[3], cur
+                        );
+                    }
                 }
             }
             info!(
@@ -3776,6 +4134,22 @@ impl WarehouseTemplate {
             &self.blue_inventory,
             &self.red_inventory,
         )?;
+        let mut blue_inv_name_ws =
+            collect_inventory_weapon_display_name_to_ws(&self.blue_inventory)?;
+        let mut red_inv_name_ws =
+            collect_inventory_weapon_display_name_to_ws(&self.red_inventory)?;
+        let mut blue_inv_ws = collect_inventory_weapon_ws_set(&self.blue_inventory)?;
+        let mut red_inv_ws = collect_inventory_weapon_ws_set(&self.red_inventory)?;
+        merge_inventory_plus_weapon_resolution_hints(
+            &mut blue_inv_name_ws,
+            &mut blue_inv_ws,
+            self.blue_inventory_plus.as_ref(),
+        )?;
+        merge_inventory_plus_weapon_resolution_hints(
+            &mut red_inv_name_ws,
+            &mut red_inv_ws,
+            self.red_inventory_plus.as_ref(),
+        )?;
 
         let blue_master = self.blue_default.deep_clone(lua)?;
         let red_master = self.red_default.deep_clone(lua)?;
@@ -3794,6 +4168,8 @@ impl WarehouseTemplate {
             HashMap::new();
         let mut blue_fowl_export_union: Option<HashSet<[i32; 4]>> = None;
         let mut red_fowl_export_union: Option<HashSet<[i32; 4]>> = None;
+        let mut blue_zone_extra_ws: HashSet<[i32; 4]> = HashSet::default();
+        let mut red_zone_extra_ws: HashSet<[i32; 4]> = HashSet::default();
         let mut objective_defaults: HashMap<
             StdString,
             bfprotocols::fowl_miz_export::ObjectiveWarehouseDefaults,
@@ -4329,8 +4705,9 @@ impl WarehouseTemplate {
             }
             bws.retain(|w| !payload_ws_blocked(*w, &blue_payload_deny));
             rws.retain(|w| !payload_ws_blocked(*w, &red_payload_deny));
-            // B/RDEFAULT: per-airframe `template_restricted` + pylon evidence. B/RINVENTORY: DCS
-            // mount set for coalition `weapon*.miz` types only (no `payload.restricted` cull; AIM-54 etc.).
+            // B/RDEFAULT: per-airframe `template.restricted` + pylon evidence. B/RINVENTORY cap:
+            // same ws union as `patch_warehouse_dynamic_spawn_links` hub weapon prune (`weapon_ws_for_aircrafts`,
+            // includes `aircraft_by_ws`), not `weapon_ws_for_aircraft_key_only` alone.
             let mut blue_default_deny_exact =
                 br.template_restricted_ws_union_for_side("blue", &blue_slot_types_hs);
             blue_default_deny_exact.extend(blue_strip_ws.iter().copied());
@@ -4351,7 +4728,9 @@ impl WarehouseTemplate {
                 let mut out = HashSet::<[i32; 4]>::new();
                 let mut sources = HashMap::<[i32; 4], HashSet<StdString>>::new();
                 for unit_type in types {
-                    for ws in br.weapon_ws_for_aircraft_key_only(unit_type) {
+                    let mut one = HashSet::new();
+                    one.insert(unit_type.clone());
+                    for ws in br.weapon_ws_for_aircrafts(&one) {
                         if !(ws[0] == 4 && ((4..=8).contains(&ws[1]) || ws[1] == 15)) {
                             continue;
                         }
@@ -4408,6 +4787,22 @@ impl WarehouseTemplate {
                 side_cap_inventory_no_restricted(&blue_payload_types_hs);
             let (mut red_for_inv, _red_inv_sources) =
                 side_cap_inventory_no_restricted(&red_payload_types_hs);
+            blue_zone_extra_ws = merge_inventory_zone_plus_into_allowlist(
+                Some(br),
+                &self.zone_plus_blue,
+                &blue_inv_name_ws,
+                Some(&blue_inv_ws),
+                &mut blue_for_inv,
+                "BINVENTORY+",
+            )?;
+            red_zone_extra_ws = merge_inventory_zone_plus_into_allowlist(
+                Some(br),
+                &self.zone_plus_red,
+                &red_inv_name_ws,
+                Some(&red_inv_ws),
+                &mut red_for_inv,
+                "RINVENTORY+",
+            )?;
             let blue_default_fuel_ws =
                 campaign_cfg::collect_weapon_ws_types_positive_initial(
                     &self.blue_default_fueltanks,
@@ -4580,6 +4975,25 @@ impl WarehouseTemplate {
             fowl_r.extend(red_inventory_allowlist.iter().copied());
             red_fowl_export_union = Some(br.expand_ws_alias_family(&fowl_r));
         }
+        if bridge_gen.is_none() {
+            let mut _zone_allow_dummy = HashSet::new();
+            merge_inventory_zone_plus_into_allowlist(
+                None,
+                &self.zone_plus_blue,
+                &blue_inv_name_ws,
+                None,
+                &mut _zone_allow_dummy,
+                "BINVENTORY+",
+            )?;
+            merge_inventory_zone_plus_into_allowlist(
+                None,
+                &self.zone_plus_red,
+                &red_inv_name_ws,
+                None,
+                &mut _zone_allow_dummy,
+                "RINVENTORY+",
+            )?;
+        }
         if let Some(caps) = warehouse_caps {
             if caps.has_any_nonzero_cap() {
                 campaign_cfg::apply_default_counts_to_weapons(&blue_master, caps)
@@ -4642,6 +5056,7 @@ impl WarehouseTemplate {
             &blue_strip_ws,
             warehouse_allowlist_for_filter(&blue_allowed_ws),
             "BDEFAULT",
+            None,
         )?;
         prune_warehouse_weapons_row(
             lua,
@@ -4649,6 +5064,7 @@ impl WarehouseTemplate {
             &red_strip_ws,
             warehouse_allowlist_for_filter(&red_allowed_ws),
             "RDEFAULT",
+            None,
         )?;
         zero_default_weapons_present_in_positive_inventory(
             &blue_master,
@@ -4775,6 +5191,7 @@ impl WarehouseTemplate {
                                 &blue_strip_ws,
                                 warehouse_allowlist_for_filter(&blue_allowed_ws),
                                 "airport post-fill BDEFAULT filter",
+                                None,
                             )?;
                             zero_default_weapons_present_in_positive_inventory(
                                 &new_row,
@@ -4791,6 +5208,7 @@ impl WarehouseTemplate {
                                 &red_strip_ws,
                                 warehouse_allowlist_for_filter(&red_allowed_ws),
                                 "airport post-fill RDEFAULT filter",
+                                None,
                             )?;
                             zero_default_weapons_present_in_positive_inventory(
                                 &new_row,
@@ -4870,6 +5288,7 @@ impl WarehouseTemplate {
                                 &blue_strip_ws,
                                 warehouse_allowlist_for_filter(&blue_allowed_ws),
                                 "warehouse post-fill BDEFAULT filter",
+                                None,
                             )?;
                             zero_default_weapons_present_in_positive_inventory(
                                 &new_row,
@@ -4886,6 +5305,7 @@ impl WarehouseTemplate {
                                 &red_strip_ws,
                                 warehouse_allowlist_for_filter(&red_allowed_ws),
                                 "warehouse post-fill RDEFAULT filter",
+                                None,
                             )?;
                             zero_default_weapons_present_in_positive_inventory(
                                 &new_row,
@@ -4912,6 +5332,7 @@ impl WarehouseTemplate {
             &new_red_inventory,
             warehouse_allowlist_for_filter(&red_inventory_allowed_ws),
             "RINVENTORY",
+            Some("Invisible FARP RINVENTORY+ and/or trigger zone RINVENTORY+"),
         )?;
         prune_warehouse_weapons_row(
             lua,
@@ -4919,7 +5340,24 @@ impl WarehouseTemplate {
             &red_strip_ws,
             warehouse_allowlist_for_filter(&red_inventory_allowed_ws),
             "RINVENTORY",
+            Some("Invisible FARP RINVENTORY+ and/or trigger zone RINVENTORY+"),
         )?;
+        if let Some(plus) = self.red_inventory_plus.as_ref() {
+            merge_inventory_plus_overwrite(
+                lua,
+                &new_red_inventory,
+                plus,
+                "RINVENTORY",
+                None,
+                true,
+                true,
+            )?;
+        }
+        if let (Some(u), Some(plus)) =
+            (red_fowl_export_union.as_mut(), self.red_inventory_plus.as_ref())
+        {
+            u.extend(campaign_cfg::collect_weapon_ws_types_positive_initial(plus)?);
+        }
         log_agm65_diag("after_inventory_finalize", "RINVENTORY", &new_red_inventory)?;
         let red_weapon_export = if red_fowl_export_union.is_some() {
             sorted_weapon_ws(&red_fowl_export_union)
@@ -4945,6 +5383,7 @@ impl WarehouseTemplate {
             &new_blue_inventory,
             warehouse_allowlist_for_filter(&blue_inventory_allowed_ws),
             "BINVENTORY",
+            Some("Invisible FARP BINVENTORY+ and/or trigger zone BINVENTORY+"),
         )?;
         prune_warehouse_weapons_row(
             lua,
@@ -4952,7 +5391,24 @@ impl WarehouseTemplate {
             &blue_strip_ws,
             warehouse_allowlist_for_filter(&blue_inventory_allowed_ws),
             "BINVENTORY",
+            Some("Invisible FARP BINVENTORY+ and/or trigger zone BINVENTORY+"),
         )?;
+        if let Some(plus) = self.blue_inventory_plus.as_ref() {
+            merge_inventory_plus_overwrite(
+                lua,
+                &new_blue_inventory,
+                plus,
+                "BINVENTORY",
+                None,
+                true,
+                true,
+            )?;
+        }
+        if let (Some(u), Some(plus)) =
+            (blue_fowl_export_union.as_mut(), self.blue_inventory_plus.as_ref())
+        {
+            u.extend(campaign_cfg::collect_weapon_ws_types_positive_initial(plus)?);
+        }
         log_agm65_diag("after_inventory_finalize", "BINVENTORY", &new_blue_inventory)?;
         // bflib: union of B/RDEFAULT and B/RINVENTORY legal wsTypes (alias-expanded).
         let blue_weapon_export = if blue_fowl_export_union.is_some() {
@@ -5017,6 +5473,8 @@ impl WarehouseTemplate {
                 objective_defaults,
             },
             inventory_aircraft_orphans_cleared,
+            blue_zone_extra_ws,
+            red_zone_extra_ws,
         ))
     }
 }
@@ -6033,10 +6491,15 @@ fn apply_objective_airbase_ids_from_export(
     Ok(summary)
 }
 
-/// Build check: all objective airbases should have non-zero `airbaseID`.
-///
-/// Airbase objectives may be represented as `OAB*` or `OLO*` in base.miz.
-/// Missing/invalid ids are reported as WARN and build continues.
+/// `airbaseID` links an objective zone to a `warehouses.airports` warehouse id. DCS has no such row for
+/// many OLO* FOB / strip logistics hubs; build still resolves ground warehouses by zone containment.
+fn objective_zone_airbase_id_absent_is_expected(name: &str) -> bool {
+    let u = name.to_ascii_uppercase();
+    u.starts_with("OLO") && (u.contains("FOB") || u.contains("STRIP"))
+}
+
+/// Build check: OAB*/OLO* zones may carry `airbaseID` for ME ↔ `warehouses.airports` round-trip and
+/// explicit airport matching. Missing ids are reported; many OLO* FOB sites legitimately have none.
 fn validate_objective_airbase_ids(base: &LoadedMiz) -> Result<(Vec<StdString>, Vec<(StdString, StdString)>)> {
     let mut missing: Vec<StdString> = Vec::new();
     let mut invalid: Vec<(StdString, StdString)> = Vec::new();
@@ -6078,11 +6541,30 @@ fn validate_objective_airbase_ids(base: &LoadedMiz) -> Result<(Vec<StdString>, V
     }
     missing.sort_unstable();
     invalid.sort_by(|a, b| a.0.cmp(&b.0));
-    warn!("objective airbaseID validation reported missing/invalid values");
-    for name in &missing {
-        warn!(
-            "WARN: objective zone {:?} is missing non-empty airbaseID",
-            name
+    let missing_surprising: Vec<&StdString> = missing
+        .iter()
+        .filter(|n| !objective_zone_airbase_id_absent_is_expected(n.as_str()))
+        .collect();
+    if !invalid.is_empty() || !missing_surprising.is_empty() {
+        warn!("objective airbaseID validation reported missing/invalid values");
+        for name in &missing_surprising {
+            warn!(
+                "WARN: objective zone {:?} is missing non-empty airbaseID (set after `-admin airbaseexport` when this objective is a paved airfield in `warehouses.airports`)",
+                name
+            );
+        }
+    }
+    let missing_expected: Vec<&StdString> = missing
+        .iter()
+        .filter(|n| objective_zone_airbase_id_absent_is_expected(n.as_str()))
+        .collect();
+    if !missing_expected.is_empty() {
+        info!(
+            "objective zone(s) with no airbaseID (normal for OLO* FOB/strip hubs without a `warehouses.airports` id): {:?}",
+            missing_expected
+                .iter()
+                .map(|s| s.as_str())
+                .collect::<Vec<_>>()
         );
     }
     for (name, raw) in &invalid {
@@ -6127,6 +6609,8 @@ fn patch_warehouse_dynamic_spawn_links(
     dyn_farp_aircraft_allow: Option<&HashSet<(Side, StdString)>>,
     ship_wh_aircraft_allow: Option<&HashMap<i64, HashSet<(Side, StdString)>>>,
     weapon_bridge: Option<&weapon_bridge::WeaponBridgeMap>,
+    zone_extra_ws_blue: &HashSet<[i32; 4]>,
+    zone_extra_ws_red: &HashSet<[i32; 4]>,
 ) -> Result<()> {
     fn patch_table(
         lua: &Lua,
@@ -6142,6 +6626,8 @@ fn patch_warehouse_dynamic_spawn_links(
         dyn_farp_aircraft_allow: Option<&HashSet<(Side, StdString)>>,
         ship_wh_aircraft_allow: Option<&HashMap<i64, HashSet<(Side, StdString)>>>,
         weapon_bridge: Option<&weapon_bridge::WeaponBridgeMap>,
+        zone_extra_ws_blue: &HashSet<[i32; 4]>,
+        zone_extra_ws_red: &HashSet<[i32; 4]>,
     ) -> Result<()> {
         fn copy_initial_amounts_scaled(
             lua: &Lua,
@@ -6412,7 +6898,15 @@ fn patch_warehouse_dynamic_spawn_links(
                 if let Some(names) = policy_types {
                     let empty_strip = HashSet::<[i32; 4]>::new();
                     // No expand_ws_alias_family: token families merge unrelated ordnance (e.g. heli FOB vs jet bombs).
-                    let allowed_ws = br.weapon_ws_for_aircrafts(&names);
+                    let mut allowed_ws = br.weapon_ws_for_aircrafts(&names);
+                    // Zone-defined module links (BINVENTORY+/RINVENTORY+ zones) are not in the bridge;
+                    // extend the per-warehouse allowlist so those wsTypes survive the prune.
+                    let zone_extra = match side {
+                        Side::Blue => zone_extra_ws_blue,
+                        Side::Red => zone_extra_ws_red,
+                        _ => &HashSet::default(),
+                    };
+                    allowed_ws.extend(zone_extra.iter().copied());
                     let wlog = format!(
                         "warehouse {wid} weapons (B/RINVENTORY filtered to allowed-aircraft wsTypes)"
                     );
@@ -6422,6 +6916,7 @@ fn patch_warehouse_dynamic_spawn_links(
                         &empty_strip,
                         Some(&allowed_ws),
                         &wlog,
+                        None,
                     )?;
                 }
             }
@@ -6445,6 +6940,8 @@ fn patch_warehouse_dynamic_spawn_links(
         dyn_farp_aircraft_allow,
         ship_wh_aircraft_allow,
         weapon_bridge,
+        zone_extra_ws_blue,
+        zone_extra_ws_red,
     )
     .context("patching airport linkDynTempl")?;
 
@@ -6465,6 +6962,8 @@ fn patch_warehouse_dynamic_spawn_links(
         dyn_farp_aircraft_allow,
         ship_wh_aircraft_allow,
         weapon_bridge,
+        zone_extra_ws_blue,
+        zone_extra_ws_red,
     )
     .context("patching warehouse linkDynTempl")?;
     Ok(())
@@ -7244,13 +7743,28 @@ pub fn run(cfg: &MizCmd) -> Result<()> {
         .context("logging airbase ID / OAB-OLO zone mapping from zone properties")?;
     let (missing_airbase, invalid_airbase) = validate_objective_airbase_ids(&base)
         .context("validating objective airbaseID requirements (OAB*/OLO*)")?;
-    if !missing_airbase.is_empty() || !invalid_airbase.is_empty() || !apply_summary.unresolved.is_empty() {
+    let airbase_export_followup_needed = !invalid_airbase.is_empty()
+        || missing_airbase
+            .iter()
+            .any(|n| !objective_zone_airbase_id_absent_is_expected(n.as_str()))
+        || apply_summary.unresolved.iter().any(|n| {
+            !objective_zone_airbase_id_absent_is_expected(n.as_str())
+        });
+    if airbase_export_followup_needed {
         warn!("WARN: some objective zones still miss valid airbaseID after auto-fill.");
-        if !apply_summary.unresolved.is_empty() {
-            let mut unresolved = apply_summary.unresolved.clone();
-            unresolved.sort_unstable();
-            unresolved.dedup();
-            warn!("WARN: unresolved objective zones from export-name match: {:?}", unresolved);
+        let mut unresolved_surprising: Vec<StdString> = apply_summary
+            .unresolved
+            .iter()
+            .filter(|n| !objective_zone_airbase_id_absent_is_expected(n.as_str()))
+            .cloned()
+            .collect();
+        if !unresolved_surprising.is_empty() {
+            unresolved_surprising.sort_unstable();
+            unresolved_surprising.dedup();
+            warn!(
+                "WARN: unresolved objective zones from export-name match: {:?}",
+                unresolved_surprising
+            );
         }
         warn!("WARN: To generate complete mapping, add your UCID to \"admins\" in mission CFG, run mission,");
         warn!("WARN: then in chat use \"-admin airbaseexport\".");
@@ -7391,7 +7905,13 @@ pub fn run(cfg: &MizCmd) -> Result<()> {
             let loaded = LoadedMiz::new(lua, wh).context("loading warehouse template")?;
             let template = WarehouseTemplate::new(&loaded, cfg)
                 .context("compiling warehouse template")?;
-            Some(WarehouseBundle { path, loaded, template })
+            Some(WarehouseBundle {
+                path,
+                loaded,
+                template,
+                zone_extra_ws_blue: HashSet::default(),
+                zone_extra_ws_red: HashSet::default(),
+            })
         }
     };
     vehicle_templates.generate_slots(lua, &mut base).context("generating slots")?;
@@ -7510,9 +8030,10 @@ pub fn run(cfg: &MizCmd) -> Result<()> {
         .map(|o| o.missing_default_warehouse_keys.clone())
         .unwrap_or_default();
 
-    let fowl_from_warehouse = if let Some(wb) = warehouse_bundle.as_ref() {
+    let mut warehouse_bundle = warehouse_bundle;
+    let fowl_from_warehouse = if let Some(wb) = warehouse_bundle.as_mut() {
         let bridge_gen = weapon_bridge_map.as_ref().map(|b| (&vehicle_templates, b));
-        let (export, inventory_aircraft_orphans_cleared) = wb
+        let (export, inventory_aircraft_orphans_cleared, zone_extra_ws_blue, zone_extra_ws_red) = wb
             .template
             .apply(
                 lua,
@@ -7526,6 +8047,8 @@ pub fn run(cfg: &MizCmd) -> Result<()> {
                 &mult_cfg,
             )
             .context("applying warehouse template")?;
+        wb.zone_extra_ws_blue = zone_extra_ws_blue;
+        wb.zone_extra_ws_red = zone_extra_ws_red;
 
         if !inventory_aircraft_orphans_cleared.is_empty() {
             pack_warehouse_bundle_to_path(wb).with_context(|| {
@@ -7655,6 +8178,8 @@ pub fn run(cfg: &MizCmd) -> Result<()> {
             dyn_farp_allow.as_ref(),
             Some(&ship_wh_allow),
             weapon_bridge_map.as_ref(),
+            &wb.zone_extra_ws_blue,
+            &wb.zone_extra_ws_red,
         )
         .context("patching warehouse linkDynTempl")?;
         if let Some(caps) = warehouse_defaults {

@@ -509,6 +509,21 @@ impl WeaponBridgeMap {
                 out.insert(*v);
             }
         }
+        // ME labels like `AGM-114K` often miss strict prefix match vs rack ids (`OH58D_AGM_114K`, …).
+        if !needle_braced && out.is_empty() {
+            for (k, v) in &self.by_descriptor {
+                if *v == ZERO_WS {
+                    continue;
+                }
+                if k.contains('/') {
+                    continue;
+                }
+                let hay = normalized_bridge_key_upper(k);
+                if hay.contains(needle.as_str()) {
+                    out.insert(*v);
+                }
+            }
+        }
         out
     }
 
@@ -748,6 +763,25 @@ mod tests {
         };
         let s = m.ws_types_for_descriptor_or_key_substring("{AIM-54C_Mk47}");
         assert!(s.contains(&[4, 4, 7, 322]));
+    }
+
+    #[test]
+    fn editor_weapon_label_maps_when_key_embeds_needle() {
+        let j = r#"{"by_descriptor":{
+            "OH58D_AGM_114K_RACK":[4,4,32,3163]
+        }}"#;
+        let f: WeaponBridgeFile = serde_json::from_str(j).unwrap();
+        let m = WeaponBridgeMap {
+            by_descriptor: f.by_descriptor,
+            fueltank_by_aircraft: HashMap::new(),
+            weapon_ws_by_aircraft: HashMap::new(),
+            aircraft_by_ws: HashMap::new(),
+            ws_alias_family: HashMap::new(),
+            template_pylon_ws: HashMap::new(),
+            template_restricted_ws: HashMap::new(),
+        };
+        let s = m.ws_types_for_descriptor_or_key_substring("AGM-114K");
+        assert!(s.contains(&[4, 4, 32, 3163]));
     }
 
     #[test]
