@@ -61,6 +61,12 @@ fn normalized_aircraft_key_upper(k: &str) -> String {
         .collect::<String>()
 }
 
+/// Normalized airframe / module type key for cross-table comparisons (TTD*, BINVENTORY+ Value, etc.).
+#[must_use]
+pub fn normalized_aircraft_type_key(k: &str) -> String {
+    normalized_aircraft_key_upper(k)
+}
+
 #[derive(Debug, Deserialize)]
 pub struct WeaponBridgeFile {
     #[serde(default)]

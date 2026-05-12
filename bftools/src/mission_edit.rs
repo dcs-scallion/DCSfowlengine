@@ -1689,6 +1689,32 @@ impl VehicleTemplates {
         out
     }
 
+    /// Same as `payload_pylon_ws_for_unit_type` but descriptor-exact only (no substring bridge).
+    fn payload_pylon_ws_for_unit_type_exact(
+        &self,
+        br: &weapon_bridge::WeaponBridgeMap,
+        side: Side,
+        unit_type: &str,
+    ) -> HashSet<[i32; 4]> {
+        const ZERO: [i32; 4] = [0, 0, 0, 0];
+        let mut out = HashSet::new();
+        let Some(variants) =
+            self.payload_variants.get(&side).and_then(|by_type| by_type.get(unit_type))
+        else {
+            return out;
+        };
+        for payload in variants {
+            for d in payload_allowlist::collect_pylon_descriptors(payload) {
+                if let Some(ws) = br.ws_type_for_descriptor(d.as_str()) {
+                    if ws != ZERO {
+                        out.insert(ws);
+                    }
+                }
+            }
+        }
+        out
+    }
+
     /// Exact pylon-only footprint for DEFAULT generation.
     ///
     /// DEFAULT must mirror stores explicitly mounted in `weapon*.miz`; substring bridge fallback can pull
@@ -3095,6 +3121,7 @@ fn collect_inventory_weapon_display_name_to_ws(
     inv_row: &Table,
 ) -> Result<HashMap<StdString, [i32; 4]>> {
     let mut out: HashMap<StdString, [i32; 4]> = HashMap::new();
+    let mut disp_all_ws: HashMap<StdString, HashSet<[i32; 4]>> = HashMap::new();
     let Ok(weapons) = inv_row.raw_get::<_, Table>("weapons") else {
         return Ok(out);
     };
@@ -3110,16 +3137,32 @@ fn collect_inventory_weapon_display_name_to_ws(
         if disp.starts_with("wsType [") || disp == "weapon row (no wsType)" {
             continue;
         }
-        if let Some(existing) = out.get(&disp) {
-            if *existing != ws {
-                warn!(
-                    "warehouse inventory name conflict: `{}` maps to multiple wsTypes; keeping first [{}, {}, {}, {}]",
-                    disp, existing[0], existing[1], existing[2], existing[3]
-                );
-            }
+        disp_all_ws.entry(disp.clone()).or_default().insert(ws);
+        out.entry(disp).or_insert(ws);
+    }
+    for (disp, types) in &disp_all_ws {
+        if types.len() <= 1 {
             continue;
         }
-        out.insert(disp, ws);
+        let Some(chosen) = out.get(disp).copied() else {
+            continue;
+        };
+        let mut types_sorted: Vec<[i32; 4]> = types.iter().copied().collect();
+        types_sorted.sort_unstable();
+        let list = types_sorted
+            .iter()
+            .map(|w| format!("[{},{},{},{}]", w[0], w[1], w[2], w[3]))
+            .collect::<Vec<_>>()
+            .join(", ");
+        warn!(
+            "B/RINVENTORY+ rows share display name `{}` with different wsType; merge uses [{},{},{},{}]. Distinct wsTypes: {}",
+            disp,
+            chosen[0],
+            chosen[1],
+            chosen[2],
+            chosen[3],
+            list
+        );
     }
     Ok(out)
 }
@@ -3337,8 +3380,8 @@ fn merge_inventory_zone_plus_into_allowlist(
                     ws[0], ws[1], ws[2], ws[3], e.item_name, e.module
                 );
             }
-            // Dynamic-spawn prune uses TTD template type strings; zone `Value` can spell the same
-            // module differently than `include_dyn_slots` — always keep resolved ws for hub hint.
+            // Land `O*` objective warehouses: coalition-wide BINVENTORY+ / RINVENTORY+ ws hints on prune allowlist.
+            // Ship / DEP FARP: same hints only for zone `Value` modules present on that hull's / FARP's TTD policy.
             added.insert(ws);
         }
     }
@@ -4706,8 +4749,8 @@ impl WarehouseTemplate {
             bws.retain(|w| !payload_ws_blocked(*w, &blue_payload_deny));
             rws.retain(|w| !payload_ws_blocked(*w, &red_payload_deny));
             // B/RDEFAULT: per-airframe `template.restricted` + pylon evidence. B/RINVENTORY cap:
-            // same ws union as `patch_warehouse_dynamic_spawn_links` hub weapon prune (`weapon_ws_for_aircrafts`,
-            // includes `aircraft_by_ws`), not `weapon_ws_for_aircraft_key_only` alone.
+            // `weapon_ws_for_aircrafts` (includes `aircraft_by_ws`). Carrier `TTDN*` prune uses the same
+            // per-type template cap as `side_cap_respects_template_restricted`; DEP FARP uses keys + fuel + filtered +.
             let mut blue_default_deny_exact =
                 br.template_restricted_ws_union_for_side("blue", &blue_slot_types_hs);
             blue_default_deny_exact.extend(blue_strip_ws.iter().copied());
@@ -6591,17 +6634,139 @@ fn validate_objective_airbase_ids(base: &LoadedMiz) -> Result<(Vec<StdString>, V
 ///    `TTDNRKuznecow`), set `initialAmount = 0` for aircraft types not listed in that hull’s `TTDN*` zone
 ///    (stock caps the air wing). Keep `linkDynTempl` from DT_* emit for other coalition types so landed
 ///    aircraft can be warehoused and slotted later.
-/// 4. `weapons` from B/RINVENTORY: when a weapon bridge is loaded, drop rows whose `wsType` is not carried
-///    by any aircraft type allowed for the same hub policy as A/C (`O*`, `TTDdynFARP`, per-hull `TTDN*`).
+/// 4. `weapons` from B/RINVENTORY: when a weapon bridge is loaded, drop rows whose `wsType` is not allowed
+///    for the same hub policy as A/C (`O*`: `weapon_ws_by_aircraft` keys only; per-hull `TTDN*` **carriers**:
+///    same per-type cap as warehouse `apply` `side_cap_respects_template_restricted` (keys + pylons, `template.restricted`),
+///    plus `fueltank_by_aircraft`, then alias-expand — no `weapon_ws_for_aircrafts` reverse-map union. `TTDdynFARP` **DEP dynamic FARPs** use the same **keys + fuel** base as `O*`, plus
+///    policy-filtered `BINVENTORY+` / `RINVENTORY+` ordnance (zone `Value` module must appear in `TTDdynFARP`),
+///    without alias-expand on the allowlist (same strict prune as `O*`). `BINVENTORY+` supplements
+///    for carriers still require matching `TTDN*` module list (not coalition-wide).
 /// If ground bases still misbehave, consider generalising this 3-step pattern to airports / FARPs.
 ///
 /// Carrier naming / zones are validated earlier by `audit_naval_carrier_mission_rules` (build fails if invalid).
+
+fn is_inventory_cap_ordnance_ws(ws: [i32; 4]) -> bool {
+    ws[0] == 4 && ((4..=8).contains(&ws[1]) || ws[1] == 15)
+}
+
+/// Per-hull `TTDN*`: policy `weapon_ws_by_aircraft` keys ∪ **exact** payload pylons (no substring bridge),
+/// minus `template.restricted` without pylon family evidence; plus `fueltank_by_aircraft`. No final
+/// `expand_ws_alias_family` on the merged set (avoids alias bleed; matches DEP FARP prune shape).
+fn naval_carrier_policy_weapon_allowlist(
+    br: &weapon_bridge::WeaponBridgeMap,
+    vt: &VehicleTemplates,
+    side: Side,
+    policy_types: &HashSet<StdString>,
+) -> HashSet<[i32; 4]> {
+    let side_name = match side {
+        Side::Blue => "blue",
+        Side::Red => "red",
+        Side::Neutral => return HashSet::new(),
+    };
+    let mut out = HashSet::new();
+    for unit_type in policy_types {
+        let restricted =
+            br.template_restricted_ws_for_side_type(side_name, unit_type.as_str());
+        let pylon_raw =
+            vt.payload_pylon_ws_for_unit_type_exact(br, side, unit_type.as_str());
+        let pylon_gate = br.expand_ws_alias_family(&pylon_raw);
+        let mut candidates = br.weapon_ws_for_aircraft_key_only(unit_type.as_str());
+        candidates.extend(pylon_raw.iter().copied());
+        for ws in candidates {
+            if !is_inventory_cap_ordnance_ws(ws) {
+                continue;
+            }
+            if restricted.contains(&ws) && !pylon_gate.contains(&ws) {
+                continue;
+            }
+            out.insert(ws);
+        }
+    }
+    out.extend(br.fueltank_ws_for_aircrafts(policy_types));
+    out
+}
+
+/// `TTDdynFARP` DEP FARP: `weapon_ws_by_aircraft` keys for policy types + fuel + policy-filtered B/RINVENTORY+
+/// ordnance (no `expand_ws_alias_family` — same shape as non-carrier `O*` prune; avoids alias bleed from coalition BINVENTORY).
+fn dep_farp_dynamic_weapon_allowlist(
+    br: &weapon_bridge::WeaponBridgeMap,
+    policy_types: &HashSet<StdString>,
+    zone_plus: &[InventoryZonePlusModuleEntry],
+    inv_name_to_ws: &HashMap<StdString, [i32; 4]>,
+    inv_weapon_ws: &HashSet<[i32; 4]>,
+) -> HashSet<[i32; 4]> {
+    let mut s = br.weapon_ws_for_aircraft_keys_only(policy_types);
+    s.extend(br.fueltank_ws_for_aircrafts(policy_types));
+    s.extend(inventory_plus_ordnance_ws_for_policy_modules(
+        br,
+        policy_types,
+        zone_plus,
+        inv_name_to_ws,
+        inv_weapon_ws,
+    ));
+    s
+}
+
+fn policy_types_include_module(
+    policy_types: &HashSet<StdString>,
+    module: &str,
+) -> bool {
+    let m = weapon_bridge::normalized_aircraft_type_key(module);
+    policy_types
+        .iter()
+        .any(|p| weapon_bridge::normalized_aircraft_type_key(p) == m)
+}
+
+/// Ordnance wsTypes from B/RINVENTORY+ zone links whose `Value` (module) is on this hub's carrier `TTDN*` or `TTDdynFARP` policy list.
+fn inventory_plus_ordnance_ws_for_policy_modules(
+    br: &weapon_bridge::WeaponBridgeMap,
+    policy_types: &HashSet<StdString>,
+    zone_plus: &[InventoryZonePlusModuleEntry],
+    inv_name_to_ws: &HashMap<StdString, [i32; 4]>,
+    inv_weapon_ws: &HashSet<[i32; 4]>,
+) -> HashSet<[i32; 4]> {
+    let mut out = HashSet::new();
+    for e in zone_plus {
+        if !policy_types_include_module(policy_types, e.module.as_str()) {
+            continue;
+        }
+        for ws in resolve_zone_link_ws_list(
+            e.item_name.as_str(),
+            inv_name_to_ws,
+            Some(inv_weapon_ws),
+            br,
+        ) {
+            if is_inventory_cap_ordnance_ws(ws) {
+                out.insert(ws);
+            }
+        }
+    }
+    out
+}
+
+fn build_inventory_plus_resolution_maps(
+    inv: Option<&Table<'static>>,
+    plus: Option<&Table<'static>>,
+) -> Result<(HashMap<StdString, [i32; 4]>, HashSet<[i32; 4]>)> {
+    let Some(inv) = inv else {
+        return Ok((HashMap::new(), HashSet::new()));
+    };
+    let mut nm = collect_inventory_weapon_display_name_to_ws(inv)?;
+    let mut ws = collect_inventory_weapon_ws_set(inv)?;
+    merge_inventory_plus_weapon_resolution_hints(&mut nm, &mut ws, plus)?;
+    Ok((nm, ws))
+}
+
 fn patch_warehouse_dynamic_spawn_links(
     lua: &Lua,
     warehouses_root: &Table<'static>,
     emit: &DynamicSpawnEmit,
     blue_inventory: Option<&Table<'static>>,
     red_inventory: Option<&Table<'static>>,
+    blue_inventory_plus: Option<&Table<'static>>,
+    red_inventory_plus: Option<&Table<'static>>,
+    zone_plus_blue: &[InventoryZonePlusModuleEntry],
+    zone_plus_red: &[InventoryZonePlusModuleEntry],
     mult_cfg: &WarehouseStockMultConfig,
     warehouse_caps: Option<&campaign_cfg::WarehouseDefaultsFromCfg>,
     obj_dyn_allow: &[ObjectiveDynAllow],
@@ -6609,9 +6774,15 @@ fn patch_warehouse_dynamic_spawn_links(
     dyn_farp_aircraft_allow: Option<&HashSet<(Side, StdString)>>,
     ship_wh_aircraft_allow: Option<&HashMap<i64, HashSet<(Side, StdString)>>>,
     weapon_bridge: Option<&weapon_bridge::WeaponBridgeMap>,
+    vehicle_templates: &VehicleTemplates,
     zone_extra_ws_blue: &HashSet<[i32; 4]>,
     zone_extra_ws_red: &HashSet<[i32; 4]>,
 ) -> Result<()> {
+    let (inv_plus_blue_nm, inv_plus_blue_ws) =
+        build_inventory_plus_resolution_maps(blue_inventory, blue_inventory_plus)?;
+    let (inv_plus_red_nm, inv_plus_red_ws) =
+        build_inventory_plus_resolution_maps(red_inventory, red_inventory_plus)?;
+
     fn patch_table(
         lua: &Lua,
         tbl: &Table<'static>,
@@ -6626,9 +6797,19 @@ fn patch_warehouse_dynamic_spawn_links(
         dyn_farp_aircraft_allow: Option<&HashSet<(Side, StdString)>>,
         ship_wh_aircraft_allow: Option<&HashMap<i64, HashSet<(Side, StdString)>>>,
         weapon_bridge: Option<&weapon_bridge::WeaponBridgeMap>,
+        vehicle_templates: &VehicleTemplates,
         zone_extra_ws_blue: &HashSet<[i32; 4]>,
         zone_extra_ws_red: &HashSet<[i32; 4]>,
+        inv_plus_blue_nm: &HashMap<StdString, [i32; 4]>,
+        inv_plus_blue_ws: &HashSet<[i32; 4]>,
+        inv_plus_red_nm: &HashMap<StdString, [i32; 4]>,
+        inv_plus_red_ws: &HashSet<[i32; 4]>,
+        zone_plus_blue: &[InventoryZonePlusModuleEntry],
+        zone_plus_red: &[InventoryZonePlusModuleEntry],
     ) -> Result<()> {
+        let empty_inv_nm: HashMap<StdString, [i32; 4]> = HashMap::new();
+        let empty_inv_ws: HashSet<[i32; 4]> = HashSet::new();
+        let empty_zone_plus: &[InventoryZonePlusModuleEntry] = &[];
         fn copy_initial_amounts_scaled(
             lua: &Lua,
             dst_row: &Table<'static>,
@@ -6691,8 +6872,9 @@ fn patch_warehouse_dynamic_spawn_links(
             }
             let mult = mult_cfg.mult_dynamic_row(wid, is_airports_table);
 
-            // Resolve the authoritative side from the containing O* zone (4th letter R/B).
-            // Falls back to the warehouse coalition field when no zone is found.
+            // O* airports: authoritative side from containing zone (4th letter R/B), else warehouse coalition.
+            // DEP FARP / naval: prefer warehouse `coalition` so TTDdynFARP / TTDN policy keys match ME rows
+            // when geometry overlaps another coalition's O* zone.
             let obj_zone: Option<&ObjectiveDynAllow> = if is_airports_table {
                 // Airport rows are keyed by airport warehouse id; prefer explicit O* mapping via airbaseID.
                 obj_dyn_allow
@@ -6714,7 +6896,15 @@ fn patch_warehouse_dynamic_spawn_links(
                 "blue" => Some(Side::Blue),
                 _ => None,
             };
-            let side = obj_zone.map(|o| o.side).or(side_from_wh);
+            // Naval / DEP FARP rows: trust warehouse `coalition` for TTDN / TTDdynFARP policy keys first.
+            // O* geometry can overlap another coalition's zone and would mis-classify side vs `dyn_allow` / inventory copy.
+            let side = if mult_cfg.dep_farp_warehouse_ids.contains(&wid)
+                || mult_cfg.naval_warehouse_ids.contains(&wid)
+            {
+                side_from_wh.or_else(|| obj_zone.map(|o| o.side))
+            } else {
+                obj_zone.map(|o| o.side).or(side_from_wh)
+            };
 
             let side = match side {
                 Some(s) => s,
@@ -6897,16 +7087,37 @@ fn patch_warehouse_dynamic_spawn_links(
 
                 if let Some(names) = policy_types {
                     let empty_strip = HashSet::<[i32; 4]>::new();
-                    // No expand_ws_alias_family: token families merge unrelated ordnance (e.g. heli FOB vs jet bombs).
-                    let mut allowed_ws = br.weapon_ws_for_aircrafts(&names);
-                    // Zone-defined module links (BINVENTORY+/RINVENTORY+ zones) are not in the bridge;
-                    // extend the per-warehouse allowlist so those wsTypes survive the prune.
-                    let zone_extra = match side {
-                        Side::Blue => zone_extra_ws_blue,
-                        Side::Red => zone_extra_ws_red,
-                        _ => &HashSet::default(),
+                    let is_naval = mult_cfg.naval_warehouse_ids.contains(&wid);
+                    let is_dep = mult_cfg.dep_farp_warehouse_ids.contains(&wid);
+                    let (nm, ws, zplus) = match side {
+                        Side::Blue => (inv_plus_blue_nm, inv_plus_blue_ws, zone_plus_blue),
+                        Side::Red => (inv_plus_red_nm, inv_plus_red_ws, zone_plus_red),
+                        _ => (&empty_inv_nm, &empty_inv_ws, empty_zone_plus),
                     };
-                    allowed_ws.extend(zone_extra.iter().copied());
+                    let mut allowed_ws = if is_naval {
+                        naval_carrier_policy_weapon_allowlist(
+                            br,
+                            vehicle_templates,
+                            side,
+                            &names,
+                        )
+                    } else if is_dep {
+                        dep_farp_dynamic_weapon_allowlist(br, &names, zplus, nm, ws)
+                    } else {
+                        br.weapon_ws_for_aircraft_keys_only(&names)
+                    };
+                    if is_naval {
+                        allowed_ws.extend(inventory_plus_ordnance_ws_for_policy_modules(
+                            br, &names, zplus, nm, ws,
+                        ));
+                    } else if !is_dep {
+                        let zone_extra = match side {
+                            Side::Blue => zone_extra_ws_blue,
+                            Side::Red => zone_extra_ws_red,
+                            _ => &HashSet::default(),
+                        };
+                        allowed_ws.extend(zone_extra.iter().copied());
+                    }
                     let wlog = format!(
                         "warehouse {wid} weapons (B/RINVENTORY filtered to allowed-aircraft wsTypes)"
                     );
@@ -6940,8 +7151,15 @@ fn patch_warehouse_dynamic_spawn_links(
         dyn_farp_aircraft_allow,
         ship_wh_aircraft_allow,
         weapon_bridge,
+        vehicle_templates,
         zone_extra_ws_blue,
         zone_extra_ws_red,
+        &inv_plus_blue_nm,
+        &inv_plus_blue_ws,
+        &inv_plus_red_nm,
+        &inv_plus_red_ws,
+        zone_plus_blue,
+        zone_plus_red,
     )
     .context("patching airport linkDynTempl")?;
 
@@ -6962,8 +7180,15 @@ fn patch_warehouse_dynamic_spawn_links(
         dyn_farp_aircraft_allow,
         ship_wh_aircraft_allow,
         weapon_bridge,
+        vehicle_templates,
         zone_extra_ws_blue,
         zone_extra_ws_red,
+        &inv_plus_blue_nm,
+        &inv_plus_blue_ws,
+        &inv_plus_red_nm,
+        &inv_plus_red_ws,
+        zone_plus_blue,
+        zone_plus_red,
     )
     .context("patching warehouse linkDynTempl")?;
     Ok(())
@@ -8171,6 +8396,10 @@ pub fn run(cfg: &MizCmd) -> Result<()> {
             &dynamic_emit,
             Some(&wb.template.blue_inventory),
             Some(&wb.template.red_inventory),
+            wb.template.blue_inventory_plus.as_ref(),
+            wb.template.red_inventory_plus.as_ref(),
+            &wb.template.zone_plus_blue,
+            &wb.template.zone_plus_red,
             &mult_cfg,
             warehouse_defaults,
             &obj_dyn_allow,
@@ -8178,6 +8407,7 @@ pub fn run(cfg: &MizCmd) -> Result<()> {
             dyn_farp_allow.as_ref(),
             Some(&ship_wh_allow),
             weapon_bridge_map.as_ref(),
+            &vehicle_templates,
             &wb.zone_extra_ws_blue,
             &wb.zone_extra_ws_red,
         )
