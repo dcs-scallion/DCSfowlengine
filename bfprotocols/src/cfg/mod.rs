@@ -424,6 +424,25 @@ pub struct Deployable {
     pub deprecated_logistics: Option<DeployableObjective>,
 }
 
+impl Deployable {
+    /// ME ship group name for TISP / FowlTools: `Group`, carrier-style `Objective.pad_templates`, or legacy top-level `"template"`.
+    pub fn provides_tisp_ship_template(&self, ship_template: &str) -> bool {
+        let from_kind = match &self.kind {
+            DeployableKind::Group { template } => template.as_str() == ship_template,
+            DeployableKind::Objective(parts) => parts
+                .pad_templates
+                .iter()
+                .any(|p| p.as_str() == ship_template),
+        };
+        let from_legacy = self
+            .deprecated_template
+            .as_ref()
+            .map(|t| t.as_str())
+            == Some(ship_template);
+        from_kind || from_legacy
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Troop {

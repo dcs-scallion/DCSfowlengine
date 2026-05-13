@@ -452,6 +452,8 @@ fn admin_spawn(ctx: &mut Context, lua: MizLua, id: Option<PlayerId>, key: String
                             origin,
                             BitFlags::empty(),
                             None,
+                            None,
+                            None,
                         )
                         .context("adding group")?;
                 }
@@ -479,18 +481,32 @@ fn admin_spawn(ctx: &mut Context, lua: MizLua, id: Option<PlayerId>, key: String
                                 player: ucid,
                                 moved_by: None,
                                 spec: spec.clone(),
-                                origin: None,
                                 cost_fraction: 1.,
+                                origin: None,
                             };
+                            let (n, _) = ctx.db.number_deployed(side, name)?;
+                            let spawn_group_label: Option<std::string::String> =
+                                if spec.limit > 1 {
+                                    let i = n;
+                                    Some(if i == 0 {
+                                        template.to_string()
+                                    } else {
+                                        format!("{}-{}", template.as_str(), i)
+                                    })
+                                } else {
+                                    None
+                                };
                             ctx.db
                                 .add_and_queue_group(
                                     &spctx,
                                     &ctx.idx,
                                     side,
                                     loc,
-                                    &template,
+                                    template.as_str(),
                                     origin,
                                     BitFlags::empty(),
+                                    None,
+                                    spawn_group_label.as_deref(),
                                     None,
                                 )
                                 .context("adding group")?;

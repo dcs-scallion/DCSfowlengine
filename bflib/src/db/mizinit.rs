@@ -210,6 +210,8 @@ impl Db {
             name,
             DeployKind::Objective { origin: obj },
             BitFlags::empty(),
+            None,
+            None,
         )?;
         let o = objective_mut!(self, obj)?;
         o.groups.get_or_default_cow(side).insert_cow(gid);
@@ -350,6 +352,9 @@ impl Db {
             t.update_objective_status(&id, now)?
         }
         t.init_warehouses(lua).context("initializing warehouses")?;
+        let spctx = SpawnCtx::new(lua)?;
+        super::tisp_init::place_tisp_initial_ships(miz, idx, &mut t, &spctx)
+            .context("initial TISP naval ship placement")?;
         t.ephemeral.dirty();
         Ok(t)
     }

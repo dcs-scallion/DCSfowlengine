@@ -44,6 +44,7 @@ pub mod group;
 pub mod logistics;
 pub mod markup;
 pub mod mizinit;
+pub mod tisp_init;
 pub mod objective;
 pub mod persisted;
 pub mod player;

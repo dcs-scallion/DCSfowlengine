@@ -681,6 +681,8 @@ impl Db {
                 &pad_template,
                 DeployKind::Objective { origin: oid },
                 UnitTag::NavalSpawnPoint.into(),
+                None,
+                None,
             ) {
                 Ok(gid) => {
                     mobile = true;
@@ -710,6 +712,8 @@ impl Db {
                     DeployKind::Objective { origin: oid },
                     BitFlags::empty(),
                     Some(now + Duration::seconds(60)),
+                    None,
+                    None,
                 ) {
                     Ok(gid) => gid,
                     Err(e) => {

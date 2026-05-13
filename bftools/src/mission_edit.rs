@@ -17,8 +17,12 @@ use crate::payload_allowlist;
 use crate::weapon_bridge;
 use crate::MizCmd;
 use anyhow::{bail, Context, Result};
-use bfprotocols::miz_trigger::{
-    fowl_trigger_zone_name_valid, FOWL_TRIGGER_ZONE_EXPECTED_PREFIXES_DISPLAY,
+use bfprotocols::{
+    cfg::{Cfg, Deployable},
+    miz_trigger::{
+        fowl_trigger_zone_name_valid, FOWL_TRIGGER_ZONE_EXPECTED_PREFIXES_DISPLAY,
+    },
+    tisp::{parse_tisp_zone_name, starts_with_tisp_prefix, TISP_PREFIX},
 };
 use compact_str::format_compact;
 use dcso3::{
@@ -7859,6 +7863,157 @@ fn resolve_warehouse_template_path(
     Ok(expected_path)
 }
 
+fn find_deployable_covering_tisp_template<'a>(
+    cfg: &'a Cfg,
+    side: Side,
+    template: &str,
+) -> Option<&'a Deployable> {
+    cfg.deployables.get(&side).into_iter().flatten().find(|d| {
+        d.provides_tisp_ship_template(template)
+    })
+}
+
+/// Drops `mission.triggers.zones` entries whose names are in `remove` (re-sequence array part).
+fn remove_mission_trigger_zones_named(
+    lua: &'static Lua,
+    mission: &Miz<'_>,
+    remove: &HashSet<StdString>,
+) -> Result<()> {
+    let triggers: Table = mission.raw_get("triggers")?;
+    let zones: Table = triggers.raw_get("zones")?;
+    let mut kept = Vec::<Table>::new();
+    for z in zones.sequence_values::<Table>() {
+        let z = z?;
+        let name: String = z.raw_get("name")?;
+        if remove.contains(name.as_str()) {
+            continue;
+        }
+        kept.push(z);
+    }
+    let new_zones = lua.create_table()?;
+    for (i, z) in kept.into_iter().enumerate() {
+        new_zones.raw_set((i + 1) as i64, z)?;
+    }
+    triggers.raw_set("zones", new_zones)?;
+    Ok(())
+}
+
+fn audit_tisp_initial_ship_zones(
+    lua: &'static Lua,
+    mission: &Miz<'_>,
+    idx: &miz::MizIndex,
+    campaign_cfg: Option<&Path>,
+) -> Result<()> {
+    const RED: &str = "\x1b[31m";
+    const RESET: &str = "\x1b[0m";
+    let mut malformed: Vec<String> = Vec::new();
+    let mut rows: Vec<(StdString, StdString, u32)> = Vec::new();
+    for zone in mission.triggers()? {
+        let zone = zone?;
+        let name = zone.name()?;
+        if !starts_with_tisp_prefix(name.as_str()) {
+            continue;
+        }
+        if let Some(p) = parse_tisp_zone_name(name.as_str()) {
+            rows.push((
+                StdString::from(p.template),
+                StdString::from(p.full_name),
+                p.instance_index,
+            ));
+        } else {
+            malformed.push(name);
+        }
+    }
+    if rows.is_empty() && malformed.is_empty() {
+        return Ok(());
+    }
+    if !malformed.is_empty() {
+        malformed.sort();
+        for z in &malformed {
+            eprintln!(
+                "{RED}ERROR malformed TISP trigger zone name \"{z}\": expected {TISP_PREFIX}{{B|R}}ShipName with optional trailing -N (example: {TISP_PREFIX}BTarawa, {TISP_PREFIX}BFrigate, {TISP_PREFIX}BFrigate-1, {TISP_PREFIX}BFrigate-2).{RESET}"
+            );
+        }
+        eprintln!(
+            "{RED}Mission assembly was interrupted: the output .miz was not written and no mission files were copied.{RESET}"
+        );
+        bail!("malformed TISP trigger zone name(s)");
+    }
+    let cfg_path = match campaign_cfg {
+        Some(p) => p,
+        None => {
+            eprintln!(
+                "{RED}ERROR the base mission contains TISP* initial-ship placement zones but --campaign-cfg was not passed.{RESET}"
+            );
+            eprintln!(
+                "{RED}Fix: pass the mission Fowl *_CFG JSON with --campaign-cfg so FowlTools can verify each TISP template against deployables (Group template + limit).{RESET}"
+            );
+            eprintln!(
+                "{RED}Mission assembly was interrupted: the output .miz was not written and no mission files were copied.{RESET}"
+            );
+            bail!("TISP zones require --campaign-cfg");
+        }
+    };
+    let cfg: Cfg = serde_json::from_reader(File::open(cfg_path).with_context(|| {
+        format_compact!("opening campaign cfg for TISP audit {:?}", cfg_path)
+    })?)
+    .with_context(|| format_compact!("decoding campaign cfg for TISP audit {:?}", cfg_path))?;
+    let mut templates: Vec<StdString> = rows.iter().map(|(t, _, _)| t.clone()).collect();
+    templates.sort();
+    templates.dedup();
+    let mut to_remove: HashSet<StdString> = HashSet::default();
+    for template in &templates {
+        let side = match template.as_bytes().first() {
+            Some(b'B') => Side::Blue,
+            Some(b'R') => Side::Red,
+            _ => bail!("internal: TISP template {:?}", template),
+        };
+        let Some(dep) = find_deployable_covering_tisp_template(&cfg, side, template.as_str())
+        else {
+            eprintln!(
+                "{RED}ERROR TISP template {:?}: no deployables entry for {:?} covers ship template {:?} (Group, Objective.pad_templates, or legacy top-level \"template\").{RESET}",
+                template, side, template
+            );
+            eprintln!(
+                "{RED}Fix: add or adjust a deployable so one of those matches the ME ship group name.{RESET}"
+            );
+            eprintln!(
+                "{RED}Mission assembly was interrupted: the output .miz was not written and no mission files were copied.{RESET}"
+            );
+            bail!("TISP template missing from CFG deployables");
+        };
+        mission
+            .get_group_by_name(idx, GroupKind::Any, side, template.as_str())?
+            .ok_or_else(|| {
+                anyhow::anyhow!(
+                    "missing ship template group {template:?} for {side:?} (ME group name must match the deployable Group template)"
+                )
+            })
+            .with_context(|| format_compact!("TISP template group {:?}", template))?;
+        let limit = dep.limit as usize;
+        let mut slots: Vec<(u32, StdString)> = rows
+            .iter()
+            .filter(|(t, _, _)| t == template)
+            .map(|(_, fname, inst)| (*inst, fname.clone()))
+            .collect();
+        slots.sort_by(|(ia, na), (ib, nb)| ia.cmp(ib).then_with(|| na.cmp(nb)));
+        for (_, zname) in slots.into_iter().skip(limit) {
+            to_remove.insert(zname);
+        }
+    }
+    if !to_remove.is_empty() {
+        let mut listed: Vec<&str> = to_remove.iter().map(|s| s.as_str()).collect();
+        listed.sort_unstable();
+        warn!(
+            "FowlTools removed {} TISP* trigger zone(s) over CFG deployable limit (not used at runtime): {:?}",
+            listed.len(),
+            listed
+        );
+        remove_mission_trigger_zones_named(lua, mission, &to_remove)?;
+    }
+    Ok(())
+}
+
 fn validate_base_fowl_trigger_zone_names(mission: &Miz) -> Result<()> {
     for zone in mission.triggers()? {
         let zone = zone?;
@@ -7953,6 +8108,12 @@ pub fn run(cfg: &MizCmd) -> Result<()> {
     let mut base = LoadedMiz::new(lua, &cfg.base).context("loading base mission")?;
     validate_base_fowl_trigger_zone_names(&base.mission)
         .context("validating Fowl trigger zone names (must match runtime)")?;
+    let base_idx = base
+        .mission
+        .index()
+        .context("indexing base mission for TISP audit")?;
+    audit_tisp_initial_ship_zones(lua, &base.mission, &base_idx, cfg.campaign_cfg.as_deref())
+        .context("TISP initial-ship placement zones")?;
     let airbase_export_path = resolve_airbase_export_path(cfg)
         .context("resolving fowl_airbase_export JSON path")?;
     if let Some(ref p) = airbase_export_path {

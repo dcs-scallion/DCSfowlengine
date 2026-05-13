@@ -278,8 +278,8 @@ impl Db {
             DeployKind::Action { name, spec: _, destination, player, marks, .. } => {
                 let pname = player
                     .as_ref()
-                    .map(|p| self.persisted.players[p].name.clone())
-                    .unwrap_or(String::from("Server"));
+                    .and_then(|p| self.persisted.players.get(p).map(|pl| pl.name.clone()))
+                    .unwrap_or_else(|| String::from("Server"));
                 let pos_msg = format_compact!("{name} {gid} deployed by {pname}");
                 let pos_mark = self.ephemeral.msgs.mark_to_side(
                     group.side,
@@ -305,7 +305,12 @@ impl Db {
                 }
             }
             DeployKind::Crate { player, spec, .. } => {
-                let name = self.persisted.players[player].name.clone();
+                let name = self
+                    .persisted
+                    .players
+                    .get(player)
+                    .map(|p| p.name.clone())
+                    .unwrap_or_else(|| String::from("Server"));
                 let msg = format_compact!("{} {gid} deployed by {name}", spec.name);
                 Some(self.ephemeral.msgs.mark_to_side(
                     group.side,
@@ -321,18 +326,22 @@ impl Db {
                 cost_fraction: _,
                 origin: _,
             } => {
-                let name = self.persisted.players[player].name.clone();
+                let name = self
+                    .persisted
+                    .players
+                    .get(player)
+                    .map(|p| p.name.clone())
+                    .unwrap_or_else(|| String::from("Server"));
                 let resp = moved_by
                     .as_ref()
-                    .map(|(u, _)| {
-                        let name = self.persisted.players[u].name.clone();
-                        format_compact!("\nresponsible party: {name}")
+                    .and_then(|(u, _)| {
+                        self.persisted.players.get(u).map(|pl| {
+                            format_compact!("\nresponsible party: {}", pl.name.clone())
+                        })
                     })
                     .unwrap_or(CompactString::from(""));
-                let msg = format_compact!(
-                    "{} {gid} deployed by {name}{resp}",
-                    spec.path.last().unwrap()
-                );
+                let tail = spec.path.last().map(|p| p.as_str()).unwrap_or("deployed");
+                let msg = format_compact!("{tail} {gid} deployed by {name}{resp}");
                 Some(self.ephemeral.msgs.mark_to_side(
                     group.side,
                     group_center,
@@ -341,12 +350,18 @@ impl Db {
                 ))
             }
             DeployKind::Troop { player, spec, moved_by, origin: _, cost_fraction: _ } => {
-                let name = self.persisted.players[player].name.clone();
+                let name = self
+                    .persisted
+                    .players
+                    .get(player)
+                    .map(|p| p.name.clone())
+                    .unwrap_or_else(|| String::from("Server"));
                 let resp = moved_by
                     .as_ref()
-                    .map(|(u, _)| {
-                        let name = self.persisted.players[u].name.clone();
-                        format_compact!("\nresponsible party: {name}")
+                    .and_then(|(u, _)| {
+                        self.persisted.players.get(u).map(|pl| {
+                            format_compact!("\nresponsible party: {}", pl.name.clone())
+                        })
                     })
                     .unwrap_or(CompactString::from(""));
                 let msg = format_compact!("{} {gid} deployed by {name}{resp}", spec.name);
@@ -446,6 +461,8 @@ impl Db {
         template_name: &str,
         origin: DeployKind,
         extra_tags: BitFlags<UnitTag>,
+        spawn_group_label: Option<&str>,
+        naval_spawn_land_detail: Option<&str>,
     ) -> Result<GroupId> {
         fn distance<'a, F: Fn(f64, f64) -> f64>(
             pos: Vector2,
@@ -638,6 +655,7 @@ impl Db {
             land: &Land,
             positions: &VecDeque<UnitPosition>,
             positions_by_typ: &FxHashMap<String, VecDeque<UnitPosition>>,
+            naval_spawn_land_detail: Option<&str>,
         ) -> Result<()> {
             for pos in
                 positions.iter().chain(positions_by_typ.values().flat_map(|v| v.iter()))
@@ -645,6 +663,12 @@ impl Db {
                 match land.get_surface_type(LuaVec2(pos.position))? {
                     SurfaceType::ShallowWater | SurfaceType::Water => (),
                     SurfaceType::Land | SurfaceType::Road | SurfaceType::Runway => {
+                        if let Some(z) = naval_spawn_land_detail {
+                            bail!(
+                                "TISP trigger zone {:?}: naval spawn position is on land (expected water)",
+                                z
+                            );
+                        }
                         bail!("you can't spawn this unit on land")
                     }
                 }
@@ -655,6 +679,11 @@ impl Db {
         let template_name = String::from(template_name);
         let template =
             spctx.get_template_ref(idx, GroupKind::Any, side, template_name.as_str())?;
+        let mut template_unit_count = 0usize;
+        for u in template.group.units()? {
+            u?;
+            template_unit_count += 1;
+        }
         let mut gpos =
             compute_unit_positions(&spctx, idx, location.clone(), &template.group)?;
         let kind = GroupCategory::from_kind(template.category);
@@ -664,6 +693,8 @@ impl Db {
         // to their destination.
         let group_name = if extra_tags.contains(UnitTag::NavalSpawnPoint) {
             template_name.clone()
+        } else if let Some(lbl) = spawn_group_label {
+            String::from(lbl)
         } else {
             String::from(format_compact!("{}-{}", template_name, gid))
         };
@@ -704,7 +735,12 @@ impl Db {
                 {
                     () // it's ok to spawn crates on ships
                 } else if spawned.tags.contains(UnitTag::Boat) {
-                    check_land(&land, &gpos.positions, &gpos.by_type)
+                    check_land(
+                        &land,
+                        &gpos.positions,
+                        &gpos.by_type,
+                        naval_spawn_land_detail,
+                    )
                         .with_context(|| format_compact!("placing group {group_name}"))?
                 } else {
                     check_water(&land, &gpos.positions, &gpos.by_type)
@@ -724,15 +760,29 @@ impl Db {
                 .get(typ.as_str())
                 .ok_or_else(|| anyhow!("unit type not classified {typ}"))?;
             let tags = UnitTags(tags.0 | extra_tags);
-            let template_name = unit.name()?;
+            let unit_tpl_name = unit.name()?;
             let unit_name = if extra_tags.contains(UnitTag::NavalSpawnPoint) {
-                template_name.clone()
+                unit_tpl_name.clone()
+            } else if spawn_group_label.is_some() && template_unit_count == 1 {
+                group_name.clone()
             } else {
                 String::from(format_compact!("{}-{}", group_name, uid))
             };
             let pos = match gpos.by_type.get_mut(&typ) {
-                None => gpos.positions.pop_front().unwrap(),
-                Some(positions) => positions.pop_front().unwrap(),
+                None => gpos.positions.pop_front().ok_or_else(|| {
+                    anyhow!(
+                        "internal: no queued position for unit type {:?} in template {:?} (main deque empty)",
+                        typ.as_str(),
+                        template_name
+                    )
+                })?,
+                Some(positions) => positions.pop_front().ok_or_else(|| {
+                    anyhow!(
+                        "internal: no queued position for unit type {:?} in template {:?} (by_type deque empty)",
+                        typ.as_str(),
+                        template_name
+                    )
+                })?,
             };
             let position = {
                 let mut p = Position3::default();
@@ -751,7 +801,7 @@ impl Db {
                 typ: Vehicle(typ),
                 tags,
                 name: unit_name.clone(),
-                template_name,
+                template_name: unit_tpl_name,
                 spawn_position: position,
                 spawn_pos: pos.position,
                 spawn_heading: pos.heading,
@@ -818,6 +868,8 @@ impl Db {
         origin: DeployKind,
         extra_tags: BitFlags<UnitTag>,
         delay: Option<DateTime<Utc>>,
+        spawn_group_label: Option<&str>,
+        naval_spawn_land_detail: Option<&str>,
     ) -> Result<GroupId> {
         let gid = self.add_group(
             &spctx,
@@ -827,6 +879,8 @@ impl Db {
             template_name,
             origin,
             extra_tags,
+            spawn_group_label,
+            naval_spawn_land_detail,
         )?;
         match delay {
             None => self.ephemeral.push_spawn(gid),

@@ -1811,6 +1811,8 @@ impl Db {
                 &args.cfg.template,
                 origin,
                 tags | UnitTag::Driveable,
+                None,
+                None,
             )
             .context("creating group")?;
         let mission = gen_mission(self, gid, pos).context("generating mission for new unit")?;
@@ -2324,14 +2326,26 @@ impl Db {
                     cost_fraction: 1.,
                     origin: None,
                 };
+                let spawn_group_label: Option<std::string::String> = if spec.limit > 1 {
+                    let i = n;
+                    Some(if i == 0 {
+                        template.to_string()
+                    } else {
+                        format!("{}-{}", template.as_str(), i)
+                    })
+                } else {
+                    None
+                };
                 let gid = self.add_and_queue_group(
                     &spctx,
                     idx,
                     side,
                     spawnloc,
-                    template,
+                    template.as_str(),
                     origin,
                     BitFlags::empty(),
+                    None,
+                    spawn_group_label.as_deref(),
                     None,
                 )?;
                 self.ephemeral.stat(Stat::DeployGroup {
@@ -2401,6 +2415,8 @@ impl Db {
             &*troop_cfg.template,
             dk,
             BitFlags::empty(),
+            None,
+            None,
             None,
         )?;
         self.ephemeral.stat(Stat::DeployTroop {

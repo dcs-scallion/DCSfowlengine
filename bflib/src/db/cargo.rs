@@ -273,6 +273,8 @@ impl Db {
             dk,
             BitFlags::empty(),
             None,
+            None,
+            None,
         )?;
         Ok(st)
     }
@@ -883,14 +885,28 @@ impl Db {
                                     cost_fraction: 1.,
                                     origin: Some(from_obj),
                                 };
+                                let (n, _) = self.number_deployed(st.side, dep.as_str())?;
+                                let spawn_group_label: Option<std::string::String> =
+                                    if spec.limit > 1 {
+                                        let i = n;
+                                        Some(if i == 0 {
+                                            template.to_string()
+                                        } else {
+                                            format!("{}-{}", template.as_str(), i)
+                                        })
+                                    } else {
+                                        None
+                                    };
                                 let gid = self.add_and_queue_group(
                                     &spctx,
                                     idx,
                                     st.side,
                                     spawnloc,
-                                    template,
+                                    template.as_str(),
                                     origin,
                                     BitFlags::empty(),
+                                    None,
+                                    spawn_group_label.as_deref(),
                                     None,
                                 )?;
                                 for cr in have.values().flat_map(|c| c.iter()) {
@@ -1029,6 +1045,8 @@ impl Db {
             &template,
             dk,
             BitFlags::empty(),
+            None,
+            None,
             None,
         ) {
             self.ephemeral
@@ -1227,6 +1245,8 @@ impl Db {
             &*it.troop.template,
             dk,
             BitFlags::empty(),
+            None,
+            None,
             None,
         ) {
             Ok(gid) => {

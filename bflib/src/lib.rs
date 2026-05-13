@@ -1353,6 +1353,7 @@ fn delayed_init_miz(lua: MizLua) -> Result<()> {
     debug!("path to saved state is {:?}", path);
     info!("initializing db");
     let to_bg = ctx.to_background.as_ref().unwrap().clone();
+    crate::db::tisp_init::validate_tisp_zones_on_water(lua, &miz)?;
     if !path.exists() {
         debug!("saved state doesn't exist, starting from default");
         ctx.do_bg_task(Task::Stat(Stat::NewRound { sortie: ctx.sortie.clone() }));
@@ -1494,10 +1495,15 @@ fn init_miz(lua: MizLua) -> Result<()> {
                     mlua::Value::Nil,
                     move |lua, _, now| {
                         let ctx = unsafe { Context::get_mut() };
+                        let screen_detail = e
+                            .chain()
+                            .map(|err| err.to_string())
+                            .collect::<Vec<_>>()
+                            .join("\n\n");
                         let _ = Trigger::singleton(lua)?.action()?.out_text(
                             format_compact!(
-                                "THE MISSION CANNOT START BECAUSE OF AN ERROR\n\n{:?}",
-                                e
+                                "THE MISSION CANNOT START BECAUSE OF AN ERROR\n\n{0}",
+                                screen_detail.as_str()
                             )
                             .into(),
                             3600,
