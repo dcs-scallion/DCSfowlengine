@@ -686,6 +686,65 @@ impl Db {
                 })
         };
         load_and_sync_airbases().context("loading and syncing airbases")?;
+        // Dynamic FARPs (TISP / -action): zone center is a heuristic; DCS ship airbase `getPoint`
+        // can sit outside the circle after `move_farp_pad`. Pair by ME pad group name like `add_farp`.
+        let mut pair_farp_airbases_by_pad = || -> Result<()> {
+            for (oid, obj) in &self.persisted.objectives {
+                if self.ephemeral.airbase_by_oid.contains_key(oid) {
+                    continue;
+                }
+                let ObjectiveKind::Farp { pad_template, .. } = &obj.kind else {
+                    continue;
+                };
+                let airbase = Airbase::get_by_name(lua, pad_template.clone()).with_context(|| {
+                    format_compact!(
+                        "FARP objective {:?}: expected DCS airbase named {:?}",
+                        obj.name,
+                        pad_template
+                    )
+                })?;
+                if !airbase.is_exist()? {
+                    bail!(
+                        "FARP objective {:?}: airbase {:?} not spawned",
+                        obj.name,
+                        pad_template
+                    );
+                }
+                airbase
+                    .auto_capture(false)
+                    .context("setting airbase autocapture")?;
+                airbase
+                    .set_coalition(obj.owner)
+                    .context("setting airbase coalition")?;
+                let w = airbase
+                    .get_warehouse()
+                    .context("getting airbase warehouse")?;
+                let whid = w.whid().context("getting airbase warehouse id")?;
+                let airbase_oid = airbase
+                    .object_id()
+                    .context("getting airbase object_id")?;
+                if self
+                    .ephemeral
+                    .airbase_by_oid
+                    .values()
+                    .any(|existing| existing == &airbase_oid)
+                {
+                    bail!(
+                        "FARP pad {:?} already paired to another objective (duplicate pad name?)",
+                        pad_template
+                    );
+                }
+                if let Entry::Vacant(e) = self.ephemeral.airbase_by_oid.entry(*oid) {
+                    e.insert(airbase_oid.clone());
+                    self.ephemeral
+                        .airbases_by_oid
+                        .insert(*oid, smallvec![airbase_oid]);
+                    objective_whid.insert(*oid, whid);
+                }
+            }
+            Ok(())
+        };
+        pair_farp_airbases_by_pad().context("pairing FARP objectives to ship airbases by pad name")?;
         let mut adjust_warehouses_for_miz_changes = || -> Result<()> {
             for (_oid, obj) in self.persisted.objectives.iter_mut_cow() {
                 let mut del_eq: SmallVec<[String; 8]> = smallvec![];

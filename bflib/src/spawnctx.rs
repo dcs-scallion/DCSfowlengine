@@ -14,7 +14,7 @@ FITNESS FOR A PARTICULAR PURPOSE. See the GNU Affero Public License
 for more details.
 */
 
-use anyhow::{Context, Result, anyhow};
+use anyhow::{Context, Result, anyhow, bail};
 use bfprotocols::perf::PerfInner;
 use chrono::Utc;
 use compact_str::format_compact;
@@ -169,14 +169,20 @@ impl<'lua> SpawnCtx<'lua> {
                 .context("getting the pad")?;
             pad.group.set("hidden", false)?;
             pad.group.set("lateActivation", false)?;
-            let pad_unit = pad
-                .group
-                .units()
-                .context("getting pad units")?
-                .get(1)
-                .context("getting pad unit")?;
-            pad_unit.set_pos(pos).context("setting pad pos")?;
-            drop(pad_unit);
+            let units = pad.group.units().context("getting pad units")?;
+            let n = units.len() as i64;
+            if n < 1 {
+                bail!("pad template {pad_template} has no units");
+            }
+            let anchor_old = units.get(1).context("getting first pad unit")?.pos()?;
+            let dx = pos.x - anchor_old.x;
+            let dy = pos.y - anchor_old.y;
+            for i in 1..=n {
+                let u = units.get(i).with_context(|| format_compact!("pad unit index {i}"))?;
+                let p = u.pos()?;
+                u.set_pos(Vector2::new(p.x + dx, p.y + dy))
+                    .with_context(|| format_compact!("setting pad unit {i} position"))?;
+            }
             pad
         };
         self.spawn(pad).context("moving the pad")

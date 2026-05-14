@@ -1149,7 +1149,7 @@ fn run_slow_timed_events(
         }
         record_perf(&mut perf.unit_culling, ts);
         let ts = Utc::now();
-        if let Err(e) = ctx.db.update_objectives_markup() {
+        if let Err(e) = ctx.db.update_objectives_markup(lua) {
             error!("could not remark objectives {e}")
         }
         record_perf(&mut perf.remark_objectives, ts);
@@ -1225,6 +1225,9 @@ fn run_timed_events(
         error!("error processing spawn queue {:?}", e)
     }
     record_perf(&mut perf.spawn_queue, now);
+    if let Err(e) = ctx.db.try_run_deferred_tisp_initial_ships(lua, &ctx.idx, now) {
+        error!("deferred TISP initial ships: {e:?}");
+    }
     let now = Utc::now();
     if let Err(e) = advise_captured(ctx, lua, ts) {
         error!("error advise captured {:?}", e)
@@ -1366,6 +1369,8 @@ fn delayed_init_miz(lua: MizLua) -> Result<()> {
             Arc::clone(&fowl_export),
         )
             .context("initalizing the mission")?;
+        ctx.db
+            .schedule_tisp_initial_ship_placement(Utc::now() + Duration::seconds(60));
     } else {
         debug!("saved state exists, loading it");
         ctx.db = Db::load(

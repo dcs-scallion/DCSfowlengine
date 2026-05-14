@@ -111,7 +111,6 @@
   "cull_after": 600,
   "slow_timed_events_freq": 10,
   "threatened_distance": {
-    "J-11A": 36000,
     "C-101CC": 9000,
     "L-39C": 9000,
     "TF-51D": 0,
@@ -141,7 +140,6 @@
     "RQ-1A Predator": 0,
     "MiG-29A": 21600,
     "MiG-29 Fulcrum": 21600,
-    "MiG-29S": 21600,
     "F-14A-135-GR-Early": 36000,
     "F-14A-135-GR": 36000,
     "MiG-21Bis": 14400,
@@ -189,10 +187,8 @@
   "life_types": {
     "Su-25": "Attack",
     "C-101CC": "Recon",
-    "J-11A": "Standard",
     "MiG-29A": "Intercept",
     "MiG-29 Fulcrum": "Intercept",
-    "MiG-29S": "Intercept",
     "MiG-21Bis": "Intercept",
     "L-39C": "Recon",
     "TF-51D": "Recon",
@@ -3193,9 +3189,6 @@
       "RadarGuided",
       "Launcher"
     ],
-    "J-11A": [
-      "Aircraft"
-    ],
     "C-101CC": [
       "Aircraft"
     ],
@@ -3827,9 +3820,6 @@
       "Aircraft"
     ],
       "MiG-29 Fulcrum": [
-      "Aircraft"
-    ],
-      "MiG-29S": [
       "Aircraft"
     ],
     "5p73 s-125 ln": [

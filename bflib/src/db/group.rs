@@ -37,8 +37,8 @@ use dcso3::{
     coalition::Side,
     coord::Coord,
     env::miz,
-    env::miz::{Group, GroupKind, MizIndex},
-    group::GroupCategory,
+    env::miz::{Group as MizGroup, GroupKind, MizIndex},
+    group::{Group as DcsGroup, GroupCategory},
     land::{Land, SurfaceType},
     net::{SlotId, Ucid},
     object::{DcsObject, DcsOid},
@@ -245,13 +245,41 @@ impl Db {
             .filter_map(|gid| self.persisted.groups.get(gid))
     }
 
-    pub(super) fn mark_group(&mut self, gid: &GroupId) -> Result<()> {
+    fn live_group_center_ground2<'lua>(
+        lua: MizLua<'lua>,
+        group: &SpawnedGroup,
+    ) -> Option<Vector2> {
+        let g = DcsGroup::get_by_name(lua, group.name.as_str()).ok()?;
+        if !g.is_exist().ok()? {
+            return None;
+        }
+        let n = g.get_size().ok()?;
+        if n < 1 {
+            return None;
+        }
+        let mut pts = SmallVec::<[Vector2; 16]>::new();
+        for i in 1_i64..=n {
+            let u = g.get_unit(i as usize).ok()?;
+            let p = u.get_point().ok()?;
+            pts.push(Vector2::new(p.0.x, p.0.z));
+        }
+        (!pts.is_empty()).then(|| centroid2d(pts))
+    }
+
+    pub(super) fn mark_group(&mut self, lua: MizLua, gid: &GroupId) -> Result<()> {
         if let Some(id) = self.ephemeral.group_marks.remove(gid) {
             self.ephemeral.msgs.delete_mark(id)
         }
         let group = group_mut!(self, gid)?;
-        let group_center =
-            centroid2d(group.units.into_iter().map(|uid| self.persisted.units[uid].pos));
+        let group_center = Self::live_group_center_ground2(lua, group).unwrap_or_else(|| {
+            centroid2d(
+                group
+                    .units
+                    .into_iter()
+                    .filter_map(|uid| self.persisted.units.get(uid))
+                    .filter_map(|u| if u.dead { None } else { Some(u.pos) }),
+            )
+        });
         let id = match &mut group.origin {
             DeployKind::ObjectiveDeprecated => None,
             DeployKind::Objective { origin: oid } => match objective!(self, oid) {
@@ -497,7 +525,7 @@ impl Db {
             spctx: &SpawnCtx,
             idx: &MizIndex,
             location: SpawnLoc,
-            template: &Group,
+            template: &MizGroup,
         ) -> Result<GroupPosition> {
             let mut positions = template
                 .units()?
@@ -675,6 +703,46 @@ impl Db {
             }
             Ok(())
         }
+        /// Deck aircraft sit on land; only hull units tagged Boat must be on water at deploy.
+        fn check_land_boat_hulls_at_deploy(
+            land: &Land,
+            unit_classification: &FxHashMap<Vehicle, UnitTags>,
+            template: &MizGroup<'_>,
+            gpos: &GroupPosition,
+            naval_spawn_land_detail: Option<&str>,
+        ) -> Result<()> {
+            if !gpos.by_type.is_empty() {
+                return check_land(
+                    land,
+                    &gpos.positions,
+                    &gpos.by_type,
+                    naval_spawn_land_detail,
+                );
+            }
+            for (u, p) in template.units()?.into_iter().zip(gpos.positions.iter()) {
+                let u = u?;
+                let typ = u.typ()?;
+                let tags = *unit_classification
+                    .get(typ.as_str())
+                    .ok_or_else(|| anyhow!("unit type not classified {typ}"))?;
+                if !tags.contains(UnitTag::Boat) {
+                    continue;
+                }
+                match land.get_surface_type(LuaVec2(p.position))? {
+                    SurfaceType::ShallowWater | SurfaceType::Water => (),
+                    SurfaceType::Land | SurfaceType::Road | SurfaceType::Runway => {
+                        if let Some(z) = naval_spawn_land_detail {
+                            bail!(
+                                "TISP trigger zone {:?}: naval spawn position is on land (expected water)",
+                                z
+                            );
+                        }
+                        bail!("you can't spawn this unit on land")
+                    }
+                }
+            }
+            Ok(())
+        }
         let land = Land::singleton(spctx.lua())?;
         let template_name = String::from(template_name);
         let template =
@@ -735,10 +803,11 @@ impl Db {
                 {
                     () // it's ok to spawn crates on ships
                 } else if spawned.tags.contains(UnitTag::Boat) {
-                    check_land(
+                    check_land_boat_hulls_at_deploy(
                         &land,
-                        &gpos.positions,
-                        &gpos.by_type,
+                        &self.ephemeral.cfg.unit_classification,
+                        &template.group,
+                        &gpos,
                         naval_spawn_land_detail,
                     )
                         .with_context(|| format_compact!("placing group {group_name}"))?
@@ -854,7 +923,7 @@ impl Db {
         self.persisted.groups_by_name.insert_cow(group_name, gid);
         self.persisted.groups_by_side.get_or_default_cow(side).insert_cow(gid);
         self.ephemeral.dirty();
-        self.mark_group(&gid)?;
+        self.mark_group(spctx.lua(), &gid)?;
         Ok(gid)
     }
 
@@ -918,7 +987,7 @@ impl Db {
             });
             let gid = unit.group;
             if group_health!(self, gid)?.0 == 1 {
-                self.mark_group(&gid)?
+                self.mark_group(lua, &gid)?
             }
             return Ok(BirthRes::None);
         }
@@ -1282,7 +1351,7 @@ impl Db {
         }
         for gid in moved {
             self.ephemeral.dirty();
-            self.mark_group(&gid)?;
+            self.mark_group(lua, &gid)?;
         }
         Ok(dead)
     }

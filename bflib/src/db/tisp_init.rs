@@ -3,7 +3,8 @@ use super::Db;
 use crate::spawnctx::{SpawnCtx, SpawnLoc};
 use anyhow::{anyhow, bail, Context, Result};
 use bfprotocols::{
-    cfg::{Cfg, Deployable},
+    cfg::{Cfg, Deployable, DeployableKind},
+    stats::Stat,
     tisp::{parse_tisp_zone_name, starts_with_tisp_prefix, TISP_PREFIX},
 };
 use dcso3::{
@@ -141,38 +142,73 @@ pub fn place_tisp_initial_ships(
                     side
                 )
             })?;
-        for (i, (_, zone_name, pos)) in slots.iter().take(limit).enumerate() {
-            let spawn_label: Option<String> = if limit > 1 {
-                Some(if i == 0 {
-                    template.clone()
-                } else {
-                    format!("{}-{}", template, i)
-                })
-            } else {
-                None
-            };
-            db.add_group(
-                spctx,
-                idx,
-                side,
-                SpawnLoc::AtPos {
-                    pos: *pos,
-                    offset_direction: Vector2::new(1., 0.),
-                    group_heading: 0.,
-                },
-                template.as_str(),
-                DeployKind::Deployed {
-                    player: Ucid::default(),
-                    moved_by: None,
-                    spec: dep.clone(),
-                    cost_fraction: 1.,
-                    origin: None,
-                },
-                BitFlags::empty(),
-                spawn_label.as_deref(),
-                Some(zone_name.as_str()),
+        let dep_menu_key = dep.path.last().ok_or_else(|| {
+            anyhow!(
+                "TISP deployable for ME template {:?} has empty path (menu name)",
+                template
             )
-            .with_context(|| format!("TISP spawn for zone {:?}", zone_name))?;
+        })?;
+        for (_, zone_name, pos) in slots.iter().take(limit) {
+            let (n, _) = db.number_deployed(side, dep_menu_key.as_str()).with_context(|| {
+                format!("TISP counting deployed instances for zone {:?}", zone_name)
+            })?;
+            if n >= dep.limit as usize {
+                bail!(
+                    "TISP: more initial-ship zones than deployable limit ({}) for {:?} on {:?}",
+                    dep.limit,
+                    dep_menu_key.as_str(),
+                    side
+                );
+            }
+            let lua = spctx.lua();
+            match &dep.kind {
+                DeployableKind::Objective(parts) => {
+                    let oid = db
+                        .add_farp(lua, spctx, idx, side, *pos, &dep, parts)
+                        .with_context(|| format!("TISP add_farp for zone {:?}", zone_name))?;
+                    db.ephemeral.stat(Stat::DeployFarp {
+                        by: Ucid::default(),
+                        oid,
+                        deployable: dep_menu_key.clone(),
+                    });
+                }
+                DeployableKind::Group {
+                    template: group_tpl,
+                } => {
+                    let spawn_group_label: Option<String> = if dep.limit > 1 {
+                        Some(if n == 0 {
+                            group_tpl.to_string()
+                        } else {
+                            format!("{}-{}", group_tpl.as_str(), n)
+                        })
+                    } else {
+                        None
+                    };
+                    db.add_and_queue_group(
+                        spctx,
+                        idx,
+                        side,
+                        SpawnLoc::AtPos {
+                            pos: *pos,
+                            offset_direction: Vector2::new(1., 0.),
+                            group_heading: 0.,
+                        },
+                        group_tpl.as_str(),
+                        DeployKind::Deployed {
+                            player: Ucid::default(),
+                            moved_by: None,
+                            spec: dep.clone(),
+                            cost_fraction: 1.,
+                            origin: None,
+                        },
+                        BitFlags::empty(),
+                        None,
+                        spawn_group_label.as_deref(),
+                        None,
+                    )
+                    .with_context(|| format!("TISP spawn for zone {:?}", zone_name))?;
+                }
+            }
         }
     }
     Ok(())

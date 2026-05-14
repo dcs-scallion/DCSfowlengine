@@ -137,6 +137,8 @@ pub struct Ephemeral {
     pub(super) production_by_side: FxHashMap<Side, Arc<Production>>,
     pub(super) actions_taken: FxHashMap<Side, FxHashMap<String, u32>>,
     pub(super) delayspawnq: BTreeMap<DateTime<Utc>, SmallVec<[GroupId; 8]>>,
+    /// New round only: wall-clock time to run `place_tisp_initial_ships` after full startup.
+    pub(super) tisp_initial_after: Option<DateTime<Utc>>,
     pub(super) awacs_stn: u32,
     pub(super) logistics_stage: LogiStage,
     spawnq: VecDeque<GroupId>,
@@ -178,6 +180,7 @@ impl Default for Ephemeral {
             production_by_side: FxHashMap::default(),
             actions_taken: FxHashMap::default(),
             delayspawnq: BTreeMap::default(),
+            tisp_initial_after: None,
             awacs_stn: 0o77777,
             spawnq: VecDeque::default(),
             despawnq: VecDeque::default(),
@@ -833,6 +836,22 @@ impl Ephemeral {
         Ok(())
     }
 
+    /// After `coalition.addGroup`, runtime `groupId` differs from the ME template. Client slots and
+    /// `out_text_for_group` still use template ids from `init_objective_slots` until remapped.
+    pub(super) fn remap_slot_miz_gid(&mut self, old: miz::GroupId, new: miz::GroupId) {
+        if old == new {
+            return;
+        }
+        for si in self.slot_info.values_mut() {
+            if si.miz_gid == old {
+                si.miz_gid = new;
+            }
+        }
+        if let Some(slot) = self.slot_by_miz_gid.remove(&old) {
+            self.slot_by_miz_gid.insert(new, slot);
+        }
+    }
+
     pub(super) fn spawn_group<'lua>(
         &mut self,
         perf: &mut PerfInner,
@@ -863,7 +882,7 @@ impl Ephemeral {
                 .context("setting points")?;
         }
         let mut points: SmallVec<[Vector2; 16]> = smallvec![];
-        let by_tname: FxHashMap<&str, &SpawnedUnit> = group
+        let mut unit_pool: Vec<&SpawnedUnit> = group
             .units
             .into_iter()
             .filter_map(|uid| {
@@ -872,7 +891,7 @@ impl Ephemeral {
                     if u.dead {
                         None
                     } else {
-                        Some((u.template_name.as_str(), u))
+                        Some(u)
                     }
                 })
             })
@@ -882,9 +901,14 @@ impl Ephemeral {
             let mut i = 1;
             while i as usize <= units.len() {
                 let unit = units.get(i)?;
-                match by_tname.get(unit.name()?.as_str()) {
+                let uname = unit.name()?;
+                let j = unit_pool
+                    .iter()
+                    .position(|su| su.template_name.as_str() == uname.as_str());
+                match j {
                     None => units.remove(i)?,
-                    Some(su) => {
+                    Some(j) => {
+                        let su = unit_pool.remove(j);
                         if su.tags.contains(UnitTag::AWACS) {
                             let stn = String::from(format_compact!("{:005o}", self.awacs_stn));
                             if let Ok(props) = unit.raw_get::<_, LuaTable>("AddPropAircraft") {
@@ -907,6 +931,13 @@ impl Ephemeral {
             record_perf(&mut perf.spawn, ts);
             Ok(None)
         } else {
+            if points.is_empty() {
+                bail!(
+                    "spawn_group: no persisted positions for group {:?} template {:?}",
+                    group.name,
+                    group.template_name
+                );
+            }
             let point = centroid2d(points.iter().map(|p| *p));
             template.group.set_pos(point)?;
             /*
@@ -928,6 +959,18 @@ impl Ephemeral {
                     let oid = g.object_id()?;
                     self.object_id_by_gid.insert(group.id, oid.clone());
                     self.gid_by_object_id.insert(oid, group.id);
+                    if let Ok(tpl) = spctx.get_template_ref(
+                        idx,
+                        GroupKind::Any,
+                        group.side,
+                        group.template_name.as_str(),
+                    ) {
+                        let old_gid = tpl.group.id()?;
+                        let new_gid = g.id()?;
+                        if old_gid != new_gid {
+                            self.remap_slot_miz_gid(old_gid, new_gid);
+                        }
+                    }
                 }
             }
             record_perf(&mut perf.spawn, ts);

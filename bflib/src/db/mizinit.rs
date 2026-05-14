@@ -44,6 +44,7 @@ use bfprotocols::{
 use chrono::prelude::*;
 use compact_str::CompactString;
 use dcso3::{
+    airbase::Airbase,
     centroid2d, coalition::Side, controller::PointType, coord::Coord, env::miz::{Group, Miz, MizIndex, Skill, TriggerZone, TriggerZoneTyp}, land::Land, net::Net, trigger::Trigger, LuaVec2, LuaVec3, MizLua, String, Vector2, Vector3
 };
 use enumflags2::BitFlags;
@@ -352,9 +353,6 @@ impl Db {
             t.update_objective_status(&id, now)?
         }
         t.init_warehouses(lua).context("initializing warehouses")?;
-        let spctx = SpawnCtx::new(lua)?;
-        super::tisp_init::place_tisp_initial_ships(miz, idx, &mut t, &spctx)
-            .context("initial TISP naval ship placement")?;
         t.ephemeral.dirty();
         Ok(t)
     }
@@ -439,27 +437,53 @@ impl Db {
                 obj.threat_pos3 = Vector3::new(pos.x, alt, pos.y);
                 if let ObjectiveKind::Farp {
                     spec: _,
-                    mobile: _,
+                    mobile,
                     pad_template,
                 } = &obj.kind
                 {
-                    if let Some(uid) = self.persisted.units_by_name.get(pad_template)
-                        && let Some(unit) = self.persisted.units.get(uid)
-                    {
-                        self.ephemeral.push_spawn(unit.group);
-                    } else {
-                        spctx
-                            .move_farp_pad(idx, obj.owner, &pad_template, pos)
-                            .context("moving farp pad")?;
+                    // Carriers exist as Group and as ship Airbase; Group.getByName can miss timing.
+                    let pad_live_group = dcso3::group::Group::get_by_name(spctx.lua(), pad_template.as_str())
+                        .and_then(|g| g.is_exist())
+                        .unwrap_or(false);
+                    let pad_live_airbase = Airbase::get_by_name(spctx.lua(), pad_template.clone())
+                        .and_then(|a| a.is_exist())
+                        .unwrap_or(false);
+                    let pad_live = pad_live_group || pad_live_airbase;
+                    if !pad_live {
+                        // Mobile FARP: never push_spawn the pad from DB here — spawn_group uses ME
+                        // template and drops deck props to map origin when matching fails. Relocate via
+                        // move_farp_pad only (same as add_farp tail).
+                        if *mobile {
+                            spctx
+                                .move_farp_pad(idx, obj.owner, &pad_template, pos)
+                                .context("moving farp pad")?;
+                        } else if let Some(uid) = self.persisted.units_by_name.get(pad_template)
+                            && let Some(unit) = self.persisted.units.get(uid)
+                        {
+                            self.ephemeral.push_spawn(unit.group);
+                        } else {
+                            spctx
+                                .move_farp_pad(idx, obj.owner, &pad_template, pos)
+                                .context("moving farp pad")?;
+                        }
                     }
                     self.ephemeral.set_pad_template_used(pad_template.clone());
                 }
                 if let Some(groups) = obj.groups.get(&obj.owner) {
                     for gid in groups {
                         let group = group!(self, gid)?;
-                        if obj.kind.is_farp() || group.class.is_services() {
-                            self.ephemeral.push_spawn(*gid)
+                        if !obj.kind.is_farp() && !group.class.is_services() {
+                            continue;
                         }
+                        // Pad row is handled only in the FARP block above; spawning it again here
+                        // duplicates the ME group (carriers jump back to template). Defenses use
+                        // different template_name values than pad_template.
+                        if let ObjectiveKind::Farp { pad_template: pt, .. } = &obj.kind {
+                            if group.template_name.as_str() == pt.as_str() {
+                                continue;
+                            }
+                        }
+                        self.ephemeral.push_spawn(*gid)
                     }
                 }
                 // spawn left behind base defenses
@@ -488,7 +512,7 @@ impl Db {
                 .map(|(gid, _)| *gid)
                 .collect::<Vec<_>>();
             for gid in groups {
-                self.mark_group(&gid)?
+                self.mark_group(lua, &gid)?
             }
             for (_, obj) in &self.persisted.objectives {
                 self.ephemeral.create_objective_markup(&self.persisted, obj)
@@ -537,6 +561,39 @@ impl Db {
                 self.ephemeral.dirty();
             }
         }
+        Ok(())
+    }
+
+    /// Wall-clock time when `place_tisp_initial_ships` should run (new round only).
+    pub fn schedule_tisp_initial_ship_placement(&mut self, at: DateTime<Utc>) {
+        self.ephemeral.tisp_initial_after = Some(at);
+    }
+
+    pub fn try_run_deferred_tisp_initial_ships(
+        &mut self,
+        lua: MizLua,
+        idx: &MizIndex,
+        now: DateTime<Utc>,
+    ) -> Result<()> {
+        match self.ephemeral.tisp_initial_after {
+            Some(at) if now >= at => {}
+            _ => return Ok(()),
+        }
+        self.ephemeral.tisp_initial_after = None;
+        let miz = Miz::singleton(lua)?;
+        let spctx = SpawnCtx::new(lua)?;
+        if let Err(e) = super::tisp_init::place_tisp_initial_ships(&miz, idx, self, &spctx)
+            .context("deferred TISP naval ship placement")
+        {
+            error!(
+                "deferred TISP naval ship placement failed (use -action if needed): {e:?}"
+            );
+            return Ok(());
+        }
+        self.setup_warehouses_after_load(lua)
+            .context("warehouses after deferred TISP")?;
+        info!("warehouses re-synced after deferred TISP placement");
+        self.ephemeral.dirty();
         Ok(())
     }
 }

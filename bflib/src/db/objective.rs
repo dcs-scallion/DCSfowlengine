@@ -60,6 +60,28 @@ use serde_derive::{Deserialize, Serialize};
 use smallvec::{SmallVec, smallvec};
 use std::{cmp::max, str::FromStr, sync::Arc};
 
+/// Ground XZ for mobile FARP markup / zone (persisted unit.pos can lag ME template after spawn).
+fn mobile_farp_anchor_ground2(lua: MizLua<'_>, pad_template: &str) -> Option<Vector2> {
+    let name = String::from(pad_template);
+    if let Ok(ab) = Airbase::get_by_name(lua, name.clone()) {
+        if ab.is_exist().unwrap_or(false) {
+            if let Ok(p) = ab.get_point() {
+                return Some(Vector2::new(p.0.x, p.0.z));
+            }
+        }
+    }
+    if let Ok(g) = Group::get_by_name(lua, pad_template) {
+        if g.is_exist().unwrap_or(false) {
+            if let Ok(u) = g.get_unit(1) {
+                if let Ok(p) = u.get_point() {
+                    return Some(Vector2::new(p.0.x, p.0.z));
+                }
+            }
+        }
+    }
+    None
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 pub enum ObjGroupClass {
     Logi,
@@ -1399,7 +1421,7 @@ impl Db {
         }
         for gid in to_mark {
             if let Err(e) = self
-                .mark_group(&gid)
+                .mark_group(lua, &gid)
                 .with_context(|| format_compact!("marking gid {gid} after capture"))
             {
                 error!("{e:?}")
@@ -1408,7 +1430,7 @@ impl Db {
         Ok(actually_captured)
     }
 
-    pub fn update_objectives_markup(&mut self) -> Result<()> {
+    pub fn update_objectives_markup(&mut self, lua: MizLua) -> Result<()> {
         let mut pos_update: SmallVec<[(ObjectiveId, String); 8]> = smallvec![];
         for (id, obj) in &self.persisted.objectives {
             if let ObjectiveKind::Farp {
@@ -1423,14 +1445,25 @@ impl Db {
         }
         let mut moved: SmallVec<[ObjectiveId; 8]> = smallvec![];
         for (oid, pad) in pos_update {
+            let new_pos = mobile_farp_anchor_ground2(lua, pad.as_str()).or_else(|| {
+                let uid = self.persisted.units_by_name.get(&pad)?;
+                let unit = self.persisted.units.get(uid)?;
+                Some(unit.pos)
+            });
+            let Some(new_pos) = new_pos else {
+                continue;
+            };
             let obj = objective_mut!(self, oid)?;
-            if let Some(uid) = self.persisted.units_by_name.get(&pad)
-                && let Some(unit) = self.persisted.units.get(uid)
-                && let Zone::Circle { pos, .. } = &mut obj.zone
-                && pos != &unit.pos
-            {
-                *pos = unit.pos;
-                moved.push(oid)
+            if let Zone::Circle { pos, .. } = &mut obj.zone {
+                if pos != &new_pos {
+                    *pos = new_pos;
+                    let alt = Land::singleton(lua)
+                        .and_then(|land| land.get_height(LuaVec2(*pos)))
+                        .unwrap_or(0.)
+                        + 50.;
+                    obj.threat_pos3 = Vector3::new(new_pos.x, alt, new_pos.y);
+                    moved.push(oid);
+                }
             }
         }
         for (_, obj) in &self.persisted.objectives {
