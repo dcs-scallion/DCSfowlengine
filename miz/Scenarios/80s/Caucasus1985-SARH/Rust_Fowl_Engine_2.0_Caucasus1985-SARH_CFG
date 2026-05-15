@@ -73,7 +73,7 @@
   "default_warehouse_Fueltanks": 50,
   "default_warehouse_Misc": 100,
   "warehouse": {
-    "farp_max": 100,
+    "farp_max": 2,
     "fob_max": 3,
     "carrier_airbase_max": 4, 
     "airbase_max": 5,

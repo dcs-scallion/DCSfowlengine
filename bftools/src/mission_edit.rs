@@ -2973,6 +2973,185 @@ fn apply_inventory_liquids_scaled(dst: &Table, src: &Table, lua: &Lua, mult: u32
     Ok(())
 }
 
+fn preserve_dynamic_flags(
+    lua: &Lua,
+    new_row: &Table,
+    old_row: &Table,
+    preserve_liquids: bool,
+) -> Result<()> {
+    match old_row.raw_get::<_, Value>("dynamicSpawn") {
+        Ok(v) if !v.is_nil() => new_row.raw_set("dynamicSpawn", v)?,
+        _ => new_row.raw_set("dynamicSpawn", false)?,
+    }
+    match old_row.raw_get::<_, Value>("dynamicCargo") {
+        Ok(v) if !v.is_nil() => new_row.raw_set("dynamicCargo", v)?,
+        _ => new_row.raw_set("dynamicCargo", false)?,
+    }
+    if preserve_liquids {
+        for key in ["jet_fuel", "gasoline", "diesel", "methanol_mixture"] {
+            let v: Value = old_row.raw_get(key).unwrap_or(Value::Nil);
+            if v.is_nil() {
+                continue;
+            }
+            match v {
+                Value::Table(t) => new_row.raw_set(key, t.deep_clone(lua)?)?,
+                _ => new_row.raw_set(key, v)?,
+            }
+        }
+    }
+    Ok(())
+}
+
+#[derive(Clone, Copy, Default)]
+enum WarehouseTemplateStockMode {
+    /// B/RDEFAULT: hub `weapons` only (no A/C in template by design).
+    #[default]
+    DefaultHubWeapons,
+    /// B/RINVENTORY: A/C amounts on matching mission rows; weapons merge over default where stock > 0.
+    InventoryStock,
+}
+
+fn copy_aircraft_initial_amounts_scaled(
+    dst_row: &Table,
+    src_row: &Table<'static>,
+    mult: u32,
+) -> Result<()> {
+    let (Ok(dst_aircrafts), Ok(src_aircrafts)) = (
+        dst_row.raw_get::<_, Table>("aircrafts"),
+        src_row.raw_get::<_, Table>("aircrafts"),
+    ) else {
+        return Ok(());
+    };
+    for cat in ["helicopters", "planes"] {
+        let (Ok(dst_cat), Ok(src_cat)) = (
+            dst_aircrafts.raw_get::<_, Table>(cat),
+            src_aircrafts.raw_get::<_, Table>(cat),
+        ) else {
+            continue;
+        };
+        for pair in dst_cat.clone().pairs::<String, Table>() {
+            let (unit_type, dst_unit) = pair?;
+            let Ok(src_unit) = src_cat.raw_get::<_, Table>(unit_type.clone()) else {
+                continue;
+            };
+            let Ok(src_amt) = src_unit.raw_get::<_, u32>("initialAmount") else {
+                continue;
+            };
+            dst_unit.raw_set("initialAmount", src_amt.saturating_mul(mult))?;
+        }
+    }
+    Ok(())
+}
+
+/// Template `weapons` (and optionally A/C) onto mission warehouse row, × capacity mult.
+fn copy_initial_amounts_scaled(
+    lua: &Lua,
+    dst_row: &Table,
+    src_row: &Table<'static>,
+    mult: u32,
+    mode: WarehouseTemplateStockMode,
+) -> Result<()> {
+    if matches!(mode, WarehouseTemplateStockMode::InventoryStock) {
+        copy_aircraft_initial_amounts_scaled(dst_row, src_row, mult)?;
+    }
+
+    let Some(src_weapons) = src_row.raw_get::<_, Table>("weapons").ok() else {
+        return Ok(());
+    };
+
+    match mode {
+        WarehouseTemplateStockMode::DefaultHubWeapons => {
+            let dst_weapons = lua.create_table()?;
+            let mut idx = 1u32;
+            for pair in src_weapons.clone().pairs::<Value, Table>() {
+                let (_, src_w) = pair?;
+                let cloned = src_w.deep_clone(lua)?;
+                if let Ok(src_amt) = cloned.raw_get::<_, u32>("initialAmount") {
+                    cloned.raw_set("initialAmount", src_amt.saturating_mul(mult))?;
+                }
+                dst_weapons.raw_set(idx, cloned)?;
+                idx = idx.saturating_add(1);
+            }
+            dst_row.raw_set("weapons", dst_weapons)?;
+        }
+        WarehouseTemplateStockMode::InventoryStock => {
+            let dst_weapons = match dst_row.raw_get::<_, Table>("weapons") {
+                Ok(t) => t,
+                Err(_) => {
+                    let t = lua.create_table()?;
+                    dst_row.raw_set("weapons", t.clone())?;
+                    t
+                }
+            };
+            let mut dst_idx_by_ws: HashMap<[i32; 4], Value> = HashMap::new();
+            for pair in dst_weapons.clone().pairs::<Value, Table>() {
+                let (k, w) = pair?;
+                let Some(ws) = read_weapon_ws_type(&w) else {
+                    continue;
+                };
+                dst_idx_by_ws.insert(ws, k);
+            }
+            for pair in src_weapons.clone().pairs::<Value, Table>() {
+                let (_, src_w) = pair?;
+                let src_amt = src_w.raw_get::<_, u32>("initialAmount").unwrap_or(0);
+                if src_amt == 0 {
+                    continue;
+                }
+                let scaled = src_amt.saturating_mul(mult);
+                let Some(ws) = read_weapon_ws_type(&src_w) else {
+                    continue;
+                };
+                if let Some(k) = dst_idx_by_ws.get(&ws) {
+                    let dst_w = dst_weapons.raw_get::<_, Table>(k.clone())?;
+                    dst_w.raw_set("initialAmount", scaled)?;
+                } else {
+                    let cloned = src_w.deep_clone(lua)?;
+                    cloned.raw_set("initialAmount", scaled)?;
+                    let mut new_idx = dst_weapons.raw_len().saturating_add(1);
+                    if new_idx == 0 {
+                        new_idx = 1;
+                    }
+                    dst_weapons.raw_set(new_idx, cloned)?;
+                    dst_idx_by_ws.insert(ws, Value::Integer(new_idx as i64));
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Template stock onto mission warehouse (+ liquids). Mode selects B/RDEFAULT vs B/RINVENTORY fields.
+fn apply_mission_warehouse_template_stock(
+    lua: &Lua,
+    dst_row: &Table,
+    src_row: &Table<'static>,
+    mult: u32,
+    mode: WarehouseTemplateStockMode,
+) -> Result<()> {
+    copy_initial_amounts_scaled(lua, dst_row, src_row, mult, mode)?;
+    apply_inventory_liquids_scaled(dst_row, src_row, lua, mult)
+}
+
+fn fill_static_mission_warehouse_from_templates<'a>(
+    lua: &'a Lua,
+    old_row: &Table<'a>,
+    default_tpl: &Table<'static>,
+    inventory_tpl: &Table<'static>,
+    mult: u32,
+) -> Result<Table<'a>> {
+    let new_row = old_row.deep_clone(lua)?;
+    preserve_dynamic_flags(lua, &new_row, old_row, true)?;
+    apply_mission_warehouse_template_stock(
+        lua,
+        &new_row,
+        default_tpl,
+        mult,
+        WarehouseTemplateStockMode::DefaultHubWeapons,
+    )?;
+    apply_inventory_liquids_scaled(&new_row, inventory_tpl, lua, mult)?;
+    Ok(new_row)
+}
+
 #[derive(Clone, Copy)]
 enum NeutralWarehouseBuildKind {
     /// Neutral airports without DS: cleared here. Neutral + DS: see `neutral_dynamic_spawn_airport_zero_stock_link_templates`.
@@ -4147,35 +4326,6 @@ impl WarehouseTemplate {
             Ok(zeroed)
         }
 
-        fn preserve_dynamic_flags(
-            lua: &Lua,
-            new_row: &Table,
-            old_row: &Table,
-            preserve_liquids: bool,
-        ) -> Result<()> {
-            match old_row.raw_get::<_, Value>("dynamicSpawn") {
-                Ok(v) if !v.is_nil() => new_row.raw_set("dynamicSpawn", v)?,
-                _ => new_row.raw_set("dynamicSpawn", false)?,
-            }
-            match old_row.raw_get::<_, Value>("dynamicCargo") {
-                Ok(v) if !v.is_nil() => new_row.raw_set("dynamicCargo", v)?,
-                _ => new_row.raw_set("dynamicCargo", false)?,
-            }
-            if preserve_liquids {
-                for key in ["jet_fuel", "gasoline", "diesel", "methanol_mixture"] {
-                    let v: Value = old_row.raw_get(key).unwrap_or(Value::Nil);
-                    if v.is_nil() {
-                        continue;
-                    }
-                    match v {
-                        Value::Table(t) => new_row.raw_set(key, t.deep_clone(lua)?)?,
-                        _ => new_row.raw_set(key, v)?,
-                    }
-                }
-            }
-            Ok(())
-        }
-
         let inventory_aircraft_orphans_cleared = sanitize_both_production_inventory_aircraft_templates(
             weapon_airframes,
             &self.blue_inventory,
@@ -5210,65 +5360,19 @@ impl WarehouseTemplate {
                 // Liquids prefilled in `patch_warehouse_dynamic_spawn_links` (same mult as weapons/aircraft).
                 continue;
             }
-            let src = match side {
-                Side::Blue => &blue_master,
-                Side::Red => &red_master,
+            let (def_tpl, inv_tpl) = match side {
+                Side::Blue => (&self.blue_default, &self.blue_inventory),
+                Side::Red => (&self.red_default, &self.red_inventory),
                 Side::Neutral => unreachable!("filtered above"),
             };
-            let new_row = src.deep_clone(lua)?;
-            preserve_dynamic_flags(lua, &new_row, &old_row, true)?;
-            let inv_tpl = match side {
-                Side::Blue => &self.blue_inventory,
-                Side::Red => &self.red_inventory,
-                Side::Neutral => unreachable!(),
-            };
-            apply_inventory_liquids_scaled(&new_row, inv_tpl, lua, mult_cfg.mult_airport(id))?;
-            if let Some(caps) = warehouse_caps {
-                if caps.has_any_nonzero_cap() && !is_dynamic {
-                    let m = mult_cfg.mult_airport(id);
-                    campaign_cfg::fill_zero_weapon_amounts_from_cfg(&new_row, caps, m)
-                        .with_context(|| {
-                            format_compact!("fill zero weapons airport {id}")
-                        })?;
-                    match side {
-                        Side::Blue => {
-                            prune_warehouse_weapons_row(
-                                lua,
-                                &new_row,
-                                &blue_strip_ws,
-                                warehouse_allowlist_for_filter(&blue_allowed_ws),
-                                "airport post-fill BDEFAULT filter",
-                                None,
-                            )?;
-                            zero_default_weapons_present_in_positive_inventory(
-                                &new_row,
-                                &self.blue_inventory,
-                                blue_inventory_positive_block_ws.as_ref(),
-                                "airport post-fill BDEFAULT de-dup",
-                                "BINVENTORY",
-                            )?;
-                        }
-                        Side::Red => {
-                            prune_warehouse_weapons_row(
-                                lua,
-                                &new_row,
-                                &red_strip_ws,
-                                warehouse_allowlist_for_filter(&red_allowed_ws),
-                                "airport post-fill RDEFAULT filter",
-                                None,
-                            )?;
-                            zero_default_weapons_present_in_positive_inventory(
-                                &new_row,
-                                &self.red_inventory,
-                                red_inventory_positive_block_ws.as_ref(),
-                                "airport post-fill RDEFAULT de-dup",
-                                "RINVENTORY",
-                            )?;
-                        }
-                        Side::Neutral => unreachable!("filtered above"),
-                    }
-                }
-            }
+            let new_row = fill_static_mission_warehouse_from_templates(
+                lua,
+                &old_row,
+                def_tpl,
+                inv_tpl,
+                mult_cfg.mult_airport(id),
+            )
+            .with_context(|| format_compact!("airport {id}"))?;
             airports
                 .set(id, new_row)
                 .with_context(|| format_compact!("setting airport {id}"))?;
@@ -5307,65 +5411,19 @@ impl WarehouseTemplate {
                 // Dynamic hubs: patched only in `patch_warehouse_dynamic_spawn_links`.
                 continue;
             }
-            let src = match side {
-                Side::Blue => &blue_master,
-                Side::Red => &red_master,
+            let (def_tpl, inv_tpl) = match side {
+                Side::Blue => (&self.blue_default, &self.blue_inventory),
+                Side::Red => (&self.red_default, &self.red_inventory),
                 Side::Neutral => unreachable!("filtered above"),
             };
-            let new_row = src.deep_clone(lua)?;
-            preserve_dynamic_flags(lua, &new_row, &old_row, true)?;
-            let inv_tpl = match side {
-                Side::Blue => &self.blue_inventory,
-                Side::Red => &self.red_inventory,
-                Side::Neutral => unreachable!(),
-            };
-            apply_inventory_liquids_scaled(&new_row, inv_tpl, lua, mult_cfg.mult_warehouse_row(id))?;
-            if let Some(caps) = warehouse_caps {
-                if caps.has_any_nonzero_cap() {
-                    let m = mult_cfg.mult_warehouse_row(id);
-                    campaign_cfg::fill_zero_weapon_amounts_from_cfg(&new_row, caps, m)
-                        .with_context(|| {
-                            format_compact!("fill zero weapons warehouse {id}")
-                        })?;
-                    match side {
-                        Side::Blue => {
-                            prune_warehouse_weapons_row(
-                                lua,
-                                &new_row,
-                                &blue_strip_ws,
-                                warehouse_allowlist_for_filter(&blue_allowed_ws),
-                                "warehouse post-fill BDEFAULT filter",
-                                None,
-                            )?;
-                            zero_default_weapons_present_in_positive_inventory(
-                                &new_row,
-                                &self.blue_inventory,
-                                blue_inventory_positive_block_ws.as_ref(),
-                                "warehouse post-fill BDEFAULT de-dup",
-                                "BINVENTORY",
-                            )?;
-                        }
-                        Side::Red => {
-                            prune_warehouse_weapons_row(
-                                lua,
-                                &new_row,
-                                &red_strip_ws,
-                                warehouse_allowlist_for_filter(&red_allowed_ws),
-                                "warehouse post-fill RDEFAULT filter",
-                                None,
-                            )?;
-                            zero_default_weapons_present_in_positive_inventory(
-                                &new_row,
-                                &self.red_inventory,
-                                red_inventory_positive_block_ws.as_ref(),
-                                "warehouse post-fill RDEFAULT de-dup",
-                                "RINVENTORY",
-                            )?;
-                        }
-                        Side::Neutral => unreachable!("filtered above"),
-                    }
-                }
-            }
+            let new_row = fill_static_mission_warehouse_from_templates(
+                lua,
+                &old_row,
+                def_tpl,
+                inv_tpl,
+                mult_cfg.mult_warehouse_row(id),
+            )
+            .with_context(|| format_compact!("warehouse {id}"))?;
             warehouses
                 .set(id, new_row)
                 .with_context(|| format_compact!("setting warehouse {id}"))?
@@ -5480,24 +5538,11 @@ impl WarehouseTemplate {
             .context("setting blue inventory")?;
         base.warehouses.set("airports", airports)?;
         base.warehouses.set("warehouses", warehouses)?;
-        // Mirror computed `weapons` into unpacked warehouse template (`warehouse_bundle` → repack below).
+        // Repack: mirror production inventory `weapons` only; BDEFAULT/RDEFAULT rows stay as in warehouse*.miz.
         if !weapon_bridge_used {
             warn!(
                 "weapon bridge missing: template BDEFAULT/RDEFAULT `weapons` not mirrored; BINVENTORY/RINVENTORY mirrored"
             );
-        } else {
-            copy_weapons_subtable(
-                lua,
-                &self.blue_default,
-                &blue_master,
-                "BDEFAULT template",
-            )?;
-            copy_weapons_subtable(
-                lua,
-                &self.red_default,
-                &red_master,
-                "RDEFAULT template",
-            )?;
         }
         copy_weapons_subtable(
             lua,
@@ -5661,7 +5706,7 @@ fn inventory_aircraft_type_names(inv: &Table, cat: &str) -> Result<HashSet<StdSt
     Ok(out)
 }
 
-/// B4: neutral + Dynamic Spawn **airport** row — empty weapons/fuel, `aircrafts` rows from BINVENTORY ∪ RINVENTORY
+/// B4: neutral + Dynamic Spawn **airport** row — empty weapons/fuel, `aircrafts` rows from B/RDEFAULT ∪ B/RINVENTORY
 /// (all `initialAmount` 0), `linkDynTempl` like coalition DS (prefer blue template, else red).
 fn neutral_dynamic_spawn_airport_zero_stock_link_templates(
     lua: &Lua,
@@ -5669,6 +5714,8 @@ fn neutral_dynamic_spawn_airport_zero_stock_link_templates(
     wid: i64,
     emit: &DynamicSpawnEmit,
     mult_cfg: &WarehouseStockMultConfig,
+    blue_def: &Table<'static>,
+    red_def: &Table<'static>,
     blue_inv: &Table<'static>,
     red_inv: &Table<'static>,
 ) -> Result<()> {
@@ -5688,7 +5735,9 @@ fn neutral_dynamic_spawn_airport_zero_stock_link_templates(
     }
     let aircrafts = lua.create_table()?;
     for cat in ["helicopters", "planes"] {
-        let mut names = inventory_aircraft_type_names(blue_inv, cat)?;
+        let mut names = inventory_aircraft_type_names(blue_def, cat)?;
+        names.extend(inventory_aircraft_type_names(red_def, cat)?);
+        names.extend(inventory_aircraft_type_names(blue_inv, cat)?);
         names.extend(inventory_aircraft_type_names(red_inv, cat)?);
         let mut sorted: Vec<StdString> = names.into_iter().collect();
         sorted.sort();
@@ -6765,6 +6814,8 @@ fn patch_warehouse_dynamic_spawn_links(
     lua: &Lua,
     warehouses_root: &Table<'static>,
     emit: &DynamicSpawnEmit,
+    blue_default: Option<&Table<'static>>,
+    red_default: Option<&Table<'static>>,
     blue_inventory: Option<&Table<'static>>,
     red_inventory: Option<&Table<'static>>,
     blue_inventory_plus: Option<&Table<'static>>,
@@ -6791,11 +6842,13 @@ fn patch_warehouse_dynamic_spawn_links(
         lua: &Lua,
         tbl: &Table<'static>,
         emit: &DynamicSpawnEmit,
+        blue_default: Option<&Table<'static>>,
+        red_default: Option<&Table<'static>>,
         blue_inventory: Option<&Table<'static>>,
         red_inventory: Option<&Table<'static>>,
         mult_cfg: &WarehouseStockMultConfig,
         is_airports_table: bool,
-        warehouse_caps: Option<&campaign_cfg::WarehouseDefaultsFromCfg>,
+        _warehouse_caps: Option<&campaign_cfg::WarehouseDefaultsFromCfg>,
         obj_dyn_allow: &[ObjectiveDynAllow],
         warehouse_positions: &HashMap<i64, Vector2>,
         dyn_farp_aircraft_allow: Option<&HashSet<(Side, StdString)>>,
@@ -6814,57 +6867,6 @@ fn patch_warehouse_dynamic_spawn_links(
         let empty_inv_nm: HashMap<StdString, [i32; 4]> = HashMap::new();
         let empty_inv_ws: HashSet<[i32; 4]> = HashSet::new();
         let empty_zone_plus: &[InventoryZonePlusModuleEntry] = &[];
-        fn copy_initial_amounts_scaled(
-            lua: &Lua,
-            dst_row: &Table<'static>,
-            src_row: &Table<'static>,
-            mult: u32,
-            _warehouse_caps: Option<&campaign_cfg::WarehouseDefaultsFromCfg>,
-        ) -> Result<()> {
-            // Prefill dynamic warehouses: same base counts as BINVENTORY/RINVENTORY, scaled like Fowl capacity.
-            if let (Ok(dst_aircrafts), Ok(src_aircrafts)) = (
-                dst_row.raw_get::<_, Table>("aircrafts"),
-                src_row.raw_get::<_, Table>("aircrafts"),
-            ) {
-                for cat in ["helicopters", "planes"] {
-                    let (Ok(dst_cat), Ok(src_cat)) = (
-                        dst_aircrafts.raw_get::<_, Table>(cat),
-                        src_aircrafts.raw_get::<_, Table>(cat),
-                    ) else {
-                        continue;
-                    };
-                    for pair in dst_cat.clone().pairs::<String, Table>() {
-                        let (unit_type, dst_unit) = pair?;
-                        let Ok(src_unit) = src_cat.raw_get::<_, Table>(unit_type.clone())
-                        else {
-                            continue;
-                        };
-                        let Ok(src_amt) = src_unit.raw_get::<_, u32>("initialAmount")
-                        else {
-                            continue;
-                        };
-                        dst_unit
-                            .raw_set("initialAmount", src_amt.saturating_mul(mult))?;
-                    }
-                }
-            }
-
-            if let Ok(src_weapons) = src_row.raw_get::<_, Table>("weapons") {
-                let dst_weapons = lua.create_table()?;
-                let mut idx = 1u32;
-                for pair in src_weapons.clone().pairs::<Value, Table>() {
-                    let (_, src_w) = pair?;
-                    let cloned = src_w.deep_clone(lua)?;
-                    if let Ok(src_amt) = cloned.raw_get::<_, u32>("initialAmount") {
-                        cloned.raw_set("initialAmount", src_amt.saturating_mul(mult))?;
-                    }
-                    dst_weapons.raw_set(idx, cloned)?;
-                    idx = idx.saturating_add(1);
-                }
-                dst_row.raw_set("weapons", dst_weapons)?;
-            }
-            Ok(())
-        }
 
         for pair in tbl.clone().pairs::<Value, Table>() {
             let (k, wh) = pair?;
@@ -6915,6 +6917,12 @@ fn patch_warehouse_dynamic_spawn_links(
                 None => {
                     // No O* zone and warehouse coalition is neutral.
                     if is_airports_table {
+                        let blue_def = blue_default.context(
+                            "BDEFAULT required for neutral Dynamic Spawn airports",
+                        )?;
+                        let red_def = red_default.context(
+                            "RDEFAULT required for neutral Dynamic Spawn airports",
+                        )?;
                         let blue_inv = blue_inventory.context(
                             "BINVENTORY required for neutral Dynamic Spawn airports",
                         )?;
@@ -6922,7 +6930,7 @@ fn patch_warehouse_dynamic_spawn_links(
                             "RINVENTORY required for neutral Dynamic Spawn airports",
                         )?;
                         neutral_dynamic_spawn_airport_zero_stock_link_templates(
-                            lua, &wh, wid, emit, mult_cfg, blue_inv, red_inv,
+                            lua, &wh, wid, emit, mult_cfg, blue_def, red_def, blue_inv, red_inv,
                         )?;
                     } else {
                         empty_neutral_build_warehouse_row(
@@ -6935,14 +6943,33 @@ fn patch_warehouse_dynamic_spawn_links(
                 }
             };
 
+            let def = match side {
+                Side::Blue => blue_default,
+                Side::Red => red_default,
+                Side::Neutral => None,
+            };
             let inv = match side {
                 Side::Blue => blue_inventory,
                 Side::Red => red_inventory,
                 Side::Neutral => None,
             };
+            if let Some(def) = def {
+                apply_mission_warehouse_template_stock(
+                    lua,
+                    &wh,
+                    def,
+                    mult,
+                    WarehouseTemplateStockMode::DefaultHubWeapons,
+                )?;
+            }
             if let Some(inv) = inv {
-                copy_initial_amounts_scaled(lua, &wh, inv, mult, warehouse_caps)?;
-                apply_inventory_liquids_scaled(&wh, inv, lua, mult)?;
+                apply_mission_warehouse_template_stock(
+                    lua,
+                    &wh,
+                    inv,
+                    mult,
+                    WarehouseTemplateStockMode::InventoryStock,
+                )?;
             }
             let aircrafts: Table = wh.raw_get("aircrafts")?;
             for cat in ["helicopters", "planes"] {
@@ -7145,6 +7172,8 @@ fn patch_warehouse_dynamic_spawn_links(
         lua,
         &airports,
         emit,
+        blue_default,
+        red_default,
         blue_inventory,
         red_inventory,
         mult_cfg,
@@ -7174,6 +7203,8 @@ fn patch_warehouse_dynamic_spawn_links(
         lua,
         &warehouses,
         emit,
+        blue_default,
+        red_default,
         blue_inventory,
         red_inventory,
         mult_cfg,
@@ -8555,6 +8586,8 @@ pub fn run(cfg: &MizCmd) -> Result<()> {
             lua,
             &base.warehouses,
             &dynamic_emit,
+            Some(&wb.template.blue_default),
+            Some(&wb.template.red_default),
             Some(&wb.template.blue_inventory),
             Some(&wb.template.red_inventory),
             wb.template.blue_inventory_plus.as_ref(),
