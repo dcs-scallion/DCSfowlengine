@@ -5284,6 +5284,25 @@ impl WarehouseTemplate {
         log_agm65_diag("after_default_finalize", "BDEFAULT", &blue_master)?;
         log_agm65_diag("after_default_finalize", "RDEFAULT", &red_master)?;
 
+        // Option B: filtered masters become template B/RDEFAULT (mission fill + repack use these rows).
+        if weapon_bridge_used {
+            copy_weapons_subtable(
+                lua,
+                &self.blue_default,
+                &blue_master,
+                "BDEFAULT template",
+            )?;
+            copy_weapons_subtable(
+                lua,
+                &self.red_default,
+                &red_master,
+                "RDEFAULT template",
+            )?;
+            info!(
+                "warehouse template BDEFAULT/RDEFAULT: mirrored filtered `weapons` from allowlist (weapon*.miz policy)"
+            );
+        }
+
         let mut blue_inventory = 0;
         let mut red_inventory = 0;
         let mut whids = vec![];
@@ -5538,10 +5557,10 @@ impl WarehouseTemplate {
             .context("setting blue inventory")?;
         base.warehouses.set("airports", airports)?;
         base.warehouses.set("warehouses", warehouses)?;
-        // Repack: mirror production inventory `weapons` only; BDEFAULT/RDEFAULT rows stay as in warehouse*.miz.
+        // Repack: B/RDEFAULT already mirrored above when bridge loaded; always refresh BINVENTORY/RINVENTORY.
         if !weapon_bridge_used {
             warn!(
-                "weapon bridge missing: template BDEFAULT/RDEFAULT `weapons` not mirrored; BINVENTORY/RINVENTORY mirrored"
+                "weapon bridge missing: template BDEFAULT/RDEFAULT `weapons` not updated from allowlist; BINVENTORY/RINVENTORY mirrored"
             );
         }
         copy_weapons_subtable(
@@ -8496,7 +8515,7 @@ pub fn run(cfg: &MizCmd) -> Result<()> {
             format_compact!("repack warehouse template {}", wb.path.display())
         })?;
         info!(
-            "repacked `{}`: mirrored BINVENTORY/RINVENTORY `weapons` from build; BDEFAULT/RDEFAULT mirrored when weapon bridge loaded (ME reference — ordnance policy in weapon<campaign_decade>.miz)",
+            "repacked `{}`: BDEFAULT/RDEFAULT/BINVENTORY/RINVENTORY `weapons` from build (defaults filtered via weapon<campaign_decade>.miz when bridge loaded)",
             wb.path.display()
         );
         export
