@@ -45,20 +45,28 @@ pub struct FowlMizExport {
     /// Key is objective name (from `O*` trigger zones without prefix, e.g. `Kobuleti`).
     #[serde(default)]
     pub objective_defaults: HashMap<String, ObjectiveWarehouseDefaults>,
+    /// `BINVENTORY+` zone links: airframe module type → warehouse item label (Key) → allowed `wsType` quads for that module.
+    #[serde(default)]
+    pub blue_inventory_zone_module_ws: HashMap<String, HashMap<String, Vec<[i32; 4]>>>,
+    /// `RINVENTORY+` zone links (same shape as [`Self::blue_inventory_zone_module_ws`]).
+    #[serde(default)]
+    pub red_inventory_zone_module_ws: HashMap<String, HashMap<String, Vec<[i32; 4]>>>,
 }
 
 fn default_schema_version() -> u32 {
-    3
+    4
 }
 
 impl Default for FowlMizExport {
     fn default() -> Self {
         Self {
-            schema_version: 3,
+            schema_version: 4,
             weapon_bridge_used: false,
             blue_weapon_ws: Vec::new(),
             red_weapon_ws: Vec::new(),
             objective_defaults: HashMap::new(),
+            blue_inventory_zone_module_ws: HashMap::new(),
+            red_inventory_zone_module_ws: HashMap::new(),
         }
     }
 }
