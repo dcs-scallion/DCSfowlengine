@@ -6686,6 +6686,54 @@
         ]
       ]
     },
+    "Zestafoni Airfield FOB": {
+      "blue_aircraft": [
+        "C-130J-30"
+      ],
+      "red_aircraft": [
+        "C-130J-30"
+      ],
+      "blue_weapon_ws": [
+        [
+          1,
+          3,
+          43,
+          3057
+        ],
+        [
+          1,
+          3,
+          43,
+          3058
+        ],
+        [
+          4,
+          15,
+          46,
+          3059
+        ]
+      ],
+      "red_weapon_ws": [
+        [
+          1,
+          3,
+          43,
+          3057
+        ],
+        [
+          1,
+          3,
+          43,
+          3058
+        ],
+        [
+          4,
+          15,
+          46,
+          3059
+        ]
+      ]
+    },
     "Kashuri Airfield": {
       "blue_aircraft": [
         "A-10A",
@@ -7796,55 +7844,7 @@
         ]
       ]
     },
-    "Zestafoni Airfield FOB": {
-      "blue_aircraft": [
-        "C-130J-30"
-      ],
-      "red_aircraft": [
-        "C-130J-30"
-      ],
-      "blue_weapon_ws": [
-        [
-          1,
-          3,
-          43,
-          3057
-        ],
-        [
-          1,
-          3,
-          43,
-          3058
-        ],
-        [
-          4,
-          15,
-          46,
-          3059
-        ]
-      ],
-      "red_weapon_ws": [
-        [
-          1,
-          3,
-          43,
-          3057
-        ],
-        [
-          1,
-          3,
-          43,
-          3058
-        ],
-        [
-          4,
-          15,
-          46,
-          3059
-        ]
-      ]
-    },
-    "Terek Airfield": {
+    "Cherkessk Airfield": {
       "blue_aircraft": [
         "A-10A",
         "A-10C",
@@ -8954,7 +8954,7 @@
         ]
       ]
     },
-    "Cherkessk Airfield": {
+    "Terek Airfield": {
       "blue_aircraft": [
         "A-10A",
         "A-10C",
