@@ -449,15 +449,15 @@ impl Db {
                         .and_then(|a| a.is_exist())
                         .unwrap_or(false);
                     let pad_live = pad_live_group || pad_live_airbase;
-                    if !pad_live {
-                        // Mobile FARP: never push_spawn the pad from DB here — spawn_group uses ME
-                        // template and drops deck props to map origin when matching fails. Relocate via
-                        // move_farp_pad only (same as add_farp tail).
-                        if *mobile {
-                            spctx
-                                .move_farp_pad(idx, obj.owner, &pad_template, pos)
-                                .context("moving farp pad")?;
-                        } else if let Some(uid) = self.persisted.units_by_name.get(pad_template)
+                    // Naval / mobile pads: ME template is always present after mission load; still
+                    // relocate to persisted zone (same as add_farp tail). Skipping when pad_live left
+                    // carriers at editor coords off the TISP positions.
+                    if *mobile {
+                        spctx
+                            .move_farp_pad(idx, obj.owner, &pad_template, pos)
+                            .context("moving mobile farp pad")?;
+                    } else if !pad_live {
+                        if let Some(uid) = self.persisted.units_by_name.get(pad_template)
                             && let Some(unit) = self.persisted.units.get(uid)
                         {
                             self.ephemeral.push_spawn(unit.group);
