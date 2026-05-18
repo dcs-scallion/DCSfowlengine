@@ -2584,6 +2584,9 @@ struct WarehouseTemplate {
     /// Trigger zone `BINVENTORY+` / `RINVENTORY+`: module-only rows (Key = warehouse item label, Value = airframe module type) to supplement inventory allowlist.
     zone_plus_blue: Vec<InventoryZonePlusModuleEntry>,
     zone_plus_red: Vec<InventoryZonePlusModuleEntry>,
+    /// Trigger zone `BDEFAULT+` / `RDEFAULT+`: same Key/Value shape; supplements default allowlist (ME catalog wsTypes).
+    zone_default_plus_blue: Vec<InventoryZonePlusModuleEntry>,
+    zone_default_plus_red: Vec<InventoryZonePlusModuleEntry>,
     blue_default: Table<'static>,
     red_default: Table<'static>,
     blue_default_plus: Table<'static>,
@@ -3443,21 +3446,26 @@ fn merge_inventory_plus_weapon_resolution_hints(
     Ok(())
 }
 
-fn compile_inventory_zone_plus_directives(
-    mission: &Miz,
-) -> Result<(Vec<InventoryZonePlusModuleEntry>, Vec<InventoryZonePlusModuleEntry>)> {
-    let mut blue = Vec::new();
-    let mut red = Vec::new();
+#[derive(Default)]
+struct WarehouseZonePlusDirectives {
+    inventory_blue: Vec<InventoryZonePlusModuleEntry>,
+    inventory_red: Vec<InventoryZonePlusModuleEntry>,
+    default_blue: Vec<InventoryZonePlusModuleEntry>,
+    default_red: Vec<InventoryZonePlusModuleEntry>,
+}
+
+fn compile_warehouse_zone_plus_directives(mission: &Miz) -> Result<WarehouseZonePlusDirectives> {
+    let mut out = WarehouseZonePlusDirectives::default();
     for zone_r in mission.triggers()? {
         let zone = zone_r?;
         let zname = zone.name()?;
         let zname_ref = zname.as_ref();
-        let target = if zname_ref == "BINVENTORY+" {
-            &mut blue
-        } else if zname_ref == "RINVENTORY+" {
-            &mut red
-        } else {
-            continue;
+        let (target, farp_hint) = match zname_ref {
+            "BINVENTORY+" => (&mut out.inventory_blue, "BINVENTORY+"),
+            "RINVENTORY+" => (&mut out.inventory_red, "RINVENTORY+"),
+            "BDEFAULT+" => (&mut out.default_blue, "BDEFAULT+"),
+            "RDEFAULT+" => (&mut out.default_red, "RDEFAULT+"),
+            _ => continue,
         };
         for prop_r in zone.properties()? {
             let prop = prop_r?;
@@ -3474,7 +3482,7 @@ fn compile_inventory_zone_plus_directives(
             }
             if val.parse::<u32>().is_ok() {
                 info!(
-                    "{zname_ref} zone: skip `{item}` = `{val}` (quantities: use Invisible FARP BINVENTORY+ / RINVENTORY+ warehouse rows; zones are module links only: Value = airframe module type)"
+                    "{zname_ref} zone: skip `{item}` = `{val}` (quantities: use Invisible FARP {farp_hint} warehouse rows; zones are module links only: Value = airframe module type)"
                 );
                 continue;
             }
@@ -3484,19 +3492,31 @@ fn compile_inventory_zone_plus_directives(
             });
         }
     }
-    if !blue.is_empty() {
+    if !out.inventory_blue.is_empty() {
         info!(
-            "BINVENTORY+ trigger zone: {} module link row(s) (allowlist supplement)",
-            blue.len()
+            "BINVENTORY+ trigger zone: {} module link row(s) (inventory allowlist supplement)",
+            out.inventory_blue.len()
         );
     }
-    if !red.is_empty() {
+    if !out.inventory_red.is_empty() {
         info!(
-            "RINVENTORY+ trigger zone: {} module link row(s) (allowlist supplement)",
-            red.len()
+            "RINVENTORY+ trigger zone: {} module link row(s) (inventory allowlist supplement)",
+            out.inventory_red.len()
         );
     }
-    Ok((blue, red))
+    if !out.default_blue.is_empty() {
+        info!(
+            "BDEFAULT+ trigger zone: {} module link row(s) (default allowlist supplement)",
+            out.default_blue.len()
+        );
+    }
+    if !out.default_red.is_empty() {
+        info!(
+            "RDEFAULT+ trigger zone: {} module link row(s) (default allowlist supplement)",
+            out.default_red.len()
+        );
+    }
+    Ok(out)
 }
 
 fn collect_inventory_weapon_ws_set(inv_row: &Table) -> Result<HashSet<[i32; 4]>> {
@@ -3654,6 +3674,153 @@ fn resolve_zone_link_ws_for_module(
         list
     );
     out
+}
+
+/// B/RDEFAULT+ zone links: trust editor Key/Value and map labels to ME warehouse wsTypes (e.g. AGM-65A -> [4,4,8,273]).
+fn resolve_default_zone_link_ws_for_module(
+    item_name: &str,
+    module: &str,
+    _side: Side,
+    br: &weapon_bridge::WeaponBridgeMap,
+    default_plus_map: &HashMap<StdString, [i32; 4]>,
+    default_plus_weapon_ws: &HashSet<[i32; 4]>,
+    label: &str,
+) -> Vec<[i32; 4]> {
+    let mut matched: HashSet<[i32; 4]> = HashSet::new();
+    let label_ws: HashSet<[i32; 4]> = zone_item_label_ws_candidates(item_name, default_plus_map, br)
+        .into_iter()
+        .filter(|w| is_inventory_cap_ordnance_ws(*w))
+        .collect();
+    for w in &label_ws {
+        if default_plus_weapon_ws.contains(w) {
+            matched.insert(*w);
+        }
+    }
+    let mut bridge_ws = HashSet::new();
+    bridge_ws.extend(br.ws_types_for_descriptor_or_key_substring(item_name));
+    if !item_name.starts_with('{') {
+        let braced = format!("{{{item_name}}}");
+        bridge_ws.extend(br.ws_types_for_descriptor_or_key_substring(&braced));
+    }
+    for ws in bridge_ws {
+        if !is_inventory_cap_ordnance_ws(ws) {
+            continue;
+        }
+        if label_ws.contains(&ws) || default_plus_weapon_ws.contains(&ws) {
+            matched.insert(ws);
+        }
+    }
+    if matched.is_empty() && !label_ws.is_empty() {
+        warn!(
+            "{label} zone: `{item_name}` -> `{module}`: no wsType resolved for default allowlist (check Key spelling or BDEFAULT+ FARP row wsType)",
+        );
+        return Vec::new();
+    }
+    if matched.is_empty() {
+        warn!(
+            "{label} zone: skip `{item_name}` -> `{module}` (no ordnance wsType for label)",
+        );
+        return Vec::new();
+    }
+    let mut out: Vec<[i32; 4]> = matched.into_iter().collect();
+    out.sort_by_key(|w| (w[0], w[1], w[2], w[3]));
+    let list = out
+        .iter()
+        .map(|w| format!("[{},{},{},{}]", w[0], w[1], w[2], w[3]))
+        .collect::<Vec<_>>()
+        .join(", ");
+    info!(
+        "{label} zone: `{item_name}` module `{module}` -> {} default wsType(s): {}",
+        out.len(),
+        list
+    );
+    out
+}
+
+fn default_zone_ws_for_policy_modules(
+    br: &weapon_bridge::WeaponBridgeMap,
+    side: Side,
+    zone_entries: &[InventoryZonePlusModuleEntry],
+    policy_types: &HashSet<StdString>,
+    default_plus_nm: &HashMap<StdString, [i32; 4]>,
+    default_plus_ws: &HashSet<[i32; 4]>,
+    zone_label: &str,
+) -> HashSet<[i32; 4]> {
+    let mut out = HashSet::new();
+    for e in zone_entries {
+        if !policy_types_include_module(policy_types, e.module.as_str()) {
+            continue;
+        }
+        for ws in resolve_default_zone_link_ws_for_module(
+            e.item_name.as_str(),
+            e.module.as_str(),
+            side,
+            br,
+            default_plus_nm,
+            default_plus_ws,
+            zone_label,
+        ) {
+            out.insert(ws);
+        }
+    }
+    out
+}
+
+fn build_default_plus_resolution_maps(
+    default_plus: Option<&Table<'static>>,
+) -> Result<(HashMap<StdString, [i32; 4]>, HashSet<[i32; 4]>)> {
+    let Some(row) = default_plus else {
+        return Ok((HashMap::new(), HashSet::new()));
+    };
+    let mut nm = collect_inventory_weapon_display_name_to_ws(row)?;
+    let mut ws = collect_inventory_weapon_ws_set(row)?;
+    merge_inventory_plus_weapon_resolution_hints(&mut nm, &mut ws, Some(row))?;
+    Ok((nm, ws))
+}
+
+fn merge_default_zone_plus_into_allowlist(
+    br: Option<&weapon_bridge::WeaponBridgeMap>,
+    side: Side,
+    entries: &[InventoryZonePlusModuleEntry],
+    default_plus_map: &HashMap<StdString, [i32; 4]>,
+    default_plus_weapon_ws: &HashSet<[i32; 4]>,
+    into_allowlist: &mut HashSet<[i32; 4]>,
+    sources: &mut HashMap<[i32; 4], HashSet<StdString>>,
+    label: &str,
+) -> Result<HashSet<[i32; 4]>> {
+    let mut added: HashSet<[i32; 4]> = HashSet::default();
+    let Some(br) = br else {
+        if !entries.is_empty() {
+            warn!(
+                "{label} zone: {} module link row(s) ignored (weapon bridge required)",
+                entries.len()
+            );
+        }
+        return Ok(added);
+    };
+    for e in entries {
+        let wss = resolve_default_zone_link_ws_for_module(
+            e.item_name.as_str(),
+            e.module.as_str(),
+            side,
+            br,
+            default_plus_map,
+            default_plus_weapon_ws,
+            label,
+        );
+        for ws in wss {
+            if !is_inventory_cap_ordnance_ws(ws) {
+                continue;
+            }
+            into_allowlist.insert(ws);
+            sources
+                .entry(ws)
+                .or_default()
+                .insert(format!("{label} zone"));
+            added.insert(ws);
+        }
+    }
+    Ok(added)
 }
 
 fn merge_inventory_zone_plus_into_allowlist(
@@ -3905,8 +4072,7 @@ impl WarehouseTemplate {
         } else {
             None
         };
-        let (zone_plus_blue, zone_plus_red) =
-            compile_inventory_zone_plus_directives(&wht.mission)?;
+        let zone_directives = compile_warehouse_zone_plus_directives(&wht.mission)?;
         Ok(Self {
             blue_inventory: warehouses
                 .raw_get(blue_inventory_id)
@@ -3916,8 +4082,10 @@ impl WarehouseTemplate {
                 .context("getting red inventory")?,
             blue_inventory_plus,
             red_inventory_plus,
-            zone_plus_blue,
-            zone_plus_red,
+            zone_plus_blue: zone_directives.inventory_blue,
+            zone_plus_red: zone_directives.inventory_red,
+            zone_default_plus_blue: zone_directives.default_blue,
+            zone_default_plus_red: zone_directives.default_red,
             blue_default: warehouses
                 .raw_get(blue_default_id)
                 .context("getting BDEFAULT inventory")?,
@@ -4497,6 +4665,10 @@ impl WarehouseTemplate {
             &mut red_inv_ws,
             self.red_inventory_plus.as_ref(),
         )?;
+        let (blue_default_plus_nm, blue_default_plus_ws) =
+            build_default_plus_resolution_maps(Some(&self.blue_default_plus))?;
+        let (red_default_plus_nm, red_default_plus_ws) =
+            build_default_plus_resolution_maps(Some(&self.red_default_plus))?;
 
         let blue_master = self.blue_default.deep_clone(lua)?;
         let red_master = self.red_default.deep_clone(lua)?;
@@ -5140,6 +5312,26 @@ impl WarehouseTemplate {
                 side_cap_inventory_no_restricted(&blue_payload_types_hs);
             let (mut red_for_inv, _red_inv_sources) =
                 side_cap_inventory_no_restricted(&red_payload_types_hs);
+            merge_default_zone_plus_into_allowlist(
+                Some(br),
+                Side::Blue,
+                &self.zone_default_plus_blue,
+                &blue_default_plus_nm,
+                &blue_default_plus_ws,
+                &mut blue_for_default,
+                &mut blue_default_sources,
+                "BDEFAULT+",
+            )?;
+            merge_default_zone_plus_into_allowlist(
+                Some(br),
+                Side::Red,
+                &self.zone_default_plus_red,
+                &red_default_plus_nm,
+                &red_default_plus_ws,
+                &mut red_for_default,
+                &mut red_default_sources,
+                "RDEFAULT+",
+            )?;
             merge_inventory_zone_plus_into_allowlist(
                 Some(br),
                 Some(vt),
@@ -7025,8 +7217,12 @@ fn patch_warehouse_dynamic_spawn_links(
     red_inventory: Option<&Table<'static>>,
     blue_inventory_plus: Option<&Table<'static>>,
     red_inventory_plus: Option<&Table<'static>>,
+    blue_default_plus: Option<&Table<'static>>,
+    red_default_plus: Option<&Table<'static>>,
     zone_plus_blue: &[InventoryZonePlusModuleEntry],
     zone_plus_red: &[InventoryZonePlusModuleEntry],
+    zone_default_plus_blue: &[InventoryZonePlusModuleEntry],
+    zone_default_plus_red: &[InventoryZonePlusModuleEntry],
     mult_cfg: &WarehouseStockMultConfig,
     warehouse_caps: Option<&campaign_cfg::WarehouseDefaultsFromCfg>,
     obj_dyn_allow: &[ObjectiveDynAllow],
@@ -7040,6 +7236,10 @@ fn patch_warehouse_dynamic_spawn_links(
         build_inventory_plus_resolution_maps(blue_inventory, blue_inventory_plus)?;
     let (inv_plus_red_nm, inv_plus_red_ws) =
         build_inventory_plus_resolution_maps(red_inventory, red_inventory_plus)?;
+    let (default_plus_blue_nm, default_plus_blue_ws) =
+        build_default_plus_resolution_maps(blue_default_plus)?;
+    let (default_plus_red_nm, default_plus_red_ws) =
+        build_default_plus_resolution_maps(red_default_plus)?;
 
     fn patch_table(
         lua: &Lua,
@@ -7064,10 +7264,18 @@ fn patch_warehouse_dynamic_spawn_links(
         inv_plus_red_ws: &HashSet<[i32; 4]>,
         zone_plus_blue: &[InventoryZonePlusModuleEntry],
         zone_plus_red: &[InventoryZonePlusModuleEntry],
+        zone_default_plus_blue: &[InventoryZonePlusModuleEntry],
+        zone_default_plus_red: &[InventoryZonePlusModuleEntry],
+        default_plus_blue_nm: &HashMap<StdString, [i32; 4]>,
+        default_plus_blue_ws: &HashSet<[i32; 4]>,
+        default_plus_red_nm: &HashMap<StdString, [i32; 4]>,
+        default_plus_red_ws: &HashSet<[i32; 4]>,
     ) -> Result<()> {
         let empty_inv_nm: HashMap<StdString, [i32; 4]> = HashMap::new();
         let empty_inv_ws: HashSet<[i32; 4]> = HashSet::new();
         let empty_zone_plus: &[InventoryZonePlusModuleEntry] = &[];
+        let empty_default_nm: HashMap<StdString, [i32; 4]> = HashMap::new();
+        let empty_default_ws: HashSet<[i32; 4]> = HashSet::new();
 
         for pair in tbl.clone().pairs::<Value, Table>() {
             let (k, wh) = pair?;
@@ -7377,6 +7585,35 @@ fn patch_warehouse_dynamic_spawn_links(
                             ws,
                             zone_label,
                         ));
+                        let (def_zplus, def_nm, def_ws, def_label) = match side {
+                            Side::Blue => (
+                                zone_default_plus_blue,
+                                default_plus_blue_nm,
+                                default_plus_blue_ws,
+                                "BDEFAULT+",
+                            ),
+                            Side::Red => (
+                                zone_default_plus_red,
+                                default_plus_red_nm,
+                                default_plus_red_ws,
+                                "RDEFAULT+",
+                            ),
+                            Side::Neutral => (
+                                empty_zone_plus,
+                                &empty_default_nm,
+                                &empty_default_ws,
+                                "B/RDEFAULT+",
+                            ),
+                        };
+                        allowed_ws.extend(default_zone_ws_for_policy_modules(
+                            br,
+                            side,
+                            def_zplus,
+                            &names,
+                            def_nm,
+                            def_ws,
+                            def_label,
+                        ));
                     }
                     let wlog = format!(
                         "warehouse {wid} weapons (B/RINVENTORY filtered to allowed-aircraft wsTypes)"
@@ -7420,6 +7657,12 @@ fn patch_warehouse_dynamic_spawn_links(
         &inv_plus_red_ws,
         zone_plus_blue,
         zone_plus_red,
+        zone_default_plus_blue,
+        zone_default_plus_red,
+        &default_plus_blue_nm,
+        &default_plus_blue_ws,
+        &default_plus_red_nm,
+        &default_plus_red_ws,
     )
     .context("patching airport linkDynTempl")?;
 
@@ -7449,6 +7692,12 @@ fn patch_warehouse_dynamic_spawn_links(
         &inv_plus_red_ws,
         zone_plus_blue,
         zone_plus_red,
+        zone_default_plus_blue,
+        zone_default_plus_red,
+        &default_plus_blue_nm,
+        &default_plus_blue_ws,
+        &default_plus_red_nm,
+        &default_plus_red_ws,
     )
     .context("patching warehouse linkDynTempl")?;
     Ok(())
@@ -8813,8 +9062,12 @@ pub fn run(cfg: &MizCmd) -> Result<()> {
             Some(&wb.template.red_inventory),
             wb.template.blue_inventory_plus.as_ref(),
             wb.template.red_inventory_plus.as_ref(),
+            Some(&wb.template.blue_default_plus),
+            Some(&wb.template.red_default_plus),
             &wb.template.zone_plus_blue,
             &wb.template.zone_plus_red,
+            &wb.template.zone_default_plus_blue,
+            &wb.template.zone_default_plus_red,
             &mult_cfg,
             warehouse_defaults,
             &obj_dyn_allow,
