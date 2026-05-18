@@ -3251,17 +3251,32 @@ fn empty_neutral_build_warehouse_row(
     Ok(())
 }
 
+fn coalition_inventory_positive_weapon_ws(
+    inv: &Table<'static>,
+    inv_plus: Option<&Table<'static>>,
+) -> Result<HashSet<[i32; 4]>> {
+    let mut u = campaign_cfg::collect_weapon_ws_types_positive_initial(inv)?;
+    if let Some(plus) = inv_plus {
+        u.extend(campaign_cfg::collect_weapon_ws_types_positive_initial(plus)?);
+    }
+    Ok(u)
+}
+
 fn apply_weapon_cfg_cap_scale_pass(
     warehouses_root: &Table,
     caps: &campaign_cfg::WarehouseDefaultsFromCfg,
     mult_cfg: &WarehouseStockMultConfig,
     skip_ids: &HashSet<i64>,
+    blue_inventory_skip_ws: &HashSet<[i32; 4]>,
+    red_inventory_skip_ws: &HashSet<[i32; 4]>,
 ) -> Result<()> {
     fn one_table(
         tbl: &Table,
         caps: &campaign_cfg::WarehouseDefaultsFromCfg,
         mult_cfg: &WarehouseStockMultConfig,
         skip_ids: &HashSet<i64>,
+        blue_inventory_skip_ws: &HashSet<[i32; 4]>,
+        red_inventory_skip_ws: &HashSet<[i32; 4]>,
         is_airports: bool,
     ) -> Result<()> {
         for pair in tbl.clone().pairs::<Value, Table>() {
@@ -3283,7 +3298,14 @@ fn apply_weapon_cfg_cap_scale_pass(
             } else {
                 mult_cfg.mult_warehouse_row(wid)
             };
-            campaign_cfg::scale_weapon_amounts_matching_cfg_cap(&row, caps, mult)?;
+            let skip_ws = match coa.to_lowercase().as_str() {
+                "blue" => Some(blue_inventory_skip_ws),
+                "red" => Some(red_inventory_skip_ws),
+                _ => None,
+            };
+            campaign_cfg::scale_weapon_amounts_matching_cfg_cap(
+                &row, caps, mult, skip_ws,
+            )?;
         }
         Ok(())
     }
@@ -3292,8 +3314,24 @@ fn apply_weapon_cfg_cap_scale_pass(
     let warehouses = warehouses_root
         .raw_get::<_, Table>("warehouses")
         .context("scale pass warehouses")?;
-    one_table(&airports, caps, mult_cfg, skip_ids, true)?;
-    one_table(&warehouses, caps, mult_cfg, skip_ids, false)?;
+    one_table(
+        &airports,
+        caps,
+        mult_cfg,
+        skip_ids,
+        blue_inventory_skip_ws,
+        red_inventory_skip_ws,
+        true,
+    )?;
+    one_table(
+        &warehouses,
+        caps,
+        mult_cfg,
+        skip_ids,
+        blue_inventory_skip_ws,
+        red_inventory_skip_ws,
+        false,
+    )?;
     Ok(())
 }
 
@@ -8792,8 +8830,25 @@ pub fn run(cfg: &MizCmd) -> Result<()> {
                 let mut skip = HashSet::default();
                 skip.insert(blue_inv_id);
                 skip.insert(red_inv_id);
-                apply_weapon_cfg_cap_scale_pass(&base.warehouses, caps, &mult_cfg, &skip)
-                    .context("scaling default_warehouse_* caps by stock multiplier")?;
+                let blue_inv_skip = coalition_inventory_positive_weapon_ws(
+                    &wb.template.blue_inventory,
+                    wb.template.blue_inventory_plus.as_ref(),
+                )
+                .context("blue inventory wsTypes for cfg cap scale pass")?;
+                let red_inv_skip = coalition_inventory_positive_weapon_ws(
+                    &wb.template.red_inventory,
+                    wb.template.red_inventory_plus.as_ref(),
+                )
+                .context("red inventory wsTypes for cfg cap scale pass")?;
+                apply_weapon_cfg_cap_scale_pass(
+                    &base.warehouses,
+                    caps,
+                    &mult_cfg,
+                    &skip,
+                    &blue_inv_skip,
+                    &red_inv_skip,
+                )
+                .context("scaling default_warehouse_* caps by stock multiplier")?;
             }
         }
     }

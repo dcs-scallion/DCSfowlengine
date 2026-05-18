@@ -317,10 +317,12 @@ pub fn fill_zero_weapon_amounts_from_cfg(
 }
 
 /// Rows cloned from BDEFAULT/RDEFAULT carry raw cfg caps; multiply by Fowl warehouse capacity when still at baseline.
+/// Skips wsTypes in `skip_inventory_ws` (B/RINVENTORY stock) so inventory×mult that equals a cfg cap is not scaled again.
 pub fn scale_weapon_amounts_matching_cfg_cap(
     row: &Table,
     caps: &WarehouseDefaultsFromCfg,
     mult: u32,
+    skip_inventory_ws: Option<&HashSet<[i32; 4]>>,
 ) -> Result<()> {
     if !caps.has_any_nonzero_cap() || mult <= 1 {
         return Ok(());
@@ -333,9 +335,12 @@ pub fn scale_weapon_amounts_matching_cfg_cap(
         let Ok(wst) = w.raw_get::<_, Table>("wsType") else {
             continue;
         };
-        let Some((l1, l2, l3, _)) = read_ws_type4(&wst)? else {
+        let Some((l1, l2, l3, l4)) = read_ws_type4(&wst)? else {
             continue;
         };
+        if skip_inventory_ws.is_some_and(|s| s.contains(&[l1, l2, l3, l4])) {
+            continue;
+        }
         let Some(cap) = cap_for_weapon_ws_type(l1, l2, l3, caps) else {
             continue;
         };
