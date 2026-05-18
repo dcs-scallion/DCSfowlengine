@@ -422,7 +422,7 @@ fn process_slot_rejection(ctx: &mut Context, id: PlayerId, ucid: Ucid, rej: Slot
             );
         }
         SlotAuth::NoLives(typ) => {
-            let msg = match lives(&mut ctx.db, &ucid, Some(typ)) {
+            let msg = match lives(&mut ctx.db, &ucid, Some(typ), true) {
                 Ok(s) => s,
                 Err(e) => {
                     error!("failed to get lives for {} {:?}", ucid, e);
@@ -614,7 +614,7 @@ fn on_event(lua: MizLua, ev: Event) -> Result<()> {
                 match ctx.db.player_left_unit(lua, start_ts, &initiator) {
                     Ok((_, Some((ucid, slot, typ)), deslot_ucid)) => {
                         let mut msg = CompactString::new("life returned\n");
-                        if let Ok(l) = lives(&mut ctx.db, &ucid, Some(typ)) {
+                        if let Ok(l) = format_lives_total(&mut ctx.db, &ucid, typ) {
                             msg.push_str(&l);
                         }
                         // Synchronous call while player is still in the DCS group
@@ -771,7 +771,31 @@ fn on_event(lua: MizLua, ev: Event) -> Result<()> {
     Ok(())
 }
 
-fn lives(db: &mut Db, ucid: &Ucid, typfilter: Option<LifeType>) -> Result<CompactString> {
+/// After a life is returned: always show banked total (`cur/n`), never `1+cur/n`.
+fn format_lives_total(db: &mut Db, ucid: &Ucid, typ: LifeType) -> Result<CompactString> {
+    db.maybe_reset_lives(ucid, Utc::now())?;
+    let player = db.player(ucid).ok_or_else(|| anyhow!("no such player {:?}", ucid))?;
+    let cfg = &db.ephemeral.cfg;
+    let (n, reset_after) = cfg.default_lives[&typ];
+    let now = Utc::now();
+    Ok(match player.lives.get(&typ) {
+        None => format_compact!("{typ} {n}/{n}"),
+        Some((reset, cur)) => {
+            let since_reset = now - *reset;
+            let reset = chatcmd::format_duration(
+                Duration::seconds(reset_after as i64) - since_reset,
+            );
+            format_compact!("{typ} {cur}/{n} resetting in {reset}")
+        }
+    })
+}
+
+fn lives(
+    db: &mut Db,
+    ucid: &Ucid,
+    typfilter: Option<LifeType>,
+    include_slot_reserve: bool,
+) -> Result<CompactString> {
     db.maybe_reset_lives(ucid, Utc::now())?;
     let player = db.player(ucid).ok_or_else(|| anyhow!("no such player {:?}", ucid))?;
     let cfg = &db.ephemeral.cfg;
@@ -798,7 +822,11 @@ fn lives(db: &mut Db, ucid: &Ucid, typfilter: Option<LifeType>) -> Result<Compac
                     let reset = chatcmd::format_duration(
                         Duration::seconds(*reset_after as i64) - since_reset,
                     );
-                    if cfg.limited_lives && cfg.lives_birth && active_life_type == Some(*typ) {
+                    if include_slot_reserve
+                        && cfg.limited_lives
+                        && cfg.lives_birth
+                        && active_life_type == Some(*typ)
+                    {
                         msg.push_str(&format_compact!(
                             "{typ} 1+{cur}/{n} resetting in {reset}"
                         ));
@@ -828,7 +856,7 @@ fn message_life(
         .ok_or_else(|| anyhow!("no player in slot {:?}", slot))?
         .clone();
     let mut msg = CompactString::new(msg);
-    if let Ok(lives) = lives(&mut ctx.db, &ucid, typ) {
+    if let Ok(lives) = lives(&mut ctx.db, &ucid, typ, true) {
         msg.push_str(&lives)
     }
     ctx.db.ephemeral.msgs().panel_to_unit(10, false, uid, msg);

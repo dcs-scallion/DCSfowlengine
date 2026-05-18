@@ -946,12 +946,18 @@ impl Db {
         let player = maybe_mut!(self.persisted.players, ucid, "player")?;
         let position = unit.get_position()?;
         let point = Vector2::new(position.p.x, position.p.z);
-        let landed_at_objective = self
-            .persisted
-            .objectives
-            .into_iter()
-            .find(|(_, obj)| obj.zone.contains(point))
-            .map(|(oid, _)| *oid);
+        let landed_at_objective = if obj.zone.contains(point) {
+            Some(oid)
+        } else if !sifo.ground_start {
+            // dynamic slot: spawn objective already validated (may be outside O trigger)
+            Some(oid)
+        } else {
+            self.persisted
+                .objectives
+                .into_iter()
+                .find(|(_, o)| o.zone.contains(point))
+                .map(|(oid, _)| *oid)
+        };
         player.current_slot = Some((
             slot,
             Some(InstancedPlayer {

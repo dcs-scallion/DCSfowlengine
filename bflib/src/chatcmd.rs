@@ -132,7 +132,7 @@ fn lives_command(ctx: &mut Context, id: PlayerId) -> Result<()> {
         .connected
         .get(&id)
         .ok_or_else(|| anyhow!("missing info for player {:?}", id))?;
-    let msg = lives(&mut ctx.db, &ifo.ucid, None)?;
+    let msg = lives(&mut ctx.db, &ifo.ucid, None, true)?;
     ctx.db.ephemeral.msgs().send(MsgTyp::Chat(Some(id)), msg);
     Ok(())
 }
