@@ -227,17 +227,25 @@ impl Db {
     }
 
     pub fn init_objective_slots(&mut self, side: Side, slot: Group) -> Result<()> {
+        // Warehouse dyn templates and carrier-linked static slots use deck routes without ComboTask.
+        if slot.raw_get::<_, bool>("dynSpawnTemplate").unwrap_or(false) {
+            return Ok(());
+        }
         let mut ground_start = false;
-        for point in slot.route()?.points()? {
-            let point = point?;
-            match point.typ {
-                PointType::TakeOffGround | PointType::TakeOffGroundHot => ground_start = true,
-                PointType::Land
-                | PointType::TakeOff
-                | PointType::Custom(_)
-                | PointType::Nil
-                | PointType::TakeOffParking
-                | PointType::TurningPoint => (),
+        if !slot.raw_get::<_, bool>("linkOffset").unwrap_or(false) {
+            for point in slot.route()?.points()? {
+                let point = point?;
+                match point.typ {
+                    PointType::TakeOffGround | PointType::TakeOffGroundHot => {
+                        ground_start = true
+                    }
+                    PointType::Land
+                    | PointType::TakeOff
+                    | PointType::Custom(_)
+                    | PointType::Nil
+                    | PointType::TakeOffParking
+                    | PointType::TurningPoint => (),
+                }
             }
         }
         for unit in slot.units()? {
@@ -246,7 +254,10 @@ impl Db {
             self.ephemeral
                 .cfg
                 .check_vehicle_has_threat_distance(&vehicle)?;
-            if unit.skill()? != Skill::Client {
+            let Ok(skill) = unit.skill() else {
+                continue;
+            };
+            if skill != Skill::Client {
                 continue;
             }
             let id = unit.slot()?;

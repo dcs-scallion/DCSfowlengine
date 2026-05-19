@@ -496,6 +496,8 @@ const INCLUDE_DYNAMIC_SLOT_KEYS: &[&str] = &["include_dyn_slots", "include"];
 
 /// DEP* dynamic FARP aircraft allowlist (SETTINGS-dynamic-slots-creation); not part of general land TTD policy merge.
 const TTD_DYN_FARP_POLICY_ZONE: &str = "TTDdynFARP";
+/// Naval warehouse ME `dynamicSpawn` after stock/linkDynTempl (keys `TTDN` + hull name, e.g. `TTDNRKuznecow`).
+const SETTINGS_DYNAMIC_SPAWN_TTDN_ZONE: &str = "SETTINGS-dynamic-spawn-TTDN";
 
 fn parse_trigger_slot_quantity(value: &str) -> Result<usize> {
     let t = value.trim();
@@ -815,8 +817,6 @@ enum SlotType {
 const DYNAMIC_TEMPLATE_GROUP_PREFIX: &str = "zzDT-";
 /// Older missions / weapon.miz may still use `DT-`; strip and match-load only.
 const LEGACY_DYNAMIC_TEMPLATE_PREFIX: &str = "DT-";
-/// North offset (meters, +DCS `y`) for template mirrors in `weapon.miz`.
-const WEAPON_DT_MIRROR_OFFSET_NORTH_M: f64 = 1000.0;
 
 #[inline]
 fn is_dynamic_template_group_name(name: &str) -> bool {
@@ -838,72 +838,6 @@ fn apply_dynamic_template_group_visibility(
             group.raw_set("hiddenOnMFD", true)?;
         }
     }
-    Ok(())
-}
-
-fn offset_air_group_north_m(group: &Group<'_>, delta_y: f64) -> Result<()> {
-    let p = group.pos()?;
-    group.set_pos(na::Vector2::new(p.x, p.y + delta_y))?;
-    for u in group.units()? {
-        let u = u?;
-        let up = u.pos()?;
-        u.set_pos(na::Vector2::new(up.x, up.y + delta_y))?;
-    }
-    let route = group.route()?;
-    let mut new_pts = Vec::new();
-    for pt in route.points()? {
-        let mut pt = pt?;
-        pt.pos.0.y += delta_y;
-        new_pts.push(pt);
-    }
-    route.set_points(new_pts)?;
-    Ok(())
-}
-
-fn strip_dt_prefixed_groups_from_cjtf_air(
-    lua: &'static Lua,
-    mission: &Miz,
-) -> Result<()> {
-    for side in [Side::Blue, Side::Red] {
-        let cname = match side {
-            Side::Blue => Country::CJTF_BLUE,
-            Side::Red => Country::CJTF_RED,
-            Side::Neutral => continue,
-        };
-        let coa = mission.coalition(side)?;
-        let Some(country) = coa.country(cname)? else {
-            continue;
-        };
-        for category in ["plane", "helicopter"] {
-            strip_dt_from_plane_or_heli(lua, &country, category)?;
-        }
-    }
-    Ok(())
-}
-
-fn strip_dt_from_plane_or_heli(
-    lua: &'static Lua,
-    country: &MizCountry<'_>,
-    category: &str,
-) -> Result<()> {
-    let seq: Sequence<Group> = match category {
-        "plane" => country.planes()?,
-        "helicopter" => country.helicopters()?,
-        _ => bail!("strip_dt_from_plane_or_heli: bad category"),
-    };
-    if seq.len() == 0 {
-        return Ok(());
-    }
-    let new_groups = lua.create_table()?;
-    for g in seq {
-        let g = g?;
-        if is_dynamic_template_group_name(&g.name()?) {
-            continue;
-        }
-        new_groups.push(g)?;
-    }
-    let cat_tbl: Table = country.raw_get(category)?;
-    cat_tbl.raw_set("group", new_groups)?;
     Ok(())
 }
 
@@ -962,59 +896,6 @@ fn push_client_air_group_to_cjtf(
         }
     };
     seq.push(tmpl)?;
-    Ok(())
-}
-
-fn sync_dt_mirror_groups_into_weapon_miz(
-    lua: &'static Lua,
-    weapon_path: &Path,
-    base: &LoadedMiz,
-) -> Result<()> {
-    let weapon_ld = LoadedMiz::new(lua, weapon_path).with_context(|| {
-        format_compact!("loading weapon.miz for DT mirror: {weapon_path:?}")
-    })?;
-    strip_dt_prefixed_groups_from_cjtf_air(lua, &weapon_ld.mission)?;
-    for side in [Side::Blue, Side::Red] {
-        let cname = match side {
-            Side::Blue => Country::CJTF_BLUE,
-            Side::Red => Country::CJTF_RED,
-            Side::Neutral => unreachable!(),
-        };
-        let base_coa = base.mission.coalition(side)?;
-        let Some(base_country) = base_coa.country(cname)? else {
-            continue;
-        };
-        for (slot_kind, seq) in [
-            (SlotType::Plane, base_country.planes()?),
-            (SlotType::Helicopter, base_country.helicopters()?),
-        ] {
-            for g in seq {
-                let g = g?;
-                let name = g.name()?;
-                if !is_dynamic_template_group_name(&name) {
-                    continue;
-                }
-                let tmpl: Group<'static> = g.deep_clone(lua)?;
-                offset_air_group_north_m(&tmpl, WEAPON_DT_MIRROR_OFFSET_NORTH_M)?;
-                apply_dynamic_template_group_visibility(&tmpl, slot_kind)?;
-                push_client_air_group_to_cjtf(
-                    lua,
-                    &weapon_ld.mission,
-                    side,
-                    slot_kind,
-                    tmpl,
-                )?;
-            }
-        }
-    }
-    let s = serialize_to_lua("mission", Value::Table((&*weapon_ld.mission).clone()))?;
-    fs::write(&weapon_ld.miz.files["mission"], &s)
-        .with_context(|| format_compact!("writing weapon.miz mission (DT mirror)"))?;
-    info!(
-        "wrote zzDT-* / legacy DT-* mirror groups (+{:.0} m north, hidden) to {}",
-        WEAPON_DT_MIRROR_OFFSET_NORTH_M,
-        weapon_path.display()
-    );
     Ok(())
 }
 
@@ -1096,11 +977,22 @@ impl VehicleTemplates {
         Ok(())
     }
 
+    fn lua_empty_combo_task(lua: &Lua) -> Result<Table<'_>> {
+        let task = lua.create_table()?;
+        task.raw_set("id", "ComboTask")?;
+        let params = lua.create_table()?;
+        params.raw_set("tasks", lua.create_table()?)?;
+        task.raw_set("params", params)?;
+        Ok(task)
+    }
+
     /// Patch existing Lua waypoint tables in place (preserves DCS-only fields `IntoLua` might drop).
-    /// First point is forced to parking takeoff with locked ETA/speed and fixed barometric alt.
+    /// Land/airport and naval: first point `TakeOffParking` + baro alt 10; naval also sets `linkUnit`.
     fn patch_dt_route_points_lua_tables(
+        lua: &Lua,
         grp: &Group<'static>,
         _slot_kind: SlotType,
+        link_unit: Option<i64>,
     ) -> Result<()> {
         let route: Table = grp.raw_get("route").context("DT group missing route")?;
         let points: Table =
@@ -1112,13 +1004,8 @@ impl VehicleTemplates {
         for i in 1..=n {
             let p: Table =
                 points.raw_get(i).with_context(|| format_compact!("route point {i}"))?;
-            let typ = if i == 1 {
-                "TakeOffParking"
-            } else {
-                "Turning Point"
-            };
-            p.raw_set("type", typ)?;
             if i == 1 {
+                p.raw_set("type", "TakeOffParking")?;
                 p.raw_set("alt", 10)?;
                 p.raw_set("action", "From Parking Area")?;
                 p.raw_set("alt_type", "BARO")?;
@@ -1127,8 +1014,15 @@ impl VehicleTemplates {
                 p.raw_set("speed_locked", true)?;
                 p.raw_set("airdromId", Value::Nil)?;
                 p.raw_set("helipadId", Value::Nil)?;
-                p.raw_set("linkUnit", Value::Nil)?;
                 p.raw_set("timeReFuAr", Value::Nil)?;
+                p.raw_set("task", Self::lua_empty_combo_task(lua)?)?;
+                if let Some(id) = link_unit {
+                    p.raw_set("linkUnit", id)?;
+                } else {
+                    p.raw_set("linkUnit", Value::Nil)?;
+                }
+            } else {
+                p.raw_set("type", "Turning Point")?;
             }
         }
         Ok(())
@@ -2092,10 +1986,8 @@ impl VehicleTemplates {
         Ok(())
     }
 
-    /// Emits `zzDT-<type>-<side>` groups (`dynSpawnTemplate` + warehouse `linkDynTempl`).
-    ///
-    /// Appended like static slots in ME lists (prefix `zz` sorts them late). Mirrors go to `weapon.miz`
-    /// (+1 km north, hidden). Runtime uses `dynSpawnTemplate` + warehouse links on the **base** mission.
+    /// Emits `zzDT-<type>-<side>` groups (`dynSpawnTemplate` + warehouse `linkDynTempl`) into **base** only.
+    /// `weapon*.miz` is read-only (static client templates); never written by bftools.
     fn emit_dynamic_spawn_templates(
         &self,
         lua: &'static Lua,
@@ -2108,6 +2000,8 @@ impl VehicleTemplates {
         let idx = base.mission.index()?;
         let dynamic_creation_settings =
             Self::load_zone_creation_settings(base, "SETTINGS-dynamic-slots-creation")?;
+        let naval_dynamic_spawn_settings =
+            Self::load_zone_creation_settings(base, SETTINGS_DYNAMIC_SPAWN_TTDN_ZONE)?;
         let mut uid = idx.max_uid();
         let mut gid = idx.max_gid();
         uid.next();
@@ -2343,7 +2237,7 @@ impl VehicleTemplates {
                 );
             }
             // Force first-point route fields required by DCS dynamic templates.
-            Self::patch_dt_route_points_lua_tables(&tmpl, slot_kind)?;
+            Self::patch_dt_route_points_lua_tables(lua, &tmpl, slot_kind, None)?;
 
             tmpl.set_name(group_name.clone())?;
             tmpl.set_id(gid)?;
@@ -2411,8 +2305,152 @@ impl VehicleTemplates {
             info!("added dynamic spawn template {}", group_name);
         }
 
+        // Per-hull templates: carrier DS needs route `linkUnit` = ship unitId (see static TTSN slots).
+        let ship_wh_map = collect_ship_warehouse_group_map(base)?;
+        let mut link_by_ship: HashMap<(Side, String, String), GroupId> = HashMap::default();
+        let ship_hull_by_wid: HashMap<i64, String> = ship_wh_map
+            .iter()
+            .map(|(&wid, (_, hull))| (wid, String::from(hull.as_str())))
+            .collect();
+        let ship_aircraft_allow =
+            build_ship_warehouse_aircraft_allow(base, &dyn_templates, &ship_wh_map)?;
+        let mut naval_template_keys: HashSet<(Side, String, String)> = HashSet::default();
+        for (&ship_unit_id, (side, hull_name)) in &ship_wh_map {
+            let hull_key = format!("TTDN{}", hull_name.as_str());
+            if naval_dynamic_spawn_settings
+                .get(&String::from(hull_key.as_str()))
+                .copied()
+                == Some(false)
+            {
+                info!(
+                    "skipping per-hull naval dynamic templates for {} ({SETTINGS_DYNAMIC_SPAWN_TTDN_ZONE} {hull_key}=false; use static deck slots)",
+                    hull_name
+                );
+                continue;
+            }
+            let Some(allowed) = ship_aircraft_allow.get(&ship_unit_id) else {
+                continue;
+            };
+            for (slot_side, unit_type) in allowed {
+                if *slot_side != *side {
+                    continue;
+                }
+                let unit_type = String::from(unit_type.as_str());
+                let hull_dc = String::from(hull_name.as_str());
+                let dedup = (*side, unit_type.clone(), hull_dc.clone());
+                if !naval_template_keys.insert(dedup.clone()) {
+                    continue;
+                }
+                let (slot_kind, src_default) =
+                    if let Some(g) = self.plane_slots.get(side).and_then(|m| m.get(&unit_type)) {
+                        (SlotType::Plane, g)
+                    } else if let Some(g) =
+                        self.helicopter_slots.get(side).and_then(|m| m.get(&unit_type))
+                    {
+                        (SlotType::Helicopter, g)
+                    } else {
+                        warn!(
+                            "TTDN {:?}: {} listed but no plane/heli template in weapon.miz",
+                            hull_name, unit_type
+                        );
+                        continue;
+                    };
+                let (src, from_weapon_dt) = match self
+                    .dt_weapon_source
+                    .get(&(*side, slot_kind, unit_type.clone()))
+                {
+                    Some(g) => (g, true),
+                    None => (src_default, false),
+                };
+                let group_name = String::from(format_compact!(
+                    "{}{unit_type}-{}-{hull_name}",
+                    DYNAMIC_TEMPLATE_GROUP_PREFIX,
+                    side.to_str()
+                ));
+                if emitted_names.contains(&group_name) {
+                    warn!("skipping naval dynamic template {group_name}, duplicate");
+                    continue;
+                }
+                let kind = match slot_kind {
+                    SlotType::Plane => GroupKind::Plane,
+                    SlotType::Helicopter => GroupKind::Helicopter,
+                };
+                if base
+                    .mission
+                    .get_group_by_name(&idx, kind, *side, &group_name)?
+                    .is_some()
+                {
+                    warn!("skipping naval dynamic template {group_name}, already exists");
+                    continue;
+                }
+                let tmpl: Group<'static> = src.deep_clone(lua)?;
+                tmpl.raw_set("dynSpawnTemplate", true)?;
+                tmpl.raw_set("lateActivation", false)?;
+                tmpl.raw_set("uncontrolled", false)?;
+                tmpl.raw_set("linkOffset", true)?;
+                if from_weapon_dt {
+                    info!(
+                        "{group_name}: using route from weapon.miz template, linkUnit={ship_unit_id}"
+                    );
+                } else {
+                    info!("{group_name}: linkUnit={ship_unit_id}");
+                }
+                Self::patch_dt_route_points_lua_tables(lua, &tmpl, slot_kind, Some(ship_unit_id))?;
+                tmpl.set_name(group_name.clone())?;
+                tmpl.set_id(gid)?;
+                tmpl.raw_set("password", slot_password.clone())?;
+                let mut unit_ord = 0;
+                for u in tmpl.units()? {
+                    let u = u?;
+                    if u.skill()? != Skill::Client {
+                        bail!(
+                            "dynamic template source for {unit_type} must use Client skill"
+                        );
+                    }
+                    unit_ord += 1;
+                    u.set_id(uid)?;
+                    u.set_name(String::from(format_compact!("{group_name}-{unit_ord}")))?;
+                    u.raw_set("skill", "Client")?;
+                    u.raw_set("password", Value::Nil)?;
+                    u.raw_set("fuel", 0)?;
+                    u.raw_set("alt", 0)?;
+                    u.raw_set("datalinks", Value::Nil)?;
+                    u.raw_set("Radio", Value::Nil)?;
+                    u.raw_set("AddPropAircraft", Value::Nil)?;
+                    if let Some(w) =
+                        Self::table_for_side_or_opposite(&self.payload, *side, &unit_type)
+                    {
+                        let payload_tbl = w.deep_clone(lua)?;
+                        let pylons = pylons_by_side_type
+                            .get(&(*side, unit_type.clone()))
+                            .or_else(|| {
+                                pylons_by_side_type
+                                    .get(&(side.opposite(), unit_type.clone()))
+                            });
+                        if let Some(pylons) = pylons {
+                            payload_tbl.raw_set("pylons", pylons.deep_clone(lua)?)?;
+                        }
+                        u.set("payload", payload_tbl)?;
+                    }
+                    if let Some(v) = self.frequency.get(side).and_then(|t| t.get(&unit_type)) {
+                        u.set("frequency", v.deep_clone(lua)?)?;
+                    }
+                    uid.next();
+                }
+                apply_dynamic_template_group_visibility(&tmpl, slot_kind)?;
+                let template_gid = tmpl.id()?;
+                gid.next();
+                push_client_air_group_to_cjtf(lua, &base.mission, *side, slot_kind, tmpl)?;
+                link_by_ship.insert(dedup, template_gid);
+                emitted_names.insert(group_name.clone());
+                info!("added naval dynamic spawn template {}", group_name);
+            }
+        }
+
         Ok(DynamicSpawnEmit {
             link_by_side_type,
+            link_by_ship,
+            ship_hull_by_wid,
             land_allow,
             naval_allow,
             dyn_templates,
@@ -2795,6 +2833,44 @@ fn warehouse_dynamic_spawn_enabled(row: &Table) -> bool {
     row.raw_get::<_, Value>("dynamicSpawn")
         .map(|v| lua_value_truthy(&v))
         .unwrap_or(false)
+}
+
+/// ME `dynamicSpawn` on ship warehouse rows only; runs after fill / `linkDynTempl` patch.
+fn apply_settings_dynamic_spawn_ttdn_naval_flags(
+    base: &LoadedMiz,
+    warehouses: &Table<'static>,
+    ship_hull_by_wid: &HashMap<i64, String>,
+) -> Result<()> {
+    let settings = VehicleTemplates::load_zone_creation_settings(
+        base,
+        SETTINGS_DYNAMIC_SPAWN_TTDN_ZONE,
+    )?;
+    if settings.is_empty() {
+        warn!(
+            "trigger zone {SETTINGS_DYNAMIC_SPAWN_TTDN_ZONE} missing or has no bool properties; naval dynamicSpawn left as built"
+        );
+        return Ok(());
+    }
+    let wh_tbl: Table = warehouses
+        .raw_get("warehouses")
+        .context("warehouses.warehouses")?;
+    for (&wid, hull) in ship_hull_by_wid {
+        let key = format!("TTDN{hull}");
+        let Some(enabled) = settings.get(&String::from(key.as_str())).copied() else {
+            warn!(
+                "naval warehouse {wid} ({hull}): no `{key}` in {SETTINGS_DYNAMIC_SPAWN_TTDN_ZONE}; dynamicSpawn unchanged"
+            );
+            continue;
+        };
+        let row: Table = wh_tbl
+            .raw_get(wid)
+            .with_context(|| format!("naval warehouse row {wid} ({hull})"))?;
+        row.raw_set("dynamicSpawn", enabled)?;
+        info!(
+            "naval warehouse {wid} ({hull}): dynamicSpawn={enabled} ({SETTINGS_DYNAMIC_SPAWN_TTDN_ZONE})"
+        );
+    }
+    Ok(())
 }
 
 /// Red/blue rows get BDEFAULT/RDEFAULT; neutral build rows are cleared (see `empty_neutral_build_warehouse_row`).
@@ -5960,6 +6036,10 @@ impl WarehouseTemplate {
 /// Emitted `DT_*` templates and allow-lists for where each type may offer dynamic spawn.
 struct DynamicSpawnEmit {
     link_by_side_type: HashMap<(Side, String), GroupId>,
+    /// Per hull (`RKuznecow`, …): coalition templates with route `linkUnit` = ship `unitId`.
+    link_by_ship: HashMap<(Side, String, String), GroupId>,
+    /// Naval warehouse id → ME ship group name (for `linkDynTempl` lookup).
+    ship_hull_by_wid: HashMap<i64, String>,
     /// `Some` when any enabled `TTD*` policy zone exists (membership list for land / non-ship DS).
     land_allow: Option<HashSet<(Side, String)>>,
     /// `Some` when any enabled `TTDN*` policy zone exists (ship warehouse DS).
@@ -7387,11 +7467,23 @@ fn patch_warehouse_dynamic_spawn_links(
                 };
                 for pair in cat_tbl.pairs::<String, Table>() {
                     let (unit_type, row) = pair?;
-                    let link = emit
-                        .link_by_side_type
-                        .get(&(side, unit_type.clone()))
-                        .map(|gid| gid.inner())
-                        .unwrap_or(0);
+                    let link = if mult_cfg.naval_warehouse_ids.contains(&wid) {
+                        emit
+                            .ship_hull_by_wid
+                            .get(&wid)
+                            .and_then(|hull| {
+                                emit.link_by_ship.get(&(
+                                    side,
+                                    unit_type.clone(),
+                                    hull.clone(),
+                                ))
+                            })
+                    } else {
+                        None
+                    }
+                    .or_else(|| emit.link_by_side_type.get(&(side, unit_type.clone())))
+                    .map(|gid| gid.inner())
+                    .unwrap_or(0);
                     row.raw_set("linkDynTempl", link)?;
                 }
             }
@@ -8848,12 +8940,6 @@ pub fn run(cfg: &MizCmd) -> Result<()> {
     let dynamic_emit = vehicle_templates
         .emit_dynamic_spawn_templates(lua, &mut base)
         .context("emitting dynamic spawn templates")?;
-    if weapon_template_path != cfg.base {
-        sync_dt_mirror_groups_into_weapon_miz(lua, &weapon_template_path, &base)
-            .context("syncing zzDT-* mirror groups into weapon.miz")?;
-    } else {
-        warn!("--weapon equals --base; skipping zzDT-* mirror write to weapon.miz");
-    }
     sync_l10n_dictionary_sortie_stem_to_output_miz(&base, &cfg.output)
         .context("l10n: set dictionary[mission.sortie] to --output .miz stem (DCS Saved Games / Fowl files)")?;
     let s = serialize_to_lua("mission", Value::Table((&*base.mission).clone()))?;
@@ -9109,6 +9195,12 @@ pub fn run(cfg: &MizCmd) -> Result<()> {
             &vehicle_templates,
         )
         .context("patching warehouse linkDynTempl")?;
+        apply_settings_dynamic_spawn_ttdn_naval_flags(
+            &base,
+            &base.warehouses,
+            &dynamic_emit.ship_hull_by_wid,
+        )
+        .context("applying SETTINGS-dynamic-spawn-TTDN naval dynamicSpawn flags")?;
         if let Some(caps) = warehouse_defaults {
             if caps.has_any_nonzero_cap() {
                 let mut skip = HashSet::default();
