@@ -7721,6 +7721,37 @@ fn compile_objectives(base: &LoadedMiz) -> Result<Vec<TriggerZone>> {
     Ok(objectives)
 }
 
+/// Default owner at index 3: `O` + type (`AB`/`FO`/`LO`) + `B`/`R`/`N` + display name (same as `mizinit`).
+fn objective_default_owner_from_zone_name(zone_name: &str) -> Option<Side> {
+    if !zone_name.starts_with('O') || zone_name.len() < 4 {
+        return None;
+    }
+    match zone_name.as_bytes()[3] {
+        b'B' => Some(Side::Blue),
+        b'R' => Some(Side::Red),
+        b'N' => Some(Side::Neutral),
+        _ => None,
+    }
+}
+
+fn count_objectives_by_default_owner(objectives: &[TriggerZone]) -> (usize, usize, usize) {
+    let mut blue = 0usize;
+    let mut red = 0usize;
+    let mut neutral = 0usize;
+    for obj in objectives {
+        let Ok(zone_name) = obj.inner.name() else {
+            continue;
+        };
+        match objective_default_owner_from_zone_name(&zone_name) {
+            Some(Side::Blue) => blue += 1,
+            Some(Side::Red) => red += 1,
+            Some(Side::Neutral) => neutral += 1,
+            _ => {}
+        }
+    }
+    (blue, red, neutral)
+}
+
 fn compile_tzf_plane_fuel_zones(base: &LoadedMiz) -> Result<Vec<TzfPlaneFuelZone>> {
     let mut out = Vec::new();
     for zone in base
@@ -9143,5 +9174,10 @@ pub fn run(cfg: &MizCmd) -> Result<()> {
         .write_next_to_miz(&cfg.output)
         .context("writing Fowl mission export JSON")?;
     info!("wrote Fowl mission export to {:?}", export_path);
+    let (blue_objectives, red_objectives, neutral_objectives) =
+        count_objectives_by_default_owner(&objectives);
+    println!("Objectives total - Blue coalition: {blue_objectives}");
+    println!("Objectives total - Red coalition: {red_objectives}");
+    println!("Objectives total - Neutral coalition: {neutral_objectives}");
     Ok(())
 }

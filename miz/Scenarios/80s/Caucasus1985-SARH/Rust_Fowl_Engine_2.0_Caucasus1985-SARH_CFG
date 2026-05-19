@@ -3150,6 +3150,12 @@
     "S-3B": [
       "Unarmed"
     ],
+    "A6E": [
+      "Unarmed"
+    ],
+    "CH-53E": [
+      "Unarmed"
+    ],
     "S-3B Tanker": [
       "Unarmed"
     ],
@@ -3175,6 +3181,9 @@
       "Unarmed"
     ],
     "AM32a-60_01": [
+      "Unarmed"
+    ],
+    "us carrier shooter": [
       "Unarmed"
     ],
     "Silkworm_SR": [
