@@ -79,24 +79,23 @@ fn text_color(side: Side, a: f32) -> Color {
     }
 }
 
-/// Skrýt Supply a Fuel nepřátelské základně (červený tým nevidí u modrých, modrý u červených).
-fn hide_supply_fuel_for_viewer(obj_owner: Side, viewer: Side) -> bool {
+/// Cross-coalition view: Health/Logi only (no supply, fuel, or points).
+fn enemy_objective_view(obj_owner: Side, viewer: Side) -> bool {
     matches!(
         (obj_owner, viewer),
         (Side::Red, Side::Blue) | (Side::Blue, Side::Red)
     )
 }
 
-fn objective_stats_text(obj: &Objective, hide_supply_fuel: bool) -> CompactString {
+fn objective_stats_text(obj: &Objective, limited: bool) -> CompactString {
     let get_idx = |val: u8| -> usize { (val as usize * 12 / 100).min(12) };
-    if hide_supply_fuel {
+    if limited {
         format_compact!(
-            "\n\n{} {:>3} Health\n{} {:>3} Logi\n\nPoints: {}",
+            "\n\n{} {:>3} Health\n{} {:>3} Logi",
             BAR_LOOKUP[get_idx(obj.health)],
             obj.health,
             BAR_LOOKUP[get_idx(obj.logi)],
             obj.logi,
-            obj.points
         )
     } else {
         format_compact!(
@@ -111,6 +110,13 @@ fn objective_stats_text(obj: &Objective, hide_supply_fuel: bool) -> CompactStrin
             obj.fuel,
             obj.points
         )
+    }
+}
+
+fn objective_map_kind_label(kind: &ObjectiveKind) -> &'static str {
+    match kind {
+        ObjectiveKind::Logistics => "⌂ HUB",
+        _ => kind.name(),
     }
 }
 
@@ -209,11 +215,11 @@ impl ObjectiveMarkup {
             } else if let (Some(id_r), Some(id_b)) = (self.stats_label_red, self.stats_label_blue) {
                 msgq.set_markup_text(
                     id_r,
-                    objective_stats_text(obj, hide_supply_fuel_for_viewer(obj.owner, Side::Red)).into(),
+                    objective_stats_text(obj, enemy_objective_view(obj.owner, Side::Red)).into(),
                 );
                 msgq.set_markup_text(
                     id_b,
-                    objective_stats_text(obj, hide_supply_fuel_for_viewer(obj.owner, Side::Blue)).into(),
+                    objective_stats_text(obj, enemy_objective_view(obj.owner, Side::Blue)).into(),
                 );
             }
         }
@@ -262,7 +268,7 @@ impl ObjectiveMarkup {
         t.logi = obj.logi;
         t.supply = obj.supply;
         t.fuel = obj.fuel;
-        t.name = format_compact!(" {} {} ", obj.name, obj.kind.name()).into();
+        t.name = format_compact!(" {} {} ", obj.name, objective_map_kind_label(&obj.kind)).into();
         t.pos = obj.zone.pos();
         let pos3 = Vector3::new(t.pos.x, 0., t.pos.y);
 
@@ -378,7 +384,7 @@ impl ObjectiveMarkup {
                 id_r,
                 make_stats_spec(objective_stats_text(
                     obj,
-                    hide_supply_fuel_for_viewer(obj.owner, Side::Red),
+                    enemy_objective_view(obj.owner, Side::Red),
                 )),
             );
             msgq.text_to_all(
@@ -386,7 +392,7 @@ impl ObjectiveMarkup {
                 id_b,
                 make_stats_spec(objective_stats_text(
                     obj,
-                    hide_supply_fuel_for_viewer(obj.owner, Side::Blue),
+                    enemy_objective_view(obj.owner, Side::Blue),
                 )),
             );
             t.stats_label_red = Some(id_r);
