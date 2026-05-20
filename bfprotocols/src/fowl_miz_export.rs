@@ -12,6 +12,42 @@ use std::fs::File;
 use std::io::Write;
 use std::path::{Path, PathBuf};
 
+/// One tracked warehouse row (munition, airframe, or other equipment label).
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct ObjectiveStockItem {
+    pub baseline: u32,
+    /// DCS `wsType` quad for ordnance; omitted for airframes and non-wsType rows.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ws_type: Option<[i32; 4]>,
+    /// Template BINVENTORY/RINVENTORY reference amount (pre objective multiplier).
+    #[serde(default)]
+    pub production: u32,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct ObjectiveStockLiquid {
+    pub baseline: u32,
+    #[serde(default)]
+    pub production: u32,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct ObjectiveCoalitionStock {
+    #[serde(default)]
+    pub equipment: HashMap<String, ObjectiveStockItem>,
+    #[serde(default)]
+    pub liquids: HashMap<String, ObjectiveStockLiquid>,
+}
+
+/// Per objective (`O*` zone name without prefix): both coalition logical baselines for Fowl 2.0.
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct ObjectiveStockByCoalition {
+    #[serde(default)]
+    pub blue: ObjectiveCoalitionStock,
+    #[serde(default)]
+    pub red: ObjectiveCoalitionStock,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct ObjectiveWarehouseDefaults {
     /// Aircraft module types allowed for blue ownership on this objective/base.
@@ -51,22 +87,26 @@ pub struct FowlMizExport {
     /// `RINVENTORY+` zone links (same shape as [`Self::blue_inventory_zone_module_ws`]).
     #[serde(default)]
     pub red_inventory_zone_module_ws: HashMap<String, HashMap<String, Vec<[i32; 4]>>>,
+    /// Per-objective warehouse baselines for blue and red owners (`O*` name without prefix).
+    #[serde(default)]
+    pub objective_stock: HashMap<String, ObjectiveStockByCoalition>,
 }
 
 fn default_schema_version() -> u32 {
-    4
+    5
 }
 
 impl Default for FowlMizExport {
     fn default() -> Self {
         Self {
-            schema_version: 4,
+            schema_version: 5,
             weapon_bridge_used: false,
             blue_weapon_ws: Vec::new(),
             red_weapon_ws: Vec::new(),
             objective_defaults: HashMap::new(),
             blue_inventory_zone_module_ws: HashMap::new(),
             red_inventory_zone_module_ws: HashMap::new(),
+            objective_stock: HashMap::new(),
         }
     }
 }

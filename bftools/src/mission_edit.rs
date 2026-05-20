@@ -19,6 +19,10 @@ use crate::MizCmd;
 use anyhow::{bail, Context, Result};
 use bfprotocols::{
     cfg::{Cfg, Deployable},
+    fowl_miz_export::{
+        ObjectiveCoalitionStock, ObjectiveStockByCoalition, ObjectiveStockItem,
+        ObjectiveStockLiquid, ObjectiveWarehouseDefaults,
+    },
     miz_trigger::{
         fowl_trigger_zone_name_valid, FOWL_TRIGGER_ZONE_EXPECTED_PREFIXES_DISPLAY,
     },
@@ -2674,6 +2678,551 @@ fn mirror_assembled_production_inventory(
     Ok(())
 }
 
+const LIQUID_STOCK_KEYS: [&str; 4] = ["jet_fuel", "gasoline", "diesel", "methanol_mixture"];
+
+fn ordnance_ws_type(quad: [i32; 4]) -> bool {
+    quad[0] == 4 && (4..=8).contains(&quad[1])
+}
+
+#[derive(Default)]
+struct InventoryProductionMaps {
+    weapon_by_ws: HashMap<[i32; 4], u32>,
+    aircraft: HashMap<StdString, u32>,
+    liquids: HashMap<StdString, u32>,
+}
+
+fn read_liquid_amount(tbl: &Table) -> u32 {
+    if let Ok(v) = tbl.raw_get::<_, f64>("InitFuel") {
+        return v.max(0.) as u32;
+    }
+    if let Ok(v) = tbl.raw_get::<_, i64>("InitFuel") {
+        return v.max(0) as u32;
+    }
+    0
+}
+
+fn build_inventory_production_maps(inv_tpl: &Table) -> Result<InventoryProductionMaps> {
+    let mut out = InventoryProductionMaps::default();
+    if let Ok(weapons) = inv_tpl.raw_get::<_, Table>("weapons") {
+        for pair in weapons.clone().pairs::<Value, Table>() {
+            let (_, w) = pair?;
+            let Some(ws) = read_weapon_ws_type(&w) else {
+                continue;
+            };
+            let amt = w.raw_get::<_, u32>("initialAmount").unwrap_or(0);
+            if amt > 0 {
+                out.weapon_by_ws.insert(ws, amt);
+            }
+        }
+    }
+    if let Ok(aircrafts) = inv_tpl.raw_get::<_, Table>("aircrafts") {
+        for cat in ["helicopters", "planes"] {
+            let Ok(cat_tbl) = aircrafts.raw_get::<_, Table>(cat) else {
+                continue;
+            };
+            for pair in cat_tbl.clone().pairs::<String, Table>() {
+                let (unit_type, row) = pair?;
+                let amt = row.raw_get::<_, u32>("initialAmount").unwrap_or(0);
+                if amt > 0 {
+                    out.aircraft.insert(unit_type.as_str().to_string(), amt);
+                }
+            }
+        }
+    }
+    for key in LIQUID_STOCK_KEYS {
+        let Ok(tbl) = inv_tpl.raw_get::<_, Table>(key) else {
+            continue;
+        };
+        let amt = read_liquid_amount(&tbl);
+        if amt > 0 {
+            out.liquids.insert(key.to_string(), amt);
+        }
+    }
+    Ok(out)
+}
+
+fn coalition_catalog_weapon_ws(row: &Table) -> Result<HashSet<[i32; 4]>> {
+    let mut out = HashSet::default();
+    if let Ok(weapons) = row.raw_get::<_, Table>("weapons") {
+        for pair in weapons.clone().pairs::<Value, Table>() {
+            let (_, w) = pair?;
+            if let Some(ws) = read_weapon_ws_type(&w) {
+                let amt = w.raw_get::<_, u32>("initialAmount").unwrap_or(0);
+                if amt > 0 {
+                    out.insert(ws);
+                }
+            }
+        }
+    }
+    Ok(out)
+}
+
+fn objective_weapon_allowset(
+    defaults: &HashMap<StdString, ObjectiveWarehouseDefaults>,
+    objective_name: &str,
+    side: Side,
+) -> Option<HashSet<[i32; 4]>> {
+    let d = defaults.get(objective_name)?;
+    let list = match side {
+        Side::Blue => &d.blue_weapon_ws,
+        Side::Red => &d.red_weapon_ws,
+        Side::Neutral => return None,
+    };
+    if list.is_empty() {
+        return None;
+    }
+    Some(list.iter().copied().collect())
+}
+
+fn weapon_allowed_for_objective_stock(
+    ws: [i32; 4],
+    catalog: &HashSet<[i32; 4]>,
+    allow: Option<&HashSet<[i32; 4]>>,
+) -> bool {
+    if !catalog.contains(&ws) {
+        return false;
+    }
+    let Some(allow) = allow else {
+        return true;
+    };
+    if !ordnance_ws_type(ws) {
+        return true;
+    }
+    allow.contains(&ws)
+}
+
+fn extract_objective_coalition_stock(
+    row: &Table,
+    side: Side,
+    inv_tpl: &Table<'static>,
+    catalog: &HashSet<[i32; 4]>,
+    defaults: &HashMap<StdString, ObjectiveWarehouseDefaults>,
+    objective_name: &str,
+) -> Result<ObjectiveCoalitionStock> {
+    let prod = build_inventory_production_maps(inv_tpl)?;
+    let allow = objective_weapon_allowset(defaults, objective_name, side);
+    let mut out = ObjectiveCoalitionStock::default();
+    if let Ok(weapons) = row.raw_get::<_, Table>("weapons") {
+        for pair in weapons.clone().pairs::<Value, Table>() {
+            let (_, w) = pair?;
+            let Some(ws) = read_weapon_ws_type(&w) else {
+                continue;
+            };
+            if !weapon_allowed_for_objective_stock(ws, catalog, allow.as_ref()) {
+                continue;
+            }
+            let baseline = w.raw_get::<_, u32>("initialAmount").unwrap_or(0);
+            if baseline == 0 {
+                continue;
+            }
+            let Some(name) = weapon_row_export_key(&w) else {
+                continue;
+            };
+            out.equipment.insert(
+                name,
+                ObjectiveStockItem {
+                    baseline,
+                    ws_type: ordnance_ws_type(ws).then_some(ws),
+                    production: prod.weapon_by_ws.get(&ws).copied().unwrap_or(0),
+                },
+            );
+        }
+    }
+    if let Ok(aircrafts) = row.raw_get::<_, Table>("aircrafts") {
+        for cat in ["helicopters", "planes"] {
+            let Ok(cat_tbl) = aircrafts.raw_get::<_, Table>(cat) else {
+                continue;
+            };
+            for pair in cat_tbl.clone().pairs::<String, Table>() {
+                let (unit_type, u) = pair?;
+                let baseline = u.raw_get::<_, u32>("initialAmount").unwrap_or(0);
+                if baseline == 0 {
+                    continue;
+                }
+                out.equipment.insert(
+                    unit_type.as_str().to_string(),
+                    ObjectiveStockItem {
+                        baseline,
+                        ws_type: None,
+                        production: prod
+                            .aircraft
+                            .get(unit_type.as_str())
+                            .copied()
+                            .unwrap_or(0),
+                    },
+                );
+            }
+        }
+    }
+    for key in LIQUID_STOCK_KEYS {
+        let Ok(tbl) = row.raw_get::<_, Table>(key) else {
+            continue;
+        };
+        let baseline = read_liquid_amount(&tbl);
+        if baseline == 0 {
+            continue;
+        }
+        out.liquids.insert(
+            key.to_string(),
+            ObjectiveStockLiquid {
+                baseline,
+                production: prod.liquids.get(key).copied().unwrap_or(0),
+            },
+        );
+    }
+    Ok(out)
+}
+
+struct ResolvedObjectiveWarehouse<'a> {
+    row: Table<'a>,
+    wh_id: i64,
+    is_airport: bool,
+}
+
+fn resolve_airport_warehouse_by_zone_geometry<'a>(
+    base: &'a LoadedMiz,
+    allow: &ObjectiveDynAllow,
+) -> Result<Option<ResolvedObjectiveWarehouse<'a>>> {
+    let airports = base
+        .warehouses
+        .raw_get::<_, Table>("airports")
+        .context("airports for objective stock geometry")?;
+    let mut airport_wids = HashSet::default();
+    for pair in airports.clone().pairs::<Value, Table>() {
+        let (k, _) = pair?;
+        if let Some(id) = warehouse_lua_key_i64(k) {
+            airport_wids.insert(id);
+        }
+    }
+    if airport_wids.is_empty() {
+        return Ok(None);
+    }
+    let positions = collect_airport_positions_from_groups(base, &airport_wids)
+        .context("airport positions for objective stock geometry")?;
+    for (id, pos) in positions {
+        if !allow.contains(pos) {
+            continue;
+        }
+        let row = airports
+            .raw_get::<_, Table>(id)
+            .with_context(|| format_compact!("airport warehouse {id} (zone geometry)"))?;
+        return Ok(Some(ResolvedObjectiveWarehouse {
+            row,
+            wh_id: id,
+            is_airport: true,
+        }));
+    }
+    Ok(None)
+}
+
+fn resolve_objective_warehouse<'a>(
+    base: &'a LoadedMiz,
+    allow: &ObjectiveDynAllow,
+) -> Result<Option<ResolvedObjectiveWarehouse<'a>>> {
+    if let Some(id) = allow.airbase_id {
+        let airports = base
+            .warehouses
+            .raw_get::<_, Table>("airports")
+            .context("airports for objective stock")?;
+        match airports
+            .raw_get::<_, Value>(id)
+            .with_context(|| format_compact!("airport warehouse {id}"))?
+        {
+            Value::Table(row) => {
+                return Ok(Some(ResolvedObjectiveWarehouse {
+                    row,
+                    wh_id: id,
+                    is_airport: true,
+                }));
+            }
+            Value::Nil => {
+                let warehouses = base
+                    .warehouses
+                    .raw_get::<_, Table>("warehouses")
+                    .context("warehouses for objective stock airbaseID")?;
+                if let Ok(row) = warehouses.raw_get::<_, Table>(id) {
+                    return Ok(Some(ResolvedObjectiveWarehouse {
+                        row,
+                        wh_id: id,
+                        is_airport: false,
+                    }));
+                }
+                warn!(
+                    "objective zone {:?}: airbaseID {id} not in warehouses.airports or warehouses.warehouses; trying zone geometry",
+                    allow.zone_name.as_str()
+                );
+                if let Some(resolved) =
+                    resolve_airport_warehouse_by_zone_geometry(base, allow)?
+                {
+                    return Ok(Some(resolved));
+                }
+            }
+            other => bail!(
+                "airport warehouse {id}: expected table or nil, got {:?}",
+                other
+            ),
+        }
+    } else if let Some(resolved) = resolve_airport_warehouse_by_zone_geometry(base, allow)? {
+        return Ok(Some(resolved));
+    }
+    let warehouses = base
+        .warehouses
+        .raw_get::<_, Table>("warehouses")
+        .context("warehouses for objective stock")?;
+    let mut ids = HashSet::default();
+    for pair in warehouses.clone().pairs::<i64, Table>() {
+        let (id, _) = pair?;
+        ids.insert(id);
+    }
+    let positions = collect_warehouse_unit_positions(base, &ids)?;
+    for (id, pos) in positions {
+        if allow.contains(pos) {
+            let row = warehouses
+                .raw_get::<_, Table>(id)
+                .with_context(|| format_compact!("warehouse {id}"))?;
+            return Ok(Some(ResolvedObjectiveWarehouse {
+                row,
+                wh_id: id,
+                is_airport: false,
+            }));
+        }
+    }
+    Ok(None)
+}
+
+fn stock_mult_for_objective(
+    mult_cfg: &WarehouseStockMultConfig,
+    allow: &ObjectiveDynAllow,
+    resolved: Option<(i64, bool)>,
+) -> u32 {
+    if let Some((id, is_airport)) = resolved {
+        return if is_airport {
+            mult_cfg.mult_airport(id)
+        } else {
+            mult_cfg.mult_warehouse_row(id)
+        };
+    }
+    if allow.is_logistics_hub {
+        mult_cfg.hub_max.max(1)
+    } else {
+        mult_cfg.airbase_max.max(1)
+    }
+}
+
+/// Opposite-coalition baseline for export: BINVENTORY catalog × mult (same items Fowl tracks after capture).
+fn synthesize_virtual_coalition_stock(
+    inv_tpl: &Table<'static>,
+    mult: u32,
+    catalog: &HashSet<[i32; 4]>,
+    defaults: &HashMap<StdString, ObjectiveWarehouseDefaults>,
+    objective_name: &str,
+    side: Side,
+) -> Result<ObjectiveCoalitionStock> {
+    let prod = build_inventory_production_maps(inv_tpl)?;
+    let allow = objective_weapon_allowset(defaults, objective_name, side);
+    let mult = mult.max(1);
+    let mut out = ObjectiveCoalitionStock::default();
+    if let Ok(weapons) = inv_tpl.raw_get::<_, Table>("weapons") {
+        for pair in weapons.clone().pairs::<Value, Table>() {
+            let (_, w) = pair?;
+            let Some(ws) = read_weapon_ws_type(&w) else {
+                continue;
+            };
+            if !weapon_allowed_for_objective_stock(ws, catalog, allow.as_ref()) {
+                continue;
+            }
+            let production = prod.weapon_by_ws.get(&ws).copied().unwrap_or(0);
+            if production == 0 {
+                continue;
+            }
+            let baseline = production.saturating_mul(mult);
+            let Some(name) = weapon_row_export_key(&w) else {
+                continue;
+            };
+            out.equipment.insert(
+                name,
+                ObjectiveStockItem {
+                    baseline,
+                    ws_type: ordnance_ws_type(ws).then_some(ws),
+                    production,
+                },
+            );
+        }
+    }
+    if let Ok(aircrafts) = inv_tpl.raw_get::<_, Table>("aircrafts") {
+        for cat in ["helicopters", "planes"] {
+            let Ok(cat_tbl) = aircrafts.raw_get::<_, Table>(cat) else {
+                continue;
+            };
+            for pair in cat_tbl.clone().pairs::<String, Table>() {
+                let (unit_type, row) = pair?;
+                let production = row.raw_get::<_, u32>("initialAmount").unwrap_or(0);
+                if production == 0 {
+                    continue;
+                }
+                let baseline = production.saturating_mul(mult);
+                out.equipment.insert(
+                    unit_type.as_str().to_string(),
+                    ObjectiveStockItem {
+                        baseline,
+                        ws_type: None,
+                        production,
+                    },
+                );
+            }
+        }
+    }
+    for key in LIQUID_STOCK_KEYS {
+        let Ok(tbl) = inv_tpl.raw_get::<_, Table>(key) else {
+            continue;
+        };
+        let production = read_liquid_amount(&tbl);
+        if production == 0 {
+            continue;
+        }
+        let baseline = production.saturating_mul(mult);
+        out.liquids.insert(
+            key.to_string(),
+            ObjectiveStockLiquid {
+                baseline,
+                production,
+            },
+        );
+    }
+    Ok(out)
+}
+
+fn compute_virtual_objective_coalition_stock(
+    inv_tpl: &Table<'static>,
+    mult: u32,
+    catalog: &HashSet<[i32; 4]>,
+    defaults: &HashMap<StdString, ObjectiveWarehouseDefaults>,
+    objective_name: &str,
+    side: Side,
+) -> Result<ObjectiveCoalitionStock> {
+    synthesize_virtual_coalition_stock(
+        inv_tpl,
+        mult,
+        catalog,
+        defaults,
+        objective_name,
+        side,
+    )
+}
+
+/// After mission fill: `.miz` row for ME coalition + opposite coalition virtual profile (export only).
+pub fn build_objective_stock_export(
+    _lua: &Lua,
+    base: &LoadedMiz,
+    obj_dyn_allow: &[ObjectiveDynAllow],
+    mult_cfg: &WarehouseStockMultConfig,
+    tpl: &WarehouseTemplate,
+    built_blue: &Table,
+    built_red: &Table,
+    objective_defaults: &HashMap<StdString, ObjectiveWarehouseDefaults>,
+) -> Result<HashMap<StdString, ObjectiveStockByCoalition>> {
+    let blue_catalog = coalition_catalog_weapon_ws(built_blue)?;
+    let red_catalog = coalition_catalog_weapon_ws(built_red)?;
+    let mut out: HashMap<StdString, ObjectiveStockByCoalition> = HashMap::default();
+    let mut seen: HashSet<StdString> = HashSet::default();
+    for allow in obj_dyn_allow {
+        let Some(objective_name) = allow.zone_name.as_str().get(4..) else {
+            continue;
+        };
+        if !seen.insert(objective_name.to_string()) {
+            continue;
+        }
+        let mut entry = ObjectiveStockByCoalition::default();
+        let resolved_meta = resolve_objective_warehouse(base, allow)?;
+        let mult = stock_mult_for_objective(
+            mult_cfg,
+            allow,
+            resolved_meta
+                .as_ref()
+                .map(|r| (r.wh_id, r.is_airport)),
+        );
+        if let Some(resolved) = resolved_meta {
+            let side = warehouse_side_for_default_apply(&resolved.row)?
+                .unwrap_or(allow.side);
+            let inv_tpl = match side {
+                Side::Blue => &tpl.blue_inventory,
+                Side::Red => &tpl.red_inventory,
+                Side::Neutral => {
+                    out.insert(objective_name.to_string(), entry);
+                    continue;
+                }
+            };
+            let catalog = match side {
+                Side::Blue => &blue_catalog,
+                Side::Red => &red_catalog,
+                Side::Neutral => unreachable!(),
+            };
+            let stock = extract_objective_coalition_stock(
+                &resolved.row,
+                side,
+                inv_tpl,
+                catalog,
+                objective_defaults,
+                objective_name,
+            )?;
+            match side {
+                Side::Blue => entry.blue = stock,
+                Side::Red => entry.red = stock,
+                Side::Neutral => {}
+            }
+            let opposite = side.opposite();
+            let (opp_inv, opp_cat) = match opposite {
+                Side::Blue => (&tpl.blue_inventory, &blue_catalog),
+                Side::Red => (&tpl.red_inventory, &red_catalog),
+                Side::Neutral => {
+                    out.insert(objective_name.to_string(), entry);
+                    continue;
+                }
+            };
+            let virtual_stock = compute_virtual_objective_coalition_stock(
+                opp_inv,
+                mult,
+                opp_cat,
+                objective_defaults,
+                objective_name,
+                opposite,
+            )?;
+            match opposite {
+                Side::Blue => entry.blue = virtual_stock,
+                Side::Red => entry.red = virtual_stock,
+                Side::Neutral => {}
+            }
+        } else {
+            for side in [Side::Blue, Side::Red] {
+                let (inv_tpl, catalog) = match side {
+                    Side::Blue => (&tpl.blue_inventory, &blue_catalog),
+                    Side::Red => (&tpl.red_inventory, &red_catalog),
+                    Side::Neutral => continue,
+                };
+                let stock = compute_virtual_objective_coalition_stock(
+                    inv_tpl,
+                    mult,
+                    catalog,
+                    objective_defaults,
+                    objective_name,
+                    side,
+                )?;
+                match side {
+                    Side::Blue => entry.blue = stock,
+                    Side::Red => entry.red = stock,
+                    Side::Neutral => {}
+                }
+            }
+        }
+        out.insert(objective_name.to_string(), entry);
+    }
+    info!(
+        "fowl export objective_stock: {} objective(s) with blue/red logical profiles",
+        out.len()
+    );
+    Ok(out)
+}
+
 struct WarehouseTemplate {
     blue_inventory: Table<'static>,
     red_inventory: Table<'static>,
@@ -3604,22 +4153,37 @@ fn warehouse_allowlist_for_filter(
     opt.as_ref().filter(|s| !s.is_empty())
 }
 
+fn weapon_ws_type_label(ws: [i32; 4]) -> StdString {
+    format!(
+        "wsType [{},{},{},{}]",
+        ws[0], ws[1], ws[2], ws[3]
+    )
+    .into()
+}
+
 fn warehouse_weapon_display_name(w: &Table) -> StdString {
     for key in ["name", "desc", "displayName", "Name"] {
         if let Ok(s) = w.raw_get::<_, String>(key) {
-            if !s.is_empty() {
-                return StdString::from(s.as_str());
+            let t = s.as_str().trim();
+            if !t.is_empty() && !t.eq_ignore_ascii_case("nil") {
+                return StdString::from(t);
             }
         }
     }
-    if let Ok(wst) = w.raw_get::<_, Table>("wsType") {
-        let a = wst.raw_get::<_, i32>(1).unwrap_or(0);
-        let b = wst.raw_get::<_, i32>(2).unwrap_or(0);
-        let c = wst.raw_get::<_, i32>(3).unwrap_or(0);
-        let d = wst.raw_get::<_, i32>(4).unwrap_or(0);
-        return format!("wsType [{a},{b},{c},{d}]").into();
+    if let Some(ws) = read_weapon_ws_type(w) {
+        return weapon_ws_type_label(ws);
     }
     StdString::from("weapon row (no wsType)")
+}
+
+/// Export key for a weapon row; skips junk ME placeholders without wsType.
+fn weapon_row_export_key(w: &Table) -> Option<StdString> {
+    read_weapon_ws_type(w)?;
+    let label = warehouse_weapon_display_name(w);
+    if label == "weapon row (no wsType)" {
+        return None;
+    }
+    Some(label)
 }
 
 fn read_weapon_ws_type(w: &Table) -> Option<[i32; 4]> {
@@ -6209,13 +6773,14 @@ impl WarehouseTemplate {
         }
         Ok((
             bfprotocols::fowl_miz_export::FowlMizExport {
-                schema_version: 4,
+                schema_version: 5,
                 weapon_bridge_used,
                 blue_weapon_ws: blue_weapon_export,
                 red_weapon_ws: red_weapon_export,
                 objective_defaults,
                 blue_inventory_zone_module_ws,
                 red_inventory_zone_module_ws,
+                objective_stock: HashMap::new(),
             },
             inventory_aircraft_orphans_cleared,
             built_production_blue,
@@ -9267,7 +9832,7 @@ pub fn run(cfg: &MizCmd) -> Result<()> {
 
     let mut warehouse_bundle = warehouse_bundle;
     let mut built_production_inventory: Option<(Table<'static>, Table<'static>)> = None;
-    let fowl_from_warehouse = if let Some(wb) = warehouse_bundle.as_mut() {
+    let mut fowl_from_warehouse = if let Some(wb) = warehouse_bundle.as_mut() {
         let bridge_gen = weapon_bridge_map.as_ref().map(|b| (&vehicle_templates, b));
         let (export, inventory_aircraft_orphans_cleared, built_blue, built_red) = wb
             .template
@@ -9465,6 +10030,25 @@ pub fn run(cfg: &MizCmd) -> Result<()> {
                 )
                 .context("scaling default_warehouse_* caps by stock multiplier")?;
             }
+        }
+        if let Some((built_blue, built_red)) = built_production_inventory.as_ref() {
+            let obj_dyn_allow = build_objective_dyn_allow(&base, &dynamic_emit.dyn_templates)
+                .context("objective zones for stock export after warehouse patch")?;
+            fowl_from_warehouse.objective_stock = build_objective_stock_export(
+                lua,
+                &base,
+                &obj_dyn_allow,
+                &mult_cfg,
+                &wb.template,
+                built_blue,
+                built_red,
+                &fowl_from_warehouse.objective_defaults,
+            )
+            .context("building per-objective warehouse stock export")?;
+            info!(
+                "fowl export objective_stock: written after warehouse patch ({} objectives)",
+                fowl_from_warehouse.objective_stock.len()
+            );
         }
     }
 

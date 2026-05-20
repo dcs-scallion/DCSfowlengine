@@ -119,3 +119,5 @@ no_llvm_build
 **/-pracovní_soubory-možno_smazat/
 # Chat exports / saved threads (e.g. scenario `.../- chat/`)
 **/- chat/
+bftools/analyze_export.ps1
+bftools/analyze_export_detail.ps1
