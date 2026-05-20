@@ -23,6 +23,17 @@
       "z": 366766.3
     },
     {
+      "airbase_name": "Novorossiysk",
+      "category": 0,
+      "id": 14,
+      "name": "Novorossiysk",
+      "objective_kind": "Airbase",
+      "trigger_zone_name": "OABRNovorossiysk",
+      "warehouse_whid": "Airdrome14",
+      "x": -40299.0,
+      "z": 279853.5
+    },
+    {
       "airbase_name": "Krymsk",
       "category": 0,
       "id": 15,
@@ -38,22 +49,11 @@
       "category": 0,
       "id": 16,
       "name": "Maykop",
-      "objective_kind": "Logistics Hub",
-      "trigger_zone_name": "OLORMaykop",
+      "objective_kind": "Airbase",
+      "trigger_zone_name": "OABRMaykop",
       "warehouse_whid": "Airdrome16",
       "x": -27625.9,
       "z": 457047.7
-    },
-    {
-      "airbase_name": "Gelendzhik",
-      "category": 0,
-      "id": 17,
-      "name": "Gelensdick",
-      "objective_kind": "Airbase",
-      "trigger_zone_name": "OABRGelensdick",
-      "warehouse_whid": "Airdrome17",
-      "x": -50995.6,
-      "z": 297848.8
     },
     {
       "airbase_name": "Sochi-Adler",
@@ -71,8 +71,8 @@
       "category": 0,
       "id": 20,
       "name": "Sukhumi",
-      "objective_kind": "Logistics Hub",
-      "trigger_zone_name": "OLOBSukhumi",
+      "objective_kind": "Airbase",
+      "trigger_zone_name": "OABBSukhumi",
       "warehouse_whid": "Airdrome20",
       "x": -221381.7,
       "z": 565908.8
@@ -171,10 +171,21 @@
       "id": 29,
       "name": "Tbilisi",
       "objective_kind": "Logistics Hub",
-      "trigger_zone_name": "OLORTbilisi",
+      "trigger_zone_name": "OLOBTbilisi",
       "warehouse_whid": "Airdrome29",
       "x": -314926.3,
       "z": 895724.0
+    },
+    {
+      "airbase_name": "Vaziani",
+      "category": 0,
+      "id": 31,
+      "name": "Vaziani",
+      "objective_kind": "Airbase",
+      "trigger_zone_name": "OABBVaziani",
+      "warehouse_whid": "Airdrome31",
+      "x": -318191.7,
+      "z": 902331.8
     },
     {
       "airbase_name": "Beslan",
@@ -188,26 +199,26 @@
       "z": 842251.8
     },
     {
-      "airbase_name": "Zestafoni LOG HUB",
+      "airbase_name": "Gubskaya ROAD FOB HUB",
       "category": 1,
-      "id": 19286,
-      "name": "Zestafoni LOG",
+      "id": 20771,
+      "name": "Gubskaya ROAD FOB",
       "objective_kind": "Logistics Hub",
-      "trigger_zone_name": "OLOBZestafoni LOG",
-      "warehouse_whid": "19286",
-      "x": -286183.8,
-      "z": 725996.3
+      "trigger_zone_name": "OLORGubskaya ROAD FOB",
+      "warehouse_whid": "20771",
+      "x": -52465.9,
+      "z": 522614.3
     },
     {
-      "airbase_name": "Cherkessk Airfield LOG HUB",
+      "airbase_name": "Zestafoni ROAD FOB HUB",
       "category": 1,
-      "id": 20732,
-      "name": "Cherkessk Airfield",
+      "id": 20792,
+      "name": "Zestafoni ROAD FOB",
       "objective_kind": "Logistics Hub",
-      "trigger_zone_name": "OLORCherkessk Airfield",
-      "warehouse_whid": "20732",
-      "x": -65783.3,
-      "z": 622377.9
+      "trigger_zone_name": "OLOBZestafoni ROAD FOB",
+      "warehouse_whid": "20792",
+      "x": -284530.2,
+      "z": 722627.5
     }
   ],
   "schema_version": 1,

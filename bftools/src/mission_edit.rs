@@ -2905,12 +2905,12 @@ fn objective_dyn_allow_for_spawn<'a>(
         obj_dyn_allow.iter().find(|o| o.airbase_id == Some(wid)).or_else(|| {
             warehouse_positions
                 .get(&wid)
-                .and_then(|&pos| obj_dyn_allow.iter().find(|o| o.contains(pos)))
+                .and_then(|&pos| objective_dyn_allow_geom_pick(obj_dyn_allow, pos))
         })
     } else {
         warehouse_positions
             .get(&wid)
-            .and_then(|&pos| obj_dyn_allow.iter().find(|o| o.contains(pos)))
+            .and_then(|&pos| objective_dyn_allow_geom_pick(obj_dyn_allow, pos))
     }
 }
 
@@ -6405,6 +6405,34 @@ impl ObjectiveDynAllow {
     }
 }
 
+/// When a position sits under several objectives, prefer non-`OLO*` zones over logistics overlays:
+/// `OLO*` skips `include_dyn_slots` pruning, and naive `Iterator::find` ordering can leak coalition stock.
+fn objective_dyn_allow_geom_pick<'a>(
+    obj_dyn_allow: &'a [ObjectiveDynAllow],
+    pos: Vector2,
+) -> Option<&'a ObjectiveDynAllow> {
+    let matched: Vec<&'a ObjectiveDynAllow> =
+        obj_dyn_allow.iter().filter(|o| o.contains(pos)).collect();
+    if matched.is_empty() {
+        return None;
+    }
+    if matched.len() == 1 {
+        return Some(matched[0]);
+    }
+    let non_lo: Vec<&'a ObjectiveDynAllow> = matched
+        .iter()
+        .copied()
+        .filter(|o| !o.is_logistics_hub)
+        .collect();
+    let mut pool = if non_lo.is_empty() {
+        matched
+    } else {
+        non_lo
+    };
+    pool.sort_by(|a, b| a.zone_name.cmp(&b.zone_name));
+    pool.first().copied()
+}
+
 /// Allowed `(Side, aircraft type)` for **`warehouses.warehouses`** dynamic rows on DEP template FARPs (`BDEPFARP*`/`…`).
 /// Controlled only by zone `TTDdynFARP`; excludes overlap with objective `TTDLogi` pruning.
 fn build_dyn_farp_aircraft_allow(
@@ -7153,8 +7181,9 @@ fn objective_zone_airbase_id_absent_is_expected(name: &str) -> bool {
     u.starts_with("OLO") && (u.contains("FOB") || u.contains("STRIP"))
 }
 
-/// Build check: OAB*/OLO* zones may carry `airbaseID` for ME ↔ `warehouses.airports` round-trip and
-/// explicit airport matching. Missing ids are reported; many OLO* FOB sites legitimately have none.
+/// Collect OAB*/OLO* zones that lack usable `warehouses.airports` binding via `airbaseID`.
+///
+/// Allowed gap: [`objective_zone_airbase_id_absent_is_expected`] (OLO* FOB/strip placeholders without airports row).
 fn validate_objective_airbase_ids(base: &LoadedMiz) -> Result<(Vec<StdString>, Vec<(StdString, StdString)>)> {
     let mut missing: Vec<StdString> = Vec::new();
     let mut invalid: Vec<(StdString, StdString)> = Vec::new();
@@ -7196,19 +7225,6 @@ fn validate_objective_airbase_ids(base: &LoadedMiz) -> Result<(Vec<StdString>, V
     }
     missing.sort_unstable();
     invalid.sort_by(|a, b| a.0.cmp(&b.0));
-    let missing_surprising: Vec<&StdString> = missing
-        .iter()
-        .filter(|n| !objective_zone_airbase_id_absent_is_expected(n.as_str()))
-        .collect();
-    if !invalid.is_empty() || !missing_surprising.is_empty() {
-        warn!("objective airbaseID validation reported missing/invalid values");
-        for name in &missing_surprising {
-            warn!(
-                "WARN: objective zone {:?} is missing non-empty airbaseID (set after `-admin airbaseexport` when this objective is a paved airfield in `warehouses.airports`)",
-                name
-            );
-        }
-    }
     let missing_expected: Vec<&StdString> = missing
         .iter()
         .filter(|n| objective_zone_airbase_id_absent_is_expected(n.as_str()))
@@ -7222,13 +7238,62 @@ fn validate_objective_airbase_ids(base: &LoadedMiz) -> Result<(Vec<StdString>, V
                 .collect::<Vec<_>>()
         );
     }
-    for (name, raw) in &invalid {
+    Ok((missing, invalid))
+}
+
+/// End-of-run reminder: builders still produce a playable .miz, but stale `airbaseID`/`fowl_airbase_export` mis-binds warehouses.
+fn warn_airbase_objective_bindings_follow_up_summary(
+    missing_airbase: &[StdString],
+    invalid_airbase: &[(StdString, StdString)],
+    unresolved_surprising_export: &[StdString],
+) {
+    let required_missing: Vec<&str> = missing_airbase
+        .iter()
+        .filter(|n| !objective_zone_airbase_id_absent_is_expected(n.as_str()))
+        .map(|s| s.as_str())
+        .collect();
+    if invalid_airbase.is_empty()
+        && required_missing.is_empty()
+        && unresolved_surprising_export.is_empty()
+    {
+        return;
+    }
+    warn!(
+        "======================================================================"
+    );
+    warn!(
+        "FowlTools WARN: Objective OAB*/OLO* bindings need completion (warehouse prune / airport identity)."
+    );
+    if !invalid_airbase.is_empty() {
         warn!(
-            "WARN: objective zone {:?} has invalid airbaseID value {:?} (expected integer > 0)",
-            name, raw
+            "Invalid `airbaseID` trigger property value (expected integer > 0 matching `warehouses.airports`): {:?}",
+            invalid_airbase
         );
     }
-    Ok((missing, invalid))
+    if !required_missing.is_empty() {
+        warn!(
+            "Missing non-empty `airbaseID` on objective zone(s) (every paved-airfield objective needs it; exempt OLO* with FOB or STRIP in the zone name): {:?}",
+            required_missing,
+        );
+    }
+    if !unresolved_surprising_export.is_empty() {
+        warn!(
+            "Airbase export JSON matched no zone name for {:?} — add entry or fix trigger name spelling so auto-fill finds the row.",
+            unresolved_surprising_export
+        );
+    }
+    warn!(
+        "How to regenerate mapping: mission CFG lists your UCID under \"admins\", run the mission from DCS, chat `-admin airbaseexport`,"
+    );
+    warn!(
+        "then copy `fowl_airbase_export-DCS.version.*.json` from Saved Games\\DCS to the scenario mission folder and rebuild."
+    );
+    warn!(
+        "Until resolved, geography may classify some airports under an overlapping logistics zone (`OLO*`); update export to avoid silent stock mistakes."
+    );
+    warn!(
+        "======================================================================"
+    );
 }
 
 /// Wire `linkDynTempl` to emitted dynamic template group ids (`zzDT-*`, `dynSpawnTemplate`).
@@ -7474,14 +7539,14 @@ fn patch_warehouse_dynamic_spawn_links(
                     .iter()
                     .find(|o| o.airbase_id == Some(wid))
                     .or_else(|| {
-                        warehouse_positions
-                            .get(&wid)
-                            .and_then(|&pos| obj_dyn_allow.iter().find(|o| o.contains(pos)))
+                        warehouse_positions.get(&wid).and_then(|&pos| {
+                            objective_dyn_allow_geom_pick(obj_dyn_allow, pos)
+                        })
                     })
             } else {
                 warehouse_positions
                     .get(&wid)
-                    .and_then(|&pos| obj_dyn_allow.iter().find(|o| o.contains(pos)))
+                    .and_then(|&pos| objective_dyn_allow_geom_pick(obj_dyn_allow, pos))
             };
             let coa: String = wh.raw_get("coalition")?;
             let side_from_wh = match coa.to_lowercase().as_str() {
@@ -8855,33 +8920,15 @@ pub fn run(cfg: &MizCmd) -> Result<()> {
         .context("logging airbase ID / OAB-OLO zone mapping from zone properties")?;
     let (missing_airbase, invalid_airbase) = validate_objective_airbase_ids(&base)
         .context("validating objective airbaseID requirements (OAB*/OLO*)")?;
-    let airbase_export_followup_needed = !invalid_airbase.is_empty()
-        || missing_airbase
-            .iter()
-            .any(|n| !objective_zone_airbase_id_absent_is_expected(n.as_str()))
-        || apply_summary.unresolved.iter().any(|n| {
-            !objective_zone_airbase_id_absent_is_expected(n.as_str())
-        });
-    if airbase_export_followup_needed {
-        warn!("WARN: some objective zones still miss valid airbaseID after auto-fill.");
-        let mut unresolved_surprising: Vec<StdString> = apply_summary
-            .unresolved
-            .iter()
-            .filter(|n| !objective_zone_airbase_id_absent_is_expected(n.as_str()))
-            .cloned()
-            .collect();
-        if !unresolved_surprising.is_empty() {
-            unresolved_surprising.sort_unstable();
-            unresolved_surprising.dedup();
-            warn!(
-                "WARN: unresolved objective zones from export-name match: {:?}",
-                unresolved_surprising
-            );
-        }
-        warn!("WARN: To generate complete mapping, add your UCID to \"admins\" in mission CFG, run mission,");
-        warn!("WARN: then in chat use \"-admin airbaseexport\".");
-        warn!("WARN: Move saved fowl_airbase_export-DCS.version.*.json from Saved Games DCS folder to mission folder,");
-        warn!("WARN: and rerun build with ! build-and-copy-mission.ps1.");
+    let mut unresolved_surprising: Vec<StdString> = apply_summary
+        .unresolved
+        .iter()
+        .filter(|n| !objective_zone_airbase_id_absent_is_expected(n.as_str()))
+        .cloned()
+        .collect();
+    if !unresolved_surprising.is_empty() {
+        unresolved_surprising.sort_unstable();
+        unresolved_surprising.dedup();
     }
     let mut objectives = compile_objectives(&base).context("compiling objectives")?;
     let tzf_plane_fuel =
@@ -9377,5 +9424,10 @@ pub fn run(cfg: &MizCmd) -> Result<()> {
     println!("Objectives total - Blue coalition: {blue_objectives}");
     println!("Objectives total - Red coalition: {red_objectives}");
     println!("Objectives total - Neutral coalition: {neutral_objectives}");
+    warn_airbase_objective_bindings_follow_up_summary(
+        missing_airbase.as_slice(),
+        invalid_airbase.as_slice(),
+        unresolved_surprising.as_slice(),
+    );
     Ok(())
 }
