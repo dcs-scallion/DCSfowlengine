@@ -131,6 +131,7 @@ try {
         if ($LASTEXITCODE -ne 0) {
             Write-Host "WARNING: cargo clean failed (files under target\ may be locked by IDE, another cargo, or AV). Continuing with release build without clean." -ForegroundColor Yellow
         }
+        Start-Sleep -Seconds 2
     }
 
     Write-Host "`nStarting release build: package bflib..." -ForegroundColor Yellow

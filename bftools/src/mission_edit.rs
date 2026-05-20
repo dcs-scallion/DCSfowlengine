@@ -2600,6 +2600,80 @@ impl VehicleTemplates {
     }
 }
 
+/// Copy built production BINVENTORY/RINVENTORY row (weapons, aircrafts, liquids, equipment).
+fn overwrite_production_inventory_row_from_source(
+    lua: &Lua,
+    dst_row: &Table,
+    src_row: &Table,
+    row_label: &str,
+) -> Result<()> {
+    let dynamic_spawn = dst_row.raw_get::<_, Value>("dynamicSpawn").ok();
+    let dynamic_cargo = dst_row.raw_get::<_, Value>("dynamicCargo").ok();
+    for key in ["weapons", "aircrafts", "equipment"] {
+        match src_row.raw_get::<_, Table>(key) {
+            Ok(src_tbl) => dst_row.raw_set(key, src_tbl.deep_clone(lua)?)?,
+            Err(_) => dst_row.raw_set(key, lua.create_table()?)?,
+        }
+    }
+    for key in ["jet_fuel", "gasoline", "diesel", "methanol_mixture"] {
+        match src_row.raw_get::<_, Table>(key) {
+            Ok(src_tbl) => dst_row.raw_set(key, src_tbl.deep_clone(lua)?)?,
+            Err(_) => {
+                let _ = dst_row.raw_remove(key);
+            }
+        }
+    }
+    if let Some(v) = dynamic_spawn {
+        if !v.is_nil() {
+            dst_row.raw_set("dynamicSpawn", v)?;
+        }
+    }
+    if let Some(v) = dynamic_cargo {
+        if !v.is_nil() {
+            dst_row.raw_set("dynamicCargo", v)?;
+        }
+    }
+    info!(
+        "{row_label}: wrote built production inventory (weapons, aircrafts, liquids, equipment)"
+    );
+    Ok(())
+}
+
+/// After all warehouse passes: refresh assembled mission B/RINVENTORY from bftools-built production rows.
+fn mirror_assembled_production_inventory(
+    lua: &Lua,
+    base: &LoadedMiz,
+    cfg: &MizCmd,
+    built_blue: &Table,
+    built_red: &Table,
+) -> Result<()> {
+    let (blue_id, red_id) =
+        production_inventory_unit_ids(base, cfg).context("production inventory unitIds")?;
+    let warehouses = base
+        .warehouses
+        .raw_get::<_, Table>("warehouses")
+        .context("warehouses table")?;
+    let dst_blue = warehouses
+        .raw_get::<_, Table>(blue_id)
+        .with_context(|| format_compact!("mission warehouse row {}", cfg.blue_production_template))?;
+    let dst_red = warehouses
+        .raw_get::<_, Table>(red_id)
+        .with_context(|| format_compact!("mission warehouse row {}", cfg.red_production_template))?;
+    overwrite_production_inventory_row_from_source(
+        lua,
+        &dst_blue,
+        built_blue,
+        cfg.blue_production_template.as_str(),
+    )?;
+    overwrite_production_inventory_row_from_source(
+        lua,
+        &dst_red,
+        built_red,
+        cfg.red_production_template.as_str(),
+    )?;
+    Ok(())
+}
+
 struct WarehouseTemplate {
     blue_inventory: Table<'static>,
     red_inventory: Table<'static>,
@@ -4300,7 +4374,7 @@ impl WarehouseTemplate {
 
     fn apply(
         &self,
-        lua: &Lua,
+        lua: &'static Lua,
         cfg: &MizCmd,
         base: &mut LoadedMiz,
         warehouse_caps: Option<&campaign_cfg::WarehouseDefaultsFromCfg>,
@@ -4312,8 +4386,12 @@ impl WarehouseTemplate {
         >,
         _droptank_ws_from_weapon_warehouses: &(HashSet<[i32; 4]>, HashSet<[i32; 4]>),
         mult_cfg: &WarehouseStockMultConfig,
-    ) -> Result<(bfprotocols::fowl_miz_export::FowlMizExport, Vec<InventoryAircraftOrphanSanitized>)>
-    {
+    ) -> Result<(
+        bfprotocols::fowl_miz_export::FowlMizExport,
+        Vec<InventoryAircraftOrphanSanitized>,
+        Table<'static>,
+        Table<'static>,
+    )> {
         fn copy_weapons_subtable(
             lua: &Lua,
             dst_row: &Table,
@@ -5704,12 +5782,10 @@ impl WarehouseTemplate {
                 Some(br.expand_ws_alias_family(&blue_inventory_allowlist));
             red_inventory_allowed_ws =
                 Some(br.expand_ws_alias_family(&red_inventory_allowlist));
-            let mut fowl_b = blue_default_allowlist.clone();
-            fowl_b.extend(blue_inventory_allowlist.iter().copied());
-            blue_fowl_export_union = Some(br.expand_ws_alias_family(&fowl_b));
-            let mut fowl_r = red_default_allowlist.clone();
-            fowl_r.extend(red_inventory_allowlist.iter().copied());
-            red_fowl_export_union = Some(br.expand_ws_alias_family(&fowl_r));
+            blue_fowl_export_union =
+                Some(br.expand_ws_alias_family(&blue_inventory_allowlist));
+            red_fowl_export_union =
+                Some(br.expand_ws_alias_family(&red_inventory_allowlist));
         }
         if bridge_gen.is_none() {
             let mut _zone_allow_dummy = HashSet::new();
@@ -6077,7 +6153,7 @@ impl WarehouseTemplate {
             u.extend(campaign_cfg::collect_weapon_ws_types_positive_initial(plus)?);
         }
         log_agm65_diag("after_inventory_finalize", "BINVENTORY", &new_blue_inventory)?;
-        // bflib: union of B/RDEFAULT and B/RINVENTORY legal wsTypes (alias-expanded).
+        // bflib export: production inventory wsTypes only (not B/RDEFAULT).
         let blue_weapon_export = if blue_fowl_export_union.is_some() {
             sorted_weapon_ws(&blue_fowl_export_union)
         } else if warehouse_allowlist_for_filter(&blue_allowed_ws).is_some() {
@@ -6098,26 +6174,32 @@ impl WarehouseTemplate {
         warehouses
             .set(blue_inventory, new_blue_inventory.clone())
             .context("setting blue inventory")?;
+        let built_production_blue = new_blue_inventory
+            .deep_clone(lua)
+            .context("clone built BINVENTORY for assembled mission + warehouse repack")?;
+        let built_production_red = new_red_inventory
+            .deep_clone(lua)
+            .context("clone built RINVENTORY for assembled mission + warehouse repack")?;
         base.warehouses.set("airports", airports)?;
         base.warehouses.set("warehouses", warehouses)?;
-        // Repack: B/RDEFAULT already mirrored above when bridge loaded; always refresh BINVENTORY/RINVENTORY.
-        if !weapon_bridge_used {
-            warn!(
-                "weapon bridge missing: template BDEFAULT/RDEFAULT `weapons` not updated from allowlist; BINVENTORY/RINVENTORY mirrored"
-            );
-        }
-        copy_weapons_subtable(
+        // Repack warehouse*.miz: same built production rows as assembled mission (inventory-only, post-validate).
+        overwrite_production_inventory_row_from_source(
             lua,
             &self.blue_inventory,
-            &new_blue_inventory,
-            "BINVENTORY template",
+            &built_production_blue,
+            "BINVENTORY template (built)",
         )?;
-        copy_weapons_subtable(
+        overwrite_production_inventory_row_from_source(
             lua,
             &self.red_inventory,
-            &new_red_inventory,
-            "RINVENTORY template",
+            &built_production_red,
+            "RINVENTORY template (built)",
         )?;
+        if !weapon_bridge_used {
+            warn!(
+                "weapon bridge missing: template BDEFAULT/RDEFAULT `weapons` not updated from allowlist"
+            );
+        }
         if !blue_inventory_zone_module_ws.is_empty() || !red_inventory_zone_module_ws.is_empty() {
             info!(
                 "fowl export inventory_zone_module_ws: blue_modules={} red_modules={}",
@@ -6136,6 +6218,8 @@ impl WarehouseTemplate {
                 red_inventory_zone_module_ws,
             },
             inventory_aircraft_orphans_cleared,
+            built_production_blue,
+            built_production_red,
         ))
     }
 }
@@ -9182,9 +9266,10 @@ pub fn run(cfg: &MizCmd) -> Result<()> {
         .unwrap_or_default();
 
     let mut warehouse_bundle = warehouse_bundle;
+    let mut built_production_inventory: Option<(Table<'static>, Table<'static>)> = None;
     let fowl_from_warehouse = if let Some(wb) = warehouse_bundle.as_mut() {
         let bridge_gen = weapon_bridge_map.as_ref().map(|b| (&vehicle_templates, b));
-        let (export, inventory_aircraft_orphans_cleared) = wb
+        let (export, inventory_aircraft_orphans_cleared, built_blue, built_red) = wb
             .template
             .apply(
                 lua,
@@ -9198,6 +9283,7 @@ pub fn run(cfg: &MizCmd) -> Result<()> {
                 &mult_cfg,
             )
             .context("applying warehouse template")?;
+        built_production_inventory = Some((built_blue, built_red));
 
         if !inventory_aircraft_orphans_cleared.is_empty() {
             pack_warehouse_bundle_to_path(wb).with_context(|| {
@@ -9390,6 +9476,13 @@ pub fn run(cfg: &MizCmd) -> Result<()> {
             "BFNEXT_MISSING_DEFAULT_WAREHOUSE_KEYS:{}",
             missing_default_warehouse_keys.join(",")
         );
+    }
+    if let (Some((built_blue, built_red)), Some(_wb)) =
+        (built_production_inventory.as_ref(), warehouse_bundle.as_ref())
+    {
+        mirror_assembled_production_inventory(lua, &base, cfg, built_blue, built_red).context(
+            "final mirror of built BINVENTORY/RINVENTORY into assembled mission",
+        )?;
     }
     if warehouse_bundle.is_some() || !dynamic_emit.link_by_side_type.is_empty() {
         let s = serialize_to_lua("warehouses", Value::Table(base.warehouses.clone()))?;

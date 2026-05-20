@@ -77,6 +77,7 @@ try {
         if ($LASTEXITCODE -ne 0) {
             Write-Host "WARNING: cargo clean failed (files under target\ may be locked). Continuing with release build without clean." -ForegroundColor Yellow
         }
+        Start-Sleep -Seconds 2
     }
 
     "`n===== cargo build --release $(Get-Date -Format o) =====`n" | Out-File -FilePath $CargoLogFile -Append -Encoding utf8
