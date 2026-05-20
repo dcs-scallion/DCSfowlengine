@@ -15658,69 +15658,29 @@ mission =
 				{
 					[1] = 
 					{
-						["key"] = "TTDBlueStandard",
+						["key"] = "OFO",
 						["value"] = "true",
 					}, -- end of [1]
 					[2] = 
 					{
-						["key"] = "TTDRedStandard",
+						["key"] = "OAB",
 						["value"] = "true",
 					}, -- end of [2]
 					[3] = 
 					{
-						["key"] = "TTDAirbase",
+						["key"] = "OLO",
 						["value"] = "true",
 					}, -- end of [3]
 					[4] = 
 					{
-						["key"] = "TTDBlueRoadBase",
+						["key"] = "DEP*FARPPAD",
 						["value"] = "true",
 					}, -- end of [4]
-					[5] = 
-					{
-						["key"] = "TTDRedRoadBase",
-						["value"] = "true",
-					}, -- end of [5]
-					[6] = 
-					{
-						["key"] = "TTDFOB",
-						["value"] = "true",
-					}, -- end of [6]
-					[7] = 
-					{
-						["key"] = "TTDLogi",
-						["value"] = "true",
-					}, -- end of [7]
-					[8] = 
-					{
-						["key"] = "TTDdynFARP",
-						["value"] = "true",
-					}, -- end of [8]
-					[9] = 
-					{
-						["key"] = "TTDNBForrestal",
-						["value"] = "true",
-					}, -- end of [9]
-					[10] = 
-					{
-						["key"] = "TTDNBTarawa",
-						["value"] = "true",
-					}, -- end of [10]
-					[11] = 
-					{
-						["key"] = "TTDNRKuznecow",
-						["value"] = "true",
-					}, -- end of [11]
-					[12] = 
-					{
-						["key"] = "TTDNRVeinticinco",
-						["value"] = "true",
-					}, -- end of [12]
 				}, -- end of ["properties"]
 				["hidden"] = false,
 				["y"] = 542149.5734748,
 				["x"] = -493955.81133337,
-				["name"] = "SETTINGS-dynamic-slots-creation",
+				["name"] = "SETTINGS-dynamic-spawn",
 				["heading"] = 0,
 				["type"] = 0,
 			}, -- end of [583]

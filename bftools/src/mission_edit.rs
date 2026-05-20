@@ -494,10 +494,13 @@ const INCLUDE_STATIC_SLOT_KEYS: &[&str] = &["include", "include_dyn_slots"];
 /// `include` kept for older missions).
 const INCLUDE_DYNAMIC_SLOT_KEYS: &[&str] = &["include_dyn_slots", "include"];
 
-/// DEP* dynamic FARP aircraft allowlist (SETTINGS-dynamic-slots-creation); not part of general land TTD policy merge.
+/// DEP* dynamic FARP aircraft allowlist (`TTDdynFARP` zone); not part of general land TTD policy merge.
 const TTD_DYN_FARP_POLICY_ZONE: &str = "TTDdynFARP";
 /// Naval warehouse ME `dynamicSpawn` after stock/linkDynTempl (keys `TTDN` + hull name, e.g. `TTDNRKuznecow`).
 const SETTINGS_DYNAMIC_SPAWN_TTDN_ZONE: &str = "SETTINGS-dynamic-spawn-TTDN";
+/// Ground hub ME `dynamicSpawn` after `patch_warehouse_dynamic_spawn_links` (O* prefix keys + `DEP*FARPPAD` for DEP template FARPs).
+const SETTINGS_DYNAMIC_SPAWN_GROUND_ZONE: &str = "SETTINGS-dynamic-spawn";
+const SETTINGS_DYNAMIC_SPAWN_DEP_FARP_KEY: &str = "DEP*FARPPAD";
 
 fn parse_trigger_slot_quantity(value: &str) -> Result<usize> {
     let t = value.trim();
@@ -588,10 +591,8 @@ impl SlotSpec {
                 }
                 match templates.get(&prop.value) {
                     None => {
-                        // Template missing: e.g. TTS* / TTD* disabled in SETTINGS-*-slots-creation,
-                        // so the template name was never registered. Skip instead of failing the build.
                         warn!(
-                            "skipping property {:?} -> '{}' (template not loaded — likely disabled in SETTINGS-*-slots-creation)",
+                            "skipping property {:?} -> '{}' (template not loaded — name not present in TTS* / TTD* mission zones)",
                             prop.key, prop.value
                         );
                     }
@@ -1998,8 +1999,6 @@ impl VehicleTemplates {
         // so this is no longer needed.
 
         let idx = base.mission.index()?;
-        let dynamic_creation_settings =
-            Self::load_zone_creation_settings(base, "SETTINGS-dynamic-slots-creation")?;
         let naval_dynamic_spawn_settings =
             Self::load_zone_creation_settings(base, SETTINGS_DYNAMIC_SPAWN_TTDN_ZONE)?;
         let mut uid = idx.max_uid();
@@ -2017,9 +2016,6 @@ impl VehicleTemplates {
             let zone = zone?;
             let name = zone.name()?;
             if let Some(s) = name.strip_prefix("TTDN") {
-                if !Self::zone_enabled_by_settings(&dynamic_creation_settings, &name) {
-                    continue;
-                }
                 dyn_templates.insert(
                     String::from(s),
                     SlotSpec::new(
@@ -2033,9 +2029,6 @@ impl VehicleTemplates {
                 if name.as_str() == TTD_DYN_FARP_POLICY_ZONE {
                     continue;
                 }
-                if !Self::zone_enabled_by_settings(&dynamic_creation_settings, &name) {
-                    continue;
-                }
                 dyn_templates.insert(
                     String::from(s),
                     SlotSpec::new(
@@ -2047,8 +2040,8 @@ impl VehicleTemplates {
                 );
             }
         }
-        // Land: enabled `TTD*` (not `TTDN*`). Naval: enabled `TTDN*`.
-        // Listed `(side,type)` only (`X` or positive qty); SETTINGS-* gates zones by name.
+        // Land: `TTD*` (not `TTDN*`). Naval: `TTDN*`.
+        // Listed `(side,type)` only (`X` or positive qty).
         let mut land_allowed_set: HashSet<(Side, String)> = HashSet::default();
         let mut naval_allowed_set: HashSet<(Side, String)> = HashSet::default();
         let mut have_land_policy_zones = false;
@@ -2057,9 +2050,6 @@ impl VehicleTemplates {
             let zone = zone?;
             let name = zone.name()?;
             if name.starts_with("TTDN") {
-                if !Self::zone_enabled_by_settings(&dynamic_creation_settings, &name) {
-                    continue;
-                }
                 have_naval_policy_zones = true;
                 let spec = SlotSpec::new(
                     &dyn_templates,
@@ -2076,9 +2066,6 @@ impl VehicleTemplates {
                 }
             } else if name.starts_with("TTD") {
                 if name.as_str() == TTD_DYN_FARP_POLICY_ZONE {
-                    continue;
-                }
-                if !Self::zone_enabled_by_settings(&dynamic_creation_settings, &name) {
                     continue;
                 }
                 have_land_policy_zones = true;
@@ -2835,6 +2822,17 @@ fn warehouse_dynamic_spawn_enabled(row: &Table) -> bool {
         .unwrap_or(false)
 }
 
+/// Fowl stock fill / `patch_warehouse_dynamic_spawn_links` require finite export (`Unlimited Liquids` → `unlimitedFuel`).
+fn warehouse_all_unlimited_off(row: &Table) -> bool {
+    !["unlimitedFuel", "unlimitedMunitions", "unlimitedAircrafts"]
+        .iter()
+        .any(|&k| {
+            row.raw_get::<_, Value>(k)
+                .map(|v| lua_value_truthy(&v))
+                .unwrap_or(false)
+        })
+}
+
 /// ME `dynamicSpawn` on ship warehouse rows only; runs after fill / `linkDynTempl` patch.
 fn apply_settings_dynamic_spawn_ttdn_naval_flags(
     base: &LoadedMiz,
@@ -2869,6 +2867,117 @@ fn apply_settings_dynamic_spawn_ttdn_naval_flags(
         info!(
             "naval warehouse {wid} ({hull}): dynamicSpawn={enabled} ({SETTINGS_DYNAMIC_SPAWN_TTDN_ZONE})"
         );
+    }
+    Ok(())
+}
+
+fn validate_settings_dynamic_spawn_ground_keys(settings: &HashMap<String, bool>) -> Result<()> {
+    for key in settings.keys() {
+        if key.as_str() == SETTINGS_DYNAMIC_SPAWN_DEP_FARP_KEY {
+            continue;
+        }
+        if key.contains('*') {
+            bail!(
+                "SETTINGS-dynamic-spawn: invalid property key {key:?} (only {:?} may contain `*`)",
+                SETTINGS_DYNAMIC_SPAWN_DEP_FARP_KEY,
+            );
+        }
+        if key.chars().count() < 3 {
+            bail!(
+                "SETTINGS-dynamic-spawn: invalid property key {key:?} (minimum three characters, e.g. objective zone prefix)"
+            );
+        }
+    }
+    Ok(())
+}
+
+fn spawn_settings_o_zone_prefix(zone_name: &str) -> StdString {
+    zone_name.chars().take(3).collect()
+}
+
+fn objective_dyn_allow_for_spawn<'a>(
+    wid: i64,
+    is_airports_table: bool,
+    obj_dyn_allow: &'a [ObjectiveDynAllow],
+    warehouse_positions: &HashMap<i64, Vector2>,
+) -> Option<&'a ObjectiveDynAllow> {
+    if is_airports_table {
+        obj_dyn_allow.iter().find(|o| o.airbase_id == Some(wid)).or_else(|| {
+            warehouse_positions
+                .get(&wid)
+                .and_then(|&pos| obj_dyn_allow.iter().find(|o| o.contains(pos)))
+        })
+    } else {
+        warehouse_positions
+            .get(&wid)
+            .and_then(|&pos| obj_dyn_allow.iter().find(|o| o.contains(pos)))
+    }
+}
+
+fn resolved_ground_dynamic_spawn_setting(
+    wid: i64,
+    is_airports_table: bool,
+    settings: &HashMap<String, bool>,
+    mult_cfg: &WarehouseStockMultConfig,
+    obj_dyn_allow: &[ObjectiveDynAllow],
+    warehouse_positions: &HashMap<i64, Vector2>,
+) -> Option<bool> {
+    if mult_cfg.naval_warehouse_ids.contains(&wid) {
+        return None;
+    }
+    if mult_cfg.dep_farp_warehouse_ids.contains(&wid) {
+        return Some(
+            settings
+                .get(SETTINGS_DYNAMIC_SPAWN_DEP_FARP_KEY)
+                .copied()
+                .unwrap_or(false),
+        );
+    }
+    let obj = objective_dyn_allow_for_spawn(wid, is_airports_table, obj_dyn_allow, warehouse_positions)?;
+    let key = spawn_settings_o_zone_prefix(obj.zone_name.as_str());
+    Some(settings.get(key.as_str()).copied().unwrap_or(false))
+}
+
+fn apply_settings_dynamic_spawn_ground_flags(
+    base: &LoadedMiz,
+    warehouses_root: &Table<'static>,
+    mult_cfg: &WarehouseStockMultConfig,
+    obj_dyn_allow: &[ObjectiveDynAllow],
+    warehouse_positions: &HashMap<i64, Vector2>,
+) -> Result<()> {
+    let settings =
+        VehicleTemplates::load_zone_creation_settings(base, SETTINGS_DYNAMIC_SPAWN_GROUND_ZONE)?;
+    validate_settings_dynamic_spawn_ground_keys(&settings)?;
+    if settings.is_empty() {
+        warn!(
+            "{} zone missing or has no valid bool properties — governed ground hubs resolve dynamicSpawn entries as false",
+            SETTINGS_DYNAMIC_SPAWN_GROUND_ZONE
+        );
+    }
+    for (is_airports, tbl_name) in [(true, "airports"), (false, "warehouses")] {
+        let Ok(tbl) = warehouses_root.raw_get::<_, Table>(tbl_name) else {
+            continue;
+        };
+        for pair in tbl.clone().pairs::<Value, Table>() {
+            let (k, wh) = pair?;
+            let Some(wid) = warehouse_lua_key_i64(k) else {
+                continue;
+            };
+            let Some(enabled) = resolved_ground_dynamic_spawn_setting(
+                wid,
+                is_airports,
+                &settings,
+                mult_cfg,
+                obj_dyn_allow,
+                warehouse_positions,
+            ) else {
+                continue;
+            };
+            if !warehouse_all_unlimited_off(&wh) {
+                continue;
+            }
+            wh.raw_set("dynamicSpawn", enabled)?;
+        }
     }
     Ok(())
 }
@@ -3277,7 +3386,7 @@ enum NeutralWarehouseBuildKind {
     Other,
 }
 
-/// Neutral + `dynamicSpawn`: ME flags + level fields from campaign B4 / variant-A chat spec.
+/// Neutral + finite warehouse export: ME flags + level fields from campaign B4 / variant-A chat spec.
 fn apply_neutral_dynamic_spawn_warehouse_flags(lua: &Lua, row: &Table) -> Result<()> {
     row.raw_set("dynamicCargo", true)?;
     row.raw_set("unlimitedFuel", false)?;
@@ -3297,7 +3406,7 @@ fn empty_neutral_build_warehouse_row(
     row: &Table,
     kind: NeutralWarehouseBuildKind,
 ) -> Result<()> {
-    if warehouse_dynamic_spawn_enabled(row) {
+    if warehouse_all_unlimited_off(row) {
         apply_neutral_dynamic_spawn_warehouse_flags(lua, row)?;
     }
     row.raw_set("weapons", lua.create_table()?)?;
@@ -5795,9 +5904,9 @@ impl WarehouseTemplate {
             let side_opt = warehouse_side_for_default_apply(&old_row)
                 .with_context(|| format_compact!("airport warehouse {id}"))?;
             if side_opt.is_none() {
-                if warehouse_dynamic_spawn_enabled(&old_row) {
+                if warehouse_all_unlimited_off(&old_row) {
                     info!(
-                        "airport warehouse {id}: neutral + dynamic spawn — stock/templates deferred to patch_warehouse_dynamic_spawn_links"
+                        "airport warehouse {id}: neutral + finite warehouse export — stock/templates deferred to patch_warehouse_dynamic_spawn_links"
                     );
                 } else {
                     empty_neutral_build_warehouse_row(
@@ -5810,8 +5919,7 @@ impl WarehouseTemplate {
                 continue;
             }
             let side = side_opt.unwrap();
-            let is_dynamic = warehouse_dynamic_spawn_enabled(&old_row);
-            if is_dynamic {
+            if warehouse_all_unlimited_off(&old_row) {
                 // Liquids prefilled in `patch_warehouse_dynamic_spawn_links` (same mult as weapons/aircraft).
                 continue;
             }
@@ -5861,9 +5969,8 @@ impl WarehouseTemplate {
                 continue;
             }
             let side = side_opt.unwrap();
-            let is_dynamic = warehouse_dynamic_spawn_enabled(&old_row);
-            if is_dynamic {
-                // Dynamic hubs: patched only in `patch_warehouse_dynamic_spawn_links`.
+            if warehouse_all_unlimited_off(&old_row) {
+                // Finite-export hubs: patched only in `patch_warehouse_dynamic_spawn_links`.
                 continue;
             }
             let (def_tpl, inv_tpl) = match side {
@@ -6275,6 +6382,8 @@ enum ObjectiveZoneGeom {
 ///
 /// Zone coalition is read from the 4th character of the zone name: 'R' = Red, 'B' = Blue.
 struct ObjectiveDynAllow {
+    /// ME trigger zone name (first three chars map `SETTINGS-dynamic-spawn`).
+    zone_name: StdString,
     geom: ObjectiveZoneGeom,
     /// Coalition this base belongs to (from 4th letter of O* zone name).
     side: Side,
@@ -6297,18 +6406,12 @@ impl ObjectiveDynAllow {
 }
 
 /// Allowed `(Side, aircraft type)` for **`warehouses.warehouses`** dynamic rows on DEP template FARPs (`BDEPFARP*`/`…`).
-/// Controlled only by zone `TTDdynFARP` (+ `SETTINGS-dynamic-slots-creation`); excludes overlap with objective `TTDLogi` pruning.
+/// Controlled only by zone `TTDdynFARP`; excludes overlap with objective `TTDLogi` pruning.
 fn build_dyn_farp_aircraft_allow(
     base: &LoadedMiz,
     dyn_templates: &HashMap<String, SlotSpec>,
 ) -> Result<Option<HashSet<(Side, StdString)>>> {
-    let dynamic_creation_settings =
-        VehicleTemplates::load_zone_creation_settings(base, "SETTINGS-dynamic-slots-creation")?;
-    if !VehicleTemplates::zone_enabled_by_settings(&dynamic_creation_settings, TTD_DYN_FARP_POLICY_ZONE)
-    {
-        return Ok(None);
-    }
-    let mut found = false;
+    let mut found_zone = false;
     let mut allowed: HashSet<(Side, StdString)> = HashSet::default();
     for zone in base.mission.triggers()? {
         let zone = zone?;
@@ -6316,7 +6419,7 @@ fn build_dyn_farp_aircraft_allow(
         if name.as_str() != TTD_DYN_FARP_POLICY_ZONE {
             continue;
         }
-        found = true;
+        found_zone = true;
         let spec = SlotSpec::new(
             dyn_templates,
             zone.properties()?,
@@ -6331,11 +6434,8 @@ fn build_dyn_farp_aircraft_allow(
             }
         }
     }
-    if !found {
-        bail!(
-            "{} is enabled in SETTINGS-dynamic-slots-creation but no trigger zone with this exact name exists",
-            TTD_DYN_FARP_POLICY_ZONE
-        );
+    if !found_zone {
+        return Ok(None);
     }
     info!(
         "{}: {} allowed (coalition, aircraft type) pair(s) for DEP dynamic FARP A/C stock",
@@ -6346,21 +6446,15 @@ fn build_dyn_farp_aircraft_allow(
 }
 
 /// Per-ship warehouse `unitId` → allowed `(Side, aircraft type)` from **`TTDN` + ship group name**
-/// (e.g. group `RKuznecow` → zone `TTDNRKuznecow`). Only hulls with that zone **enabled** in
-/// `SETTINGS-dynamic-slots-creation` get an entry; others keep full coalition inventory copy.
+/// (e.g. group `RKuznecow` → zone `TTDNRKuznecow`). Hulls without a matching `TTDN*` zone fail the build.
 fn build_ship_warehouse_aircraft_allow(
     base: &LoadedMiz,
     dyn_templates: &HashMap<String, SlotSpec>,
     ship_wh_map: &HashMap<i64, (Side, String)>,
 ) -> Result<HashMap<i64, HashSet<(Side, StdString)>>> {
-    let settings =
-        VehicleTemplates::load_zone_creation_settings(base, "SETTINGS-dynamic-slots-creation")?;
     let mut out: HashMap<i64, HashSet<(Side, StdString)>> = HashMap::default();
     for (&wid, (_side_unit, group_name)) in ship_wh_map {
         let zone_full = format!("TTDN{}", group_name);
-        if !VehicleTemplates::zone_enabled_by_settings(&settings, &zone_full) {
-            continue;
-        }
         let mut found = false;
         for zone in base.mission.triggers()? {
             let zone = zone?;
@@ -6393,10 +6487,7 @@ fn build_ship_warehouse_aircraft_allow(
             break;
         }
         if !found {
-            bail!(
-                "{} is enabled in SETTINGS-dynamic-slots-creation but no trigger zone with this exact name exists",
-                zone_full
-            );
+            bail!("carrier warehouse {}: missing naval dynamic trigger zone `{}`", wid, zone_full);
         }
     }
     Ok(out)
@@ -6468,7 +6559,9 @@ fn build_objective_dyn_allow(
             }
             TriggerZoneTyp::Quad(q) => ObjectiveZoneGeom::Quad(q),
         };
+        let znm = StdString::from(name.as_str());
         out.push(ObjectiveDynAllow {
+            zone_name: znm,
             geom,
             side: base_side,
             is_logistics_hub,
@@ -7143,7 +7236,9 @@ fn validate_objective_airbase_ids(base: &LoadedMiz) -> Result<(Vec<StdString>, V
 /// (airport hub vs airbase; `warehouses` naval vs FOB vs airbase).
 ///
 /// `TTD*` / `TTDN*`: listed `(side,type)` (quantity `X` or positive number) participates; omitted types do not,
-/// when that axis has policy zones. SETTINGS-dynamic-slots-creation still gates each zone by name.
+/// when that axis has policy zones.
+/// Ground ME `dynamicSpawn` is stamped from `SETTINGS-dynamic-spawn` after this pass (same phase as naval TTDN).
+/// Rows are filled here only when `unlimitedFuel`, `unlimitedMunitions`, and `unlimitedAircrafts` are all false (finite export).
 ///
 /// --- Planned carrier-specific pipeline (per-ship, not global naval union) ---
 /// 1. For each ship warehouse (coalition side), prefill `aircrafts` rows from `BINVENTORY` / `RINVENTORY`
@@ -7362,7 +7457,10 @@ fn patch_warehouse_dynamic_spawn_links(
             let Some(wid) = warehouse_lua_key_i64(k) else {
                 continue;
             };
-            if !warehouse_dynamic_spawn_enabled(&wh) {
+            if !warehouse_all_unlimited_off(&wh) {
+                warn!(
+                    "warehouse {wid}: skipping dynamic-spawn fill patch (set unlimitedFuel, unlimitedMunitions, unlimitedAircrafts to false in ME)"
+                );
                 continue;
             }
             let mult = mult_cfg.mult_dynamic_row(wid, is_airports_table);
@@ -7928,14 +8026,14 @@ fn logistics_hub_logical_name(display_name: &str) -> StdString {
     }
 }
 
-/// Same key as warehouse backend when `warehouses.airports[id]` owns a dynamic spawn row (`dynamicSpawn`).
+/// Same key as warehouse backend when `warehouses.airports[id]` has finite stock export (all unlimited toggles off).
 fn airports_dynamic_spawn_backend_key(ap: &Table<'static>, unit_id: i64) -> Result<Option<i64>> {
     match ap
         .raw_get::<_, Value>(unit_id)
         .with_context(|| format_compact!("warehouses.airports[{unit_id}]"))?
     {
         Value::Table(t) => {
-            if warehouse_dynamic_spawn_enabled(&t) {
+            if warehouse_all_unlimited_off(&t) {
                 Ok(Some(unit_id))
             } else {
                 Ok(None)
@@ -9108,7 +9206,7 @@ pub fn run(cfg: &MizCmd) -> Result<()> {
             )?;
         if !mult_cfg.dep_farp_warehouse_ids.is_empty() && dyn_farp_allow.is_none() {
             warn!(
-                "DEP dynamic FARP template warehouse rows exist but `{}` is not enabled in SETTINGS-dynamic-slots-creation; A/C allowlist pruning for those rows is skipped (full coalition inventory copy still applies).",
+                "DEP dynamic FARP template warehouse rows exist but trigger zone `{}` is missing; A/C allowlist pruning for those rows is skipped (full coalition inventory copy still applies).",
                 TTD_DYN_FARP_POLICY_ZONE,
             );
         }
@@ -9195,6 +9293,14 @@ pub fn run(cfg: &MizCmd) -> Result<()> {
             &vehicle_templates,
         )
         .context("patching warehouse linkDynTempl")?;
+        apply_settings_dynamic_spawn_ground_flags(
+            &base,
+            &base.warehouses,
+            &mult_cfg,
+            &obj_dyn_allow,
+            &warehouse_positions,
+        )
+        .context("applying SETTINGS-dynamic-spawn ground dynamicSpawn flags")?;
         apply_settings_dynamic_spawn_ttdn_naval_flags(
             &base,
             &base.warehouses,
