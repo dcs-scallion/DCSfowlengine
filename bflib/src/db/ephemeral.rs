@@ -95,6 +95,12 @@ pub(super) struct DeployableIndex {
 }
 
 #[derive(Debug, Clone, Copy)]
+pub(super) struct WarehouseResourceMeta {
+    pub quad: Option<[i32; 4]>,
+    pub is_aircraft: bool,
+}
+
+#[derive(Debug, Clone, Copy)]
 pub(super) struct Equipment {
     pub(super) production: u32,
 }
@@ -135,6 +141,8 @@ pub struct Ephemeral {
     pub(super) groups_with_move_missions: FxHashMap<GroupId, Vector2>,
     pub(super) units_potentially_close_to_enemies: FxHashSet<UnitId>,
     pub(super) production_by_side: FxHashMap<Side, Arc<Production>>,
+    /// Built once per session; DCS item name → wsType meta for warehouse prune/sync.
+    pub(super) warehouse_resource_meta: Option<Arc<FxHashMap<String, WarehouseResourceMeta>>>,
     pub(super) actions_taken: FxHashMap<Side, FxHashMap<String, u32>>,
     pub(super) delayspawnq: BTreeMap<DateTime<Utc>, SmallVec<[GroupId; 8]>>,
     /// New round only: wall-clock time to run `place_tisp_initial_ships` after full startup.
@@ -178,6 +186,7 @@ impl Default for Ephemeral {
             groups_with_move_missions: FxHashMap::default(),
             units_potentially_close_to_enemies: FxHashSet::default(),
             production_by_side: FxHashMap::default(),
+            warehouse_resource_meta: None,
             actions_taken: FxHashMap::default(),
             delayspawnq: BTreeMap::default(),
             tisp_initial_after: None,

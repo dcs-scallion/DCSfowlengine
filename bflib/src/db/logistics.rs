@@ -15,7 +15,7 @@ for more details.
 */
 
 use super::{
-    ephemeral::{Equipment, Production},
+    ephemeral::{Equipment, Production, WarehouseResourceMeta},
     objective::Objective,
     persisted::Persisted,
     Db, Map, MapS, SetS,
@@ -41,7 +41,7 @@ use dcso3::{
     world::World,
     LuaVec2, MizLua, String, Vector2,
 };
-use fxhash::FxHashMap;
+use fxhash::{FxHashMap, FxHashSet};
 use log::{error, warn};
 use serde_derive::{Deserialize, Serialize};
 use smallvec::{smallvec, SmallVec};
@@ -373,12 +373,6 @@ fn weapon_allowed_by_fowl_export<'lua>(
     Ok(list.iter().any(|w| *w == quad))
 }
 
-#[derive(Debug, Clone, Copy)]
-struct ResourceMeta {
-    quad: Option<[i32; 4]>,
-    is_aircraft: bool,
-}
-
 fn objective_defaults_for_side<'a>(
     export: &'a FowlMizExport,
     objective_name: &str,
@@ -397,7 +391,7 @@ fn equipment_allowed_for_objective(
     objective_name: &str,
     side: Side,
     _name: &str,
-    meta: Option<ResourceMeta>,
+    meta: Option<WarehouseResourceMeta>,
 ) -> bool {
     let Some((_, allowed_ws)) = objective_defaults_for_side(export, objective_name, side)
     else {
@@ -417,59 +411,84 @@ fn equipment_allowed_for_objective(
     true
 }
 
-fn build_resource_meta_map(lua: MizLua) -> Result<FxHashMap<String, ResourceMeta>> {
-    let mut out: FxHashMap<String, ResourceMeta> = FxHashMap::default();
+fn build_resource_meta_map(lua: MizLua) -> Result<FxHashMap<String, WarehouseResourceMeta>> {
+    let mut out: FxHashMap<String, WarehouseResourceMeta> = FxHashMap::default();
     let map = warehouse::Warehouse::get_resource_map(lua).context("getting resource map")?;
     map.for_each(|name, typ| {
         let quad = typ.quad().ok();
         let is_aircraft = typ.category().map(|c| c.is_aircraft()).unwrap_or(false);
-        out.insert(name, ResourceMeta { quad, is_aircraft });
+        out.insert(name, WarehouseResourceMeta { quad, is_aircraft });
         Ok(())
     })
     .context("building resource meta map")?;
     Ok(out)
 }
 
-/// Drops DCS warehouse rows that Fowl does not track (`.miz` stock survives until removed).
+fn allowed_weapon_quads(export: &FowlMizExport, side: Side) -> FxHashSet<[i32; 4]> {
+    side_allowlist(export, side).iter().copied().collect()
+}
+
+/// Prune via warehouse inventory + cached resource map (not full DCS catalog scan).
 fn prune_disallowed_dcs_weapon_stock<'lua>(
-    lua: MizLua<'lua>,
     warehouse: &warehouse::Warehouse<'lua>,
     export: &FowlMizExport,
     side: Side,
+    resource_meta: &FxHashMap<String, WarehouseResourceMeta>,
 ) -> Result<()> {
     if !export_has_any_weapon_allowlist(export) {
         return Ok(());
     }
-    let list = side_allowlist(export, side);
-    if list.is_empty() {
+    if side_allowlist(export, side).is_empty() {
         return Ok(());
     }
-    let map = warehouse::Warehouse::get_resource_map(lua).context("getting resource map")?;
-    map.for_each(|name, typ| {
-        let quad = typ
-            .quad()
-            .context("wsType quad for DCS warehouse prune")?;
-        if !row_subject_to_weapon_allowlist(export, &quad) {
-            return Ok(());
-        }
-        if list.iter().any(|w| *w == quad) {
-            return Ok(());
-        }
-        let qty = warehouse
-            .get_item_count(name.clone())
-            .with_context(|| format_compact!("get_item_count {name}"))?;
-        if qty > 0 {
+    let allowed = allowed_weapon_quads(export, side);
+    let inv = warehouse
+        .get_inventory(None)
+        .context("warehouse getInventory for prune")?;
+    let weapons = inv.weapons().context("warehouse weapon inventory")?;
+    weapons
+        .for_each(|name, qty| {
+            if qty == 0 {
+                return Ok(());
+            }
+            let Some(meta) = resource_meta.get(&name) else {
+                return Ok(());
+            };
+            let Some(quad) = meta.quad else {
+                return Ok(());
+            };
+            if !row_subject_to_weapon_allowlist(export, &quad) {
+                return Ok(());
+            }
+            if allowed.contains(&quad) {
+                return Ok(());
+            }
             warehouse
                 .remove_item(name.clone(), qty)
                 .with_context(|| format_compact!("remove_item {name}"))?;
-        }
-        Ok(())
-    })
-    .context("pruning disallowed weapon stock from DCS")?;
+            Ok(())
+        })
+        .context("pruning disallowed weapon stock from DCS")?;
     Ok(())
 }
 
 impl Db {
+    fn warehouse_resource_meta_cache(
+        &mut self,
+        lua: MizLua,
+    ) -> Result<Arc<FxHashMap<String, WarehouseResourceMeta>>> {
+        if self.ephemeral.warehouse_resource_meta.is_none() {
+            let map = build_resource_meta_map(lua).context("warehouse resource meta cache")?;
+            self.ephemeral.warehouse_resource_meta = Some(Arc::new(map));
+        }
+        Ok(Arc::clone(
+            self.ephemeral
+                .warehouse_resource_meta
+                .as_ref()
+                .expect("warehouse_resource_meta just set"),
+        ))
+    }
+
     fn init_resource_map(&mut self, lua: MizLua) -> Result<()> {
         let whcfg = match self.ephemeral.cfg.warehouse.as_ref() {
             None => return Ok(()),
@@ -638,11 +657,13 @@ impl Db {
     pub(super) fn setup_warehouses_after_load(&mut self, lua: MizLua) -> Result<()> {
         self.init_resource_map(lua)
             .context("initializing resource map")?;
+        let resource_meta = self
+            .warehouse_resource_meta_cache(lua)
+            .context("resource map for objective defaults")?;
         let whcfg = match self.ephemeral.cfg.warehouse.as_ref() {
             Some(cfg) => cfg,
             None => return Ok(()),
         };
-        let resource_meta = build_resource_meta_map(lua).context("resource map for objective defaults")?;
         let export = self.ephemeral.fowl_miz_export.as_ref();
         let _map = warehouse::Warehouse::get_resource_map(lua).context("getting resource map")?;
         let world = World::singleton(lua).context("getting world")?;
@@ -1451,6 +1472,9 @@ impl Db {
         lua: MizLua<'lua>,
         oid: ObjectiveId,
     ) -> Result<(&mut Objective, warehouse::Warehouse<'lua>)> {
+        let resource_meta = self
+            .warehouse_resource_meta_cache(lua)
+            .context("warehouse resource meta for prune")?;
         let obj = objective_mut!(self, oid)?;
         let airbase = self
             .ephemeral
@@ -1463,7 +1487,7 @@ impl Db {
             .context("getting warehouse")?;
         let owner = obj.owner;
         let export = self.ephemeral.fowl_miz_export.as_ref();
-        prune_disallowed_dcs_weapon_stock(lua, &warehouse, export, owner)?;
+        prune_disallowed_dcs_weapon_stock(&warehouse, export, owner, resource_meta.as_ref())?;
         sync_obj_to_warehouse(obj, &warehouse).context("syncing warehouse to objective")?;
         Ok((obj, warehouse))
     }
