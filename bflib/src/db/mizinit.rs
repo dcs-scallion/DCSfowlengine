@@ -363,7 +363,8 @@ impl Db {
         for id in ids {
             t.update_objective_status(&id, now)?
         }
-        t.init_warehouses(lua).context("initializing warehouses")?;
+        t.seed_objective_warehouses_from_export(lua)
+            .context("seeding objective warehouses from Fowl export")?;
         t.ephemeral.dirty();
         Ok(t)
     }
