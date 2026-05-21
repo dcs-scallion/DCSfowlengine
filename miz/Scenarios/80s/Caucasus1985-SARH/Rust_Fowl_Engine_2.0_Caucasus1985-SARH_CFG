@@ -20,7 +20,7 @@
   },
   "name_filter": "^[a-zA-Z0-9_<>|= ]+$",
   "max_msgs_per_second": 5,
-  "shutdown": 7,
+  "shutdown": 4,
   "points": {
     "new_player_join": 1900000,
     "air_kill": 25,
@@ -78,7 +78,7 @@
     "airbase_max": 4,
     "hub_max": 10,
     "dynamicFARPs_InitialStockPercentage": 20,
-    "tick": 15,
+    "tick": 10,
     "ticks_per_delivery": 8,
     "supply_transfer_size": 25,
     "supply_transfer_crate": {

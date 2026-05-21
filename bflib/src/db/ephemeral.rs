@@ -151,6 +151,8 @@ pub struct Ephemeral {
     pub(super) preserve_initial_warehouse_fill: bool,
     /// New round only: skip one hub distribute after bftools/`setup_warehouses` fill.
     pub(super) defer_initial_hub_distribute: bool,
+    /// New round: first logistics cycle reads DCS (SyncFrom) and skips SyncTo to ME.
+    pub(super) defer_initial_logistics_sync_to: bool,
     pub(super) awacs_stn: u32,
     pub(super) logistics_stage: LogiStage,
     spawnq: VecDeque<GroupId>,
@@ -196,6 +198,7 @@ impl Default for Ephemeral {
             tisp_initial_after: None,
             preserve_initial_warehouse_fill: false,
             defer_initial_hub_distribute: false,
+            defer_initial_logistics_sync_to: false,
             awacs_stn: 0o77777,
             spawnq: VecDeque::default(),
             despawnq: VecDeque::default(),

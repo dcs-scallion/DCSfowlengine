@@ -999,7 +999,14 @@ impl Db {
                         .into_iter()
                         .map(|(id, _)| *id)
                         .collect();
-                    self.ephemeral.logistics_stage = LogiStage::SyncToWarehouses { objectives }
+                    self.ephemeral.logistics_stage = if self
+                        .ephemeral
+                        .defer_initial_logistics_sync_to
+                    {
+                        LogiStage::SyncFromWarehouses { objectives }
+                    } else {
+                        LogiStage::SyncToWarehouses { objectives }
+                    };
                 }
                 LogiStage::Complete { last_tick } if ts - *last_tick >= freq => {
                     let objectives = self
@@ -1037,9 +1044,8 @@ impl Db {
                         } else {
                             self.persisted.logistics_ticks_since_delivery += 1;
                             let v = if self.ephemeral.defer_initial_hub_distribute {
-                                self.ephemeral.defer_initial_hub_distribute = false;
                                 info!(
-                                    "new campaign: skipping initial hub-to-objective distribute (bftools warehouse fill)"
+                                    "new campaign: skipping hub-to-objective distribute (bftools warehouse fill)"
                                 );
                                 vec![]
                             } else {
@@ -1059,14 +1065,25 @@ impl Db {
                 },
                 LogiStage::ExecuteTransfers { transfers } if transfers.is_empty() => {
                     let st = Utc::now();
-                    self.balance_logistics_hubs()?;
-                    let objectives = self
-                        .persisted
-                        .objectives
-                        .into_iter()
-                        .map(|(id, _)| *id)
-                        .collect();
-                    self.ephemeral.logistics_stage = LogiStage::SyncToWarehouses { objectives };
+                    if self.ephemeral.defer_initial_logistics_sync_to {
+                        self.ephemeral.defer_initial_logistics_sync_to = false;
+                        info!(
+                            "new campaign: skipping logistics sync-to DCS (bftools ME warehouse fill)"
+                        );
+                        self.update_supply_status()
+                            .context("supply status after bootstrap")?;
+                        self.ephemeral.logistics_stage = LogiStage::Complete { last_tick: ts };
+                    } else {
+                        self.balance_logistics_hubs()?;
+                        let objectives = self
+                            .persisted
+                            .objectives
+                            .into_iter()
+                            .map(|(id, _)| *id)
+                            .collect();
+                        self.ephemeral.logistics_stage =
+                            LogiStage::SyncToWarehouses { objectives };
+                    }
                     record_perf(&mut perf.logistics_transfer, st);
                 }
                 LogiStage::ExecuteTransfers { transfers } => {

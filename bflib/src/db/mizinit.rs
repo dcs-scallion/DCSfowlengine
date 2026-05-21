@@ -21,7 +21,7 @@ use crate::{
     bg::Task,
     db::{
         MapS,
-        logistics::Warehouse,
+        logistics::{LogiStage, Warehouse},
         objective::{Objective, Zone},
     },
     group, group_health, group_mut,
@@ -367,6 +367,7 @@ impl Db {
             .context("seeding objective warehouses from Fowl export")?;
         t.ephemeral.preserve_initial_warehouse_fill = true;
         t.ephemeral.defer_initial_hub_distribute = true;
+        t.ephemeral.defer_initial_logistics_sync_to = true;
         t.ephemeral.dirty();
         Ok(t)
     }
@@ -594,6 +595,8 @@ impl Db {
             _ => return Ok(()),
         }
         self.ephemeral.tisp_initial_after = None;
+        self.ephemeral.defer_initial_hub_distribute = true;
+        self.ephemeral.defer_initial_logistics_sync_to = true;
         let miz = Miz::singleton(lua)?;
         let spctx = SpawnCtx::new(lua)?;
         if let Err(e) = super::tisp_init::place_tisp_initial_ships(&miz, idx, self, &spctx)
@@ -602,12 +605,21 @@ impl Db {
             error!(
                 "deferred TISP naval ship placement failed (use -action if needed): {e:?}"
             );
+            self.ephemeral.defer_initial_hub_distribute = false;
             return Ok(());
         }
         self.ephemeral.preserve_initial_warehouse_fill = true;
-        self.ephemeral.defer_initial_hub_distribute = true;
         self.setup_warehouses_after_load(lua)
             .context("warehouses after deferred TISP")?;
+        self.ephemeral.defer_initial_hub_distribute = false;
+        self.ephemeral.defer_initial_logistics_sync_to = true;
+        let objectives = self
+            .persisted
+            .objectives
+            .into_iter()
+            .map(|(id, _)| *id)
+            .collect();
+        self.ephemeral.logistics_stage = LogiStage::SyncFromWarehouses { objectives };
         info!("warehouses re-synced after deferred TISP placement (bftools fill preserved)");
         self.ephemeral.dirty();
         Ok(())

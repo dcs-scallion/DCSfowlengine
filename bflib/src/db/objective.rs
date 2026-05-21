@@ -827,19 +827,23 @@ impl Db {
         self.ephemeral
             .airbases_by_oid
             .insert(oid, smallvec![airbase]);
-        self.init_farp_warehouse(&oid)
-            .context("initializing farp warehouse")?;
+        if !self.ephemeral.defer_initial_hub_distribute {
+            self.init_farp_warehouse(&oid)
+                .context("initializing farp warehouse")?;
+        }
         self.setup_supply_lines().context("setup supply lines")?;
-        let trs = self
-            .deliver_supplies_from_logistics_hubs()
-            .context("distributing supplies")?;
-        match &mut self.ephemeral.logistics_stage {
-            LogiStage::ExecuteTransfers { transfers } => transfers.extend(trs),
-            stage @ (LogiStage::Complete { .. }
-            | LogiStage::Init
-            | LogiStage::SyncFromWarehouses { .. }
-            | LogiStage::SyncToWarehouses { .. }) => {
-                *stage = LogiStage::ExecuteTransfers { transfers: trs };
+        if !self.ephemeral.defer_initial_hub_distribute {
+            let trs = self
+                .deliver_supplies_from_logistics_hubs()
+                .context("distributing supplies")?;
+            match &mut self.ephemeral.logistics_stage {
+                LogiStage::ExecuteTransfers { transfers } => transfers.extend(trs),
+                stage @ (LogiStage::Complete { .. }
+                | LogiStage::Init
+                | LogiStage::SyncFromWarehouses { .. }
+                | LogiStage::SyncToWarehouses { .. }) => {
+                    *stage = LogiStage::ExecuteTransfers { transfers: trs };
+                }
             }
         }
         self.ephemeral

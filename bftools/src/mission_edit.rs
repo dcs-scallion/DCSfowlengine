@@ -2994,19 +2994,18 @@ fn stock_mult_for_objective(
     mult_cfg: &WarehouseStockMultConfig,
     allow: &ObjectiveDynAllow,
     resolved: Option<(i64, bool)>,
-) -> u32 {
+) -> Result<u32> {
+    if allow.is_logistics_hub {
+        return Ok(mult_cfg.hub_max.max(1));
+    }
     if let Some((id, is_airport)) = resolved {
-        return if is_airport {
+        return Ok(if is_airport {
             mult_cfg.mult_airport(id)
         } else {
             mult_cfg.mult_warehouse_row(id)
-        };
+        });
     }
-    if allow.is_logistics_hub {
-        mult_cfg.hub_max.max(1)
-    } else {
-        mult_cfg.airbase_max.max(1)
-    }
+    Ok(mult_cfg.airbase_max.max(1))
 }
 
 /// Opposite-coalition baseline for export: BINVENTORY catalog × mult (same items Fowl tracks after capture).
@@ -3140,7 +3139,7 @@ pub fn build_objective_stock_export(
             resolved_meta
                 .as_ref()
                 .map(|r| (r.wh_id, r.is_airport)),
-        );
+        )?;
         if let Some(resolved) = resolved_meta {
             let side = warehouse_side_for_default_apply(&resolved.row)?
                 .unwrap_or(allow.side);
@@ -7830,6 +7829,25 @@ fn objective_zone_airbase_id_absent_is_expected(name: &str) -> bool {
     u.starts_with("OLO") && (u.contains("FOB") || u.contains("STRIP"))
 }
 
+fn extend_hub_warehouse_ids_for_olo_logistics(
+    hub_warehouse_ids: &mut HashSet<i64>,
+    obj_dyn_allow: &[ObjectiveDynAllow],
+    base: &LoadedMiz,
+) -> Result<()> {
+    for allow in obj_dyn_allow {
+        if !allow.is_logistics_hub {
+            continue;
+        }
+        let Some(resolved) = resolve_objective_warehouse(base, allow)? else {
+            continue;
+        };
+        if !resolved.is_airport {
+            hub_warehouse_ids.insert(resolved.wh_id);
+        }
+    }
+    Ok(())
+}
+
 /// Collect OAB*/OLO* zones that lack usable `warehouses.airports` binding via `airbaseID`.
 ///
 /// Allowed gap: [`objective_zone_airbase_id_absent_is_expected`] (OLO* FOB/strip placeholders without airports row).
@@ -8177,8 +8195,6 @@ fn patch_warehouse_dynamic_spawn_links(
                 );
                 continue;
             }
-            let mult = mult_cfg.mult_dynamic_row(wid, is_airports_table);
-
             // O* airports: authoritative side from containing zone (4th letter R/B), else warehouse coalition.
             // DEP FARP / naval: prefer warehouse `coalition` so TTDdynFARP / TTDN policy keys match ME rows
             // when geometry overlaps another coalition's O* zone.
@@ -8196,6 +8212,19 @@ fn patch_warehouse_dynamic_spawn_links(
                 warehouse_positions
                     .get(&wid)
                     .and_then(|&pos| objective_dyn_allow_geom_pick(obj_dyn_allow, pos))
+            };
+            let mult = if let Some(allow) = obj_zone {
+                if allow.is_logistics_hub {
+                    mult_cfg.hub_max.max(1)
+                } else if is_airports_table {
+                    mult_cfg.mult_airport(wid)
+                } else {
+                    mult_cfg.mult_dynamic_row(wid, false)
+                }
+            } else if is_airports_table {
+                mult_cfg.mult_airport(wid)
+            } else {
+                mult_cfg.mult_dynamic_row(wid, false)
             };
             let coa: String = wh.raw_get("coalition")?;
             let side_from_wh = match coa.to_lowercase().as_str() {
@@ -9734,6 +9763,10 @@ pub fn run(cfg: &MizCmd) -> Result<()> {
     let dynamic_emit = vehicle_templates
         .emit_dynamic_spawn_templates(lua, &mut base)
         .context("emitting dynamic spawn templates")?;
+    let obj_dyn_allow = build_objective_dyn_allow(&base, &dynamic_emit.dyn_templates)
+        .context("building per-base objective dyn allow map")?;
+    extend_hub_warehouse_ids_for_olo_logistics(&mut hub_warehouse_ids, &obj_dyn_allow, &base)
+        .context("OLO* logistics hub warehouse ids for hub_max multiplier")?;
     sync_l10n_dictionary_sortie_stem_to_output_miz(&base, &cfg.output)
         .context("l10n: set dictionary[mission.sortie] to --output .miz stem (DCS Saved Games / Fowl files)")?;
     let s = serialize_to_lua("mission", Value::Table((&*base.mission).clone()))?;
@@ -9896,8 +9929,6 @@ pub fn run(cfg: &MizCmd) -> Result<()> {
             .context(
                 "production BINVENTORY/RINVENTORY unitIds for dynamic warehouse prefill",
             )?;
-        let obj_dyn_allow = build_objective_dyn_allow(&base, &dynamic_emit.dyn_templates)
-            .context("building per-base objective dyn allow map")?;
         let dyn_farp_allow =
             build_dyn_farp_aircraft_allow(&base, &dynamic_emit.dyn_templates).context(
                 "building TTDdynFARP allowlist for DEP dynamic FARP warehouse A/C stocks",
