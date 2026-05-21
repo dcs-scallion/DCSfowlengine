@@ -863,8 +863,9 @@ pub struct Cfg {
     /// If the warehouse system is to be used then this should be specified,
     /// otherwise warehouses will be ignored and you should set them to unlimited
     pub warehouse: Option<WarehouseConfig>,
-    /// When true, Fowl does not run automatic production delivery or hub distribution
-    /// (DCS / mission warehouse state is authoritative).
+    /// When true: periodic production into logistics hubs and virtual hub-to-objective
+    /// distribution (no 3D convoys). When false: hub production only; no automatic
+    /// virtual distribution (for future ground/air supply routes).
     #[serde(default)]
     pub virtual_resupply: bool,
     /// Decade label for bftools (`weapon{campaign_decade}.miz`); core gameplay ignores unless referenced elsewhere.

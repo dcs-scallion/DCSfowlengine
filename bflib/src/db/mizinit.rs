@@ -365,6 +365,8 @@ impl Db {
         }
         t.seed_objective_warehouses_from_export(lua)
             .context("seeding objective warehouses from Fowl export")?;
+        t.ephemeral.preserve_initial_warehouse_fill = true;
+        t.ephemeral.defer_initial_hub_distribute = true;
         t.ephemeral.dirty();
         Ok(t)
     }
@@ -602,9 +604,11 @@ impl Db {
             );
             return Ok(());
         }
+        self.ephemeral.preserve_initial_warehouse_fill = true;
+        self.ephemeral.defer_initial_hub_distribute = true;
         self.setup_warehouses_after_load(lua)
             .context("warehouses after deferred TISP")?;
-        info!("warehouses re-synced after deferred TISP placement");
+        info!("warehouses re-synced after deferred TISP placement (bftools fill preserved)");
         self.ephemeral.dirty();
         Ok(())
     }

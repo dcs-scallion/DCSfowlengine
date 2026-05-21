@@ -1,6 +1,6 @@
 [package]
 name = "bflib"
-version = "0.1.0"
+version.workspace = true
 edition = "2024"
 
 [lib]
@@ -10,7 +10,7 @@ crate-type = ["cdylib"]
 [dependencies]
 anyhow = { workspace = true }
 arcstr = { workspace = true }
-bfprotocols = { version = "0.1", path = "../bfprotocols" }
+bfprotocols = { version = "2.0", path = "../bfprotocols" }
 bytes = { workspace = true }
 chrono = { workspace = true }
 compact_str = { workspace = true }

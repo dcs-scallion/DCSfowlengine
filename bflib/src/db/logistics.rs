@@ -42,7 +42,7 @@ use dcso3::{
     LuaVec2, MizLua, String, Vector2,
 };
 use fxhash::{FxHashMap, FxHashSet};
-use log::{error, warn};
+use log::{error, info, warn};
 use serde_derive::{Deserialize, Serialize};
 use smallvec::{smallvec, SmallVec};
 
@@ -941,12 +941,21 @@ impl Db {
             bail!("objectives missing a warehouse {:?}", missing)
         }
         let sync_oids: Vec<ObjectiveId> = self.ephemeral.airbase_by_oid.keys().copied().collect();
+        let preserve_fill = self.ephemeral.preserve_initial_warehouse_fill;
         for oid in sync_oids {
             self.sync_warehouse_to_objective(lua, oid)
                 .with_context(|| format_compact!("seed virtual stock from DCS warehouse for {:?}", oid))?;
-            self.sync_objective_to_warehouse(lua, oid).with_context(|| {
-                format_compact!("Fowl export: prune/sync DCS warehouse for {:?}", oid)
-            })?;
+            if !preserve_fill {
+                self.sync_objective_to_warehouse(lua, oid).with_context(|| {
+                    format_compact!("Fowl export: prune/sync DCS warehouse for {:?}", oid)
+                })?;
+            }
+        }
+        if preserve_fill {
+            self.ephemeral.preserve_initial_warehouse_fill = false;
+            info!(
+                "new campaign: preserved bftools ME warehouse stock (virtual sync from DCS only, no prune/sync-to)"
+            );
         }
         self.update_supply_status()
             .context("updating supply status")?;
@@ -1027,11 +1036,19 @@ impl Db {
                             v
                         } else {
                             self.persisted.logistics_ticks_since_delivery += 1;
-                            let v = match self.deliver_supplies_from_logistics_hubs() {
-                                Ok(v) => v,
-                                Err(e) => {
-                                    error!("failed to deliver supplies from hubs {:?}", e);
-                                    vec![]
+                            let v = if self.ephemeral.defer_initial_hub_distribute {
+                                self.ephemeral.defer_initial_hub_distribute = false;
+                                info!(
+                                    "new campaign: skipping initial hub-to-objective distribute (bftools warehouse fill)"
+                                );
+                                vec![]
+                            } else {
+                                match self.deliver_supplies_from_logistics_hubs() {
+                                    Ok(v) => v,
+                                    Err(e) => {
+                                        error!("failed to deliver supplies from hubs {:?}", e);
+                                        vec![]
+                                    }
                                 }
                             };
                             record_perf(&mut perf.logistics_distribute, sts);
@@ -1190,7 +1207,7 @@ impl Db {
     }
 
     pub fn deliver_production(&mut self) -> Result<Vec<Transfer>> {
-        if self.ephemeral.cfg.warehouse.is_none() || self.ephemeral.cfg.virtual_resupply {
+        if self.ephemeral.cfg.warehouse.is_none() {
             return Ok(vec![]);
         }
         self.setup_supply_lines()
@@ -1245,7 +1262,7 @@ impl Db {
     }
 
     pub fn deliver_supplies_from_logistics_hubs(&mut self) -> Result<Vec<Transfer>> {
-        if self.ephemeral.cfg.virtual_resupply {
+        if !self.ephemeral.cfg.virtual_resupply {
             return Ok(vec![]);
         }
         self.update_supply_status()
@@ -1323,7 +1340,7 @@ impl Db {
     }
 
     fn balance_logistics_hubs(&mut self) -> Result<()> {
-        if self.ephemeral.cfg.virtual_resupply {
+        if !self.ephemeral.cfg.virtual_resupply {
             return Ok(());
         }
         struct Needed<'a> {
@@ -1421,6 +1438,9 @@ impl Db {
             let mut n = 0;
             let mut sum: u32 = 0;
             for (_, inv) in &obj.warehouse.equipment {
+                if inv.stored == 0 {
+                    continue;
+                }
                 if let Some(pct) = inv.percent() {
                     sum += pct as u32;
                     n += 1;

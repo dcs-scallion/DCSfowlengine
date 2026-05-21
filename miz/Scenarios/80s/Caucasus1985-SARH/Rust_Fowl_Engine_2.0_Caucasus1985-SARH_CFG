@@ -8,7 +8,6 @@
     "delay": 900
   },
   "admins": {
-    "f279deb7a6b62c96a78eca3ddb2bd8d0": "REAPER 32 | EvilKipper",
     "4344dbefeef94662d129cba1a8596c3a": "Scallion | Robo76"
   },
   "banned": {},
@@ -21,9 +20,9 @@
   },
   "name_filter": "^[a-zA-Z0-9_<>|= ]+$",
   "max_msgs_per_second": 5,
-  "shutdown": 12,
+  "shutdown": 7,
   "points": {
-    "new_player_join": 190000,
+    "new_player_join": 1900000,
     "air_kill": 25,
     "ground_kill": 2,
     "lr_sam_bonus": 5,
@@ -65,23 +64,23 @@
   },
   "virtual_resupply": true,
   "campaign_decade": "1980s",
-  "default_warehouse_AAmissiles": 50, 
-  "default_warehouse_AGmissiles": 60, 
+  "default_warehouse_AAmissiles": 30, 
+  "default_warehouse_AGmissiles": 40, 
   "default_warehouse_AGrockets": 80, 
-  "default_warehouse_AGbombs": 70,
-  "default_warehouse_AGguidedbombs": 40,
-  "default_warehouse_Fueltanks": 20,
-  "default_warehouse_Misc": 50,
+  "default_warehouse_AGbombs": 50,
+  "default_warehouse_AGguidedbombs": 20,
+  "default_warehouse_Fueltanks": 10,
+  "default_warehouse_Misc": 25,
   "warehouse": {
-    "farp_max": 2,
-    "fob_max": 3,
-    "carrier_airbase_max": 4, 
-    "airbase_max": 5,
+    "farp_max": 1,
+    "fob_max": 2,
+    "carrier_airbase_max": 3,
+    "airbase_max": 4,
     "hub_max": 10,
     "dynamicFARPs_InitialStockPercentage": 20,
-    "tick": 5,
+    "tick": 15,
+    "ticks_per_delivery": 8,
     "supply_transfer_size": 25,
-    "ticks_per_delivery": 100,
     "supply_transfer_crate": {
       "Red": {
         "name": "Supply Transfer",
@@ -181,7 +180,7 @@
   "crate_spread": 500,
   "artillery_mission_range": 70000,
   "alcm_mission_range": 600000,
-  "lock_sides": true,
+  "lock_sides": false,
   "side_switches": 1,
   "max_crates": 6,
   "life_types": {
@@ -3153,9 +3152,6 @@
     "A6E": [
       "Unarmed"
     ],
-    "CH-53E": [
-      "Unarmed"
-    ],
     "S-3B Tanker": [
       "Unarmed"
     ],
@@ -4041,6 +4037,11 @@
       "Invincible"
     ],
     "SINGLE_HELIPAD": [
+      "Logistics",
+      "Unarmed",
+      "Invincible"
+    ],
+    "FARP_SINGLE_01": [
       "Logistics",
       "Unarmed",
       "Invincible"

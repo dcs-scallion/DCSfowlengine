@@ -57,6 +57,9 @@ uuid = { version = "1", features = ["v4", "serde"] }
 warp = { version = "0.3", features = ["tls"] }
 zstd = { version = "0.13" }
 
+[workspace.package]
+version = "2.0.0"
+
 [workspace]
 resolver = "2"
 members = ["dcso3", "bflib", "bfdb", "bfprotocols", "yats"]

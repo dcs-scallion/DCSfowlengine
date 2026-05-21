@@ -41,6 +41,8 @@ This sets:
 
 ### Building
 
+**Crate versions (Fowl 2.0):** `bflib`, `bfprotocols`, `bfdb`, and `yats` use `version.workspace = true` from root `Cargo.toml` `[workspace.package]` (currently **2.0.0**). `bftools` is outside the workspace and sets the same version in `bftools/Cargo.toml`. Bump both places when releasing; `dcso3` stays on its own line (0.2.x).
+
 **Primary build target** (DCS mission script DLL):
 ```bash
 cargo build --release --package=bflib

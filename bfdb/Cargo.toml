@@ -1,6 +1,6 @@
 [package]
 name = "bfdb"
-version = "0.1.0"
+version.workspace = true
 edition = "2021"
 
 [[bin]]
@@ -17,7 +17,7 @@ path = "src/migrate.rs"
 [dependencies]
 anyhow = { workspace = true }
 arrayvec = { workspace = true }
-bfprotocols = { version = "0.1.0", path = "../bfprotocols" }
+bfprotocols = { version = "2.0", path = "../bfprotocols" }
 bincode = { workspace = true }
 bytes = { workspace = true }
 chrono = { workspace = true }
@@ -44,4 +44,4 @@ smallvec = { workspace = true }
 tokio = { workspace = true }
 uuid = { workspace = true }
 warp = { workspace = true }
-yats = { version = "0.1", path = "../yats" }
+yats = { version = "2.0", path = "../yats" }

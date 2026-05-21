@@ -147,6 +147,10 @@ pub struct Ephemeral {
     pub(super) delayspawnq: BTreeMap<DateTime<Utc>, SmallVec<[GroupId; 8]>>,
     /// New round only: wall-clock time to run `place_tisp_initial_ships` after full startup.
     pub(super) tisp_initial_after: Option<DateTime<Utc>>,
+    /// New round: do not push virtual stock into DCS during initial `setup_warehouses` passes.
+    pub(super) preserve_initial_warehouse_fill: bool,
+    /// New round only: skip one hub distribute after bftools/`setup_warehouses` fill.
+    pub(super) defer_initial_hub_distribute: bool,
     pub(super) awacs_stn: u32,
     pub(super) logistics_stage: LogiStage,
     spawnq: VecDeque<GroupId>,
@@ -190,6 +194,8 @@ impl Default for Ephemeral {
             actions_taken: FxHashMap::default(),
             delayspawnq: BTreeMap::default(),
             tisp_initial_after: None,
+            preserve_initial_warehouse_fill: false,
+            defer_initial_hub_distribute: false,
             awacs_stn: 0o77777,
             spawnq: VecDeque::default(),
             despawnq: VecDeque::default(),
