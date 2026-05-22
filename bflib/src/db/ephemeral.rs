@@ -19,7 +19,7 @@ use super::{
     group::{SpawnedGroup, SpawnedUnit},
     logistics::LogiStage,
     markup::ObjectiveMarkup,
-    objective::Objective,
+    objective::{Objective, Zone},
     persisted::Persisted,
 };
 use crate::{
@@ -63,7 +63,7 @@ use dcso3::{
 };
 use fxhash::{FxBuildHasher, FxHashMap, FxHashSet};
 use indexmap::{IndexMap, IndexSet};
-use log::{error, info};
+use log::{error, info, warn};
 use mlua::prelude::*;
 use smallvec::{SmallVec, smallvec};
 use std::{
@@ -133,6 +133,10 @@ pub struct Ephemeral {
     pub(super) slot_by_miz_gid: FxHashMap<miz::GroupId, SlotId>,
     pub(super) airbase_by_oid: FxHashMap<ObjectiveId, DcsOid<ClassAirbase>>,
     pub(super) airbases_by_oid: FxHashMap<ObjectiveId, SmallVec<[DcsOid<ClassAirbase>; 2]>>,
+    /// FARP pad ME name (e.g. `BForrestal`) -> naval objective id.
+    pub(super) pad_template_to_objective: FxHashMap<String, ObjectiveId>,
+    /// `TTSN` + pad name trigger zones for deck slot association when `O` zones miss the ship.
+    pub(super) naval_slot_zones: FxHashMap<String, Zone>,
     pub(super) slot_info: FxHashMap<SlotId, SlotInfo>,
     used_pad_templates: FxHashSet<String>,
     pub(super) global_pad_templates: FxHashSet<String>,
@@ -184,6 +188,8 @@ impl Default for Ephemeral {
             uid_by_static: FxHashMap::default(),
             airbase_by_oid: FxHashMap::default(),
             airbases_by_oid: FxHashMap::default(),
+            pad_template_to_objective: FxHashMap::default(),
+            naval_slot_zones: FxHashMap::default(),
             slot_info: FxHashMap::default(),
             used_pad_templates: FxHashSet::default(),
             global_pad_templates: FxHashSet::default(),
@@ -638,8 +644,12 @@ impl Ephemeral {
                     self.units_able_to_move.swap_remove(&uid);
                     return Some((uid, ucid));
                 }
+            } else {
+                self.slot_by_object_id.retain(|_, s| s != slot);
+                warn!(
+                    "deslot {slot} for {ucid}: unit object id mapping already cleared"
+                );
             }
-            error!("have ucid but no unitid for dead slot {slot} {ucid}");
         }
         None
     }

@@ -464,7 +464,7 @@ fn try_occupy_slot(
     slot: SlotId,
 ) -> Result<bool> {
     let now = Utc::now();
-    match ctx.db.try_occupy_slot(now, side, slot, &ifo.ucid) {
+    match ctx.db.try_occupy_slot(MizLua::from_env(lua), now, side, slot, &ifo.ucid) {
         SlotAuth::NotRegistered(side) => {
             let name = ifo.name.clone();
             match ctx.db.register_player(ifo.ucid, name.clone(), side) {
@@ -567,7 +567,8 @@ fn on_event(lua: MizLua, ev: Event) -> Result<()> {
         Event::Birth(b) => {
             if let Ok(unit) = b.initiator.as_unit() {
                 ctx.recently_born.insert(unit.object_id()?, Utc::now());
-                match ctx.db.unit_born(lua, &unit, &ctx.connected) {
+                let birth_place = b.place.as_ref();
+                match ctx.db.unit_born(lua, &unit, &ctx.connected, birth_place) {
                     Ok(BirthRes::None) => (),
                     Ok(BirthRes::OccupiedSlot(slot)) => {
                         if ctx.db.ephemeral.cfg.limited_lives && ctx.db.ephemeral.cfg.lives_birth {
@@ -612,7 +613,7 @@ fn on_event(lua: MizLua, ev: Event) -> Result<()> {
                     }
                 }
                 match ctx.db.player_left_unit(lua, start_ts, &initiator) {
-                    Ok((_, Some((ucid, slot, typ)), deslot_ucid)) => {
+                    Ok((_, Some((ucid, slot, typ)), deslot)) => {
                         let mut msg = CompactString::new("life returned\n");
                         if let Ok(l) = format_lives_total(&mut ctx.db, &ucid, typ) {
                             msg.push_str(&l);
@@ -632,19 +633,19 @@ fn on_event(lua: MizLua, ev: Event) -> Result<()> {
                                 }
                             }
                         }
-                        if let Some(ucid) = deslot_ucid.as_ref() {
-                            ctx.db.player_deslot(ucid);
+                        if let Some((ucid, slot)) = deslot {
+                            ctx.db.player_deslot_slot(&ucid, &slot);
                         }
                     }
-                    Ok((_, None, deslot_ucid)) => {
-                        if let Some(ucid) = deslot_ucid.as_ref() {
-                            ctx.db.player_deslot(ucid);
+                    Ok((_, None, deslot)) => {
+                        if let Some((ucid, slot)) = deslot {
+                            ctx.db.player_deslot_slot(&ucid, &slot);
                         }
                     }
                     Err(e) => error!("player left unit failed {:?}", e),
                 }
             } else {
-                error!("player leave unit with no unit")
+                handle_player_leave_unit_no_initiator(ctx, lua, start_ts);
             }
         }
         Event::Hit(e) | Event::Kill(e) => {
@@ -992,6 +993,78 @@ fn check_auto_shutdown(
         return admin::admin_shutdown(ctx, lua, Some(Some(victor)));
     }
     Ok(AdminResult::Continue)
+}
+
+fn handle_player_leave_unit_no_initiator(
+    ctx: &mut Context,
+    lua: MizLua,
+    start_ts: DateTime<Utc>,
+) {
+    let changing: SmallVec<[Ucid; 4]> = ctx
+        .connected
+        .id_by_ucid
+        .keys()
+        .filter(|ucid| {
+            ctx.db
+                .persisted
+                .players
+                .get(ucid)
+                .is_some_and(|p| p.changing_slots)
+        })
+        .copied()
+        .collect();
+    if changing.is_empty() {
+        debug!("PlayerLeaveUnit without initiator (observer or slot handoff)");
+        return;
+    }
+    for ucid in changing {
+        let slot = ctx
+            .db
+            .persisted
+            .players
+            .get(&ucid)
+            .and_then(|p| p.current_slot.as_ref().map(|(s, _)| *s));
+        let Some(slot) = slot else {
+            ctx.db.player_deslot(&ucid);
+            continue;
+        };
+        let Some(objid) = ctx.db.ephemeral.get_object_id_by_slot(&slot).cloned() else {
+            ctx.db.player_deslot_slot(&ucid, &slot);
+            continue;
+        };
+        match ctx.db.player_left_unit(lua, start_ts, &objid) {
+            Ok((_, Some((ucid, slot, typ)), deslot)) => {
+                info!("life returned on deslot for {ucid} ({typ})");
+                let mut msg = CompactString::new("life returned\n");
+                if let Ok(l) = format_lives_total(&mut ctx.db, &ucid, typ) {
+                    msg.push_str(&l);
+                }
+                if let Some(miz_gid) =
+                    ctx.db.ephemeral.get_slot_info(&slot).map(|sifo| sifo.miz_gid)
+                {
+                    if let Ok(trigger) = Trigger::singleton(lua) {
+                        if let Ok(action) = trigger.action() {
+                            let _ = action.out_text_for_group(
+                                miz_gid,
+                                msg.into(),
+                                10,
+                                false,
+                            );
+                        }
+                    }
+                }
+                if let Some((ucid, slot)) = deslot {
+                    ctx.db.player_deslot_slot(&ucid, &slot);
+                }
+            }
+            Ok((_, None, deslot)) => {
+                if let Some((ucid, slot)) = deslot {
+                    ctx.db.player_deslot_slot(&ucid, &slot);
+                }
+            }
+            Err(e) => error!("player left unit (no initiator) failed {:?}", e),
+        }
+    }
 }
 
 fn force_players_to_spectators(ctx: &mut Context, net: &Net, ts: DateTime<Utc>) {

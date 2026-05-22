@@ -420,6 +420,12 @@ impl<'lua> LuaEnv<'lua> for HooksLua<'lua> {
 #[derive(Debug, Clone, Copy)]
 pub struct MizLua<'lua>(&'lua Lua);
 
+impl<'lua> MizLua<'lua> {
+    pub fn from_env<L: LuaEnv<'lua>>(env: L) -> Self {
+        MizLua(env.inner())
+    }
+}
+
 impl<'lua> LuaEnv<'lua> for MizLua<'lua> {
     fn inner(self) -> &'lua Lua {
         self.0

@@ -45,7 +45,11 @@ use chrono::prelude::*;
 use compact_str::CompactString;
 use dcso3::{
     airbase::Airbase,
-    centroid2d, coalition::Side, controller::PointType, coord::Coord, env::miz::{Group, Miz, MizIndex, Skill, TriggerZone, TriggerZoneTyp}, land::Land, net::Net, trigger::Trigger, LuaVec2, LuaVec3, MizLua, String, Vector2, Vector3
+    centroid2d, coalition::Side, controller::{MissionPoint, PointType}, coord::Coord,
+    env::miz::{Group, Miz, MizIndex, Skill, TriggerZone, TriggerZoneTyp},
+    land::Land, net::Net, object::{DcsObject, Object}, trigger::Trigger, LuaVec2, LuaVec3, MizLua,
+    String,
+    Vector2, Vector3,
 };
 use enumflags2::BitFlags;
 use fxhash::FxHashSet;
@@ -226,7 +230,141 @@ impl Db {
         Ok(())
     }
 
-    pub fn init_objective_slots(&mut self, side: Side, slot: Group) -> Result<()> {
+    fn zone_from_trigger(zone: &TriggerZone<'_>) -> Result<Zone> {
+        Ok(match zone.typ()? {
+            TriggerZoneTyp::Quad(points) => Zone::Quad {
+                pos: centroid2d([points.p0.0, points.p1.0, points.p2.0, points.p3.0]),
+                points,
+            },
+            TriggerZoneTyp::Circle { radius } => Zone::Circle {
+                pos: zone.pos()?,
+                radius,
+            },
+        })
+    }
+
+    fn build_carrier_slot_maps(&mut self, miz: &Miz) -> Result<()> {
+        self.ephemeral.pad_template_to_objective.clear();
+        for (id, obj) in self.persisted.objectives.into_iter() {
+            if let ObjectiveKind::Farp { pad_template, .. } = &obj.kind {
+                self.ephemeral
+                    .pad_template_to_objective
+                    .insert(pad_template.clone(), *id);
+            }
+        }
+        self.ephemeral.naval_slot_zones.clear();
+        for zone in miz.triggers()? {
+            let zone = zone?;
+            let name = zone.name()?;
+            let Some(pad) = name.strip_prefix("TTSN") else {
+                continue;
+            };
+            self.ephemeral
+                .naval_slot_zones
+                .insert(String::from(pad), Self::zone_from_trigger(&zone)?);
+        }
+        Ok(())
+    }
+
+    fn pad_template_from_link_offset(
+        miz: &Miz,
+        idx: &MizIndex,
+        slot: &Group,
+    ) -> Result<Option<String>> {
+        if !slot.raw_get::<_, bool>("linkOffset").unwrap_or(false) {
+            return Ok(None);
+        }
+        let route = slot.route()?;
+        for point in route.points()? {
+            let point: MissionPoint = point?;
+            let Some(link_id) = point.link_unit else {
+                continue;
+            };
+            let Some(ifo) = miz.get_group_by_unit(idx, &link_id)? else {
+                continue;
+            };
+            return Ok(Some(ifo.group.name()?));
+        }
+        Ok(None)
+    }
+
+    pub(crate) fn objective_id_for_carrier_airbase(
+        &self,
+        airbase_oid: &dcso3::object::DcsOid<dcso3::airbase::ClassAirbase>,
+    ) -> Option<ObjectiveId> {
+        self.ephemeral
+            .airbases_by_oid
+            .iter()
+            .find(|(_, oids)| oids.iter().any(|o| o == airbase_oid))
+            .map(|(oid, _)| *oid)
+    }
+
+    pub(crate) fn objective_for_slot_birth<'lua>(
+        &self,
+        lua: MizLua<'lua>,
+        birth_place: Option<&Object<'lua>>,
+        pos: Vector2,
+    ) -> Option<ObjectiveId> {
+        if let Some(place) = birth_place {
+            if let Ok(place_oid) = place.object_id() {
+                if let Ok(ab) = Airbase::get_instance_dyn(lua, &place_oid) {
+                    if let Ok(ab_oid) = ab.object_id() {
+                        if let Some(oid) = self.objective_id_for_carrier_airbase(&ab_oid) {
+                            return Some(oid);
+                        }
+                    }
+                }
+            }
+        }
+        for (id, obj) in self.persisted.objectives.into_iter() {
+            if obj.zone.contains(pos) {
+                return Some(*id);
+            }
+        }
+        for (pad, zone) in &self.ephemeral.naval_slot_zones {
+            if zone.contains(pos) {
+                if let Some(&oid) = self.ephemeral.pad_template_to_objective.get(pad) {
+                    return Some(oid);
+                }
+            }
+        }
+        None
+    }
+
+    fn resolve_client_slot_objective(
+        &self,
+        miz: &Miz,
+        idx: &MizIndex,
+        pos: Vector2,
+        slot: &Group,
+    ) -> Result<Option<ObjectiveId>> {
+        for (id, obj) in self.persisted.objectives.into_iter() {
+            if obj.zone.contains(pos) {
+                return Ok(Some(*id));
+            }
+        }
+        for (pad, zone) in &self.ephemeral.naval_slot_zones {
+            if zone.contains(pos) {
+                if let Some(&oid) = self.ephemeral.pad_template_to_objective.get(pad) {
+                    return Ok(Some(oid));
+                }
+            }
+        }
+        if let Some(pad) = Self::pad_template_from_link_offset(miz, idx, slot)? {
+            if let Some(&oid) = self.ephemeral.pad_template_to_objective.get(&pad) {
+                return Ok(Some(oid));
+            }
+        }
+        Ok(None)
+    }
+
+    pub fn init_objective_slots(
+        &mut self,
+        miz: &Miz,
+        idx: &MizIndex,
+        side: Side,
+        slot: Group,
+    ) -> Result<()> {
         // Warehouse dyn templates and carrier-linked static slots use deck routes without ComboTask.
         if slot.raw_get::<_, bool>("dynSpawnTemplate").unwrap_or(false) {
             return Ok(());
@@ -262,21 +400,13 @@ impl Db {
             }
             let id = unit.slot()?;
             let pos = unit.pos()?;
-            let obj = {
-                let mut iter = self.persisted.objectives.into_iter();
-                loop {
-                    match iter.next() {
-                        None => {
-                            info!("slot {:?} not associated with an objective", slot);
-                            return Ok(());
-                        }
-                        Some((id, obj)) => {
-                            if obj.zone.contains(pos) {
-                                break *id;
-                            }
-                        }
-                    }
-                }
+            let Some(obj) = self.resolve_client_slot_objective(miz, idx, pos, &slot)? else {
+                info!(
+                    "slot {:?} unit {:?} not associated with an objective",
+                    slot.name()?,
+                    unit.name()?
+                );
+                continue;
             };
             self.ephemeral.cfg.check_vehicle_has_life_type(&vehicle)?;
             self.ephemeral.slot_info.insert(
@@ -322,6 +452,7 @@ impl Db {
                 t.init_objective(lua, zone, name)?
             }
         }
+        t.build_carrier_slot_maps(miz)?;
         for side in Side::ALL {
             let coa = miz.coalition(side)?;
             for zone in miz.triggers()? {
@@ -345,11 +476,11 @@ impl Db {
                 let country = country?;
                 for plane in country.planes()? {
                     let plane = plane?;
-                    t.init_objective_slots(side, plane)?
+                    t.init_objective_slots(miz, idx, side, plane)?
                 }
                 for heli in country.helicopters()? {
                     let heli = heli?;
-                    t.init_objective_slots(side, heli)?
+                    t.init_objective_slots(miz, idx, side, heli)?
                 }
             }
         }
@@ -382,6 +513,7 @@ impl Db {
         spctx: &SpawnCtx,
     ) -> Result<()> {
         debug!("init slots");
+        self.build_carrier_slot_maps(miz)?;
         // migrate format changes
         if !self.persisted.migrated_v0 {
             self.persisted.migrated_v0 = true;
@@ -412,11 +544,11 @@ impl Db {
                 let country = country?;
                 for plane in country.planes()? {
                     let plane = plane?;
-                    self.init_objective_slots(side, plane)?
+                    self.init_objective_slots(miz, idx, side, plane)?
                 }
                 for heli in country.helicopters()? {
                     let heli = heli?;
-                    self.init_objective_slots(side, heli)?
+                    self.init_objective_slots(miz, idx, side, heli)?
                 }
             }
         }

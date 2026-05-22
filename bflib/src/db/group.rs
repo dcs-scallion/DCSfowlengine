@@ -41,7 +41,7 @@ use dcso3::{
     group::{Group as DcsGroup, GroupCategory},
     land::{Land, SurfaceType},
     net::{SlotId, Ucid},
-    object::{DcsObject, DcsOid},
+    object::{DcsObject, DcsOid, Object},
     rotate2d_gen,
     static_object::{ClassStatic, StaticObject},
     trigger::MarkId,
@@ -963,33 +963,41 @@ impl Db {
         lua: MizLua,
         unit: &Unit,
         connected: &Connected,
+        birth_place: Option<&Object<'_>>,
     ) -> Result<BirthRes> {
         let id = unit.object_id()?;
         let name = unit.get_name()?;
-        if let Some(uid) = self.persisted.units_by_name.get(name.as_str()) {
-            let unit = unit!(self, uid)?;
-            self.ephemeral.uid_by_object_id.insert(id.clone(), *uid);
-            self.ephemeral.object_id_by_uid.insert(*uid, id.clone());
-            self.ephemeral.units_potentially_close_to_enemies.insert(*uid);
-            if unit.tags.contains(UnitTag::Driveable) {
-                self.ephemeral.units_able_to_move.insert(*uid);
+        let player_in_unit = unit
+            .get_player_name()
+            .ok()
+            .flatten()
+            .and_then(|n| connected.get_by_name(&n));
+        if player_in_unit.is_none() {
+            if let Some(uid) = self.persisted.units_by_name.get(name.as_str()) {
+                let unit = unit!(self, uid)?;
+                self.ephemeral.uid_by_object_id.insert(id.clone(), *uid);
+                self.ephemeral.object_id_by_uid.insert(*uid, id.clone());
+                self.ephemeral.units_potentially_close_to_enemies.insert(*uid);
+                if unit.tags.contains(UnitTag::Driveable) {
+                    self.ephemeral.units_able_to_move.insert(*uid);
+                }
+                self.ephemeral.stat(Stat::Unit {
+                    id: EnId::Unit(*uid),
+                    gid: Some(unit.group),
+                    owner: unit.side,
+                    typ: stats::Unit { typ: unit.typ.clone(), tags: unit.tags },
+                    pos: stats::Pos {
+                        pos: Coord::singleton(lua)?
+                            .lo_to_ll(LuaVec3(Vector3::new(unit.pos.x, 0., unit.pos.y)))?,
+                        velocity: unit.airborne_velocity.unwrap_or_default(),
+                    },
+                });
+                let gid = unit.group;
+                if group_health!(self, gid)?.0 == 1 {
+                    self.mark_group(lua, &gid)?
+                }
+                return Ok(BirthRes::None);
             }
-            self.ephemeral.stat(Stat::Unit {
-                id: EnId::Unit(*uid),
-                gid: Some(unit.group),
-                owner: unit.side,
-                typ: stats::Unit { typ: unit.typ.clone(), tags: unit.tags },
-                pos: stats::Pos {
-                    pos: Coord::singleton(lua)?
-                        .lo_to_ll(LuaVec3(Vector3::new(unit.pos.x, 0., unit.pos.y)))?,
-                    velocity: unit.airborne_velocity.unwrap_or_default(),
-                },
-            });
-            let gid = unit.group;
-            if group_health!(self, gid)?.0 == 1 {
-                self.mark_group(lua, &gid)?
-            }
-            return Ok(BirthRes::None);
         }
         let slot = unit.slot()?;
         let (si, deferred_validate) = match self.ephemeral.slot_info.get(&slot) {
@@ -998,9 +1006,14 @@ impl Db {
                 // it's a dynamic slot
                 let typ = vehicle_type_for_dynamic_slot(unit)?;
                 let pos = unit.get_ground_position()?;
-                let obj =
-                    Db::objective_for_dynamic_slot_pos(&self.persisted.objectives, pos.0)
-                        .ok_or_else(|| anyhow!("dynamic slot not near any objective"))?;
+                let obj_id = self
+                    .objective_for_slot_birth(lua, birth_place, pos.0)
+                    .or_else(|| {
+                        Db::objective_for_dynamic_slot_pos(&self.persisted.objectives, pos.0)
+                            .map(|o| o.id)
+                    })
+                    .ok_or_else(|| anyhow!("dynamic slot not near any objective"))?;
+                let obj = objective!(self, obj_id)?;
                 let gid = unit.get_group()?.id()?;
                 let gid = miz::GroupId::from(gid.inner());
                 self.ephemeral.slot_info.insert(
@@ -1038,7 +1051,7 @@ impl Db {
             .get(&typ)
             .unwrap_or(&UnitTags::default());
         if deferred_validate {
-            match self.try_occupy_slot_deferred(Utc::now(), &ucid, slot) {
+            match self.try_occupy_slot_deferred(lua, Utc::now(), &ucid, slot) {
                 SlotAuth::Yes(typ) => {
                     self.ephemeral.stat(Stat::Slot { id: ucid, slot, typ });
                 }
@@ -1081,7 +1094,12 @@ impl Db {
             None => return Ok(()),
             Some((uid, ucid)) => {
                 if let Some(ucid) = ucid {
-                    self.player_deslot(&ucid)
+                    let slot = self
+                        .persisted
+                        .players
+                        .get(&ucid)
+                        .and_then(|p| p.current_slot.as_ref().map(|(s, _)| *s));
+                    self.sync_player_deslot_state(&ucid, slot);
                 }
                 uid
             }

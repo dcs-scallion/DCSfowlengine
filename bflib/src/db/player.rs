@@ -14,12 +14,15 @@ FITNESS FOR A PARTICULAR PURPOSE. See the GNU Affero Public License
 for more details.
 */
 
-use super::{Db, MapS, SetS, ephemeral::SlotInfo, group::DeployKind};
+use super::{Db, MapS, SetS, ephemeral::SlotInfo, group::DeployKind, objective::Objective};
 use crate::{maybe, maybe_mut, objective_mut};
 use anyhow::{Context, Result, anyhow, bail};
 use bfprotocols::{
     cfg::{LifeType, PointsCfg, UnitTag, Vehicle},
-    db::{group::GroupId, objective::ObjectiveId},
+    db::{
+        group::GroupId,
+        objective::{ObjectiveId, ObjectiveKind},
+    },
     shots::{Dead, Who},
     stats::{self, EnId, Stat},
 };
@@ -116,18 +119,50 @@ pub struct Player {
 }
 
 impl Db {
-    pub fn player_deslot(&mut self, ucid: &Ucid) {
+    /// Clear persisted slot state after ephemeral mappings are already gone.
+    pub fn sync_player_deslot_state(&mut self, ucid: &Ucid, slot: Option<SlotId>) {
         if let Some(player) = self.persisted.players.get_mut_cow(ucid) {
             player.airborne = None;
             player.provisional_points = 0;
-            if let Some((slot, _)) = player.current_slot.take() {
-                let _ = self
-                    .ephemeral
-                    .player_deslot(&self.persisted, &slot, Some(*ucid));
+            player.changing_slots = false;
+            if let Some(slot) = slot {
+                if player.current_slot.as_ref().map(|(s, _)| *s) == Some(slot) {
+                    player.current_slot.take();
+                }
+            } else {
+                player.current_slot.take();
             }
             self.ephemeral.stat(Stat::Deslot { id: *ucid });
-            self.ephemeral.dirty()
+            self.ephemeral.dirty();
         }
+    }
+
+    pub fn player_deslot_slot(&mut self, ucid: &Ucid, slot: &SlotId) {
+        let _ = self
+            .ephemeral
+            .player_deslot(&self.persisted, slot, Some(*ucid));
+        self.sync_player_deslot_state(ucid, Some(*slot));
+    }
+
+    pub fn player_deslot(&mut self, ucid: &Ucid) {
+        let slots: SmallVec<[SlotId; 4]> = self
+            .ephemeral
+            .players_by_slot
+            .iter()
+            .filter(|(_, u)| **u == *ucid)
+            .map(|(s, _)| *s)
+            .collect();
+        for slot in slots {
+            let _ = self
+                .ephemeral
+                .player_deslot(&self.persisted, &slot, Some(*ucid));
+        }
+        let current = self
+            .persisted
+            .players
+            .get(ucid)
+            .and_then(|p| p.current_slot.as_ref().map(|(s, _)| *s));
+        self.sync_player_deslot_state(ucid, current);
     }
 
     pub fn player(&self, ucid: &Ucid) -> Option<&Player> {
@@ -513,8 +548,35 @@ impl Db {
         Ok(())
     }
 
+    fn slot_airframe_available(
+        &self,
+        lua: MizLua,
+        objective: &Objective,
+        typ: &str,
+    ) -> Result<bool> {
+        if let Some(inv) = objective.warehouse.equipment.get(typ) {
+            if inv.stored > 0 {
+                return Ok(true);
+            }
+        }
+        if let ObjectiveKind::Farp { pad_template, .. } = &objective.kind {
+            let count = if let Some(ab) = self.ephemeral.airbase_by_oid.get(&objective.id) {
+                Airbase::get_instance(lua, ab)?
+                    .get_warehouse()?
+                    .get_item_count(String::from(typ))?
+            } else {
+                Airbase::get_by_name(lua, pad_template.clone())?
+                    .get_warehouse()?
+                    .get_item_count(String::from(typ))?
+            };
+            return Ok(count > 0);
+        }
+        Ok(false)
+    }
+
     pub fn try_occupy_slot(
         &mut self,
+        lua: MizLua,
         time: DateTime<Utc>,
         slot_side: Side,
         slot: SlotId,
@@ -562,7 +624,7 @@ impl Db {
             }
             SlotId::Unit(_) | SlotId::MultiCrew(_, _) => {
                 if self.ephemeral.slot_info.contains_key(&slot) {
-                    self.try_occupy_slot_deferred(time, ucid, slot)
+                    self.try_occupy_slot_deferred(lua, time, ucid, slot)
                 } else {
                     player.changing_slots = true;
                     player.jtac_or_spectators = false;
@@ -574,6 +636,7 @@ impl Db {
 
     pub fn try_occupy_slot_deferred(
         &mut self,
+        lua: MizLua,
         time: DateTime<Utc>,
         ucid: &Ucid,
         slot: SlotId,
@@ -582,39 +645,53 @@ impl Db {
             None => return SlotAuth::Denied,
             Some(sifo) => sifo,
         };
-        let player = match self.persisted.players.get_mut_cow(ucid) {
-            Some(player) => player,
-            None => {
-                if slot.is_spectator() {
-                    return SlotAuth::Yes(None);
-                }
-                return SlotAuth::NotRegistered(sifo.side);
+        if self.persisted.players.get(ucid).is_none() {
+            if slot.is_spectator() {
+                return SlotAuth::Yes(None);
             }
-        };
+            return SlotAuth::NotRegistered(sifo.side);
+        }
         let objective = match self.persisted.objectives.get(&sifo.objective) {
             Some(o) if o.owner != Side::Neutral => o,
-            Some(_) | None => return SlotAuth::ObjectiveNotOwned(player.side),
+            Some(_) | None => {
+                let side = self
+                    .persisted
+                    .players
+                    .get(ucid)
+                    .map(|p| p.side)
+                    .unwrap_or(sifo.side);
+                return SlotAuth::ObjectiveNotOwned(side);
+            }
         };
-        if objective.owner != player.side {
-            return SlotAuth::ObjectiveNotOwned(player.side);
+        let player_side = self.persisted.players.get(ucid).unwrap().side;
+        if objective.owner != player_side {
+            return SlotAuth::ObjectiveNotOwned(player_side);
         }
         if objective.captureable() {
             return SlotAuth::ObjectiveHasNoLogistics;
         }
+        if let Some(whcfg) = self.ephemeral.cfg.warehouse.as_ref() {
+            let typ = sifo.typ.as_str();
+            if !whcfg.exempt_airframes.contains(typ) {
+                match self.slot_airframe_available(lua, objective, typ) {
+                    Ok(true) => (),
+                    Ok(false) => {
+                        return SlotAuth::VehicleNotAvailable(sifo.typ.clone());
+                    }
+                    Err(e) => {
+                        error!("carrier/airframe stock check failed: {e:?}");
+                        return SlotAuth::VehicleNotAvailable(sifo.typ.clone());
+                    }
+                }
+            }
+        }
+        let player = match self.persisted.players.get_mut_cow(ucid) {
+            Some(player) => player,
+            None => return SlotAuth::NotRegistered(sifo.side),
+        };
         let life_type = self.ephemeral.cfg.life_types[&sifo.typ];
         macro_rules! yes {
             () => {
-                if let Some(whcfg) = self.ephemeral.cfg.warehouse.as_ref() {
-                    let typ = sifo.typ.as_str();
-                    if !whcfg.exempt_airframes.contains(typ) {
-                        match objective.warehouse.equipment.get(typ) {
-                            Some(inv) if inv.stored > 0 => (),
-                            Some(_) | None => {
-                                break SlotAuth::VehicleNotAvailable(sifo.typ.clone());
-                            }
-                        }
-                    }
-                }
                 player.changing_slots = false;
                 player.jtac_or_spectators = false;
                 break SlotAuth::Yes(Some(stats::Unit {
@@ -866,6 +943,19 @@ impl Db {
         oid: ObjectiveId,
         ucid: Ucid,
     ) -> Result<()> {
+        let stale: SmallVec<[SlotId; 4]> = self
+            .ephemeral
+            .players_by_slot
+            .iter()
+            .filter(|(s, u)| **u == ucid && **s != slot)
+            .map(|(s, _)| *s)
+            .collect();
+        for stale_slot in stale {
+            let _ = self
+                .ephemeral
+                .player_deslot(&self.persisted, &stale_slot, Some(ucid));
+            self.sync_player_deslot_state(&ucid, Some(stale_slot));
+        }
         if let Some(old_ucid) = self.ephemeral.players_by_slot.get(&slot) {
             let old_ucid = *old_ucid;
             if old_ucid != ucid {
@@ -986,11 +1076,11 @@ impl Db {
     ) -> Result<(
         Vec<DcsOid<ClassUnit>>,
         Option<(Ucid, SlotId, LifeType)>,
-        Option<Ucid>,
+        Option<(Ucid, SlotId)>,
     )> {
         let mut dead = vec![];
         let mut returned_life = None;
-        let mut deslot_ucid = None;
+        let mut deslot = None;
         if let Some(uid) = self.ephemeral.uid_by_object_id.get(objid) {
             let uid = *uid;
             match self.update_unit_positions(lua, now, &[uid]) {
@@ -1002,7 +1092,7 @@ impl Db {
         if let Some(slot) = self.ephemeral.slot_by_object_id.get(&objid) {
             if let Some(ucid) = self.ephemeral.player_in_slot(slot) {
                 let ucid = ucid.clone();
-                deslot_ucid = Some(ucid);
+                deslot = Some((ucid, *slot));
                 let player = maybe_mut!(self.persisted.players, ucid, "player")?;
                 if let Some((_, Some(inst))) = player.current_slot.as_mut() {
                     let typ = inst.typ.clone();
@@ -1023,6 +1113,9 @@ impl Db {
                                         lives: player.lives.clone(),
                                     });
                                     returned_life = Some((ucid, *slot, life_type));
+                                    info!(
+                                        "life returned on deslot for {ucid} ({life_type})"
+                                    );
                                     self.ephemeral.dirty();
                                 }
                             }
@@ -1064,7 +1157,7 @@ impl Db {
                 }
             }
         }
-        Ok((dead, returned_life, deslot_ucid))
+        Ok((dead, returned_life, deslot))
     }
 
     pub fn player_disconnected(&mut self, ucid: &Ucid) {
