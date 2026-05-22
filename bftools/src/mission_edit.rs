@@ -173,6 +173,16 @@ fn strip_client_plane_internal_fuel_lua(unit: &Table) -> Result<()> {
     Ok(())
 }
 
+/// `dynSpawnTemplate` groups: warehouse spawn must not carry ME internal fuel.
+fn zero_dynamic_spawn_template_unit_fuel(unit: &Table) -> Result<()> {
+    unit.raw_set("fuel", 0)?;
+    if let Ok(pl) = unit.raw_get::<_, Table>("payload") {
+        let _ = pl.raw_set("fuel", 0);
+        let _ = pl.raw_set("fuel", Value::Number(0.0));
+    }
+    Ok(())
+}
+
 struct UnpackedMiz {
     root: PathBuf,
     files: HashMap<String, PathBuf>,
@@ -2248,7 +2258,6 @@ impl VehicleTemplates {
                 u.set_name(String::from(format_compact!("{group_name}-{unit_ord}")))?;
                 u.raw_set("skill", "Client")?;
                 u.raw_set("password", Value::Nil)?;
-                u.raw_set("fuel", 0)?;
 
                 // Keep DT_* units small. These templates are only used to populate the
                 // dynamic-spawn payload UI; large avionics/radio/datalink blobs can make
@@ -2278,6 +2287,8 @@ impl VehicleTemplates {
                 {
                     u.set("frequency", v.deep_clone(lua)?)?;
                 }
+
+                zero_dynamic_spawn_template_unit_fuel(&u)?;
 
                 // If a src template contained an unknown datalink pattern, we no longer
                 // care here because we stripped datalinks above.
@@ -2403,7 +2414,6 @@ impl VehicleTemplates {
                     u.set_name(String::from(format_compact!("{group_name}-{unit_ord}")))?;
                     u.raw_set("skill", "Client")?;
                     u.raw_set("password", Value::Nil)?;
-                    u.raw_set("fuel", 0)?;
                     u.raw_set("alt", 0)?;
                     u.raw_set("datalinks", Value::Nil)?;
                     u.raw_set("Radio", Value::Nil)?;
@@ -2426,6 +2436,7 @@ impl VehicleTemplates {
                     if let Some(v) = self.frequency.get(side).and_then(|t| t.get(&unit_type)) {
                         u.set("frequency", v.deep_clone(lua)?)?;
                     }
+                    zero_dynamic_spawn_template_unit_fuel(&u)?;
                     uid.next();
                 }
                 apply_dynamic_template_group_visibility(&tmpl, slot_kind)?;

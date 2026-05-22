@@ -21,3 +21,15 @@ $bftools          = "\bftools"
 # Mission folder under repository                                 #
 $path_engine_mission = "\miz\Scenarios\80s\Caucasus1985-SARH"
 ###################################################################
+
+
+###################################################################
+# Scratch / test outputs (gitignored)                             #
+###################################################################
+# bftools --output _test* / _t* (.miz and matching *_fowl_export   #
+# if any): -pracovní_soubory-možno_smazat/ only.                    #
+# Release *_fowl_export.json (mission stem, e.g. Rust_Fowl_...):    #
+# scenario root — required for build copy and bflib at runtime.     #
+# Repo .gitignore: **/-pracovní_soubory-možno_smazat/, **/_test*,   #
+# **/_t*                                                            #
+###################################################################
