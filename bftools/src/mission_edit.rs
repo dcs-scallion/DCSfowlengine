@@ -3239,12 +3239,16 @@ struct WarehouseTemplate {
     /// Optional Invisible FARP warehouse rows: merged into B/RINVENTORY after validation (stock by `wsType`).
     blue_inventory_plus: Option<Table<'static>>,
     red_inventory_plus: Option<Table<'static>>,
-    /// Trigger zone `BINVENTORY+` / `RINVENTORY+`: module-only rows (Key = warehouse item label, Value = airframe module type) to supplement inventory allowlist.
+    /// Trigger zone `BINVENTORY+` / `RINVENTORY+`: catalog module links + optional wsType rows (`Value`=ALL|FILTER|amount|module).
     zone_plus_blue: Vec<InventoryZonePlusModuleEntry>,
     zone_plus_red: Vec<InventoryZonePlusModuleEntry>,
-    /// Trigger zone `BDEFAULT+` / `RDEFAULT+`: same Key/Value shape; supplements default allowlist (ME catalog wsTypes).
+    zone_ws_inventory_blue: HashMap<[i32; 4], WsZoneStockSpec>,
+    zone_ws_inventory_red: HashMap<[i32; 4], WsZoneStockSpec>,
+    /// Trigger zone `BDEFAULT+` / `RDEFAULT+`: same shapes as inventory+ zones.
     zone_default_plus_blue: Vec<InventoryZonePlusModuleEntry>,
     zone_default_plus_red: Vec<InventoryZonePlusModuleEntry>,
+    zone_ws_default_blue: HashMap<[i32; 4], WsZoneStockSpec>,
+    zone_ws_default_red: HashMap<[i32; 4], WsZoneStockSpec>,
     blue_default: Table<'static>,
     red_default: Table<'static>,
     blue_default_plus: Table<'static>,
@@ -4212,6 +4216,161 @@ struct InventoryZonePlusModuleEntry {
     module: StdString,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
+enum WsZoneDistributeScope {
+    #[default]
+    Filter,
+    All,
+}
+
+#[derive(Clone, Debug, Default)]
+struct WsZoneStockSpec {
+    amount: Option<u32>,
+    distribute: WsZoneDistributeScope,
+    modules: HashSet<StdString>,
+}
+
+fn zone_property_is_editor_comment(s: &str) -> bool {
+    s.starts_with("***")
+}
+
+fn parse_ws_type_zone_key(key: &str) -> Option<[i32; 4]> {
+    let compact: StdString = key.chars().filter(|c| !c.is_whitespace()).collect();
+    let inner = compact
+        .strip_prefix('[')
+        .and_then(|s| s.strip_suffix(']'))
+        .unwrap_or(compact.as_str());
+    let parts: Vec<&str> = inner.split(',').collect();
+    if parts.len() != 4 {
+        return None;
+    }
+    let mut ws = [0i32; 4];
+    for (i, p) in parts.iter().enumerate() {
+        ws[i] = p.parse().ok()?;
+    }
+    Some(ws)
+}
+
+fn ws_zone_stock_ws_for_policy_modules(
+    specs: &HashMap<[i32; 4], WsZoneStockSpec>,
+    policy_types: &HashSet<StdString>,
+) -> HashSet<[i32; 4]> {
+    let mut out = HashSet::new();
+    for (&ws, spec) in specs {
+        if spec
+            .modules
+            .iter()
+            .any(|m| policy_types_include_module(policy_types, m.as_str()))
+        {
+            out.insert(ws);
+        }
+    }
+    out
+}
+
+fn ws_zone_force_keep_ws(
+    inv_specs: &HashMap<[i32; 4], WsZoneStockSpec>,
+    def_specs: &HashMap<[i32; 4], WsZoneStockSpec>,
+) -> HashSet<[i32; 4]> {
+    let mut out = HashSet::new();
+    for specs in [inv_specs, def_specs] {
+        for (&ws, spec) in specs {
+            if spec.distribute == WsZoneDistributeScope::All {
+                out.insert(ws);
+            }
+        }
+    }
+    out
+}
+
+fn farp_positive_weapon_ws(plus: Option<&Table<'static>>) -> HashSet<[i32; 4]> {
+    let Some(row) = plus else {
+        return HashSet::new();
+    };
+    campaign_cfg::collect_weapon_ws_types_positive_initial(row).unwrap_or_default()
+}
+
+fn apply_zone_ws_weapon_stock(
+    lua: &Lua,
+    dst_row: &Table,
+    ws: [i32; 4],
+    amount: u32,
+    mult: u32,
+) -> Result<()> {
+    let scaled = amount.saturating_mul(mult);
+    if scaled == 0 {
+        return Ok(());
+    }
+    let dst_weapons = match dst_row.raw_get::<_, Table>("weapons") {
+        Ok(t) => t,
+        Err(_) => {
+            let t = lua.create_table()?;
+            dst_row.raw_set("weapons", t.clone())?;
+            t
+        }
+    };
+    for pair in dst_weapons.clone().pairs::<Value, Table>() {
+        let (_, w) = pair?;
+        if read_weapon_ws_type(&w) == Some(ws) {
+            w.raw_set("initialAmount", scaled)?;
+            return Ok(());
+        }
+    }
+    let w = lua.create_table()?;
+    let wst = lua.create_table()?;
+    wst.raw_set(1, ws[0])?;
+    wst.raw_set(2, ws[1])?;
+    wst.raw_set(3, ws[2])?;
+    wst.raw_set(4, ws[3])?;
+    w.raw_set("wsType", wst)?;
+    w.raw_set("initialAmount", scaled)?;
+    let mut new_idx = dst_weapons.raw_len().saturating_add(1);
+    if new_idx == 0 {
+        new_idx = 1;
+    }
+    dst_weapons.raw_set(new_idx, w)?;
+    Ok(())
+}
+
+fn apply_zone_ws_stock_amounts(
+    lua: &Lua,
+    wh: &Table,
+    inv_specs: &HashMap<[i32; 4], WsZoneStockSpec>,
+    def_specs: &HashMap<[i32; 4], WsZoneStockSpec>,
+    farp_inv_pos: &HashSet<[i32; 4]>,
+    farp_def_pos: &HashSet<[i32; 4]>,
+    mult: u32,
+    scope: WsZoneDistributeScope,
+    filter_allowed: Option<&HashSet<[i32; 4]>>,
+    applied_ws: &mut HashSet<[i32; 4]>,
+) -> Result<()> {
+    let farp_skip = |ws: &[i32; 4]| farp_inv_pos.contains(ws) || farp_def_pos.contains(ws);
+    for specs in [inv_specs, def_specs] {
+        for (&ws, spec) in specs {
+            if spec.distribute != scope {
+                continue;
+            }
+            let Some(amt) = spec.amount else {
+                continue;
+            };
+            if applied_ws.contains(&ws) {
+                continue;
+            }
+            if farp_skip(&ws) {
+                continue;
+            }
+            if let Some(allowed) = filter_allowed {
+                if !allowed.contains(&ws) {
+                    continue;
+                }
+            }
+            apply_zone_ws_weapon_stock(lua, wh, ws, amt, mult)?;
+            applied_ws.insert(ws);
+        }
+    }
+    Ok(())
+}
+
 fn collect_inventory_weapon_display_name_to_ws(
     inv_row: &Table,
 ) -> Result<HashMap<StdString, [i32; 4]>> {
@@ -4283,8 +4442,12 @@ fn merge_inventory_plus_weapon_resolution_hints(
 struct WarehouseZonePlusDirectives {
     inventory_blue: Vec<InventoryZonePlusModuleEntry>,
     inventory_red: Vec<InventoryZonePlusModuleEntry>,
+    ws_inventory_blue: HashMap<[i32; 4], WsZoneStockSpec>,
+    ws_inventory_red: HashMap<[i32; 4], WsZoneStockSpec>,
     default_blue: Vec<InventoryZonePlusModuleEntry>,
     default_red: Vec<InventoryZonePlusModuleEntry>,
+    ws_default_blue: HashMap<[i32; 4], WsZoneStockSpec>,
+    ws_default_red: HashMap<[i32; 4], WsZoneStockSpec>,
 }
 
 fn compile_warehouse_zone_plus_directives(mission: &Miz) -> Result<WarehouseZonePlusDirectives> {
@@ -4293,17 +4456,33 @@ fn compile_warehouse_zone_plus_directives(mission: &Miz) -> Result<WarehouseZone
         let zone = zone_r?;
         let zname = zone.name()?;
         let zname_ref = zname.as_ref();
-        let (target, farp_hint) = match zname_ref {
-            "BINVENTORY+" => (&mut out.inventory_blue, "BINVENTORY+"),
-            "RINVENTORY+" => (&mut out.inventory_red, "RINVENTORY+"),
-            "BDEFAULT+" => (&mut out.default_blue, "BDEFAULT+"),
-            "RDEFAULT+" => (&mut out.default_red, "RDEFAULT+"),
+        let (catalog_target, ws_target, farp_hint) = match zname_ref {
+            "BINVENTORY+" => (
+                &mut out.inventory_blue,
+                &mut out.ws_inventory_blue,
+                "BINVENTORY+",
+            ),
+            "RINVENTORY+" => (
+                &mut out.inventory_red,
+                &mut out.ws_inventory_red,
+                "RINVENTORY+",
+            ),
+            "BDEFAULT+" => (
+                &mut out.default_blue,
+                &mut out.ws_default_blue,
+                "BDEFAULT+",
+            ),
+            "RDEFAULT+" => (
+                &mut out.default_red,
+                &mut out.ws_default_red,
+                "RDEFAULT+",
+            ),
             _ => continue,
         };
         for prop_r in zone.properties()? {
             let prop = prop_r?;
             let item = prop.key.as_ref().trim();
-            if item.is_empty() {
+            if item.is_empty() || zone_property_is_editor_comment(item) {
                 continue;
             }
             let val = prop.value.as_ref().trim();
@@ -4313,42 +4492,96 @@ fn compile_warehouse_zone_plus_directives(mission: &Miz) -> Result<WarehouseZone
                 );
                 continue;
             }
+            if zone_property_is_editor_comment(val) {
+                continue;
+            }
+            if let Some(ws) = parse_ws_type_zone_key(item) {
+                let spec = ws_target.entry(ws).or_default();
+                if val.eq_ignore_ascii_case("ALL") {
+                    spec.distribute = WsZoneDistributeScope::All;
+                } else if val.eq_ignore_ascii_case("FILTER") {
+                    spec.distribute = WsZoneDistributeScope::Filter;
+                } else if let Ok(amt) = val.parse::<u32>() {
+                    spec.amount = Some(amt);
+                    if spec.distribute == WsZoneDistributeScope::Filter && spec.modules.is_empty() {
+                        // numeric-only row: coalition FILTER distribution
+                    }
+                } else {
+                    spec.modules.insert(StdString::from(val));
+                }
+                continue;
+            }
             if val.parse::<u32>().is_ok() {
                 info!(
-                    "{zname_ref} zone: skip `{item}` = `{val}` (quantities: use Invisible FARP {farp_hint} warehouse rows; zones are module links only: Value = airframe module type)"
+                    "{zname_ref} zone: skip catalog `{item}` = `{val}` (use wsType Key `[l1,l2,l3,l4]` for zone amounts, or Invisible FARP {farp_hint} rows)"
                 );
                 continue;
             }
-            target.push(InventoryZonePlusModuleEntry {
+            if val.eq_ignore_ascii_case("ALL") || val.eq_ignore_ascii_case("FILTER") {
+                warn!(
+                    "{zname_ref} zone: skip `{item}` = `{val}` (ALL/FILTER apply to wsType Keys only)"
+                );
+                continue;
+            }
+            catalog_target.push(InventoryZonePlusModuleEntry {
                 item_name: StdString::from(item),
                 module: StdString::from(val),
             });
         }
     }
+    fn log_ws_zone_stats(label: &str, ws: &HashMap<[i32; 4], WsZoneStockSpec>) {
+        if ws.is_empty() {
+            return;
+        }
+        let mut all_amt = 0usize;
+        let mut filter_amt = 0usize;
+        let mut module_only = 0usize;
+        for spec in ws.values() {
+            if spec.amount.is_none() {
+                if !spec.modules.is_empty() {
+                    module_only += 1;
+                }
+                continue;
+            }
+            if spec.distribute == WsZoneDistributeScope::All {
+                all_amt += 1;
+            } else {
+                filter_amt += 1;
+            }
+        }
+        info!(
+            "{label} trigger zone: {} wsType row(s) (ALL stock={all_amt}, FILTER stock={filter_amt}, module-only={module_only})",
+            ws.len()
+        );
+    }
     if !out.inventory_blue.is_empty() {
         info!(
-            "BINVENTORY+ trigger zone: {} module link row(s) (inventory allowlist supplement)",
+            "BINVENTORY+ trigger zone: {} catalog module link row(s)",
             out.inventory_blue.len()
         );
     }
     if !out.inventory_red.is_empty() {
         info!(
-            "RINVENTORY+ trigger zone: {} module link row(s) (inventory allowlist supplement)",
+            "RINVENTORY+ trigger zone: {} catalog module link row(s)",
             out.inventory_red.len()
         );
     }
     if !out.default_blue.is_empty() {
         info!(
-            "BDEFAULT+ trigger zone: {} module link row(s) (default allowlist supplement)",
+            "BDEFAULT+ trigger zone: {} catalog module link row(s)",
             out.default_blue.len()
         );
     }
     if !out.default_red.is_empty() {
         info!(
-            "RDEFAULT+ trigger zone: {} module link row(s) (default allowlist supplement)",
+            "RDEFAULT+ trigger zone: {} catalog module link row(s)",
             out.default_red.len()
         );
     }
+    log_ws_zone_stats("BINVENTORY+", &out.ws_inventory_blue);
+    log_ws_zone_stats("RINVENTORY+", &out.ws_inventory_red);
+    log_ws_zone_stats("BDEFAULT+", &out.ws_default_blue);
+    log_ws_zone_stats("RDEFAULT+", &out.ws_default_red);
     Ok(out)
 }
 
@@ -4574,12 +4807,13 @@ fn default_zone_ws_for_policy_modules(
     br: &weapon_bridge::WeaponBridgeMap,
     side: Side,
     zone_entries: &[InventoryZonePlusModuleEntry],
+    ws_zone_specs: &HashMap<[i32; 4], WsZoneStockSpec>,
     policy_types: &HashSet<StdString>,
     default_plus_nm: &HashMap<StdString, [i32; 4]>,
     default_plus_ws: &HashSet<[i32; 4]>,
     zone_label: &str,
 ) -> HashSet<[i32; 4]> {
-    let mut out = HashSet::new();
+    let mut out = ws_zone_stock_ws_for_policy_modules(ws_zone_specs, policy_types);
     for e in zone_entries {
         if !policy_types_include_module(policy_types, e.module.as_str()) {
             continue;
@@ -4917,8 +5151,12 @@ impl WarehouseTemplate {
             red_inventory_plus,
             zone_plus_blue: zone_directives.inventory_blue,
             zone_plus_red: zone_directives.inventory_red,
+            zone_ws_inventory_blue: zone_directives.ws_inventory_blue,
+            zone_ws_inventory_red: zone_directives.ws_inventory_red,
             zone_default_plus_blue: zone_directives.default_blue,
             zone_default_plus_red: zone_directives.default_red,
+            zone_ws_default_blue: zone_directives.ws_default_blue,
+            zone_ws_default_red: zone_directives.ws_default_red,
             blue_default: warehouses
                 .raw_get(blue_default_id)
                 .context("getting BDEFAULT inventory")?,
@@ -8051,6 +8289,7 @@ fn dep_farp_dynamic_weapon_allowlist(
     side: Side,
     policy_types: &HashSet<StdString>,
     zone_plus: &[InventoryZonePlusModuleEntry],
+    ws_zone_specs: &HashMap<[i32; 4], WsZoneStockSpec>,
     inv_name_to_ws: &HashMap<StdString, [i32; 4]>,
     inv_weapon_ws: &HashSet<[i32; 4]>,
     zone_label: &str,
@@ -8063,6 +8302,7 @@ fn dep_farp_dynamic_weapon_allowlist(
         side,
         policy_types,
         zone_plus,
+        ws_zone_specs,
         inv_name_to_ws,
         inv_weapon_ws,
         zone_label,
@@ -8087,11 +8327,12 @@ fn inventory_plus_ordnance_ws_for_policy_modules(
     side: Side,
     policy_types: &HashSet<StdString>,
     zone_plus: &[InventoryZonePlusModuleEntry],
+    ws_zone_specs: &HashMap<[i32; 4], WsZoneStockSpec>,
     inv_name_to_ws: &HashMap<StdString, [i32; 4]>,
     inv_weapon_ws: &HashSet<[i32; 4]>,
     zone_label: &str,
 ) -> HashSet<[i32; 4]> {
-    let mut out = HashSet::new();
+    let mut out = ws_zone_stock_ws_for_policy_modules(ws_zone_specs, policy_types);
     for e in zone_plus {
         if !policy_types_include_module(policy_types, e.module.as_str()) {
             continue;
@@ -8139,8 +8380,12 @@ fn patch_warehouse_dynamic_spawn_links(
     red_default_plus: Option<&Table<'static>>,
     zone_plus_blue: &[InventoryZonePlusModuleEntry],
     zone_plus_red: &[InventoryZonePlusModuleEntry],
+    zone_ws_inventory_blue: &HashMap<[i32; 4], WsZoneStockSpec>,
+    zone_ws_inventory_red: &HashMap<[i32; 4], WsZoneStockSpec>,
     zone_default_plus_blue: &[InventoryZonePlusModuleEntry],
     zone_default_plus_red: &[InventoryZonePlusModuleEntry],
+    zone_ws_default_blue: &HashMap<[i32; 4], WsZoneStockSpec>,
+    zone_ws_default_red: &HashMap<[i32; 4], WsZoneStockSpec>,
     mult_cfg: &WarehouseStockMultConfig,
     warehouse_caps: Option<&campaign_cfg::WarehouseDefaultsFromCfg>,
     obj_dyn_allow: &[ObjectiveDynAllow],
@@ -8158,6 +8403,10 @@ fn patch_warehouse_dynamic_spawn_links(
         build_default_plus_resolution_maps(blue_default_plus)?;
     let (default_plus_red_nm, default_plus_red_ws) =
         build_default_plus_resolution_maps(red_default_plus)?;
+    let farp_inv_blue_pos = farp_positive_weapon_ws(blue_inventory_plus);
+    let farp_inv_red_pos = farp_positive_weapon_ws(red_inventory_plus);
+    let farp_def_blue_pos = farp_positive_weapon_ws(blue_default_plus);
+    let farp_def_red_pos = farp_positive_weapon_ws(red_default_plus);
 
     fn patch_table(
         lua: &Lua,
@@ -8182,18 +8431,28 @@ fn patch_warehouse_dynamic_spawn_links(
         inv_plus_red_ws: &HashSet<[i32; 4]>,
         zone_plus_blue: &[InventoryZonePlusModuleEntry],
         zone_plus_red: &[InventoryZonePlusModuleEntry],
+        zone_ws_inventory_blue: &HashMap<[i32; 4], WsZoneStockSpec>,
+        zone_ws_inventory_red: &HashMap<[i32; 4], WsZoneStockSpec>,
         zone_default_plus_blue: &[InventoryZonePlusModuleEntry],
         zone_default_plus_red: &[InventoryZonePlusModuleEntry],
+        zone_ws_default_blue: &HashMap<[i32; 4], WsZoneStockSpec>,
+        zone_ws_default_red: &HashMap<[i32; 4], WsZoneStockSpec>,
         default_plus_blue_nm: &HashMap<StdString, [i32; 4]>,
         default_plus_blue_ws: &HashSet<[i32; 4]>,
         default_plus_red_nm: &HashMap<StdString, [i32; 4]>,
         default_plus_red_ws: &HashSet<[i32; 4]>,
+        farp_inv_blue_pos: &HashSet<[i32; 4]>,
+        farp_inv_red_pos: &HashSet<[i32; 4]>,
+        farp_def_blue_pos: &HashSet<[i32; 4]>,
+        farp_def_red_pos: &HashSet<[i32; 4]>,
     ) -> Result<()> {
         let empty_inv_nm: HashMap<StdString, [i32; 4]> = HashMap::new();
         let empty_inv_ws: HashSet<[i32; 4]> = HashSet::new();
         let empty_zone_plus: &[InventoryZonePlusModuleEntry] = &[];
+        let empty_ws_zone: HashMap<[i32; 4], WsZoneStockSpec> = HashMap::new();
         let empty_default_nm: HashMap<StdString, [i32; 4]> = HashMap::new();
         let empty_default_ws: HashSet<[i32; 4]> = HashSet::new();
+        let empty_farp_pos: HashSet<[i32; 4]> = HashSet::new();
 
         for pair in tbl.clone().pairs::<Value, Table>() {
             let (k, wh) = pair?;
@@ -8312,6 +8571,39 @@ fn patch_warehouse_dynamic_spawn_links(
                     WarehouseTemplateStockMode::InventoryStock,
                 )?;
             }
+            let (ws_inv, ws_def, farp_inv, farp_def) = match side {
+                Side::Blue => (
+                    zone_ws_inventory_blue,
+                    zone_ws_default_blue,
+                    farp_inv_blue_pos,
+                    farp_def_blue_pos,
+                ),
+                Side::Red => (
+                    zone_ws_inventory_red,
+                    zone_ws_default_red,
+                    farp_inv_red_pos,
+                    farp_def_red_pos,
+                ),
+                Side::Neutral => (
+                    &empty_ws_zone,
+                    &empty_ws_zone,
+                    &empty_farp_pos,
+                    &empty_farp_pos,
+                ),
+            };
+            let mut zone_stock_applied = HashSet::<[i32; 4]>::new();
+            apply_zone_ws_stock_amounts(
+                lua,
+                &wh,
+                ws_inv,
+                ws_def,
+                farp_inv,
+                farp_def,
+                mult,
+                WsZoneDistributeScope::All,
+                None,
+                &mut zone_stock_applied,
+            )?;
             let aircrafts: Table = wh.raw_get("aircrafts")?;
             for cat in ["helicopters", "planes"] {
                 let Ok(cat_tbl) = aircrafts.raw_get::<_, Table>(cat) else {
@@ -8344,12 +8636,48 @@ fn patch_warehouse_dynamic_spawn_links(
             // linkDynTempl is intentionally left as-is.
             if let Some(obj) = obj_zone {
                 if obj.is_logistics_hub {
+                    apply_zone_ws_stock_amounts(
+                        lua,
+                        &wh,
+                        ws_inv,
+                        ws_def,
+                        farp_inv,
+                        farp_def,
+                        mult,
+                        WsZoneDistributeScope::Filter,
+                        None,
+                        &mut zone_stock_applied,
+                    )?;
                     continue;
                 }
                 if mult_cfg.dep_farp_warehouse_ids.contains(&wid) {
+                    apply_zone_ws_stock_amounts(
+                        lua,
+                        &wh,
+                        ws_inv,
+                        ws_def,
+                        farp_inv,
+                        farp_def,
+                        mult,
+                        WsZoneDistributeScope::Filter,
+                        None,
+                        &mut zone_stock_applied,
+                    )?;
                     continue;
                 }
                 if mult_cfg.naval_warehouse_ids.contains(&wid) {
+                    apply_zone_ws_stock_amounts(
+                        lua,
+                        &wh,
+                        ws_inv,
+                        ws_def,
+                        farp_inv,
+                        farp_def,
+                        mult,
+                        WsZoneDistributeScope::Filter,
+                        None,
+                        &mut zone_stock_applied,
+                    )?;
                     continue;
                 }
                 let allowed_types = obj.per_side.get(&obj.side);
@@ -8473,10 +8801,48 @@ fn patch_warehouse_dynamic_spawn_links(
                     let empty_strip = HashSet::<[i32; 4]>::new();
                     let is_naval = mult_cfg.naval_warehouse_ids.contains(&wid);
                     let is_dep = mult_cfg.dep_farp_warehouse_ids.contains(&wid);
-                    let (nm, ws, zplus) = match side {
-                        Side::Blue => (inv_plus_blue_nm, inv_plus_blue_ws, zone_plus_blue),
-                        Side::Red => (inv_plus_red_nm, inv_plus_red_ws, zone_plus_red),
-                        _ => (&empty_inv_nm, &empty_inv_ws, empty_zone_plus),
+                    let (nm, ws, zplus, ws_zplus) = match side {
+                        Side::Blue => (
+                            inv_plus_blue_nm,
+                            inv_plus_blue_ws,
+                            zone_plus_blue,
+                            zone_ws_inventory_blue,
+                        ),
+                        Side::Red => (
+                            inv_plus_red_nm,
+                            inv_plus_red_ws,
+                            zone_plus_red,
+                            zone_ws_inventory_red,
+                        ),
+                        _ => (
+                            &empty_inv_nm,
+                            &empty_inv_ws,
+                            empty_zone_plus,
+                            &empty_ws_zone,
+                        ),
+                    };
+                    let (ws_def_zplus, def_zplus, def_nm, def_ws, def_label) = match side {
+                        Side::Blue => (
+                            zone_ws_default_blue,
+                            zone_default_plus_blue,
+                            default_plus_blue_nm,
+                            default_plus_blue_ws,
+                            "BDEFAULT+",
+                        ),
+                        Side::Red => (
+                            zone_ws_default_red,
+                            zone_default_plus_red,
+                            default_plus_red_nm,
+                            default_plus_red_ws,
+                            "RDEFAULT+",
+                        ),
+                        Side::Neutral => (
+                            &empty_ws_zone,
+                            empty_zone_plus,
+                            &empty_default_nm,
+                            &empty_default_ws,
+                            "B/RDEFAULT+",
+                        ),
                     };
                     let mut allowed_ws = if is_naval {
                         naval_carrier_policy_weapon_allowlist(
@@ -8492,7 +8858,15 @@ fn patch_warehouse_dynamic_spawn_links(
                             Side::Neutral => "B/RINVENTORY+",
                         };
                         dep_farp_dynamic_weapon_allowlist(
-                            br, vehicle_templates, side, &names, zplus, nm, ws, zone_label,
+                            br,
+                            vehicle_templates,
+                            side,
+                            &names,
+                            zplus,
+                            ws_zplus,
+                            nm,
+                            ws,
+                            zone_label,
                         )
                     } else {
                         br.weapon_ws_for_aircraft_keys_only(&names)
@@ -8509,6 +8883,7 @@ fn patch_warehouse_dynamic_spawn_links(
                             side,
                             &names,
                             zplus,
+                            ws_zplus,
                             nm,
                             ws,
                             zone_label,
@@ -8525,40 +8900,35 @@ fn patch_warehouse_dynamic_spawn_links(
                             side,
                             &names,
                             zplus,
+                            ws_zplus,
                             nm,
                             ws,
                             zone_label,
                         ));
-                        let (def_zplus, def_nm, def_ws, def_label) = match side {
-                            Side::Blue => (
-                                zone_default_plus_blue,
-                                default_plus_blue_nm,
-                                default_plus_blue_ws,
-                                "BDEFAULT+",
-                            ),
-                            Side::Red => (
-                                zone_default_plus_red,
-                                default_plus_red_nm,
-                                default_plus_red_ws,
-                                "RDEFAULT+",
-                            ),
-                            Side::Neutral => (
-                                empty_zone_plus,
-                                &empty_default_nm,
-                                &empty_default_ws,
-                                "B/RDEFAULT+",
-                            ),
-                        };
                         allowed_ws.extend(default_zone_ws_for_policy_modules(
                             br,
                             side,
                             def_zplus,
+                            ws_def_zplus,
                             &names,
                             def_nm,
                             def_ws,
                             def_label,
                         ));
                     }
+                    allowed_ws.extend(ws_zone_force_keep_ws(ws_zplus, ws_def_zplus));
+                    apply_zone_ws_stock_amounts(
+                        lua,
+                        &wh,
+                        ws_zplus,
+                        ws_def_zplus,
+                        farp_inv,
+                        farp_def,
+                        mult,
+                        WsZoneDistributeScope::Filter,
+                        Some(&allowed_ws),
+                        &mut zone_stock_applied,
+                    )?;
                     let wlog = format!(
                         "warehouse {wid} weapons (B/RINVENTORY filtered to allowed-aircraft wsTypes)"
                     );
@@ -8601,12 +8971,20 @@ fn patch_warehouse_dynamic_spawn_links(
         &inv_plus_red_ws,
         zone_plus_blue,
         zone_plus_red,
+        zone_ws_inventory_blue,
+        zone_ws_inventory_red,
         zone_default_plus_blue,
         zone_default_plus_red,
+        zone_ws_default_blue,
+        zone_ws_default_red,
         &default_plus_blue_nm,
         &default_plus_blue_ws,
         &default_plus_red_nm,
         &default_plus_red_ws,
+        &farp_inv_blue_pos,
+        &farp_inv_red_pos,
+        &farp_def_blue_pos,
+        &farp_def_red_pos,
     )
     .context("patching airport linkDynTempl")?;
 
@@ -8636,12 +9014,20 @@ fn patch_warehouse_dynamic_spawn_links(
         &inv_plus_red_ws,
         zone_plus_blue,
         zone_plus_red,
+        zone_ws_inventory_blue,
+        zone_ws_inventory_red,
         zone_default_plus_blue,
         zone_default_plus_red,
+        zone_ws_default_blue,
+        zone_ws_default_red,
         &default_plus_blue_nm,
         &default_plus_blue_ws,
         &default_plus_red_nm,
         &default_plus_red_ws,
+        &farp_inv_blue_pos,
+        &farp_inv_red_pos,
+        &farp_def_blue_pos,
+        &farp_def_red_pos,
     )
     .context("patching warehouse linkDynTempl")?;
     Ok(())
@@ -10021,8 +10407,12 @@ pub fn run(cfg: &MizCmd) -> Result<()> {
             Some(&wb.template.red_default_plus),
             &wb.template.zone_plus_blue,
             &wb.template.zone_plus_red,
+            &wb.template.zone_ws_inventory_blue,
+            &wb.template.zone_ws_inventory_red,
             &wb.template.zone_default_plus_blue,
             &wb.template.zone_default_plus_red,
+            &wb.template.zone_ws_default_blue,
+            &wb.template.zone_ws_default_red,
             &mult_cfg,
             warehouse_defaults,
             &obj_dyn_allow,
