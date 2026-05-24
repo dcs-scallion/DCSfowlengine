@@ -572,10 +572,30 @@ pub(super) fn get_player_ucid<'a>(ctx: &'a Context, key: &str) -> Result<Ucid> {
 }
 
 pub fn get_airbase(db: &Db, name: &str) -> Result<ObjectiveId> {
+    let name = name.trim();
+    if name.is_empty() {
+        bail!("empty objective name");
+    }
     for (oid, obj) in db.objectives() {
         if obj.name.as_str() == name {
             return Ok(*oid);
         }
+    }
+    for (oid, obj) in db.objectives() {
+        if db.objective_display_name(obj).as_str() == name {
+            return Ok(*oid);
+        }
+    }
+    let mut short: SmallVec<[(ObjectiveId, String); 8]> = smallvec![];
+    for (oid, obj) in db.objectives() {
+        if db.objective_matches_chat_name(obj, name) {
+            short.push((*oid, obj.name.clone()));
+        }
+    }
+    match short.len() {
+        0 => {}
+        1 => return Ok(short[0].0),
+        _ => bail!("multiple objectives match {name}, matches: {short:?}"),
     }
     let re = RegexBuilder::new(name)
         .case_insensitive(true)
@@ -583,7 +603,7 @@ pub fn get_airbase(db: &Db, name: &str) -> Result<ObjectiveId> {
         .context("building regex")?;
     let mut candidates: SmallVec<[(ObjectiveId, String); 32]> = smallvec![];
     for (oid, obj) in db.objectives() {
-        if re.is_match(obj.name.as_str()) {
+        if re.is_match(obj.name.as_str()) || re.is_match(db.objective_display_name(obj).as_str()) {
             candidates.push((*oid, obj.name.clone()));
         }
     }

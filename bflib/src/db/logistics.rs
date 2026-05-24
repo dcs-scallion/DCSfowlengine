@@ -28,6 +28,7 @@ use bfprotocols::{
     fowl_miz_export::{FowlMizExport, ObjectiveCoalitionStock},
     perf::{Perf, PerfInner},
     stats::Stat,
+    tisp::ship_pad_display_name,
 };
 use chrono::{prelude::*, Duration};
 use compact_str::{format_compact, CompactString};
@@ -283,6 +284,155 @@ fn sync_warehouse_to_obj(obj: &mut Objective, warehouse: &warehouse::Warehouse) 
     Ok(())
 }
 
+fn equipment_capacity_for_discovered_row(
+    obj: &Objective,
+    name: &str,
+    stored: u32,
+    export: &FowlMizExport,
+    whcfg: Option<&bfprotocols::cfg::WarehouseConfig>,
+    production: Option<&Production>,
+    on_water: bool,
+) -> u32 {
+    if let Some(profile) = objective_coalition_stock_for_objective(export, obj) {
+        if let Some(item) = profile.equipment.get(name) {
+            if item.baseline > 0 {
+                return item.baseline;
+            }
+        }
+    }
+    if let Some(inv) = obj.warehouse.equipment.get(name) {
+        if inv.capacity > 0 {
+            return inv.capacity.max(stored);
+        }
+    }
+    if let (Some(whcfg), Some(prod)) = (whcfg, production) {
+        if let Some(eq) = prod.equipment.get(name) {
+            return whcfg
+                .capacity(&obj.kind, on_water, eq.production)
+                .max(stored);
+        }
+    }
+    stored.max(1)
+}
+
+fn liquid_capacity_for_discovered_row(
+    obj: &Objective,
+    typ: LiquidType,
+    stored: u32,
+    export: &FowlMizExport,
+    whcfg: Option<&bfprotocols::cfg::WarehouseConfig>,
+    production: Option<&Production>,
+    on_water: bool,
+) -> u32 {
+    if let Some(profile) = objective_coalition_stock_for_objective(export, obj) {
+        for (key, liq) in &profile.liquids {
+            if liquid_type_from_export_key(key).ok() == Some(typ) && liq.baseline > 0 {
+                return liq.baseline;
+            }
+        }
+    }
+    if let Some(inv) = obj.warehouse.liquids.get(&typ) {
+        if inv.capacity > 0 {
+            return inv.capacity.max(stored);
+        }
+    }
+    if let (Some(whcfg), Some(prod)) = (whcfg, production) {
+        if let Some(qty) = prod.liquids.get(&typ) {
+            return whcfg.capacity(&obj.kind, on_water, *qty).max(stored);
+        }
+    }
+    stored.max(1)
+}
+
+/// Mobile FARP / TISP carriers: virtual rows often missing (no `O*` `objective_stock` name); DCS may still be full from bftools.
+fn discover_dcs_warehouse_into_obj(
+    obj: &mut Objective,
+    warehouse: &warehouse::Warehouse,
+    export: &FowlMizExport,
+    resource_meta: &FxHashMap<String, WarehouseResourceMeta>,
+    whcfg: Option<&bfprotocols::cfg::WarehouseConfig>,
+    production: Option<&Production>,
+    on_water: bool,
+) -> Result<()> {
+    let inv = warehouse
+        .get_inventory(None)
+        .context("warehouse getInventory for virtual hydrate")?;
+    let profile = objective_coalition_stock_for_objective(export, obj);
+    let mut ingest_equipment =
+        |items: warehouse::ItemInventory<'_>| -> Result<()> {
+            items.for_each(|name, stored| {
+                if stored == 0 {
+                    return Ok(());
+                }
+                let meta = resource_meta.get(&name).copied();
+                if !equipment_allowed_for_objective(
+                    export,
+                    obj,
+                    obj.owner,
+                    name.as_str(),
+                    meta,
+                ) {
+                    return Ok(());
+                }
+                if let Some(profile) = profile {
+                    if !profile.equipment.contains_key(name.as_str()) {
+                        let allowed = profile.equipment.is_empty();
+                        if !allowed {
+                            return Ok(());
+                        }
+                    }
+                }
+                let capacity = equipment_capacity_for_discovered_row(
+                    obj,
+                    name.as_str(),
+                    stored,
+                    export,
+                    whcfg,
+                    production,
+                    on_water,
+                );
+                let row = obj
+                    .warehouse
+                    .equipment
+                    .get_or_default_cow(String::from(name.as_str()));
+                row.stored = stored;
+                row.capacity = capacity.max(stored);
+                Ok(())
+            })
+        };
+    ingest_equipment(inv.weapons().context("warehouse weapon inventory")?)?;
+    ingest_equipment(inv.aircraft().context("warehouse aircraft inventory")?)?;
+    inv.liquids()
+        .context("warehouse liquid inventory")?
+        .for_each(|typ, stored| {
+            if stored == 0 {
+                return Ok(());
+            }
+            if let Some(profile) = profile {
+                let keep = profile.liquids.keys().any(|k| {
+                    liquid_type_from_export_key(k).ok() == Some(typ)
+                });
+                if !profile.liquids.is_empty() && !keep {
+                    return Ok(());
+                }
+            }
+            let capacity = liquid_capacity_for_discovered_row(
+                obj,
+                typ,
+                stored,
+                export,
+                whcfg,
+                production,
+                on_water,
+            );
+            let row = obj.warehouse.liquids.get_or_default_cow(typ);
+            row.stored = stored;
+            row.capacity = capacity.max(stored);
+            Ok(())
+        })?;
+    Ok(())
+}
+
 fn get_supplier<'lua>(lua: MizLua<'lua>, template: String) -> Result<warehouse::Warehouse<'lua>> {
     Airbase::get_by_name(lua, template.clone())
         .with_context(|| format_compact!("getting airbase {}", template))?
@@ -309,6 +459,65 @@ fn objective_coalition_stock_for_side<'a>(
         Side::Red => &by_coa.red,
         Side::Neutral => return None,
     })
+}
+
+fn objective_coalition_stock_for_objective<'a>(
+    export: &'a FowlMizExport,
+    obj: &Objective,
+) -> Option<&'a ObjectiveCoalitionStock> {
+    if let Some(stock) =
+        objective_coalition_stock_for_side(export, obj.name.as_str(), obj.owner)
+    {
+        return Some(stock);
+    }
+    let ObjectiveKind::Farp {
+        mobile: true,
+        pad_template,
+        ..
+    } = &obj.kind
+    else {
+        return None;
+    };
+    let display = ship_pad_display_name(pad_template.as_str());
+    if display.as_str() != obj.name.as_str() {
+        if let Some(stock) =
+            objective_coalition_stock_for_side(export, display.as_str(), obj.owner)
+        {
+            return Some(stock);
+        }
+    }
+    if pad_template.as_str() != obj.name.as_str() && pad_template.as_str() != display.as_str() {
+        return objective_coalition_stock_for_side(export, pad_template.as_str(), obj.owner);
+    }
+    None
+}
+
+fn objective_defaults_for_objective<'a>(
+    export: &'a FowlMizExport,
+    obj: &Objective,
+    side: Side,
+) -> Option<(&'a [std::string::String], &'a [[i32; 4]])> {
+    if let Some(d) = objective_defaults_for_side(export, obj.name.as_str(), side) {
+        return Some(d);
+    }
+    let ObjectiveKind::Farp {
+        mobile: true,
+        pad_template,
+        ..
+    } = &obj.kind
+    else {
+        return None;
+    };
+    let display = ship_pad_display_name(pad_template.as_str());
+    if display.as_str() != obj.name.as_str() {
+        if let Some(d) = objective_defaults_for_side(export, display.as_str(), side) {
+            return Some(d);
+        }
+    }
+    if pad_template.as_str() != obj.name.as_str() && pad_template.as_str() != display.as_str() {
+        return objective_defaults_for_side(export, pad_template.as_str(), side);
+    }
+    None
 }
 
 fn liquid_type_from_export_key(key: &str) -> Result<LiquidType> {
@@ -388,13 +597,12 @@ fn objective_defaults_for_side<'a>(
 
 fn equipment_allowed_for_objective(
     export: &FowlMizExport,
-    objective_name: &str,
+    obj: &Objective,
     side: Side,
     _name: &str,
     meta: Option<WarehouseResourceMeta>,
 ) -> bool {
-    let Some((_, allowed_ws)) = objective_defaults_for_side(export, objective_name, side)
-    else {
+    let Some((_, allowed_ws)) = objective_defaults_for_objective(export, obj, side) else {
         return true;
     };
     if let Some(meta) = meta {
@@ -602,9 +810,7 @@ impl Db {
         let resource_meta =
             build_resource_meta_map(lua).context("resource map for objective stock seed")?;
         for (_oid, obj) in self.persisted.objectives.iter_mut_cow() {
-            let Some(profile) =
-                objective_coalition_stock_for_side(export, obj.name.as_str(), obj.owner)
-            else {
+            let Some(profile) = objective_coalition_stock_for_objective(export, obj) else {
                 warn!(
                     "objective {:?}: no objective_stock profile for owner {:?}",
                     obj.name, obj.owner
@@ -617,7 +823,7 @@ impl Db {
                 let meta = resource_meta.get(&dcs_name).copied();
                 if !equipment_allowed_for_objective(
                     export,
-                    obj.name.as_str(),
+                    obj,
                     obj.owner,
                     name.as_str(),
                     meta,
@@ -815,9 +1021,7 @@ impl Db {
                 let mut del_eq: SmallVec<[String; 8]> = smallvec![];
                 let mut del_l: SmallVec<[LiquidType; 4]> = smallvec![];
                 if use_export_stock {
-                    let Some(profile) =
-                        objective_coalition_stock_for_side(export, obj.name.as_str(), obj.owner)
-                    else {
+                    let Some(profile) = objective_coalition_stock_for_objective(export, obj) else {
                         continue;
                     };
                     for (name, _) in &obj.warehouse.equipment {
@@ -827,7 +1031,7 @@ impl Db {
                             let meta = resource_meta.get(name).copied();
                             keep = equipment_allowed_for_objective(
                                 export,
-                                obj.name.as_str(),
+                                obj,
                                 obj.owner,
                                 export_key,
                                 meta,
@@ -859,7 +1063,7 @@ impl Db {
                         let meta = resource_meta.get(&dcs_name).copied();
                         if !equipment_allowed_for_objective(
                             export,
-                            obj.name.as_str(),
+                            obj,
                             obj.owner,
                             name.as_str(),
                             meta,
@@ -883,13 +1087,8 @@ impl Db {
                         let mut keep = prod.equipment.contains_key(name);
                         if keep {
                             let meta = resource_meta.get(name).copied();
-                            keep = equipment_allowed_for_objective(
-                                export,
-                                obj.name.as_str(),
-                                obj.owner,
-                                name.as_str(),
-                                meta,
-                            );
+                            keep =
+                                equipment_allowed_for_objective(export, obj, obj.owner, name.as_str(), meta);
                         }
                         if !keep {
                             del_eq.push(name.clone());
@@ -910,7 +1109,7 @@ impl Db {
                         let meta = resource_meta.get(name).copied();
                         if !equipment_allowed_for_objective(
                             export,
-                            obj.name.as_str(),
+                            obj,
                             obj.owner,
                             name.as_str(),
                             meta,
@@ -1490,17 +1689,41 @@ impl Db {
         lua: MizLua<'lua>,
         oid: ObjectiveId,
     ) -> Result<(&mut Objective, warehouse::Warehouse<'lua>)> {
-        let obj = objective_mut!(self, oid)?;
-        let airbase = self
+        let obj_name = objective!(self, oid)?.name.clone();
+        let owner = objective!(self, oid)?.owner;
+        let on_water = objective_airbase_on_water(lua, objective!(self, oid)?)?;
+        let airbase_oid = self
             .ephemeral
             .airbase_by_oid
             .get(&oid)
-            .ok_or_else(|| anyhow!("no logistics for objective {}", obj.name))?;
-        let warehouse = Airbase::get_instance(lua, &airbase)
+            .ok_or_else(|| anyhow!("no logistics for objective {}", obj_name))?
+            .clone();
+        let warehouse = Airbase::get_instance(lua, &airbase_oid)
             .context("getting airbase")?
             .get_warehouse()
             .context("getting warehouse")?;
+        let resource_meta = self
+            .warehouse_resource_meta_cache(lua)
+            .context("warehouse resource meta for DCS hydrate")?;
+        let export = Arc::clone(&self.ephemeral.fowl_miz_export);
+        let whcfg = self.ephemeral.cfg.warehouse.as_ref();
+        let production = self
+            .ephemeral
+            .production_by_side
+            .get(&owner)
+            .map(Arc::clone);
+        let obj = objective_mut!(self, oid)?;
         sync_warehouse_to_obj(obj, &warehouse).context("syncing warehouse to objective")?;
+        discover_dcs_warehouse_into_obj(
+            obj,
+            &warehouse,
+            export.as_ref(),
+            resource_meta.as_ref(),
+            whcfg,
+            production.as_deref(),
+            on_water,
+        )
+        .context("hydrating virtual warehouse from DCS inventory")?;
         Ok((obj, warehouse))
     }
 

@@ -38,6 +38,7 @@ use std::{cmp::max, fs::File, path::Path, sync::Arc};
 use tokio::sync::mpsc::UnboundedSender;
 
 pub mod actions;
+pub mod aliases;
 pub mod cargo;
 pub mod ephemeral;
 pub mod group;
@@ -184,6 +185,22 @@ pub struct Db {
 }
 
 impl Db {
+    /// Map label from `SETTINGS-aliases` when keyed by `obj.name` or naval `pad_template`.
+    pub fn objective_display_name(&self, obj: &objective::Objective) -> String {
+        aliases::resolve_objective_display_name(
+            &self.ephemeral.objective_display_aliases,
+            obj,
+        )
+    }
+
+    pub fn objective_matches_chat_name(&self, obj: &objective::Objective, query: &str) -> bool {
+        aliases::objective_matches_chat_name(
+            obj,
+            &self.ephemeral.objective_display_aliases,
+            query,
+        )
+    }
+
     pub fn load(
         miz: &Miz,
         idx: &MizIndex,

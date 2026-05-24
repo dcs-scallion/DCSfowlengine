@@ -15,9 +15,11 @@ for more details.
 */
 
 use super::{
+    aliases::resolve_objective_display_name,
     objective::{Objective, Zone},
     persisted::Persisted,
 };
+use fxhash::FxHashMap;
 use crate::msgq::MsgQ;
 use bfprotocols::{
     cfg::Cfg,
@@ -29,7 +31,6 @@ use dcso3::{
     coalition::Side,
     trigger::{ArrowSpec, CircleSpec, LineType, MarkId, QuadSpec, SideFilter, TextSpec},
 };
-use fxhash::FxHashMap;
 
 static BAR_LOOKUP: [&'static str; 13] = [
     "░ ░ ░ ░ ░", // 0%
@@ -255,7 +256,13 @@ impl ObjectiveMarkup {
         }
     }
 
-    pub(super) fn new(cfg: &Cfg, msgq: &mut MsgQ, obj: &Objective, persisted: &Persisted) -> Self {
+    pub(super) fn new(
+        cfg: &Cfg,
+        msgq: &mut MsgQ,
+        obj: &Objective,
+        persisted: &Persisted,
+        display_aliases: &FxHashMap<String, std::string::String>,
+    ) -> Self {
         let color_func = |a| text_color(obj.owner, a);
         let all_spec = match obj.kind {
             ObjectiveKind::Airbase | ObjectiveKind::Fob | ObjectiveKind::Logistics => SideFilter::All,
@@ -268,7 +275,12 @@ impl ObjectiveMarkup {
         t.logi = obj.logi;
         t.supply = obj.supply;
         t.fuel = obj.fuel;
-        t.name = format_compact!(" {} {} ", obj.name, objective_map_kind_label(&obj.kind)).into();
+        let display = resolve_objective_display_name(display_aliases, obj);
+        t.name = if matches!(obj.kind, ObjectiveKind::Farp { mobile: true, .. }) {
+            format_compact!(" {} ", display).into()
+        } else {
+            format_compact!(" {} {} ", display, objective_map_kind_label(&obj.kind)).into()
+        };
         t.pos = obj.zone.pos();
         let pos3 = Vector3::new(t.pos.x, 0., t.pos.y);
 

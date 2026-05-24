@@ -15,9 +15,9 @@
       "airbase_name": "Krasnodar-Center",
       "category": 0,
       "id": 13,
-      "name": "Krasnodar-Center",
+      "name": "Krasnodar",
       "objective_kind": "Airbase",
-      "trigger_zone_name": "OABRKrasnodar-Center",
+      "trigger_zone_name": "OABRKrasnodar",
       "warehouse_whid": "Airdrome13",
       "x": 11652.9,
       "z": 366766.3
@@ -199,23 +199,23 @@
       "z": 842251.8
     },
     {
-      "airbase_name": "Gubskaya ROAD FOB HUB",
+      "airbase_name": "Gubskaya",
       "category": 1,
       "id": 20771,
-      "name": "Gubskaya ROAD FOB",
+      "name": "Gubskaya",
       "objective_kind": "Logistics Hub",
-      "trigger_zone_name": "OLORGubskaya ROAD FOB",
+      "trigger_zone_name": "OLORGubskaya",
       "warehouse_whid": "20771",
       "x": -52465.9,
       "z": 522614.3
     },
     {
-      "airbase_name": "Zestafoni ROAD FOB HUB",
+      "airbase_name": "Zestafoni",
       "category": 1,
       "id": 20792,
-      "name": "Zestafoni ROAD FOB",
+      "name": "Zestafoni",
       "objective_kind": "Logistics Hub",
-      "trigger_zone_name": "OLOBZestafoni ROAD FOB",
+      "trigger_zone_name": "OLOBZestafoni",
       "warehouse_whid": "20792",
       "x": -284530.2,
       "z": 722627.5

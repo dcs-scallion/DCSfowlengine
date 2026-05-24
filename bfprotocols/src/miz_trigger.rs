@@ -4,6 +4,9 @@
 /// Shown in bftools / bflib errors; keep in sync with `fowl_trigger_zone_name_valid`.
 pub const FOWL_TRIGGER_ZONE_EXPECTED_PREFIXES_DISPLAY: &str = "O, G, T, or SETTINGS- prefix";
 
+/// Trigger zone: property **key** = internal id (e.g. `BForrestal`, `RVladikavkaz`), **value** = map label.
+pub const SETTINGS_OBJECTIVE_ALIASES_ZONE: &str = "SETTINGS-aliases";
+
 /// Same predicate as `bflib` `mizinit::init` after the `G…` branch: allowed `O`, `G`, `T`, or `SETTINGS-`.
 #[inline]
 pub fn fowl_trigger_zone_name_valid(name: &str) -> bool {

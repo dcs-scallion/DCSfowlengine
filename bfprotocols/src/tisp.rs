@@ -58,3 +58,13 @@ pub fn parse_tisp_zone_name(name: &str) -> Option<TispZoneRef<'_>> {
 pub fn starts_with_tisp_prefix(name: &str) -> bool {
     name.starts_with(TISP_PREFIX)
 }
+
+/// ME ship group / pad template (`BForrestal`, `RKuznecow`) → Fowl objective and `objective_stock` key.
+pub fn ship_pad_display_name(pad_template: &str) -> String {
+    let b = pad_template.as_bytes();
+    if pad_template.len() >= 2 && matches!(b[0], b'B' | b'R') {
+        pad_template[1..].to_string()
+    } else {
+        pad_template.to_string()
+    }
+}

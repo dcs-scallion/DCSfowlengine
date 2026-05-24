@@ -34,6 +34,7 @@ use bfprotocols::{
         objective::{ObjectiveId, ObjectiveKind},
     },
     stats::Stat,
+
 };
 use chrono::{Duration, prelude::*};
 use compact_str::format_compact;
@@ -748,7 +749,21 @@ impl Db {
                 groups.insert_cow(gid);
             }
         }
-        let name = {
+        let name = if mobile {
+            let mut n = 0u32;
+            let base = pad_template.as_str();
+            loop {
+                let name = if n == 0 {
+                    String::from(base)
+                } else {
+                    String::from(format_compact!("{base}-{n}"))
+                };
+                if self.persisted.objectives_by_name.get(&name).is_none() {
+                    break name;
+                }
+                n += 1;
+            }
+        } else {
             let get_utm_zone = || -> Result<String> {
                 let coord = Coord::singleton(spctx.lua())?;
                 let pos = coord.lo_to_ll(LuaVec3(Vector3::new(pos.x, 0., pos.y)))?;

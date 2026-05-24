@@ -164,6 +164,8 @@ pub struct Ephemeral {
     sync_warehouse: Vec<(ObjectiveId, Vehicle)>,
     pub(super) msgs: MsgQ,
     pub(super) victory: Option<(DateTime<Utc>, Side)>,
+    /// `SETTINGS-aliases` zone: internal id → map / UI label.
+    pub(super) objective_display_aliases: FxHashMap<std::string::String, std::string::String>,
 }
 
 impl Default for Ephemeral {
@@ -212,6 +214,7 @@ impl Default for Ephemeral {
             msgs: MsgQ::default(),
             logistics_stage: LogiStage::default(),
             victory: None,
+            objective_display_aliases: FxHashMap::default(),
         }
     }
 }
@@ -246,7 +249,13 @@ impl Ephemeral {
         }
         self.objective_markup.insert(
             obj.id,
-            ObjectiveMarkup::new(&self.cfg, &mut self.msgs, obj, persisted),
+            ObjectiveMarkup::new(
+                &self.cfg,
+                &mut self.msgs,
+                obj,
+                persisted,
+                &self.objective_display_aliases,
+            ),
         );
     }
 
@@ -264,6 +273,7 @@ impl Ephemeral {
                     &mut self.msgs,
                     obj,
                     persisted,
+                    &self.objective_display_aliases,
                 ));
             }
         }
@@ -860,6 +870,8 @@ impl Ephemeral {
                 }
             }
         }
+        self.objective_display_aliases =
+            super::aliases::load_objective_display_aliases(miz)?;
         self.cfg = cfg;
         Ok(())
     }
