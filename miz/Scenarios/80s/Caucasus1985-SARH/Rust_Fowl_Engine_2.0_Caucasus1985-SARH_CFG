@@ -20,7 +20,7 @@
   },
   "name_filter": "^[a-zA-Z0-9_<>|= ]+$",
   "max_msgs_per_second": 5,
-  "shutdown": 4,
+  "shutdown": 5,
   "points": {
     "new_player_join": 1900000,
     "air_kill": 25,
@@ -78,7 +78,7 @@
     "airbase_max": 4,
     "hub_max": 10,
     "dynamicFARPs_InitialStockPercentage": 20,
-    "tick": 10,
+    "tick": 15,
     "ticks_per_delivery": 8,
     "supply_transfer_size": 25,
     "supply_transfer_crate": {
@@ -418,10 +418,10 @@
           }
         }
       },
-      "naval-kuznecow": {
+      "naval-kuznetsov": {
         "kind": {
           "Deployable": {
-            "name": "Naval Kuznecow",
+            "name": "Naval Kuznetsov",
             "plane": null
           }
         },
@@ -1969,7 +1969,7 @@
       },
       {
         "path": [
-          "Naval Kuznecow"
+          "Naval Kuznetsov"
         ],
         "kind": {
           "Objective": {

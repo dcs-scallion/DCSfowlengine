@@ -115,6 +115,9 @@ no_llvm_build
 **/.tmp_*/
 **/.tmp*/
 **/_tmp*/
+# Local scratch: directory or file name starts with _ (ME unpack, bftools _test*, etc.)
+**/_*/
+**/_*
 # Local scratch in a named folder (create next to mission / miz as needed)
 **/-pracovní_soubory-možno_smazat/
 # Chat exports / saved threads (e.g. scenario `.../- chat/`)
