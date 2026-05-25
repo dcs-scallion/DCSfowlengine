@@ -8655,8 +8655,9 @@ fn warn_airbase_objective_bindings_follow_up_summary(
 ///    aircraft can be warehoused and slotted later.
 /// 4. `weapons` from B/RINVENTORY: when a weapon bridge is loaded, drop rows whose `wsType` is not allowed
 ///    for the same hub policy as A/C (`O*`: `weapon_ws_by_aircraft` keys only; per-hull `TTDN*` **carriers** and
-///    `TTDdynFARP` **DEP dynamic FARPs**: `naval_carrier_policy_weapon_allowlist` + policy-filtered `BINVENTORY+` /
-///    `RINVENTORY+` module links). `BINVENTORY+` supplements require matching hub module list (not coalition-wide).
+///    `TTDdynFARP` **DEP dynamic FARPs** (one path per pad coalition): `dep_farp_weapon_allowlist` =
+///    `naval_carrier_policy_weapon_allowlist` + policy-filtered `BINVENTORY+` / `RINVENTORY+` + `BDEFAULT+` / `RDEFAULT+`
+///    (no global zone `All` bleed). Zone label rows require TTDdynFARP `Value` module + bridge ordnance for that type.
 /// If ground bases still misbehave, consider generalising this 3-step pattern to airports / FARPs.
 ///
 /// Carrier naming / zones are validated earlier by `audit_naval_carrier_mission_rules` (build fails if invalid).
@@ -8705,29 +8706,47 @@ fn naval_carrier_policy_weapon_allowlist(
     out
 }
 
-/// `TTDdynFARP` DEP FARP: same weapon allowlist shape as per-hull `TTDN*` carriers.
-fn dep_farp_dynamic_weapon_allowlist(
+/// Single DEP FARP weapon allowlist: `TTDdynFARP` aircraft/pylons + policy-filtered `BINVENTORY+` / `RINVENTORY+` + `BDEFAULT+` / `RDEFAULT+` for that pad coalition (no global zone `All` bleed).
+fn dep_farp_weapon_allowlist(
     br: &weapon_bridge::WeaponBridgeMap,
     vt: &VehicleTemplates,
     side: Side,
     policy_types: &HashSet<StdString>,
-    zone_plus: &[InventoryZonePlusModuleEntry],
-    ws_zone_specs: &HashMap<[i32; 4], WsZoneStockSpec>,
+    inv_zone_plus: &[InventoryZonePlusModuleEntry],
+    inv_ws_zone_specs: &HashMap<[i32; 4], WsZoneStockSpec>,
     inv_name_to_ws: &HashMap<StdString, [i32; 4]>,
     inv_weapon_ws: &HashSet<[i32; 4]>,
-    zone_label: &str,
+    def_zone_plus: &[InventoryZonePlusModuleEntry],
+    def_ws_zone_specs: &HashMap<[i32; 4], WsZoneStockSpec>,
+    def_name_to_ws: &HashMap<StdString, [i32; 4]>,
+    def_weapon_ws: &HashSet<[i32; 4]>,
 ) -> HashSet<[i32; 4]> {
+    let (inv_label, def_label) = match side {
+        Side::Blue => ("BINVENTORY+", "BDEFAULT+"),
+        Side::Red => ("RINVENTORY+", "RDEFAULT+"),
+        Side::Neutral => ("B/RINVENTORY+", "B/RDEFAULT+"),
+    };
     let mut s = naval_carrier_policy_weapon_allowlist(br, vt, side, policy_types);
     s.extend(inventory_plus_ordnance_ws_for_policy_modules(
         br,
         vt,
         side,
         policy_types,
-        zone_plus,
-        ws_zone_specs,
+        inv_zone_plus,
+        inv_ws_zone_specs,
         inv_name_to_ws,
         inv_weapon_ws,
-        zone_label,
+        inv_label,
+    ));
+    s.extend(default_zone_ws_for_policy_modules(
+        br,
+        side,
+        def_zone_plus,
+        def_ws_zone_specs,
+        policy_types,
+        def_name_to_ws,
+        def_weapon_ws,
+        def_label,
     ));
     s
 }
@@ -8780,7 +8799,11 @@ fn inventory_plus_ordnance_ws_for_policy_modules(
         .into_iter()
         .filter(|w| is_inventory_cap_ordnance_ws(*w))
         .collect();
+        // Label-only rows: zone `Value` must be on this hub's TTD policy list; wsType on that module's bridge list.
         for ws in label_ws {
+            if !policy_types_include_module(policy_types, e.module.as_str()) {
+                continue;
+            }
             if policy_weapon_ws.contains(&ws) {
                 out.insert(ws);
             }
@@ -9029,19 +9052,23 @@ fn patch_warehouse_dynamic_spawn_links(
                     &empty_farp_pos,
                 ),
             };
+            let is_dep_wh = mult_cfg.dep_farp_warehouse_ids.contains(&wid);
             let mut zone_stock_applied = HashSet::<[i32; 4]>::new();
-            apply_zone_ws_stock_amounts(
-                lua,
-                &wh,
-                ws_inv,
-                ws_def,
-                farp_inv,
-                farp_def,
-                mult,
-                WsZoneDistributeScope::All,
-                None,
-                &mut zone_stock_applied,
-            )?;
+            // DEP template pads: only TTDdynFARP-filtered zone stock (below), not global BINVENTORY+ All rows.
+            if !is_dep_wh {
+                apply_zone_ws_stock_amounts(
+                    lua,
+                    &wh,
+                    ws_inv,
+                    ws_def,
+                    farp_inv,
+                    farp_def,
+                    mult,
+                    WsZoneDistributeScope::All,
+                    None,
+                    &mut zone_stock_applied,
+                )?;
+            }
             let aircrafts: Table = wh.raw_get("aircrafts")?;
             for cat in ["helicopters", "planes"] {
                 let Ok(cat_tbl) = aircrafts.raw_get::<_, Table>(cat) else {
@@ -9265,12 +9292,7 @@ fn patch_warehouse_dynamic_spawn_links(
                             &names,
                         )
                     } else if is_dep {
-                        let zone_label = match side {
-                            Side::Blue => "BINVENTORY+",
-                            Side::Red => "RINVENTORY+",
-                            Side::Neutral => "B/RINVENTORY+",
-                        };
-                        dep_farp_dynamic_weapon_allowlist(
+                        dep_farp_weapon_allowlist(
                             br,
                             vehicle_templates,
                             side,
@@ -9279,7 +9301,10 @@ fn patch_warehouse_dynamic_spawn_links(
                             ws_zplus,
                             nm,
                             ws,
-                            zone_label,
+                            def_zplus,
+                            ws_def_zplus,
+                            def_nm,
+                            def_ws,
                         )
                     } else {
                         br.weapon_ws_for_aircraft_keys_only(&names)
@@ -9339,7 +9364,10 @@ fn patch_warehouse_dynamic_spawn_links(
                             def_label,
                         ));
                     }
-                    allowed_ws.extend(ws_zone_force_keep_ws(ws_zplus, ws_def_zplus));
+                    // Naval only: unconditional BINVENTORY+ `All` ws rows. DEP uses TTDdynFARP allowlist only.
+                    if is_naval {
+                        allowed_ws.extend(ws_zone_force_keep_ws(ws_zplus, ws_def_zplus));
+                    }
                     apply_zone_ws_stock_amounts(
                         lua,
                         &wh,
@@ -9352,9 +9380,15 @@ fn patch_warehouse_dynamic_spawn_links(
                         Some(&allowed_ws),
                         &mut zone_stock_applied,
                     )?;
-                    let wlog = format!(
-                        "warehouse {wid} weapons (B/RINVENTORY filtered to allowed-aircraft wsTypes)"
-                    );
+                    let wlog = if is_dep {
+                        format!(
+                            "warehouse {wid} weapons (DEP FARP {TTD_DYN_FARP_POLICY_ZONE} + policy B/RINVENTORY+ + B/RDEFAULT+)"
+                        )
+                    } else {
+                        format!(
+                            "warehouse {wid} weapons (B/RINVENTORY filtered to allowed-aircraft wsTypes)"
+                        )
+                    };
                     prune_warehouse_weapons_row(
                         lua,
                         &wh,
