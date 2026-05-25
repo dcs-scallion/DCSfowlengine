@@ -1,7 +1,7 @@
 use super::{Db, MapM, objective::Objective};
 use crate::{
     admin,
-    db::{cargo::Oldest, group::DeployKind},
+    db::group::DeployKind,
     group, group_mut,
     jtac::{JtId, Jtacs},
     objective,
@@ -12,7 +12,7 @@ use anyhow::{Context, Ok, Result, anyhow, bail};
 use bfprotocols::{
     cfg::{
         Action, ActionGeoLimit, ActionKind, AiPlaneCfg, AiPlaneKind, AwacsCfg, BomberCfg,
-        DeployableCfg, DeployableKind, DroneCfg, LimitEnforceTyp, MoveCfg, NukeCfg, UnitTag,
+        DeployableCfg, DeployableKind, DroneCfg, MoveCfg, NukeCfg, UnitTag,
     },
     db::{
         group::GroupId,
@@ -2289,18 +2289,20 @@ impl Db {
             .get(dep.as_str())
             .ok_or_else(|| anyhow!("no such deployable {dep} for {side}"))?
             .clone();
-        let (n, oldest) = self.number_deployed(side, &**dep)?;
+        let dep_key = spec
+            .path
+            .last()
+            .map(|s| s.as_str())
+            .unwrap_or(dep.as_str());
+        let (n, _oldest) = self.number_deployed(side, dep_key)?;
         if n >= spec.limit as usize {
-            match spec.limit_enforce {
-                LimitEnforceTyp::DenyCrate => {
-                    bail!("the max number of {:?} are already deployed", dep)
-                }
-                LimitEnforceTyp::DeleteOldest => match oldest {
-                    Some(Oldest::Group(gid)) => self.delete_group(&gid)?,
-                    Some(Oldest::Objective(oid)) => self.delete_objective(&oid)?,
-                    None => (),
-                },
-            }
+            // `-action` / deploy mission: never delete an existing instance to make room.
+            bail!(
+                "the maximum number of {} are already deployed ({}/{})",
+                dep_key,
+                n,
+                spec.limit
+            );
         }
         let spctx = SpawnCtx::new(lua)?;
         let spawnloc = SpawnLoc::AtPos {
@@ -2390,22 +2392,14 @@ impl Db {
             cost_fraction: 1.,
         };
         let spctx = SpawnCtx::new(lua)?;
-        let (n, oldest) = self.number_troops_deployed(side, troop_cfg.name.as_str())?;
-        let to_delete = if n < troop_cfg.limit as usize {
-            None
-        } else {
-            match troop_cfg.limit_enforce {
-                LimitEnforceTyp::DeleteOldest => oldest,
-                LimitEnforceTyp::DenyCrate => {
-                    bail!(
-                        "the maximum number of {} troops are already deployed",
-                        troop_cfg.name
-                    )
-                }
-            }
-        };
-        if let Some(gid) = to_delete {
-            self.delete_group(&gid)?
+        let (n, _oldest) = self.number_troops_deployed(side, troop_cfg.name.as_str())?;
+        if n >= troop_cfg.limit as usize {
+            bail!(
+                "the maximum number of {} troops are already deployed ({}/{})",
+                troop_cfg.name,
+                n,
+                troop_cfg.limit
+            );
         }
         let gid = self.add_and_queue_group(
             &spctx,

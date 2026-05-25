@@ -843,8 +843,13 @@ impl Db {
             .airbases_by_oid
             .insert(oid, smallvec![airbase]);
         if !self.ephemeral.defer_initial_hub_distribute {
-            self.finish_dynamic_farp_warehouse(lua, &oid)
-                .context("initializing dynamic FARP warehouse")?;
+            if matches!(
+                &objective!(self, oid)?.kind,
+                ObjectiveKind::Farp { mobile: false, .. }
+            ) {
+                self.finish_dynamic_farp_warehouse(lua, &oid)
+                    .context("initializing dynamic FARP warehouse")?;
+            }
         }
         self.setup_supply_lines().context("setup supply lines")?;
         if !self.ephemeral.defer_initial_hub_distribute {
