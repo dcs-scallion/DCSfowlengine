@@ -1918,6 +1918,7 @@ impl Default for Cfg {
                 dynamic_farps_initial_stock_percentage: 100,
             }),
             virtual_resupply: false,
+            objective_group_marks: false,
             campaign_decade: None,
             default_warehouse_aa_missiles: 0,
             default_warehouse_ag_missiles: 0,

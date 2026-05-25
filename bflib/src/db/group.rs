@@ -23,7 +23,7 @@ use crate::{
 use anyhow::{anyhow, bail, Context, Result};
 use bfprotocols::{
     cfg::{Action, ActionKind, Crate, Deployable, Troop, UnitTag, UnitTags, Vehicle},
-    db::objective::ObjectiveId,
+    db::objective::{ObjectiveId, ObjectiveKind},
     stats::{self, EnId},
 };
 use bfprotocols::{
@@ -285,7 +285,11 @@ impl Db {
             DeployKind::Objective { origin: oid } => match objective!(self, oid) {
                 Err(_) => None,
                 Ok(obj) => {
-                    if group.side == obj.owner {
+                    let show = self.ephemeral.cfg.objective_group_marks
+                        || matches!(obj.kind, ObjectiveKind::Farp { mobile: true, .. });
+                    if !show || group.side != obj.owner {
+                        None
+                    } else {
                         let msg = format_compact!(
                             "objective group id {} name {} of class {:?}",
                             group.id,
@@ -298,8 +302,6 @@ impl Db {
                             true,
                             msg,
                         ))
-                    } else {
-                        None
                     }
                 }
             },

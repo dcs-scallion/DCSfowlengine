@@ -62,6 +62,7 @@
       "max_drop_speed": 50
     }
   },
+  "objective_group_marks": false,
   "virtual_resupply": true,
   "campaign_decade": "1980s",
   "default_warehouse_AAmissiles": 30, 

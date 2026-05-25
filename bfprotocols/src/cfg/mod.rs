@@ -868,6 +868,9 @@ pub struct Cfg {
     /// virtual distribution (for future ground/air supply routes).
     #[serde(default)]
     pub virtual_resupply: bool,
+    /// F10 map marks on objective base groups (RARMOR, RLOGI, …) for the owning coalition.
+    #[serde(default)]
+    pub objective_group_marks: bool,
     /// Decade label for bftools (`weapon{campaign_decade}.miz`); core gameplay ignores unless referenced elsewhere.
     #[serde(default)]
     pub campaign_decade: Option<String>,
