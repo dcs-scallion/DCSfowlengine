@@ -18,7 +18,7 @@ use crate::weapon_bridge;
 use crate::MizCmd;
 use anyhow::{bail, Context, Result};
 use bfprotocols::{
-    cfg::{Cfg, Deployable},
+    cfg::{Cfg, Deployable, DeployableKind},
     fowl_miz_export::{
         ObjectiveCoalitionStock, ObjectiveStockByCoalition, ObjectiveStockItem,
         ObjectiveStockLiquid, ObjectiveWarehouseDefaults,
@@ -174,7 +174,7 @@ fn strip_client_plane_internal_fuel_lua(unit: &Table) -> Result<()> {
     Ok(())
 }
 
-/// `dynSpawnTemplate` groups: warehouse spawn must not carry ME internal fuel.
+/// `dynSpawnTemplate` and carrier `TTSN*` deck slots: no ME internal fuel on unit/payload.
 fn zero_dynamic_spawn_template_unit_fuel(unit: &Table) -> Result<()> {
     unit.raw_set("fuel", 0)?;
     if let Ok(pl) = unit.raw_get::<_, Table>("payload") {
@@ -823,6 +823,170 @@ impl PosGenerator for SlotGrid {
     }
 }
 
+/// All carrier static slots share one ME parking anchor (DCS fans icons around the hull).
+struct ConstantPosGenerator {
+    pos: Vector2,
+    heading: f64,
+}
+
+impl PosGenerator for ConstantPosGenerator {
+    fn next(&mut self) -> Result<Vector2> {
+        Ok(self.pos)
+    }
+
+    fn azumith(&self) -> f64 {
+        self.heading
+    }
+}
+
+fn ship_unit_deck_pose(base: &LoadedMiz, unit_id: i64) -> Result<(Vector2, f64)> {
+    for side in [Side::Red, Side::Blue] {
+        let coa = base.mission.coalition(side)?;
+        for country in coa.countries()? {
+            let country = country?;
+            for group in vehicle(&country, "ship")? {
+                let group = group?;
+                for unit in group.raw_get::<_, Table>("units")?.pairs::<Value, Table>() {
+                    let unit = unit?.1;
+                    let id: i64 = unit.raw_get("unitId")?;
+                    if id != unit_id {
+                        continue;
+                    }
+                    let x: f64 = unit.raw_get("x")?;
+                    let y: f64 = unit.raw_get("y")?;
+                    let heading: f64 = unit.raw_get("heading").unwrap_or(0.);
+                    return Ok((Vector2::new(x, y), heading));
+                }
+            }
+        }
+    }
+    bail!("ship unitId {unit_id} not found in mission")
+}
+
+/// ME parking-picker origin for static carrier client slots (one world point per ship, not deck grid).
+fn carrier_static_slot_reference_pose(
+    base: &LoadedMiz,
+    ship_unit_id: i64,
+) -> Result<(Vector2, f64)> {
+    let (ship_pos, ship_h) = ship_unit_deck_pose(base, ship_unit_id)?;
+    // Ship-local offset from ME snap on Kuznetsov (reference hull heading below).
+    const REF_HEADING: f64 = 2.2689280275926;
+    const WORLD_DX: f64 = -58.119_326_064_5;
+    const WORLD_DY: f64 = 50.704_130_380_32;
+    let c0 = REF_HEADING.cos();
+    let s0 = REF_HEADING.sin();
+    let local_x = WORLD_DX * c0 - WORLD_DY * s0;
+    let local_y = WORLD_DX * s0 + WORLD_DY * c0;
+    let dc = ship_h.cos();
+    let ds = ship_h.sin();
+    let pos = Vector2::new(
+        ship_pos.x + local_x * dc + local_y * ds,
+        ship_pos.y - local_x * ds + local_y * dc,
+    );
+    Ok((pos, ship_h))
+}
+
+/// Warehouse carrier hulls stay off-map until Fowl spawns them (`move_farp_pad`).
+fn set_warehouse_ships_late_activation(
+    base: &mut LoadedMiz,
+    ship_wh: &HashMap<i64, (Side, String)>,
+) -> Result<()> {
+    let names: HashSet<&String> = ship_wh.values().map(|(_, g)| g).collect();
+    if names.is_empty() {
+        return Ok(());
+    }
+    for side in [Side::Red, Side::Blue] {
+        let coa = base.mission.coalition(side)?;
+        for country in coa.countries()? {
+            let country = country?;
+            for group in vehicle(&country, "ship")? {
+                let group = group?;
+                let gname: String = group.raw_get("name")?;
+                if names.contains(&gname) {
+                    group.raw_set("lateActivation", true)?;
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+/// ME pad group (`RKuznecow`, …) → Fowl objective display name from CFG deployables.
+fn build_carrier_pad_objective_names(cfg: &Cfg) -> HashMap<String, String> {
+    let mut out = HashMap::default();
+    for side in [Side::Blue, Side::Red] {
+        let Some(deployables) = cfg.deployables.get(&side) else {
+            continue;
+        };
+        for dep in deployables {
+            let DeployableKind::Objective(obj) = &dep.kind else {
+                continue;
+            };
+            let Some(objective_name) = dep.path.last() else {
+                continue;
+            };
+            for pad in &obj.pad_templates {
+                out.insert(pad.clone(), objective_name.clone());
+            }
+        }
+    }
+    out
+}
+
+fn route_point_i64(p: &Table, key: &str) -> Option<i64> {
+    match p.raw_get::<_, Value>(key).ok()? {
+        Value::Integer(i) => Some(i),
+        Value::Number(n) => Some(n as i64),
+        _ => None,
+    }
+}
+
+/// Ship warehouse `unitId` from a carrier deck client slot (`linkOffset` legacy or `TakeOffParking` + `linkUnit`/`helipadId`).
+fn carrier_ship_unit_from_client_group(group: &Table) -> Result<Option<i64>> {
+    let route: Table = group.raw_get("route")?;
+    let points: Table = route.raw_get("points")?;
+    if points.raw_len() < 1 {
+        return Ok(None);
+    }
+    let p: Table = points.raw_get(1)?;
+    if group.raw_get::<_, bool>("linkOffset").unwrap_or(false) {
+        return Ok(route_point_i64(&p, "linkUnit"));
+    }
+    let typ: String = p.raw_get("type").unwrap_or_default();
+    if typ.as_str() == "TakeOffParking" {
+        return Ok(route_point_i64(&p, "linkUnit").or_else(|| route_point_i64(&p, "helipadId")));
+    }
+    Ok(None)
+}
+
+fn carrier_pad_from_client_group(base: &LoadedMiz, group: &Table) -> Result<Option<String>> {
+    let Some(link_id) = carrier_ship_unit_from_client_group(group)? else {
+        return Ok(None);
+    };
+    let ship_wh = collect_ship_warehouse_group_map(base)?;
+    Ok(ship_wh.get(&link_id).map(|(_, g)| g.clone()))
+}
+
+fn client_slot_objective_name(
+    unit_pos: Vector2,
+    group: &Table,
+    objectives: &[TriggerZone],
+    base: &LoadedMiz,
+    carrier_pads: &HashMap<String, String>,
+) -> Result<Option<String>> {
+    for obj in objectives {
+        if obj.contains(unit_pos)? {
+            return Ok(Some(obj.objective_name.clone()));
+        }
+    }
+    if let Some(pad) = carrier_pad_from_client_group(base, group)? {
+        if let Some(name) = carrier_pads.get(&pad) {
+            return Ok(Some(name.clone()));
+        }
+    }
+    Ok(None)
+}
+
 #[derive(Clone, Copy, Hash, PartialEq, Eq)]
 enum SlotType {
     Plane,
@@ -1000,6 +1164,59 @@ impl VehicleTemplates {
         params.raw_set("tasks", lua.create_table()?)?;
         task.raw_set("params", params)?;
         Ok(task)
+    }
+
+    /// ME-style carrier static deck slot (no `linkOffset`; DCS docks via `helipadId` + `parking`).
+    fn patch_static_carrier_deck_slot_group(
+        lua: &Lua,
+        grp: &Table,
+        ship_unit_id: i64,
+        pos: Vector2,
+        radio_set: bool,
+    ) -> Result<()> {
+        grp.raw_set("hiddenOnMFD", true)?;
+        grp.raw_set("tasks", lua.create_table()?)?;
+        grp.raw_set("task", "Nothing")?;
+        grp.raw_set("taskSelected", true)?;
+        grp.raw_set("uncontrolled", false)?;
+        grp.raw_set("uncontrollable", false)?;
+        grp.raw_set("radioSet", radio_set)?;
+        grp.raw_set("lateActivation", false)?;
+
+        let route: Table = grp.raw_get("route")?;
+        let points: Table = route.raw_get("points")?;
+        let p: Table = points.raw_get(1)?;
+        p.raw_set("type", "TakeOffParking")?;
+        p.raw_set("alt", 0)?;
+        p.raw_set("action", "From Parking Area")?;
+        p.raw_set("alt_type", "BARO")?;
+        p.raw_set("ETA", 0)?;
+        p.raw_set("ETA_locked", true)?;
+        p.raw_set("speed_locked", true)?;
+        p.raw_set("airdromId", Value::Nil)?;
+        p.raw_set("helipadId", ship_unit_id)?;
+        p.raw_set("timeReFuAr", Value::Nil)?;
+        p.raw_set("linkUnit", ship_unit_id)?;
+        p.raw_set("task", Self::lua_empty_combo_task(lua)?)?;
+        p.raw_set("formation_template", "")?;
+        p.raw_set("x", pos.x)?;
+        p.raw_set("y", pos.y)?;
+        let props = lua.create_table()?;
+        props.raw_set("addopt", lua.create_table()?)?;
+        p.raw_set("properties", props)?;
+
+        grp.raw_set("x", pos.x)?;
+        grp.raw_set("y", pos.y)?;
+
+        for u in grp.raw_get::<_, Table>("units")?.sequence_values::<Table>() {
+            let u = u?;
+            u.raw_set("alt", 0)?;
+            u.raw_set("x", pos.x)?;
+            u.raw_set("y", pos.y)?;
+            u.raw_set("parking", "1")?;
+            u.raw_set("parking_id", "1")?;
+        }
+        Ok(())
     }
 
     /// Patch existing Lua waypoint tables in place (preserves DCS-only fields `IntoLua` might drop).
@@ -1859,33 +2076,43 @@ impl VehicleTemplates {
                 info!("added slot template {s}")
             }
         }
-        for zone in base.mission.triggers()? {
-            let zone = zone?;
-            let name = zone.name()?;
-            if !name.starts_with("TS") {
-                continue;
+        let ship_wh_map = collect_ship_warehouse_group_map(base)?;
+        let mut ship_unit_by_group: HashMap<String, i64> = HashMap::default();
+        for (&unit_id, (_side, group_name)) in &ship_wh_map {
+            if let Some(prev) = ship_unit_by_group.insert(group_name.clone(), unit_id) {
+                warn!(
+                    "multiple carrier warehouse ships share group name {:?}; static TTSN linkUnit uses unitId {}",
+                    group_name, prev
+                );
             }
-            let spec = SlotSpec::new(
-                &templates,
-                zone.properties()?,
-                false,
-                INCLUDE_STATIC_SLOT_KEYS,
-            )?;
+        }
+        let mut emit_static_slots_for_zone = |zone: dcso3::env::miz::TriggerZone<'_>,
+                                             zone_name: &str,
+                                             spec: &SlotSpec,
+                                             naval_link_unit: Option<i64>| -> Result<()> {
             for (side, slots) in &spec.slots {
-                let mut posgen: Box<dyn PosGenerator> = match zone.typ()? {
+                let base_posgen: Box<dyn PosGenerator> = match zone.typ()? {
                     TriggerZoneTyp::Quad(quad) => Box::new(SlotGrid::new(
-                        name.clone(),
+                        String::from(zone_name),
                         quad,
                         spec.margin,
                         spec.spacing,
                     )?),
                     TriggerZoneTyp::Circle { radius } => Box::new(SlotRadial::new(
-                        name.clone(),
+                        String::from(zone_name),
                         radius,
                         zone.pos()?,
                         spec.margin,
                         spec.spacing,
                     )?),
+                };
+                let mut posgen: Box<dyn PosGenerator> = match naval_link_unit {
+                    Some(ship_id) => {
+                        let (pos, heading) =
+                            carrier_static_slot_reference_pose(base, ship_id)?;
+                        Box::new(ConstantPosGenerator { pos, heading })
+                    }
+                    None => base_posgen,
                 };
                 let coa = base.mission.coalition(*side)?;
                 let cname = match side {
@@ -1953,6 +2180,7 @@ impl VehicleTemplates {
                         let tmpl = tmpl.deep_clone(lua)?;
                         let pos = posgen.next()?;
                         let route = tmpl.route()?;
+                        let deck_slot = naval_link_unit.is_some();
                         route.set_points({
                             let mut first = true;
                             route
@@ -1961,9 +2189,10 @@ impl VehicleTemplates {
                                 .map(|p| {
                                     let mut p = p?;
                                     if first {
-                                        let is_naval = spec
-                                            .naval_units
-                                            .contains(&(*side, vehicle.clone()));
+                                        let is_naval = deck_slot
+                                            || spec
+                                                .naval_units
+                                                .contains(&(*side, vehicle.clone()));
                                         p.typ = if is_naval {
                                             PointType::TakeOffParking
                                         } else {
@@ -1981,6 +2210,11 @@ impl VehicleTemplates {
                         tmpl.set_route(route)?;
                         tmpl.set_id(gid)?;
                         tmpl.set_pos(pos)?;
+                        let is_heli = self
+                            .helicopter_slots
+                            .get(side)
+                            .and_then(|s| s.get(vehicle))
+                            .is_some();
                         for u in tmpl.units()? {
                             let u = u?;
                             if u.skill()? != Skill::Client {
@@ -1989,15 +2223,70 @@ impl VehicleTemplates {
                             u.set_id(uid)?;
                             u.set_heading(posgen.azumith())?;
                             u.set_pos(pos)?;
+                            if naval_link_unit.is_some() {
+                                zero_dynamic_spawn_template_unit_fuel(&u)?;
+                            }
                             set_dl_mizuid(&u)
                                 .with_context(|| format_compact!("unit {u:?}"))?;
                             uid.next();
+                        }
+                        if let Some(id) = naval_link_unit {
+                            Self::patch_static_carrier_deck_slot_group(
+                                lua,
+                                &tmpl,
+                                id,
+                                pos,
+                                is_heli,
+                            )?;
                         }
                         gid.next();
                         seq.push(tmpl)?;
                     }
                 }
             }
+            Ok(())
+        };
+        // Land/air static placement: TS* (not TTSN* — carriers use the loop below).
+        for zone in base.mission.triggers()? {
+            let zone = zone?;
+            let name = zone.name()?;
+            if !name.starts_with("TS") || name.starts_with("TTSN") {
+                continue;
+            }
+            let spec = SlotSpec::new(
+                &templates,
+                zone.properties()?,
+                false,
+                INCLUDE_STATIC_SLOT_KEYS,
+            )?;
+            emit_static_slots_for_zone(zone, name.as_ref(), &spec, None)?;
+        }
+        // Carrier deck static slots: TTSN* only, gated by SETTINGS-static-slots-creation.
+        for zone in base.mission.triggers()? {
+            let zone = zone?;
+            let name = zone.name()?;
+            let Some(pad) = name.strip_prefix("TTSN") else {
+                continue;
+            };
+            if !Self::zone_enabled_by_settings(&static_creation_settings, name.as_ref()) {
+                continue;
+            }
+            let Some(&ship_unit_id) = ship_unit_by_group.get(pad) else {
+                warn!(
+                    "skipping static carrier slots for {name}: no warehouse ship with group name {pad}"
+                );
+                continue;
+            };
+            let spec = SlotSpec::new(
+                &templates,
+                zone.properties()?,
+                true,
+                INCLUDE_STATIC_SLOT_KEYS,
+            )?;
+            emit_static_slots_for_zone(zone, name.as_ref(), &spec, Some(ship_unit_id))?;
+            info!(
+                "added static carrier deck slots for {pad} (zone {name}, linkUnit={ship_unit_id})"
+            );
         }
         Ok(())
     }
@@ -2466,6 +2755,7 @@ impl VehicleTemplates {
         objectives: &mut Vec<TriggerZone>,
         base: &mut LoadedMiz,
         tzf_plane_fuel: &[TzfPlaneFuelZone],
+        carrier_pad_objectives: &HashMap<String, String>,
     ) -> Result<()> {
         let mut slots: HashMap<String, HashMap<String, usize>> = HashMap::default();
         let mut replace_count: HashMap<String, isize> = HashMap::new();
@@ -2542,6 +2832,9 @@ impl VehicleTemplates {
                         {
                             unit.set("frequency", v.deep_clone(lua)?)?
                         }
+                        if carrier_pad_from_client_group(base, &group)?.is_some() {
+                            zero_dynamic_spawn_template_unit_fuel(&unit)?;
+                        }
                         increment_key(&mut replace_count, &unit_type);
                         let x = unit.get("x")?;
                         let y = unit.get("y")?;
@@ -2554,8 +2847,20 @@ impl VehicleTemplates {
                             }
                         }
                         let mut found = false;
-                        for trigger_zone in &mut *objectives {
-                            if trigger_zone.contains(unit_pos)? {
+                        if let Some(obj_name) = client_slot_objective_name(
+                            unit_pos,
+                            &group,
+                            objectives,
+                            base,
+                            carrier_pad_objectives,
+                        )? {
+                            for trigger_zone in &mut *objectives {
+                                if trigger_zone.objective_name != obj_name {
+                                    continue;
+                                }
+                                if !trigger_zone.contains(unit_pos)? {
+                                    continue;
+                                }
                                 found = true;
                                 let count = increment_key(
                                     &mut trigger_zone.spawn_count,
@@ -2586,6 +2891,26 @@ impl VehicleTemplates {
                                     *cnt += 1;
                                 }
                                 break;
+                            }
+                            if !found {
+                                found = true;
+                                let tbl = slots.entry(obj_name.clone()).or_insert_with(|| {
+                                    let mut tbl = HashMap::default();
+                                    if let Some(t) = self.payload.get(&side) {
+                                        for k in t.keys() {
+                                            tbl.insert(k.clone(), 0);
+                                        }
+                                    }
+                                    tbl
+                                });
+                                let n = tbl.entry(unit_type.clone()).or_insert(0);
+                                *n += 1;
+                                let count = *n;
+                                let new_name = String::from(format_compact!(
+                                    "{obj_name} {unit_type} {count}{stn_string}"
+                                ));
+                                unit.set("name", new_name.clone())?;
+                                group.set("name", new_name)?;
                             }
                         }
                         if strip_internal_fuel_plane {
@@ -9600,6 +9925,7 @@ fn compile_tzf_plane_fuel_zones(base: &LoadedMiz) -> Result<Vec<TzfPlaneFuelZone
 fn collect_objective_aircraft_by_side(
     base: &LoadedMiz,
     objectives: &[TriggerZone],
+    carrier_pad_objectives: &HashMap<String, String>,
 ) -> Result<HashMap<StdString, HashMap<Side, HashSet<StdString>>>> {
     let mut out: HashMap<StdString, HashMap<Side, HashSet<StdString>>> =
         HashMap::default();
@@ -9626,19 +9952,20 @@ fn collect_objective_aircraft_by_side(
                     let unit_type: String = unit.raw_get("type")?;
                     let x = unit.get("x")?;
                     let y = unit.get("y")?;
-                    let mut found = false;
-                    for obj in objectives {
-                        if obj.contains(Vector2::new(x, y))? {
-                            out.entry(obj.objective_name.to_string())
-                                .or_default()
-                                .entry(side)
-                                .or_default()
-                                .insert(unit_type.to_string());
-                            found = true;
-                            break;
-                        }
-                    }
-                    if !found {
+                    let unit_pos = Vector2::new(x, y);
+                    if let Some(obj_name) = client_slot_objective_name(
+                        unit_pos,
+                        &group,
+                        objectives,
+                        base,
+                        carrier_pad_objectives,
+                    )? {
+                        out.entry(StdString::from(obj_name.as_str()))
+                            .or_default()
+                            .entry(side)
+                            .or_default()
+                            .insert(unit_type.to_string());
+                    } else {
                         bail!(
                             "slot unit {} is not associated with an objective",
                             value_to_json(&Value::Table(unit.clone()))
@@ -10668,13 +10995,42 @@ pub fn run(cfg: &MizCmd) -> Result<()> {
             })
         }
     };
+    let carrier_pad_objectives = match cfg.campaign_cfg.as_ref() {
+        Some(p) => {
+            let fowl_cfg: Cfg = serde_json::from_reader(
+                File::open(p).with_context(|| format!("opening campaign cfg {p:?}"))?,
+            )
+            .context("parsing campaign cfg for carrier pad_templates")?;
+            let m = build_carrier_pad_objective_names(&fowl_cfg);
+            if !m.is_empty() {
+                info!(
+                    "carrier pad -> objective map: {} deployable pad_template(s) from CFG",
+                    m.len()
+                );
+            }
+            m
+        }
+        None => HashMap::default(),
+    };
     vehicle_templates.generate_slots(lua, &mut base).context("generating slots")?;
     vehicle_templates
-        .apply(lua, &mut objectives, &mut base, &tzf_plane_fuel)
+        .apply(
+            lua,
+            &mut objectives,
+            &mut base,
+            &tzf_plane_fuel,
+            &carrier_pad_objectives,
+        )
         .context("applying vehicle templates")?;
-    let objective_aircraft_by_side =
-        collect_objective_aircraft_by_side(&base, &objectives)
-            .context("collecting objective aircraft module map")?;
+    let ship_wh_for_late = collect_ship_warehouse_group_map(&base)?;
+    set_warehouse_ships_late_activation(&mut base, &ship_wh_for_late)
+        .context("warehouse ship lateActivation")?;
+    let objective_aircraft_by_side = collect_objective_aircraft_by_side(
+        &base,
+        &objectives,
+        &carrier_pad_objectives,
+    )
+    .context("collecting objective aircraft module map")?;
     info!(
         "objective module map prepared for {} objective(s)",
         objective_aircraft_by_side.len()

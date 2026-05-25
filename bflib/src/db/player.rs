@@ -670,6 +670,11 @@ impl Db {
         if objective.captureable() {
             return SlotAuth::ObjectiveHasNoLogistics;
         }
+        if matches!(&objective.kind, ObjectiveKind::Farp { .. })
+            && !self.ephemeral.airbase_by_oid.contains_key(&objective.id)
+        {
+            return SlotAuth::VehicleNotAvailable(sifo.typ.clone());
+        }
         if let Some(whcfg) = self.ephemeral.cfg.warehouse.as_ref() {
             let typ = sifo.typ.as_str();
             if !whcfg.exempt_airframes.contains(typ) {

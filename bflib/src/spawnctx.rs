@@ -185,6 +185,7 @@ impl<'lua> SpawnCtx<'lua> {
             }
             pad
         };
+        let _ = idx;
         self.spawn(pad).context("moving the pad")
     }
 

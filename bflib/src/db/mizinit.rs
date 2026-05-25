@@ -46,7 +46,7 @@ use compact_str::CompactString;
 use dcso3::{
     airbase::Airbase,
     centroid2d, coalition::Side, controller::{MissionPoint, PointType}, coord::Coord,
-    env::miz::{Group, Miz, MizIndex, Skill, TriggerZone, TriggerZoneTyp},
+    env::miz::{Group, Miz, MizIndex, Skill, TriggerZone, TriggerZoneTyp, UnitId},
     land::Land, net::Net, object::{DcsObject, Object}, trigger::Trigger, LuaVec2, LuaVec3, MizLua,
     String,
     Vector2, Vector3,
@@ -271,15 +271,19 @@ impl Db {
         idx: &MizIndex,
         slot: &Group,
     ) -> Result<Option<String>> {
-        if !slot.raw_get::<_, bool>("linkOffset").unwrap_or(false) {
-            return Ok(None);
-        }
+        let link_offset = slot.raw_get::<_, bool>("linkOffset").unwrap_or(false);
         let route = slot.route()?;
         for point in route.points()? {
             let point: MissionPoint = point?;
-            let Some(link_id) = point.link_unit else {
+            let link_id = point.link_unit.or_else(|| {
+                point.helipad.map(|h| UnitId::from(h.inner()))
+            });
+            let Some(link_id) = link_id else {
                 continue;
             };
+            if !link_offset && point.typ != PointType::TakeOffParking {
+                continue;
+            }
             let Some(ifo) = miz.get_group_by_unit(idx, &link_id)? else {
                 continue;
             };
