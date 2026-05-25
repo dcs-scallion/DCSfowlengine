@@ -1,7 +1,7 @@
 use super::{Db, MapM, objective::Objective};
 use crate::{
     admin,
-    db::group::DeployKind,
+    db::{cargo::Oldest, group::DeployKind},
     group, group_mut,
     jtac::{JtId, Jtacs},
     objective,
@@ -12,7 +12,8 @@ use anyhow::{Context, Ok, Result, anyhow, bail};
 use bfprotocols::{
     cfg::{
         Action, ActionGeoLimit, ActionKind, AiPlaneCfg, AiPlaneKind, AwacsCfg, BomberCfg,
-        DeployableCfg, DeployableKind, DroneCfg, MoveCfg, NukeCfg, UnitTag,
+        Deployable, DeployableCfg, DeployableKind, DroneCfg, LimitEnforceTyp, MoveCfg, NukeCfg,
+        UnitTag, Vehicle,
     },
     db::{
         group::GroupId,
@@ -32,7 +33,7 @@ use dcso3::{
         ActionTyp, AiOption, AlarmState, AltType, Command, GroundOption, MissionPoint,
         OrbitPattern, PointType, Task, TurnMethod, VehicleFormation,
     },
-    env::miz::MizIndex,
+    env::miz::{GroupKind, MizIndex},
     group::Group,
     land::Land,
     net::Ucid,
@@ -2271,6 +2272,29 @@ impl Db {
         self.transfer_supplies(lua, src, tgt)
     }
 
+    /// Carrier-style objective deploy (boat pad): `-action` must not delete the oldest instance (teleport exploit).
+    fn deployable_action_denies_at_limit(
+        &self,
+        spctx: &SpawnCtx,
+        idx: &MizIndex,
+        side: Side,
+        spec: &Deployable,
+    ) -> bool {
+        let DeployableKind::Objective(parts) = &spec.kind else {
+            return false;
+        };
+        parts.pad_templates.iter().any(|pad| {
+            spctx
+                .get_template_ref(idx, GroupKind::Any, side, pad.as_str())
+                .ok()
+                .and_then(|gifo| gifo.group.units().ok())
+                .and_then(|units| units.first().ok())
+                .and_then(|u| u.typ().ok())
+                .and_then(|typ| self.ephemeral.cfg.unit_classification.get(&Vehicle(typ)))
+                .is_some_and(|tags| tags.contains(UnitTag::Boat))
+        })
+    }
+
     fn deployable_to_point(
         &mut self,
         lua: MizLua,
@@ -2294,17 +2318,33 @@ impl Db {
             .last()
             .map(|s| s.as_str())
             .unwrap_or(dep.as_str());
-        let (n, _oldest) = self.number_deployed(side, dep_key)?;
-        if n >= spec.limit as usize {
-            // `-action` / deploy mission: never delete an existing instance to make room.
-            bail!(
-                "the maximum number of {} are already deployed ({}/{})",
-                dep_key,
-                n,
-                spec.limit
-            );
-        }
         let spctx = SpawnCtx::new(lua)?;
+        let (n, oldest) = self.number_deployed(side, dep_key)?;
+        if n >= spec.limit as usize {
+            if self.deployable_action_denies_at_limit(&spctx, idx, side, &spec) {
+                bail!(
+                    "the maximum number of {} are already deployed ({}/{})",
+                    dep_key,
+                    n,
+                    spec.limit
+                );
+            }
+            match spec.limit_enforce {
+                LimitEnforceTyp::DenyCrate => {
+                    bail!(
+                        "the maximum number of {} are already deployed ({}/{})",
+                        dep_key,
+                        n,
+                        spec.limit
+                    );
+                }
+                LimitEnforceTyp::DeleteOldest => match oldest {
+                    Some(Oldest::Group(gid)) => self.delete_group(&gid)?,
+                    Some(Oldest::Objective(oid)) => self.delete_objective(&oid)?,
+                    None => (),
+                },
+            }
+        }
         let spawnloc = SpawnLoc::AtPos {
             pos,
             offset_direction: Vector2::new(1., 0.),
@@ -2392,14 +2432,24 @@ impl Db {
             cost_fraction: 1.,
         };
         let spctx = SpawnCtx::new(lua)?;
-        let (n, _oldest) = self.number_troops_deployed(side, troop_cfg.name.as_str())?;
-        if n >= troop_cfg.limit as usize {
-            bail!(
-                "the maximum number of {} troops are already deployed ({}/{})",
-                troop_cfg.name,
-                n,
-                troop_cfg.limit
-            );
+        let (n, oldest) = self.number_troops_deployed(side, troop_cfg.name.as_str())?;
+        let to_delete = if n < troop_cfg.limit as usize {
+            None
+        } else {
+            match troop_cfg.limit_enforce {
+                LimitEnforceTyp::DeleteOldest => oldest,
+                LimitEnforceTyp::DenyCrate => {
+                    bail!(
+                        "the maximum number of {} troops are already deployed ({}/{})",
+                        troop_cfg.name,
+                        n,
+                        troop_cfg.limit
+                    );
+                }
+            }
+        };
+        if let Some(gid) = to_delete {
+            self.delete_group(&gid)?;
         }
         let gid = self.add_and_queue_group(
             &spctx,
