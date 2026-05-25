@@ -3391,6 +3391,134 @@ fn merge_naval_ship_objective_stock_export(
     Ok(())
 }
 
+/// DEP FARP pad `unitId` → coalition and ME pad group name (`DEPBFARPPAD0`, …); keys match bflib `pad_template`.
+fn collect_dep_farp_warehouse_group_map(
+    base: &LoadedMiz,
+    dep_ids: &HashSet<i64>,
+) -> Result<HashMap<i64, (Side, String)>> {
+    if dep_ids.is_empty() {
+        return Ok(HashMap::default());
+    }
+    let mut map = HashMap::default();
+    for side in Side::ALL {
+        let coa = base.mission.coalition(side)?;
+        for country in coa.countries()? {
+            let country = country?;
+            for group in vehicle(&country, "static")?
+                .chain(vehicle(&country, "plane")?)
+                .chain(vehicle(&country, "helicopter")?)
+            {
+                let group = group?;
+                let group_name: String = group.raw_get("name")?;
+                for unit in group.raw_get::<_, Table>("units")?.pairs::<Value, Table>() {
+                    let unit = unit?.1;
+                    let id: i64 = unit.raw_get("unitId")?;
+                    if dep_ids.contains(&id) {
+                        map.insert(id, (side, group_name.clone()));
+                    }
+                }
+            }
+        }
+    }
+    if !map.is_empty() {
+        info!(
+            "DEP FARP export: {} pad warehouse id(s) mapped to ME group names",
+            map.len()
+        );
+    }
+    Ok(map)
+}
+
+/// `objective_stock` for deployable FARP template pads (bflib looks up by `pad_template`, e.g. `DEPBFARPPAD0`).
+fn merge_dep_farp_objective_stock_export(
+    out: &mut HashMap<StdString, ObjectiveStockByCoalition>,
+    base: &LoadedMiz,
+    dep_wh_map: &HashMap<i64, (Side, String)>,
+    mult_cfg: &WarehouseStockMultConfig,
+    tpl: &WarehouseTemplate,
+    built_blue: &Table,
+    built_red: &Table,
+    objective_defaults: &HashMap<StdString, ObjectiveWarehouseDefaults>,
+) -> Result<()> {
+    if dep_wh_map.is_empty() {
+        return Ok(());
+    }
+    let warehouses = base
+        .warehouses
+        .raw_get::<_, Table>("warehouses")
+        .context("warehouses for DEP FARP objective_stock export")?;
+    let blue_catalog =
+        coalition_stock_export_weapon_catalog(built_blue, Some(&tpl.blue_default))?;
+    let red_catalog =
+        coalition_stock_export_weapon_catalog(built_red, Some(&tpl.red_default))?;
+    let mut added = 0usize;
+    for (&wid, (side, group_name)) in dep_wh_map {
+        let key = StdString::from(group_name.as_str());
+        if out.contains_key(&key) {
+            warn!(
+                "objective_stock: DEP FARP pad {:?} key {:?} already present, skipping",
+                group_name,
+                key
+            );
+            continue;
+        }
+        let row = warehouses
+            .raw_get::<_, Table>(wid)
+            .with_context(|| format_compact!("DEP FARP warehouse row for pad {group_name}"))?;
+        let mult = mult_cfg.mult_warehouse_row(wid);
+        let (inv_tpl, catalog) = match side {
+            Side::Blue => (&tpl.blue_inventory, &blue_catalog),
+            Side::Red => (&tpl.red_inventory, &red_catalog),
+            Side::Neutral => continue,
+        };
+        let stock = extract_objective_coalition_stock(
+            &row,
+            *side,
+            inv_tpl,
+            catalog,
+            objective_defaults,
+            key.as_str(),
+        )?;
+        let mut entry = ObjectiveStockByCoalition::default();
+        match side {
+            Side::Blue => entry.blue = stock,
+            Side::Red => entry.red = stock,
+            Side::Neutral => {}
+        }
+        let opposite = side.opposite();
+        let (opp_inv, opp_cat) = match opposite {
+            Side::Blue => (&tpl.blue_inventory, &blue_catalog),
+            Side::Red => (&tpl.red_inventory, &red_catalog),
+            Side::Neutral => {
+                out.insert(key, entry);
+                added += 1;
+                continue;
+            }
+        };
+        let virtual_stock = compute_virtual_objective_coalition_stock(
+            opp_inv,
+            mult,
+            opp_cat,
+            objective_defaults,
+            key.as_str(),
+            opposite,
+        )?;
+        match opposite {
+            Side::Blue => entry.blue = virtual_stock,
+            Side::Red => entry.red = virtual_stock,
+            Side::Neutral => {}
+        }
+        out.insert(key, entry);
+        added += 1;
+    }
+    if added > 0 {
+        info!(
+            "objective_stock: merged {added} DEP FARP pad profile(s) (e.g. DEPBFARPPAD0)"
+        );
+    }
+    Ok(())
+}
+
 struct WarehouseTemplate {
     blue_inventory: Table<'static>,
     red_inventory: Table<'static>,
@@ -7576,6 +7704,67 @@ fn build_ship_warehouse_aircraft_allow(
     Ok(out)
 }
 
+/// Per DEP pad group name (`DEPBFARPPAD0`, …): `objective_defaults` from `TTDdynFARP` (export extract + bflib filters).
+fn extend_objective_defaults_for_dep_farps(
+    defaults: &mut HashMap<StdString, bfprotocols::fowl_miz_export::ObjectiveWarehouseDefaults>,
+    dep_wh_map: &HashMap<i64, (Side, String)>,
+    dyn_farp_allow: &HashSet<(Side, StdString)>,
+    br: &weapon_bridge::WeaponBridgeMap,
+) -> Result<usize> {
+    if dep_wh_map.is_empty() || dyn_farp_allow.is_empty() {
+        return Ok(0);
+    }
+    let mut added = 0usize;
+    for (_, (owner_side, pad_name)) in dep_wh_map {
+        let key = StdString::from(pad_name.as_str());
+        if defaults.contains_key(&key) {
+            continue;
+        }
+        let mut policy_types: HashSet<StdString> = HashSet::default();
+        for (side, ut) in dyn_farp_allow {
+            if *side == *owner_side {
+                policy_types.insert(ut.clone());
+            }
+        }
+        if policy_types.is_empty() {
+            continue;
+        }
+        let (blue_aircraft, red_aircraft) = match owner_side {
+            Side::Blue => (policy_types.clone(), HashSet::default()),
+            Side::Red => (HashSet::default(), policy_types.clone()),
+            Side::Neutral => continue,
+        };
+        let mut blue_weapon_ws: HashSet<[i32; 4]> = HashSet::default();
+        let mut red_weapon_ws: HashSet<[i32; 4]> = HashSet::default();
+        blue_weapon_ws.extend(br.weapon_ws_for_aircraft_keys_only(&blue_aircraft));
+        red_weapon_ws.extend(br.weapon_ws_for_aircraft_keys_only(&red_aircraft));
+        let mut blue_aircraft_vec: Vec<_> = blue_aircraft.into_iter().collect();
+        blue_aircraft_vec.sort();
+        let mut red_aircraft_vec: Vec<_> = red_aircraft.into_iter().collect();
+        red_aircraft_vec.sort();
+        let mut blue_ws_vec: Vec<_> = blue_weapon_ws.into_iter().collect();
+        blue_ws_vec.sort_by_key(|w| (w[0], w[1], w[2], w[3]));
+        let mut red_ws_vec: Vec<_> = red_weapon_ws.into_iter().collect();
+        red_ws_vec.sort_by_key(|w| (w[0], w[1], w[2], w[3]));
+        defaults.insert(
+            key,
+            bfprotocols::fowl_miz_export::ObjectiveWarehouseDefaults {
+                blue_aircraft: blue_aircraft_vec,
+                red_aircraft: red_aircraft_vec,
+                blue_weapon_ws: blue_ws_vec,
+                red_weapon_ws: red_ws_vec,
+            },
+        );
+        added += 1;
+    }
+    if added > 0 {
+        info!(
+            "objective_defaults: added {added} DEP FARP pad profile(s) from {TTD_DYN_FARP_POLICY_ZONE}"
+        );
+    }
+    Ok(added)
+}
+
 /// `objective_defaults` for `Kuznetsov` / `Forrestal` keys (TTDN* air wing) — aligns export extract and bflib filters with `O*` hubs.
 fn extend_objective_defaults_for_naval_hulls(
     defaults: &mut HashMap<StdString, bfprotocols::fowl_miz_export::ObjectiveWarehouseDefaults>,
@@ -8465,12 +8654,9 @@ fn warn_airbase_objective_bindings_follow_up_summary(
 ///    (stock caps the air wing). Keep `linkDynTempl` from DT_* emit for other coalition types so landed
 ///    aircraft can be warehoused and slotted later.
 /// 4. `weapons` from B/RINVENTORY: when a weapon bridge is loaded, drop rows whose `wsType` is not allowed
-///    for the same hub policy as A/C (`O*`: `weapon_ws_by_aircraft` keys only; per-hull `TTDN*` **carriers**:
-///    same per-type cap as warehouse `apply` `side_cap_respects_template_restricted` (keys + pylons, `template.restricted`),
-///    plus `fueltank_by_aircraft`, then alias-expand — no `weapon_ws_for_aircrafts` reverse-map union. `TTDdynFARP` **DEP dynamic FARPs** use the same **keys + fuel** base as `O*`, plus
-///    policy-filtered `BINVENTORY+` / `RINVENTORY+` ordnance (zone `Value` module must appear in `TTDdynFARP`),
-///    without alias-expand on the allowlist (same strict prune as `O*`). `BINVENTORY+` supplements
-///    for carriers still require matching `TTDN*` module list (not coalition-wide).
+///    for the same hub policy as A/C (`O*`: `weapon_ws_by_aircraft` keys only; per-hull `TTDN*` **carriers** and
+///    `TTDdynFARP` **DEP dynamic FARPs**: `naval_carrier_policy_weapon_allowlist` + policy-filtered `BINVENTORY+` /
+///    `RINVENTORY+` module links). `BINVENTORY+` supplements require matching hub module list (not coalition-wide).
 /// If ground bases still misbehave, consider generalising this 3-step pattern to airports / FARPs.
 ///
 /// Carrier naming / zones are validated earlier by `audit_naval_carrier_mission_rules` (build fails if invalid).
@@ -8519,8 +8705,7 @@ fn naval_carrier_policy_weapon_allowlist(
     out
 }
 
-/// `TTDdynFARP` DEP FARP: `weapon_ws_by_aircraft` keys for policy types + fuel + policy-filtered B/RINVENTORY+
-/// ordnance (no `expand_ws_alias_family` — same shape as non-carrier `O*` prune; avoids alias bleed from coalition BINVENTORY).
+/// `TTDdynFARP` DEP FARP: same weapon allowlist shape as per-hull `TTDN*` carriers.
 fn dep_farp_dynamic_weapon_allowlist(
     br: &weapon_bridge::WeaponBridgeMap,
     vt: &VehicleTemplates,
@@ -8532,8 +8717,7 @@ fn dep_farp_dynamic_weapon_allowlist(
     inv_weapon_ws: &HashSet<[i32; 4]>,
     zone_label: &str,
 ) -> HashSet<[i32; 4]> {
-    let mut s = br.weapon_ws_for_aircraft_keys_only(policy_types);
-    s.extend(br.fueltank_ws_for_aircrafts(policy_types));
+    let mut s = naval_carrier_policy_weapon_allowlist(br, vt, side, policy_types);
     s.extend(inventory_plus_ordnance_ws_for_policy_modules(
         br,
         vt,
@@ -8571,7 +8755,7 @@ fn inventory_plus_ordnance_ws_for_policy_modules(
     zone_label: &str,
 ) -> HashSet<[i32; 4]> {
     let mut out = ws_zone_stock_ws_for_policy_modules(ws_zone_specs, policy_types);
-    let policy_weapon_ws = br.weapon_ws_for_aircrafts(policy_types);
+    let policy_weapon_ws = br.weapon_ws_for_aircraft_keys_only(policy_types);
     for e in zone_plus {
         if policy_types_include_module(policy_types, e.module.as_str()) {
             for ws in resolve_zone_link_ws_for_module(
@@ -8587,7 +8771,7 @@ fn inventory_plus_ordnance_ws_for_policy_modules(
                 out.insert(ws);
             }
         }
-        // ME rows like Key `*** AO-2-5` / Value `*** KMGU-2`: Value is a group label, not an airframe module.
+        // Label-only BINVENTORY+ rows: ordnance must be on the hub policy list, not whole coalition inventory.
         let label_ws: HashSet<[i32; 4]> = zone_item_label_ws_candidates(
             e.item_name.as_str(),
             inv_name_to_ws,
@@ -8597,7 +8781,7 @@ fn inventory_plus_ordnance_ws_for_policy_modules(
         .filter(|w| is_inventory_cap_ordnance_ws(*w))
         .collect();
         for ws in label_ws {
-            if policy_weapon_ws.contains(&ws) || inv_weapon_ws.contains(&ws) {
+            if policy_weapon_ws.contains(&ws) {
                 out.insert(ws);
             }
         }
@@ -8904,21 +9088,10 @@ fn patch_warehouse_dynamic_spawn_links(
                     )?;
                     continue;
                 }
+                // DEP template pads: `TTDdynFARP` + weapon allowlist below, not O* zone TTD / zone ws.
                 if mult_cfg.dep_farp_warehouse_ids.contains(&wid) {
-                    apply_zone_ws_stock_amounts(
-                        lua,
-                        &wh,
-                        ws_inv,
-                        ws_def,
-                        farp_inv,
-                        farp_def,
-                        mult,
-                        WsZoneDistributeScope::Filter,
-                        None,
-                        &mut zone_stock_applied,
-                    )?;
-                    continue;
-                }
+                    // fall through to DEP A/C prune and weapon bridge
+                } else {
                 let allowed_types = obj.per_side.get(&obj.side);
                 let aircrafts: Table = wh.raw_get("aircrafts")?;
                 for cat in ["helicopters", "planes"] {
@@ -8939,6 +9112,7 @@ fn patch_warehouse_dynamic_spawn_links(
                             }
                         }
                     }
+                }
                 }
             }
             // DEP* dynamic FARP template stocks: prune A/C rows by `TTDdynFARP` allowlist only.
@@ -10790,6 +10964,23 @@ pub fn run(cfg: &MizCmd) -> Result<()> {
                 )
                 .context("naval hull objective_defaults for export")?;
             }
+            let dep_wh_map = collect_dep_farp_warehouse_group_map(
+                &base,
+                &mult_cfg.dep_farp_warehouse_ids,
+            )
+            .context("DEP FARP pad map for objective_defaults export")?;
+            if let (Some(br), Some(da)) = (
+                weapon_bridge_map.as_ref(),
+                dyn_farp_allow.as_ref(),
+            ) {
+                extend_objective_defaults_for_dep_farps(
+                    &mut fowl_from_warehouse.objective_defaults,
+                    &dep_wh_map,
+                    da,
+                    br,
+                )
+                .context("DEP FARP pad objective_defaults for export")?;
+            }
             let mut objective_stock = build_objective_stock_export(
                 lua,
                 &base,
@@ -10812,6 +11003,17 @@ pub fn run(cfg: &MizCmd) -> Result<()> {
                 &fowl_from_warehouse.objective_defaults,
             )
             .context("merging naval ship objective_stock export")?;
+            merge_dep_farp_objective_stock_export(
+                &mut objective_stock,
+                &base,
+                &dep_wh_map,
+                &mult_cfg,
+                &wb.template,
+                built_blue,
+                built_red,
+                &fowl_from_warehouse.objective_defaults,
+            )
+            .context("merging DEP FARP pad objective_stock export")?;
             fowl_from_warehouse.objective_stock = objective_stock;
             info!(
                 "fowl export objective_stock: written after warehouse patch ({} objectives)",

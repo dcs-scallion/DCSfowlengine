@@ -25,7 +25,7 @@ use anyhow::{anyhow, bail, Context, Result};
 use bfprotocols::{
     cfg::Vehicle,
     db::objective::{ObjectiveId, ObjectiveKind},
-    fowl_miz_export::{FowlMizExport, ObjectiveCoalitionStock},
+    fowl_miz_export::{FowlMizExport, ObjectiveCoalitionStock, ObjectiveStockItem},
     perf::{Perf, PerfInner},
     stats::Stat,
     tisp::ship_pad_display_name,
@@ -158,6 +158,10 @@ pub struct Transfer {
 }
 
 impl Transfer {
+    pub(super) fn target(&self) -> ObjectiveId {
+        self.target
+    }
+
     fn execute(&self, db: &mut Persisted, to_bg: &Option<UnboundedSender<Task>>) -> Result<()> {
         let src = db
             .objectives
@@ -239,7 +243,11 @@ pub struct Warehouse {
     pub(super) destination: SetS<ObjectiveId>,
 }
 
-fn sync_obj_to_warehouse(obj: &Objective, warehouse: &warehouse::Warehouse) -> Result<()> {
+fn sync_obj_to_warehouse(
+    obj: &Objective,
+    warehouse: &warehouse::Warehouse,
+    export_farp_liquids_tons: bool,
+) -> Result<()> {
     let perf = unsafe { Perf::get_mut() };
     let perf = Arc::make_mut(&mut perf.inner);
     for (item, inv) in &obj.warehouse.equipment {
@@ -258,28 +266,90 @@ fn sync_obj_to_warehouse(obj: &Objective, warehouse: &warehouse::Warehouse) -> R
         }
     }
     for (name, inv) in &obj.warehouse.liquids {
+        let target_kg = if export_farp_liquids_tons {
+            fowl_liquid_tons_to_dcs_kg(inv.stored)
+        } else {
+            inv.stored
+        };
         let current = warehouse
             .get_liquid_amount(*name)
             .with_context(|| format_compact!("getting liquid amount for {name:?}"))?;
-        if current < inv.stored {
+        if current < target_kg {
             warehouse
-                .add_liquid(*name, inv.stored - current)
+                .add_liquid(*name, target_kg - current)
                 .with_context(|| format_compact!("adding liquid {name:?}"))?;
-        } else if current > inv.stored {
+        } else if current > target_kg {
             warehouse
-                .remove_liquid(*name, current - inv.stored)
+                .remove_liquid(*name, current - target_kg)
                 .with_context(|| format_compact!("removing liquid {name:?}"))?;
         }
     }
     Ok(())
 }
 
-fn sync_warehouse_to_obj(obj: &mut Objective, warehouse: &warehouse::Warehouse) -> Result<()> {
+fn sync_warehouse_to_obj(
+    obj: &mut Objective,
+    warehouse: &warehouse::Warehouse,
+    export_farp_liquids_tons: bool,
+) -> Result<()> {
     for (name, inv) in obj.warehouse.equipment.iter_mut_cow() {
         inv.stored = warehouse.get_item_count(name.clone())?;
     }
     for (name, inv) in obj.warehouse.liquids.iter_mut_cow() {
-        inv.stored = warehouse.get_liquid_amount(*name)?;
+        let kg = warehouse.get_liquid_amount(*name)?;
+        inv.stored = if export_farp_liquids_tons {
+            dcs_liquid_kg_to_fowl_tons(kg)
+        } else {
+            kg
+        };
+    }
+    Ok(())
+}
+
+/// Ground DEP FARP: ME pad may still carry full stock; drop DCS rows not in virtual or above virtual `stored`.
+fn prune_dep_farp_dcs_warehouse_to_virtual<'lua>(
+    obj: &Objective,
+    warehouse: &warehouse::Warehouse<'lua>,
+) -> Result<()> {
+    let inv = warehouse
+        .get_inventory(None)
+        .context("warehouse getInventory for FARP virtual prune")?;
+    let trim_equipment = |items: warehouse::ItemInventory<'_>| -> Result<()> {
+            items.for_each(|name, qty| {
+                if qty == 0 {
+                    return Ok(());
+                }
+                let target = obj
+                    .warehouse
+                    .equipment
+                    .get(name.as_str())
+                    .map(|i| i.stored)
+                    .unwrap_or(0);
+                if qty != target {
+                    warehouse
+                        .set_item(name.clone(), target)
+                        .with_context(|| format_compact!("set_item {name} to {target}"))?;
+                }
+                Ok(())
+            })
+        };
+    trim_equipment(inv.weapons().context("warehouse weapons for FARP prune")?)?;
+    trim_equipment(inv.aircraft().context("warehouse aircraft for FARP prune")?)?;
+    for typ in LiquidType::ALL {
+        let target = obj
+            .warehouse
+            .liquids
+            .get(&typ)
+            .map(|i| fowl_liquid_tons_to_dcs_kg(i.stored))
+            .unwrap_or(0);
+        let current = warehouse
+            .get_liquid_amount(typ)
+            .with_context(|| format_compact!("get_liquid_amount {typ:?}"))?;
+        if current != target {
+            warehouse
+                .set_liquid_amount(typ, target)
+                .with_context(|| format_compact!("set_liquid_amount {typ:?} to {target} kg"))?;
+        }
     }
     Ok(())
 }
@@ -289,12 +359,18 @@ fn equipment_capacity_for_discovered_row(
     name: &str,
     stored: u32,
     export: &FowlMizExport,
+    resource_meta: &FxHashMap<String, WarehouseResourceMeta>,
     whcfg: Option<&bfprotocols::cfg::WarehouseConfig>,
     production: Option<&Production>,
     on_water: bool,
 ) -> u32 {
     if let Some(profile) = objective_coalition_stock_for_objective(export, obj) {
-        if let Some(item) = profile.equipment.get(name) {
+        let item = if objective_is_ground_dep_farp(obj) {
+            profile_export_equipment_item(profile, name, resource_meta)
+        } else {
+            profile.equipment.get(name)
+        };
+        if let Some(item) = item {
             if item.baseline > 0 {
                 return item.baseline;
             }
@@ -344,7 +420,7 @@ fn liquid_capacity_for_discovered_row(
     stored.max(1)
 }
 
-/// Mobile FARP / TISP carriers: virtual rows often missing (no `O*` `objective_stock` name); DCS may still be full from bftools.
+/// FARP pads: virtual rows keyed by pad template when runtime objective name differs from export.
 fn discover_dcs_warehouse_into_obj(
     obj: &mut Objective,
     warehouse: &warehouse::Warehouse,
@@ -375,11 +451,14 @@ fn discover_dcs_warehouse_into_obj(
                     return Ok(());
                 }
                 if let Some(profile) = profile {
-                    if !profile.equipment.contains_key(name.as_str()) {
-                        let allowed = profile.equipment.is_empty();
-                        if !allowed {
-                            return Ok(());
-                        }
+                    if !discover_equipment_allowed_by_export_profile(
+                        obj,
+                        profile,
+                        name.as_str(),
+                        resource_meta,
+                    ) && !profile.equipment.is_empty()
+                    {
+                        return Ok(());
                     }
                 }
                 let capacity = equipment_capacity_for_discovered_row(
@@ -387,6 +466,7 @@ fn discover_dcs_warehouse_into_obj(
                     name.as_str(),
                     stored,
                     export,
+                    resource_meta,
                     whcfg,
                     production,
                     on_water,
@@ -461,6 +541,74 @@ fn objective_coalition_stock_for_side<'a>(
     })
 }
 
+/// Pozemní DEP FARP (`DEPBFARPPAD*`); not naval deck pads or carrier airbases.
+fn objective_is_ground_dep_farp(obj: &Objective) -> bool {
+    matches!(obj.kind, ObjectiveKind::Farp { mobile: false, .. })
+}
+
+/// Export `objective_stock` for mobile naval pads (allowlist / defaults), not DEP pads.
+fn farp_export_lookup_keys(obj: &Objective) -> Option<SmallVec<[String; 3]>> {
+    let ObjectiveKind::Farp {
+        mobile: true,
+        pad_template,
+        ..
+    } = &obj.kind
+    else {
+        return None;
+    };
+    let mut keys: SmallVec<[String; 3]> = smallvec![];
+    let display = ship_pad_display_name(pad_template.as_str());
+    if display.as_str() != obj.name.as_str() {
+        keys.push(String::from(display));
+    }
+    if pad_template.as_str() != obj.name.as_str() {
+        keys.push(pad_template.clone());
+    }
+    if keys.is_empty() {
+        None
+    } else {
+        Some(keys)
+    }
+}
+
+fn dep_farp_export_profile<'a>(
+    export: &'a FowlMizExport,
+    obj: &Objective,
+) -> Option<&'a ObjectiveCoalitionStock> {
+    if !objective_is_ground_dep_farp(obj) {
+        return None;
+    }
+    let ObjectiveKind::Farp { pad_template, .. } = &obj.kind else {
+        return None;
+    };
+    objective_coalition_stock_for_side(export, pad_template.as_str(), obj.owner).or_else(|| {
+        objective_coalition_stock_for_side(export, obj.name.as_str(), obj.owner)
+    })
+}
+
+/// Ground DEP FARP with per-pad export stock: 20% initial fill, DCS sync in tons, virtual prune.
+fn objective_is_ground_dep_farp_export(export: &FowlMizExport, obj: &Objective) -> bool {
+    dep_farp_export_profile(export, obj).is_some()
+}
+
+/// Persisted deploy: virtual rows already set (e.g. after 20% init); do not hydrate from ME pad template on load.
+fn dep_farp_has_persisted_virtual_stock(obj: &Objective) -> bool {
+    if !objective_is_ground_dep_farp(obj) {
+        return false;
+    }
+    for (_, inv) in &obj.warehouse.equipment {
+        if inv.capacity > 0 {
+            return true;
+        }
+    }
+    for (_, inv) in &obj.warehouse.liquids {
+        if inv.capacity > 0 {
+            return true;
+        }
+    }
+    false
+}
+
 fn objective_coalition_stock_for_objective<'a>(
     export: &'a FowlMizExport,
     obj: &Objective,
@@ -470,24 +618,11 @@ fn objective_coalition_stock_for_objective<'a>(
     {
         return Some(stock);
     }
-    let ObjectiveKind::Farp {
-        mobile: true,
-        pad_template,
-        ..
-    } = &obj.kind
-    else {
-        return None;
-    };
-    let display = ship_pad_display_name(pad_template.as_str());
-    if display.as_str() != obj.name.as_str() {
-        if let Some(stock) =
-            objective_coalition_stock_for_side(export, display.as_str(), obj.owner)
-        {
+    let keys = farp_export_lookup_keys(obj)?;
+    for key in keys {
+        if let Some(stock) = objective_coalition_stock_for_side(export, key.as_str(), obj.owner) {
             return Some(stock);
         }
-    }
-    if pad_template.as_str() != obj.name.as_str() && pad_template.as_str() != display.as_str() {
-        return objective_coalition_stock_for_side(export, pad_template.as_str(), obj.owner);
     }
     None
 }
@@ -500,22 +635,11 @@ fn objective_defaults_for_objective<'a>(
     if let Some(d) = objective_defaults_for_side(export, obj.name.as_str(), side) {
         return Some(d);
     }
-    let ObjectiveKind::Farp {
-        mobile: true,
-        pad_template,
-        ..
-    } = &obj.kind
-    else {
-        return None;
-    };
-    let display = ship_pad_display_name(pad_template.as_str());
-    if display.as_str() != obj.name.as_str() {
-        if let Some(d) = objective_defaults_for_side(export, display.as_str(), side) {
+    let keys = farp_export_lookup_keys(obj)?;
+    for key in keys {
+        if let Some(d) = objective_defaults_for_side(export, key.as_str(), side) {
             return Some(d);
         }
-    }
-    if pad_template.as_str() != obj.name.as_str() && pad_template.as_str() != display.as_str() {
-        return objective_defaults_for_side(export, pad_template.as_str(), side);
     }
     None
 }
@@ -528,6 +652,76 @@ fn liquid_type_from_export_key(key: &str) -> Result<LiquidType> {
         "methanol_mixture" => Ok(LiquidType::MW50),
         _ => bail!("unknown liquid key in Fowl export: {key}"),
     }
+}
+
+/// Fowl export / bftools `InitFuel` for FARPs: metric tons; DCS `getLiquidAmount` / `setLiquidAmount`: kg.
+const FOWL_LIQUID_TONS_TO_DCS_KG: u32 = 1000;
+
+fn fowl_liquid_tons_to_dcs_kg(tons: u32) -> u32 {
+    tons.saturating_mul(FOWL_LIQUID_TONS_TO_DCS_KG)
+}
+
+fn dcs_liquid_kg_to_fowl_tons(kg: u32) -> u32 {
+    kg / FOWL_LIQUID_TONS_TO_DCS_KG
+}
+
+fn parse_export_ws_type_key(key: &str) -> Option<[i32; 4]> {
+    let inner = key.strip_prefix("wsType [")?.strip_suffix(']')?;
+    let parts: Vec<i32> = inner
+        .split(',')
+        .filter_map(|s| s.trim().parse().ok())
+        .collect();
+    match parts.as_slice() {
+        [a, b, c, d] => Some([*a, *b, *c, *d]),
+        _ => None,
+    }
+}
+
+fn resolve_export_equipment_dcs_name(
+    export_key: &str,
+    resource_meta: &FxHashMap<String, WarehouseResourceMeta>,
+) -> String {
+    if let Some(quad) = parse_export_ws_type_key(export_key) {
+        for (name, meta) in resource_meta {
+            if meta.quad == Some(quad) {
+                return name.clone();
+            }
+        }
+    }
+    String::from(export_key)
+}
+
+fn profile_export_equipment_item<'a>(
+    profile: &'a ObjectiveCoalitionStock,
+    dcs_name: &str,
+    resource_meta: &FxHashMap<String, WarehouseResourceMeta>,
+) -> Option<&'a ObjectiveStockItem> {
+    profile.equipment.get(dcs_name).or_else(|| {
+        profile.equipment.iter().find_map(|(key, item)| {
+            (resolve_export_equipment_dcs_name(key, resource_meta).as_str() == dcs_name).then_some(item)
+        })
+    })
+}
+
+fn profile_export_equipment_has(
+    profile: &ObjectiveCoalitionStock,
+    dcs_name: &str,
+    resource_meta: &FxHashMap<String, WarehouseResourceMeta>,
+) -> bool {
+    profile_export_equipment_item(profile, dcs_name, resource_meta).is_some()
+}
+
+fn discover_equipment_allowed_by_export_profile(
+    obj: &Objective,
+    profile: &ObjectiveCoalitionStock,
+    dcs_name: &str,
+    resource_meta: &FxHashMap<String, WarehouseResourceMeta>,
+) -> bool {
+    if objective_is_ground_dep_farp(obj) {
+        return profile_export_equipment_has(profile, dcs_name, resource_meta);
+    }
+    // Carriers / airbases: do not filter DCS rows by export wsType keys (hydrate from ME warehouse).
+    true
 }
 
 /// DCS `wsType_Weapon` branch (`l1 == 4`): missile 4, bomb 5, shell 6, NURS 7, torpedo 8 (see DCS modding wsType list). Fowl `campaign_cfg` used 5/6 for some buckets; runtime `getResourceMap` often uses **7** for Hydra-class rockets.
@@ -751,11 +945,10 @@ impl Db {
         Ok(())
     }
 
-    pub(super) fn init_farp_warehouse(&mut self, oid: &ObjectiveId) -> Result<()> {
-        let whcfg = match self.ephemeral.cfg.warehouse.as_ref() {
-            Some(cfg) => cfg,
-            None => return Ok(()),
-        };
+    pub(super) fn init_farp_warehouse(&mut self, lua: MizLua, oid: &ObjectiveId) -> Result<()> {
+        if self.ephemeral.cfg.warehouse.is_none() {
+            return Ok(());
+        }
         let initial_stock_pct = self
             .ephemeral
             .cfg
@@ -764,7 +957,68 @@ impl Db {
             .map(|w| w.dynamic_farps_initial_stock_percentage)
             .unwrap_or(100)
             .min(100);
+        let export = Arc::clone(&self.ephemeral.fowl_miz_export);
+        let obj_read = objective!(self, oid)?;
+        if !objective_is_ground_dep_farp(obj_read) {
+            bail!(
+                "init_farp_warehouse: {:?} is not a ground DEP FARP (naval pads use DCS ME stock)",
+                obj_read.name
+            );
+        }
+        let profile = dep_farp_export_profile(export.as_ref(), obj_read).cloned();
+        let resource_meta = self
+            .warehouse_resource_meta_cache(lua)
+            .context("resource map for DEP FARP export stock")?;
         let obj = objective_mut!(self, oid)?;
+        if let Some(profile) = profile {
+            obj.warehouse = Warehouse::default();
+            for (name, item) in &profile.equipment {
+                if item.baseline == 0 {
+                    continue;
+                }
+                let dcs_name =
+                    resolve_export_equipment_dcs_name(name.as_str(), resource_meta.as_ref());
+                let meta = resource_meta.get(&dcs_name).copied();
+                if !equipment_allowed_for_objective(
+                    export.as_ref(),
+                    obj,
+                    obj.owner,
+                    name.as_str(),
+                    meta,
+                ) {
+                    continue;
+                }
+                obj.warehouse.equipment.insert_cow(
+                    dcs_name,
+                    Inventory {
+                        stored: scale_capacity_by_percent_floor(item.baseline, initial_stock_pct),
+                        capacity: item.baseline,
+                    },
+                );
+            }
+            for (key, liq) in &profile.liquids {
+                if liq.baseline == 0 {
+                    continue;
+                }
+                let typ = liquid_type_from_export_key(key)
+                    .with_context(|| format_compact!("FARP objective {:?}", obj.name))?;
+                obj.warehouse.liquids.insert_cow(
+                    typ,
+                    Inventory {
+                        stored: scale_capacity_by_percent_floor(liq.baseline, initial_stock_pct),
+                        capacity: liq.baseline,
+                    },
+                );
+            }
+            log::info!(
+                "ground DEP FARP {:?} ({:?}): warehouse from export pad profile ({}% initial stock)",
+                oid,
+                obj.name,
+                initial_stock_pct
+            );
+            return Ok(());
+        }
+        let whcfg = self.ephemeral.cfg.warehouse.as_ref().unwrap();
         let production = match self.ephemeral.production_by_side.get(&obj.owner) {
             Some(q) => Arc::clone(q),
             None => return Ok(()),
@@ -772,7 +1026,6 @@ impl Db {
         for (name, equip) in &production.equipment {
             let capacity = whcfg.capacity(&obj.kind, false, equip.production);
             let inv = Inventory {
-                // Equipment includes airframes; percent uses floor (e.g. 2.8 -> 2).
                 stored: scale_capacity_by_percent_floor(capacity, initial_stock_pct),
                 capacity,
             };
@@ -786,10 +1039,71 @@ impl Db {
             };
             obj.warehouse.liquids.insert_cow(*name, inv);
         }
-        log::info!(
-            "dynamic FARP {:?}: initialized warehouse stock to {}% of capacity",
+        warn!(
+            "dynamic FARP {:?} ({:?}): no export profile for pad; using coalition BINVENTORY/RINVENTORY ({}% stock)",
             oid,
+            obj.name,
             initial_stock_pct
+        );
+        Ok(())
+    }
+
+    /// Push virtual DEP FARP stock (tons→kg) into DCS and prune ME template overflow.
+    pub(super) fn apply_dep_farp_virtual_stock_to_dcs(
+        &mut self,
+        lua: MizLua,
+        oid: &ObjectiveId,
+    ) -> Result<()> {
+        let export = self.ephemeral.fowl_miz_export.as_ref();
+        let obj = objective!(self, oid)?;
+        if !objective_is_ground_dep_farp_export(export, obj) {
+            return Ok(());
+        }
+        self.sync_objective_to_warehouse(lua, *oid)
+            .context("applying ground DEP FARP virtual stock to DCS warehouse")?;
+        Ok(())
+    }
+
+    fn mark_dep_farp_virtual_authoritative(&mut self, oid: ObjectiveId) {
+        let until = Utc::now() + Duration::seconds(90);
+        self.ephemeral
+            .dep_farp_authoritative_until
+            .insert(oid, until);
+    }
+
+    fn dep_farp_skip_dcs_hydrate(&self, oid: ObjectiveId) -> bool {
+        self.ephemeral
+            .dep_farp_authoritative_until
+            .get(&oid)
+            .is_some_and(|until| Utc::now() < *until)
+    }
+
+    /// Initial DEP FARP fill only: [`Self::init_farp_warehouse`] at `dynamicFARPs_InitialStockPercentage`, then DCS sync.
+    /// Later hub resupply uses normal `capacity` like any other objective (`virtual_resupply`).
+    pub(super) fn finish_dynamic_farp_warehouse(
+        &mut self,
+        lua: MizLua,
+        oid: &ObjectiveId,
+    ) -> Result<()> {
+        let pct = self
+            .ephemeral
+            .cfg
+            .warehouse
+            .as_ref()
+            .map(|w| w.dynamic_farps_initial_stock_percentage)
+            .unwrap_or(100)
+            .min(100);
+        let name = objective!(self, oid)?.name.clone();
+        self.init_farp_warehouse(lua, oid)
+            .context("initializing dynamic FARP warehouse")?;
+        self.mark_dep_farp_virtual_authoritative(*oid);
+        self.apply_dep_farp_virtual_stock_to_dcs(lua, oid)
+            .context("applying ground DEP FARP initial stock to DCS warehouse")?;
+        self.update_supply_status()
+            .context("updating supply/fuel after FARP warehouse init")?;
+        info!(
+            "ground DEP FARP {:?} ({:?}): DCS warehouse set to {}% export stock (infobar supply/fuel updated)",
+            oid, name, pct
         );
         Ok(())
     }
@@ -810,14 +1124,65 @@ impl Db {
         let resource_meta =
             build_resource_meta_map(lua).context("resource map for objective stock seed")?;
         for (_oid, obj) in self.persisted.objectives.iter_mut_cow() {
-            let Some(profile) = objective_coalition_stock_for_objective(export, obj) else {
+            obj.warehouse = Warehouse::default();
+            if objective_is_ground_dep_farp(obj) {
+                let Some(profile) = dep_farp_export_profile(export, obj) else {
+                    warn!(
+                        "ground DEP FARP {:?}: no export pad profile for {:?}",
+                        obj.name,
+                        obj.owner
+                    );
+                    continue;
+                };
+                for (name, item) in &profile.equipment {
+                    if item.baseline == 0 {
+                        continue;
+                    }
+                    let dcs_name =
+                        resolve_export_equipment_dcs_name(name.as_str(), &resource_meta);
+                    let meta = resource_meta.get(&dcs_name).copied();
+                    if !equipment_allowed_for_objective(
+                        export,
+                        obj,
+                        obj.owner,
+                        name.as_str(),
+                        meta,
+                    ) {
+                        continue;
+                    }
+                    obj.warehouse.equipment.insert_cow(
+                        dcs_name,
+                        Inventory {
+                            stored: 0,
+                            capacity: item.baseline,
+                        },
+                    );
+                }
+                for (key, liq) in &profile.liquids {
+                    if liq.baseline == 0 {
+                        continue;
+                    }
+                    let typ = liquid_type_from_export_key(key)
+                        .with_context(|| format_compact!("DEP FARP {:?}", obj.name))?;
+                    obj.warehouse.liquids.insert_cow(
+                        typ,
+                        Inventory {
+                            stored: 0,
+                            capacity: liq.baseline,
+                        },
+                    );
+                }
+                continue;
+            }
+            let Some(profile) =
+                objective_coalition_stock_for_side(export, obj.name.as_str(), obj.owner)
+            else {
                 warn!(
                     "objective {:?}: no objective_stock profile for owner {:?}",
                     obj.name, obj.owner
                 );
                 continue;
             };
-            obj.warehouse = Warehouse::default();
             for (name, item) in &profile.equipment {
                 let dcs_name = String::from(name.as_str());
                 let meta = resource_meta.get(&dcs_name).copied();
@@ -1021,65 +1386,138 @@ impl Db {
                 let mut del_eq: SmallVec<[String; 8]> = smallvec![];
                 let mut del_l: SmallVec<[LiquidType; 4]> = smallvec![];
                 if use_export_stock {
-                    let Some(profile) = objective_coalition_stock_for_objective(export, obj) else {
-                        continue;
-                    };
-                    for (name, _) in &obj.warehouse.equipment {
-                        let export_key = name.as_str();
-                        let mut keep = profile.equipment.contains_key(export_key);
-                        if keep {
-                            let meta = resource_meta.get(name).copied();
-                            keep = equipment_allowed_for_objective(
+                    if objective_is_ground_dep_farp(obj) {
+                        let Some(profile) = dep_farp_export_profile(export, obj) else {
+                            continue;
+                        };
+                        for (name, _) in &obj.warehouse.equipment {
+                            let mut keep = profile_export_equipment_has(
+                                profile,
+                                name.as_str(),
+                                resource_meta.as_ref(),
+                            );
+                            if keep {
+                                let meta = resource_meta.get(name).copied();
+                                keep = equipment_allowed_for_objective(
+                                    export,
+                                    obj,
+                                    obj.owner,
+                                    name.as_str(),
+                                    meta,
+                                );
+                            }
+                            if !keep {
+                                del_eq.push(name.clone());
+                            }
+                        }
+                        for name in del_eq {
+                            obj.warehouse.equipment.remove_cow(&name);
+                        }
+                        for (liq, _) in &obj.warehouse.liquids {
+                            let keep = profile.liquids.keys().any(|k| {
+                                liquid_type_from_export_key(k).ok() == Some(*liq)
+                            });
+                            if !keep {
+                                del_l.push(*liq);
+                            }
+                        }
+                        for liq in del_l {
+                            obj.warehouse.liquids.remove_cow(&liq);
+                        }
+                        for (name, item) in &profile.equipment {
+                            if item.baseline == 0 {
+                                continue;
+                            }
+                            let dcs_name = resolve_export_equipment_dcs_name(
+                                name.as_str(),
+                                resource_meta.as_ref(),
+                            );
+                            let meta = resource_meta.get(&dcs_name).copied();
+                            if !equipment_allowed_for_objective(
                                 export,
                                 obj,
                                 obj.owner,
-                                export_key,
+                                name.as_str(),
                                 meta,
-                            );
+                            ) {
+                                continue;
+                            }
+                            let inv = obj.warehouse.equipment.get_or_default_cow(dcs_name);
+                            inv.capacity = item.baseline;
                         }
-                        if !keep {
-                            del_eq.push(name.clone());
+                        for (key, liq) in &profile.liquids {
+                            if liq.baseline == 0 {
+                                continue;
+                            }
+                            let typ = liquid_type_from_export_key(key)?;
+                            let inv = obj.warehouse.liquids.get_or_default_cow(typ);
+                            inv.capacity = liq.baseline;
                         }
-                    }
-                    for name in del_eq {
-                        obj.warehouse.equipment.remove_cow(&name);
-                    }
-                    for (liq, _) in &obj.warehouse.liquids {
-                        let keep = profile.liquids.keys().any(|k| {
-                            liquid_type_from_export_key(k).ok() == Some(*liq)
-                        });
-                        if !keep {
-                            del_l.push(*liq);
-                        }
-                    }
-                    for liq in del_l {
-                        obj.warehouse.liquids.remove_cow(&liq);
-                    }
-                    for (name, item) in &profile.equipment {
-                        if item.baseline == 0 {
-                            continue;
-                        }
-                        let dcs_name = String::from(name.as_str());
-                        let meta = resource_meta.get(&dcs_name).copied();
-                        if !equipment_allowed_for_objective(
+                    } else {
+                        let Some(profile) = objective_coalition_stock_for_side(
                             export,
-                            obj,
+                            obj.name.as_str(),
                             obj.owner,
-                            name.as_str(),
-                            meta,
-                        ) {
+                        ) else {
                             continue;
+                        };
+                        for (name, _) in &obj.warehouse.equipment {
+                            let export_key = name.as_str();
+                            let mut keep = profile.equipment.contains_key(export_key);
+                            if keep {
+                                let meta = resource_meta.get(name).copied();
+                                keep = equipment_allowed_for_objective(
+                                    export,
+                                    obj,
+                                    obj.owner,
+                                    export_key,
+                                    meta,
+                                );
+                            }
+                            if !keep {
+                                del_eq.push(name.clone());
+                            }
                         }
-                        let inv = obj.warehouse.equipment.get_or_default_cow(dcs_name);
-                        inv.capacity = item.baseline;
-                    }
-                    for (key, liq) in &profile.liquids {
-                        if liq.baseline == 0 {
-                            continue;
+                        for name in del_eq {
+                            obj.warehouse.equipment.remove_cow(&name);
                         }
-                        let typ = liquid_type_from_export_key(key)?;
-                        let inv = obj.warehouse.liquids.get_or_default_cow(typ);
-                        inv.capacity = liq.baseline;
+                        for (liq, _) in &obj.warehouse.liquids {
+                            let keep = profile.liquids.keys().any(|k| {
+                                liquid_type_from_export_key(k).ok() == Some(*liq)
+                            });
+                            if !keep {
+                                del_l.push(*liq);
+                            }
+                        }
+                        for liq in del_l {
+                            obj.warehouse.liquids.remove_cow(&liq);
+                        }
+                        for (name, item) in &profile.equipment {
+                            if item.baseline == 0 {
+                                continue;
+                            }
+                            let dcs_name = String::from(name.as_str());
+                            let meta = resource_meta.get(&dcs_name).copied();
+                            if !equipment_allowed_for_objective(
+                                export,
+                                obj,
+                                obj.owner,
+                                name.as_str(),
+                                meta,
+                            ) {
+                                continue;
+                            }
+                            let inv = obj.warehouse.equipment.get_or_default_cow(dcs_name);
+                            inv.capacity = item.baseline;
+                        }
+                        for (key, liq) in &profile.liquids {
+                            if liq.baseline == 0 {
+                                continue;
+                            }
+                            let typ = liquid_type_from_export_key(key)?;
+                            let inv = obj.warehouse.liquids.get_or_default_cow(typ);
+                            inv.capacity = liq.baseline;
+                        }
                     }
                 } else if let Some(prod) = self.ephemeral.production_by_side.get(&obj.owner) {
                     let on_water = objective_airbase_on_water(lua, obj)?;
@@ -1155,6 +1593,26 @@ impl Db {
             info!(
                 "new campaign: preserved bftools ME warehouse stock (virtual sync from DCS only, no prune/sync-to)"
             );
+        }
+        let mut dep_farp_restore: SmallVec<[(ObjectiveId, String); 8]> = smallvec![];
+        for oid in &self.persisted.farps {
+            let obj = objective!(self, oid)?;
+            if dep_farp_has_persisted_virtual_stock(obj) {
+                dep_farp_restore.push((*oid, obj.name.clone()));
+            }
+        }
+        for (oid, name) in dep_farp_restore {
+            if let Err(e) = self.apply_dep_farp_virtual_stock_to_dcs(lua, &oid) {
+                error!(
+                    "failed to restore persisted ground DEP FARP {:?} ({:?}) warehouse to DCS: {e:?}",
+                    oid, name
+                );
+            } else {
+                info!(
+                    "restored persisted ground DEP FARP {:?} ({:?}) virtual warehouse to DCS",
+                    oid, name
+                );
+            }
         }
         self.update_supply_status()
             .context("updating supply status")?;
@@ -1712,8 +2170,21 @@ impl Db {
             .production_by_side
             .get(&owner)
             .map(Arc::clone);
+        let skip_dep_hydrate = self.dep_farp_skip_dcs_hydrate(oid);
         let obj = objective_mut!(self, oid)?;
-        sync_warehouse_to_obj(obj, &warehouse).context("syncing warehouse to objective")?;
+        if objective_is_ground_dep_farp_export(export.as_ref(), obj) {
+            let keep_virtual = skip_dep_hydrate || dep_farp_has_persisted_virtual_stock(obj);
+            prune_dep_farp_dcs_warehouse_to_virtual(obj, &warehouse)
+                .context("pruning ground DEP FARP DCS warehouse to virtual stock")?;
+            if !keep_virtual {
+                self.ephemeral.dep_farp_authoritative_until.remove(&oid);
+                sync_warehouse_to_obj(obj, &warehouse, true)
+                    .context("syncing ground DEP FARP warehouse from DCS (tracked rows only)")?;
+            }
+            return Ok((obj, warehouse));
+        }
+        sync_warehouse_to_obj(obj, &warehouse, false)
+            .context("syncing warehouse to objective")?;
         discover_dcs_warehouse_into_obj(
             obj,
             &warehouse,
@@ -1748,7 +2219,13 @@ impl Db {
         let owner = obj.owner;
         let export = self.ephemeral.fowl_miz_export.as_ref();
         prune_disallowed_dcs_weapon_stock(&warehouse, export, owner, resource_meta.as_ref())?;
-        sync_obj_to_warehouse(obj, &warehouse).context("syncing warehouse to objective")?;
+        let dep_farp_export = objective_is_ground_dep_farp_export(export, obj);
+        sync_obj_to_warehouse(obj, &warehouse, dep_farp_export)
+            .context("syncing warehouse to objective")?;
+        if dep_farp_export {
+            prune_dep_farp_dcs_warehouse_to_virtual(obj, &warehouse)
+                .context("pruning ground DEP FARP DCS warehouse after virtual push")?;
+        }
         Ok((obj, warehouse))
     }
 
@@ -1809,11 +2286,11 @@ impl Db {
         for tr in transfers {
             tr.execute(&mut self.persisted, &self.ephemeral.to_bg)?
         }
-        sync_obj_to_warehouse(
-            objective!(self, from)?,
-            &from_wh,
-        )?;
-        sync_obj_to_warehouse(objective!(self, to)?, &to_wh)?;
+        let export = self.ephemeral.fowl_miz_export.as_ref();
+        let from_dep = objective_is_ground_dep_farp_export(export, objective!(self, from)?);
+        let to_dep = objective_is_ground_dep_farp_export(export, objective!(self, to)?);
+        sync_obj_to_warehouse(objective!(self, from)?, &from_wh, from_dep)?;
+        sync_obj_to_warehouse(objective!(self, to)?, &to_wh, to_dep)?;
         self.update_supply_status()
             .context("updating supply status")?;
         Ok(())
@@ -1837,6 +2314,10 @@ impl Db {
             Some(p) => Arc::clone(p),
             None => return Ok(()),
         };
+        let dep_farp_export = objective_is_ground_dep_farp_export(
+            self.ephemeral.fowl_miz_export.as_ref(),
+            objective!(self, oid)?,
+        );
         let (obj, warehouse) = self
             .sync_warehouse_to_objective(lua, oid)
             .with_context(|| format_compact!("syncing warehouses to {oid}"))?;
@@ -1850,7 +2331,7 @@ impl Db {
                 inv.reduce(percent);
             }
         }
-        sync_obj_to_warehouse(obj, &warehouse).context("syncing from warehouse")?;
+        sync_obj_to_warehouse(obj, &warehouse, dep_farp_export).context("syncing from warehouse")?;
         self.update_supply_status()
             .context("updating supply status")?;
         self.ephemeral.dirty();

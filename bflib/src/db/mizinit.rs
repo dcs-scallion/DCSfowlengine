@@ -588,31 +588,21 @@ impl Db {
                     pad_template,
                 } = &obj.kind
                 {
-                    // Carriers exist as Group and as ship Airbase; Group.getByName can miss timing.
-                    let pad_live_group = dcso3::group::Group::get_by_name(spctx.lua(), pad_template.as_str())
-                        .and_then(|g| g.is_exist())
-                        .unwrap_or(false);
-                    let pad_live_airbase = Airbase::get_by_name(spctx.lua(), pad_template.clone())
-                        .and_then(|a| a.is_exist())
-                        .unwrap_or(false);
-                    let pad_live = pad_live_group || pad_live_airbase;
-                    // Naval / mobile pads: ME template is always present after mission load; still
-                    // relocate to persisted zone (same as add_farp tail). Skipping when pad_live left
-                    // carriers at editor coords off the TISP positions.
+                    // ME DEP pad templates exist at editor coords after every mission load (`pad_live`).
+                    // Ground DEP FARPs must still relocate to the persisted deploy position (same as
+                    // `add_farp`); skipping when `pad_live` left the invisible pad off-map.
                     if *mobile {
                         spctx
                             .move_farp_pad(idx, obj.owner, &pad_template, pos)
                             .context("moving mobile farp pad")?;
-                    } else if !pad_live {
-                        if let Some(uid) = self.persisted.units_by_name.get(pad_template)
-                            && let Some(unit) = self.persisted.units.get(uid)
-                        {
-                            self.ephemeral.push_spawn(unit.group);
-                        } else {
-                            spctx
-                                .move_farp_pad(idx, obj.owner, &pad_template, pos)
-                                .context("moving farp pad")?;
-                        }
+                    } else {
+                        spctx
+                            .move_farp_pad(idx, obj.owner, &pad_template, pos)
+                            .context("moving ground DEP FARP pad after load")?;
+                        info!(
+                            "respawned ground DEP FARP {:?} pad {:?} at persisted position",
+                            obj.name, pad_template
+                        );
                     }
                     self.ephemeral.set_pad_template_used(pad_template.clone());
                 }

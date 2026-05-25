@@ -843,14 +843,15 @@ impl Db {
             .airbases_by_oid
             .insert(oid, smallvec![airbase]);
         if !self.ephemeral.defer_initial_hub_distribute {
-            self.init_farp_warehouse(&oid)
-                .context("initializing farp warehouse")?;
+            self.finish_dynamic_farp_warehouse(lua, &oid)
+                .context("initializing dynamic FARP warehouse")?;
         }
         self.setup_supply_lines().context("setup supply lines")?;
         if !self.ephemeral.defer_initial_hub_distribute {
-            let trs = self
+            let mut trs = self
                 .deliver_supplies_from_logistics_hubs()
                 .context("distributing supplies")?;
+            trs.retain(|t| t.target() != oid);
             match &mut self.ephemeral.logistics_stage {
                 LogiStage::ExecuteTransfers { transfers } => transfers.extend(trs),
                 stage @ (LogiStage::Complete { .. }
@@ -859,6 +860,13 @@ impl Db {
                 | LogiStage::SyncToWarehouses { .. }) => {
                     *stage = LogiStage::ExecuteTransfers { transfers: trs };
                 }
+            }
+            if matches!(
+                &objective!(self, oid)?.kind,
+                ObjectiveKind::Farp { mobile: false, .. }
+            ) {
+                self.apply_dep_farp_virtual_stock_to_dcs(lua, &oid)
+                    .context("re-applying DEP FARP initial DCS stock after hub staging")?;
             }
         }
         self.ephemeral

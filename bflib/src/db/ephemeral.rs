@@ -157,6 +157,8 @@ pub struct Ephemeral {
     pub(super) defer_initial_hub_distribute: bool,
     /// New round: first logistics cycle reads DCS (SyncFrom) and skips SyncTo to ME.
     pub(super) defer_initial_logistics_sync_to: bool,
+    /// Ground DEP FARP after deploy: virtual stock is authoritative; skip DCS hydrate until this time.
+    pub(super) dep_farp_authoritative_until: FxHashMap<ObjectiveId, DateTime<Utc>>,
     pub(super) awacs_stn: u32,
     pub(super) logistics_stage: LogiStage,
     spawnq: VecDeque<GroupId>,
@@ -207,6 +209,7 @@ impl Default for Ephemeral {
             preserve_initial_warehouse_fill: false,
             defer_initial_hub_distribute: false,
             defer_initial_logistics_sync_to: false,
+            dep_farp_authoritative_until: FxHashMap::default(),
             awacs_stn: 0o77777,
             spawnq: VecDeque::default(),
             despawnq: VecDeque::default(),
