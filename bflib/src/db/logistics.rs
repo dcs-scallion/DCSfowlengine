@@ -875,6 +875,77 @@ fn prune_disallowed_dcs_weapon_stock<'lua>(
 }
 
 impl Db {
+    fn warehouse_sync_objective_ids(&self) -> Vec<ObjectiveId> {
+        self.persisted
+            .objectives
+            .into_iter()
+            .filter(|(_, obj)| !matches!(obj.kind, ObjectiveKind::Production))
+            .map(|(id, _)| *id)
+            .collect()
+    }
+
+    fn scale_production_amount(base: u32, production: u8) -> u32 {
+        if production == 0 || base == 0 {
+            return 0;
+        }
+        let scaled = base.saturating_mul(production as u32) / 100;
+        if scaled == 0 { 1 } else { scaled }
+    }
+
+    pub(super) fn nearest_logistics_hub(
+        persisted: &Persisted,
+        owner: Side,
+        pos: Vector2,
+    ) -> Option<ObjectiveId> {
+        persisted
+            .logistics_hubs
+            .into_iter()
+            .filter_map(|hid| {
+                let hub = persisted.objectives.get(hid)?;
+                if hub.owner != owner {
+                    return None;
+                }
+                let dist = na::distance_squared(&pos.into(), &hub.zone.pos().into());
+                Some((*hid, dist))
+            })
+            .min_by(|(_, a), (_, b)| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal))
+            .map(|(hid, _)| hid)
+    }
+
+    pub(super) fn refresh_hub_production_from_opr(&mut self) -> Result<()> {
+        let mut sums: FxHashMap<ObjectiveId, (u32, u32)> = FxHashMap::default();
+        let opr_ids: Vec<ObjectiveId> = self
+            .persisted
+            .objectives
+            .into_iter()
+            .filter(|(_, obj)| matches!(obj.kind, ObjectiveKind::Production))
+            .map(|(id, _)| *id)
+            .collect();
+        for oid in opr_ids {
+            let (owner, pos, production) = {
+                let obj = objective!(self, oid)?;
+                (obj.owner, obj.zone.pos(), obj.production)
+            };
+            let hub = Self::nearest_logistics_hub(&self.persisted, owner, pos);
+            let obj = objective_mut!(self, oid)?;
+            obj.feed_hub = hub;
+            if let Some(hid) = hub {
+                let e = sums.entry(hid).or_insert((0, 0));
+                e.0 = e.0.saturating_add(production as u32);
+                e.1 = e.1.saturating_add(1);
+            }
+        }
+        for hid in &self.persisted.logistics_hubs {
+            let hub = objective_mut!(self, hid)?;
+            if let Some((sum, n)) = sums.get(hid).copied() {
+                hub.production = (sum / n.max(1)) as u8;
+            } else {
+                hub.production = 0;
+            }
+        }
+        Ok(())
+    }
+
     fn warehouse_resource_meta_cache(
         &mut self,
         lua: MizLua,
@@ -1125,6 +1196,9 @@ impl Db {
             build_resource_meta_map(lua).context("resource map for objective stock seed")?;
         for (_oid, obj) in self.persisted.objectives.iter_mut_cow() {
             obj.warehouse = Warehouse::default();
+            if matches!(obj.kind, ObjectiveKind::Production) {
+                continue;
+            }
             if objective_is_ground_dep_farp(obj) {
                 let Some(profile) = dep_farp_export_profile(export, obj) else {
                     warn!(
@@ -1383,6 +1457,9 @@ impl Db {
         let mut adjust_warehouses_for_miz_changes = || -> Result<()> {
             let use_export_stock = export_has_objective_stock(export);
             for (_oid, obj) in self.persisted.objectives.iter_mut_cow() {
+                if matches!(obj.kind, ObjectiveKind::Production) {
+                    continue;
+                }
                 let mut del_eq: SmallVec<[String; 8]> = smallvec![];
                 let mut del_l: SmallVec<[LiquidType; 4]> = smallvec![];
                 if use_export_stock {
@@ -1570,6 +1647,9 @@ impl Db {
         adjust_warehouses_for_miz_changes().context("adjusting warehouses for miz changes")?;
         let mut missing = vec![];
         for (oid, obj) in &self.persisted.objectives {
+            if matches!(obj.kind, ObjectiveKind::Production) {
+                continue;
+            }
             if !self.ephemeral.airbase_by_oid.contains_key(oid) {
                 missing.push(obj.name.clone());
             }
@@ -1644,18 +1724,20 @@ impl Db {
         perf: &mut PerfInner,
         ts: DateTime<Utc>,
     ) -> Result<()> {
-        if let Some(wcfg) = self.ephemeral.cfg.warehouse.as_ref() {
-            let freq = Duration::minutes(wcfg.tick as i64);
-            let ticks_per_delivery = wcfg.ticks_per_delivery;
+        if let Some((tick, ticks_per_delivery)) = self
+            .ephemeral
+            .cfg
+            .warehouse
+            .as_ref()
+            .map(|w| (w.tick, w.ticks_per_delivery))
+        {
+            self.refresh_hub_production_from_opr()
+                .context("refreshing hub production before logistics step")?;
+            let freq = Duration::minutes(tick as i64);
             let start_ts = Utc::now();
             match &mut self.ephemeral.logistics_stage {
                 LogiStage::Init => {
-                    let objectives = self
-                        .persisted
-                        .objectives
-                        .into_iter()
-                        .map(|(id, _)| *id)
-                        .collect();
+                    let objectives = self.warehouse_sync_objective_ids().into();
                     self.ephemeral.logistics_stage = if self
                         .ephemeral
                         .defer_initial_logistics_sync_to
@@ -1666,12 +1748,7 @@ impl Db {
                     };
                 }
                 LogiStage::Complete { last_tick } if ts - *last_tick >= freq => {
-                    let objectives = self
-                        .persisted
-                        .objectives
-                        .into_iter()
-                        .map(|(id, _)| *id)
-                        .collect();
+                    let objectives = self.warehouse_sync_objective_ids().into();
                     self.ephemeral.logistics_stage = LogiStage::SyncFromWarehouses { objectives };
                 }
                 LogiStage::Complete { last_tick: _ } => (),
@@ -1732,12 +1809,7 @@ impl Db {
                         self.ephemeral.logistics_stage = LogiStage::Complete { last_tick: ts };
                     } else {
                         self.balance_logistics_hubs()?;
-                        let objectives = self
-                            .persisted
-                            .objectives
-                            .into_iter()
-                            .map(|(id, _)| *id)
-                            .collect();
+                        let objectives = self.warehouse_sync_objective_ids().into();
                         self.ephemeral.logistics_stage =
                             LogiStage::SyncToWarehouses { objectives };
                     }
@@ -1850,6 +1922,7 @@ impl Db {
         for (oid, obj) in &self.persisted.objectives {
             match obj.kind {
                 ObjectiveKind::Logistics => (),
+                ObjectiveKind::Production => (),
                 ObjectiveKind::Airbase | ObjectiveKind::Farp { .. } | ObjectiveKind::Fob => {
                     let hub = self.compute_supplier(obj)?;
                     suppliers.push((*oid, hub));
@@ -1884,6 +1957,8 @@ impl Db {
         if self.ephemeral.cfg.warehouse.is_none() {
             return Ok(vec![]);
         }
+        self.refresh_hub_production_from_opr()
+            .context("refreshing OPR to OLO production map")?;
         self.setup_supply_lines()
             .context("setting up supply lines")?;
         let mut deliver_produced_supplies = || -> Result<()> {
@@ -1897,12 +1972,12 @@ impl Db {
                     if logi.owner == side {
                         for (name, inv) in logi.warehouse.equipment.iter_mut_cow() {
                             if let Some(eq) = production.equipment.get(name) {
-                                *inv += eq.production;
+                                *inv += Self::scale_production_amount(eq.production, logi.production);
                             }
                         }
                         for (name, inv) in logi.warehouse.liquids.iter_mut_cow() {
                             if let Some(pr) = production.liquids.get(name) {
-                                *inv += *pr;
+                                *inv += Self::scale_production_amount(*pr, logi.production);
                             }
                         }
                     }
@@ -2147,6 +2222,12 @@ impl Db {
         lua: MizLua<'lua>,
         oid: ObjectiveId,
     ) -> Result<(&mut Objective, warehouse::Warehouse<'lua>)> {
+        if matches!(objective!(self, oid)?.kind, ObjectiveKind::Production) {
+            bail!(
+                "warehouse sync skipped for production objective {}",
+                objective!(self, oid)?.name
+            );
+        }
         let obj_name = objective!(self, oid)?.name.clone();
         let owner = objective!(self, oid)?.owner;
         let on_water = objective_airbase_on_water(lua, objective!(self, oid)?)?;

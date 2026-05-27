@@ -672,7 +672,15 @@ fn on_event(lua: MizLua, ev: Event) -> Result<()> {
                 e.target.as_ref().and_then(|t| t.as_static().ok())
             {
                 if target.get_life()? < 1 {
-                    if let Err(e) = ctx.db.static_dead(&target.object_id()?, start_ts) {
+                    let killer = e
+                        .initiator
+                        .as_ref()
+                        .and_then(|i| i.as_unit().ok())
+                        .and_then(|u| u.object_id().ok())
+                        .and_then(|id| crate::shots::who(&ctx.db, id));
+                    if let Err(e) =
+                        ctx.db.static_dead(&target.object_id()?, start_ts, killer.as_ref())
+                    {
                         error!("static dead failed {e:?}")
                     }
                 }
@@ -692,7 +700,7 @@ fn on_event(lua: MizLua, ev: Event) -> Result<()> {
                 }
             } else if let Some(st) = e.initiator.as_ref().and_then(|s| s.as_static().ok())
             {
-                if let Err(e) = ctx.db.static_dead(&st.object_id()?, start_ts) {
+                if let Err(e) = ctx.db.static_dead(&st.object_id()?, start_ts, None) {
                     error!("static killed failed {e:?}")
                 }
             }
@@ -1208,6 +1216,10 @@ fn run_slow_timed_events(
         }
         if let Err(e) = ctx.db.maybe_do_repairs(ts) {
             error!("error doing repairs {:?}", e)
+        }
+        let spctx = crate::spawnctx::SpawnCtx::new(lua)?;
+        if let Err(e) = ctx.db.maybe_do_production_repairs(lua, &spctx, &ctx.idx, ts) {
+            error!("error doing OPR production repairs {:?}", e)
         }
         record_perf(&mut perf.do_repairs, start_ts);
         if let Err(e) = ctx.db.advance_actions(lua, &ctx.idx, &ctx.jtac, start_ts) {

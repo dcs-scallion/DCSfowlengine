@@ -16,7 +16,7 @@ for more details.
 
 use super::{ephemeral::SlotInfo, objective::ObjGroupClass, player::SlotAuth, Db, SetS};
 use crate::{
-    group, group_by_name, group_health, group_mut, objective,
+    group, group_by_name, group_health, group_mut, objective, objective_mut,
     spawnctx::{Despawn, SpawnCtx, SpawnLoc},
     unit, unit_by_name, unit_mut, Connected,
 };
@@ -1078,6 +1078,79 @@ impl Db {
         Ok(BirthRes::OccupiedSlot(slot))
     }
 
+    /// ME static factory already in the mission; no `spawn()`.
+    pub(super) fn register_production_static_group(
+        &mut self,
+        side: Side,
+        oid: ObjectiveId,
+        group_name: String,
+        unit_name: String,
+        unit_type: String,
+        pos: Vector2,
+        heading: f64,
+    ) -> Result<()> {
+        if self.persisted.units_by_name.get(unit_name.as_str()).is_some() {
+            return Ok(());
+        }
+        let tags = *self
+            .ephemeral
+            .cfg
+            .unit_classification
+            .get(unit_type.as_str())
+            .ok_or_else(|| anyhow!("production factory unit type not classified: {unit_type}"))?;
+        let gid = GroupId::new();
+        let uid = UnitId::new();
+        let position = {
+            let mut p = Position3::default();
+            p.p.x = pos.x;
+            p.p.y = 0.;
+            p.p.z = pos.y;
+            p
+        };
+        let spawned_unit = SpawnedUnit {
+            id: uid,
+            group: gid,
+            side,
+            typ: Vehicle(unit_type.clone()),
+            tags,
+            name: unit_name.clone(),
+            template_name: unit_name.clone(),
+            spawn_position: position,
+            spawn_pos: pos,
+            spawn_heading: heading,
+            position,
+            pos,
+            heading,
+            dead: false,
+            moved: None,
+            airborne_velocity: None,
+        };
+        let spawned = SpawnedGroup {
+            id: gid,
+            name: group_name.clone(),
+            template_name: group_name.clone(),
+            side,
+            kind: None,
+            origin: DeployKind::Objective { origin: oid },
+            class: super::objective::ObjGroupClass::Production,
+            units: SetS::from_iter([uid]),
+            tags,
+        };
+        self.persisted.units.insert_cow(uid, spawned_unit);
+        self.persisted.units_by_name.insert_cow(unit_name, uid);
+        self.persisted.groups.insert_cow(gid, spawned);
+        self.persisted.groups_by_name.insert_cow(group_name, gid);
+        self.persisted
+            .groups_by_side
+            .get_or_default_cow(side)
+            .insert_cow(gid);
+        let obj = objective_mut!(self, oid)?;
+        obj.groups.get_or_default_cow(side).insert_cow(gid);
+        self.persisted.objectives_by_group.insert_cow(gid, oid);
+        self.ephemeral.dirty();
+        Ok(())
+    }
+
     pub fn static_born(&mut self, st: &StaticObject) -> Result<()> {
         let id = st.object_id()?;
         let name = st.get_name()?;
@@ -1117,7 +1190,7 @@ impl Db {
                 let gid = unit.group;
                 let health = group_health!(self, gid)?.0;
                 if let Some(oid) = self.persisted.objectives_by_group.get(&gid).copied() {
-                    self.update_objective_status(&oid, now)?;
+                    self.update_objective_status(None, &oid, now)?;
                     self.ephemeral.units_potentially_close_to_enemies.remove(&uid);
                     if health == 0 {
                         if let Some(id) = self.ephemeral.group_marks.remove(&gid) {
@@ -1189,6 +1262,7 @@ impl Db {
         &mut self,
         id: &DcsOid<ClassStatic>,
         now: DateTime<Utc>,
+        killer: Option<&bfprotocols::shots::Who>,
     ) -> Result<()> {
         if let Some(uid) = self.ephemeral.uid_by_static.remove(id) {
             match self.persisted.units.get_mut_cow(&uid) {
@@ -1200,7 +1274,41 @@ impl Db {
                     if let Some(oid) =
                         self.persisted.objectives_by_group.get(&gid).copied()
                     {
-                        self.update_objective_status(&oid, now)?;
+                        let group = group!(self, gid)?;
+                        if group.class == super::objective::ObjGroupClass::Production {
+                            let obj = objective!(self, oid)?;
+                            if let Some(killer) = killer {
+                                if *killer.side() != obj.owner {
+                                    if let Some(pts) = self.ephemeral.cfg.points.as_ref() {
+                                        let award = pts.production_kill as i32;
+                                        if award > 0 {
+                                            if let Some(ucid) = killer.ucid() {
+                                                self.adjust_points(
+                                                    ucid,
+                                                    award,
+                                                    &format_compact!(
+                                                        "for destroying factory at {}",
+                                                        obj.name
+                                                    ),
+                                                );
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                        self.update_objective_status(None, &oid, now)?;
+                        self.refresh_hub_production_from_opr()
+                            .context("hub production after factory static death")?;
+                        for hid in self.persisted.logistics_hubs.clone().into_iter() {
+                            if let Some(hub) = self.persisted.objectives.get(&hid) {
+                                self.ephemeral.update_objective_markup(
+                                    &self.persisted,
+                                    hub,
+                                    &[],
+                                );
+                            }
+                        }
                     }
                     if self.persisted.deployed.contains(&gid)
                         || self.persisted.troops.contains(&gid)

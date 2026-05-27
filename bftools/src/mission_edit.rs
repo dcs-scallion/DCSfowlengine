@@ -9894,6 +9894,9 @@ fn count_objectives_by_default_owner(objectives: &[TriggerZone]) -> (usize, usiz
         let Ok(zone_name) = obj.inner.name() else {
             continue;
         };
+        if zone_name.len() >= 3 && &zone_name[1..3] == "PR" {
+            continue;
+        }
         match objective_default_owner_from_zone_name(&zone_name) {
             Some(Side::Blue) => blue += 1,
             Some(Side::Red) => red += 1,
@@ -9902,6 +9905,329 @@ fn count_objectives_by_default_owner(objectives: &[TriggerZone]) -> (usize, usiz
         }
     }
     (blue, red, neutral)
+}
+
+fn count_objective_kind_by_owner(objectives: &[TriggerZone], kind: &str) -> (usize, usize) {
+    let mut blue = 0usize;
+    let mut red = 0usize;
+    for obj in objectives {
+        let Ok(zone_name) = obj.inner.name() else {
+            continue;
+        };
+        if !zone_name.starts_with('O') || zone_name.len() < 4 {
+            continue;
+        }
+        if &zone_name[1..3] != kind {
+            continue;
+        }
+        match zone_name.as_bytes()[3] {
+            b'B' => blue += 1,
+            b'R' => red += 1,
+            _ => {}
+        }
+    }
+    (blue, red)
+}
+
+fn count_factory_statics_in_opr_zone(
+    base: &LoadedMiz,
+    zone: &TriggerZone,
+    factory_types: &std::collections::HashSet<StdString>,
+) -> Result<u32> {
+    let mut n = 0u32;
+    for (_side, coa) in
+        Side::ALL.into_iter().map(|side| (side, base.mission.coalition(side)))
+    {
+        let coa = coa?;
+        for country in coa.countries()? {
+            let country = country?;
+            for group in country.statics()? {
+                let group = group?;
+                for unit in group
+                    .raw_get::<_, Table>("units")?
+                    .pairs::<Value, Table>()
+                {
+                    let unit = unit?.1;
+                    let typ: String = unit.raw_get("type")?;
+                    if !factory_types.contains(&StdString::from(typ.as_str())) {
+                        continue;
+                    }
+                    let x: f64 = unit.raw_get("x")?;
+                    let y: f64 = unit.raw_get("y")?;
+                    if zone.contains(Vector2::new(x, y))? {
+                        n += 1;
+                    }
+                }
+            }
+        }
+    }
+    Ok(n)
+}
+
+fn set_zone_capacity_property(zone: &miz::TriggerZone, capacity: u32) -> Result<()> {
+    let lua = unsafe { &*LUA };
+    let props: Table = zone.raw_get("properties")?;
+    let mut keep: Vec<(StdString, StdString)> = Vec::new();
+    for pair in props.clone().pairs::<Value, Table>() {
+        let (_idx, prop) = pair?;
+        let key: String = prop.raw_get("key").unwrap_or_else(|_| String::from(""));
+        let val: String = prop.raw_get("value").unwrap_or_else(|_| String::from(""));
+        if key.eq_ignore_ascii_case("capacity") {
+            continue;
+        }
+        keep.push((
+            StdString::from(key.as_str()),
+            StdString::from(val.as_str()),
+        ));
+    }
+    keep.push((
+        StdString::from("Capacity"),
+        StdString::from(format_compact!("{capacity}").as_str()),
+    ));
+    let new_props = lua.create_table()?;
+    for (i, (k, v)) in keep.into_iter().enumerate() {
+        let row = lua.create_table()?;
+        row.raw_set("key", String::from(k.as_str()))?;
+        row.raw_set("value", String::from(v.as_str()))?;
+        new_props.raw_set(i + 1, row)?;
+    }
+    zone.raw_set("properties", new_props)?;
+    Ok(())
+}
+
+fn apply_opr_zone_capacity_properties(
+    base: &LoadedMiz,
+    objectives: &[TriggerZone],
+    factory_types: &std::collections::HashSet<StdString>,
+) -> Result<()> {
+    if factory_types.is_empty() {
+        warn!("production_factory_units missing in campaign CFG; skipping OPR Capacity properties");
+        return Ok(());
+    }
+    for obj in objectives {
+        let zone_name = obj.inner.name()?;
+        if zone_name.len() < 4 || &zone_name[1..3] != "PR" {
+            continue;
+        }
+        let n = count_factory_statics_in_opr_zone(base, obj, factory_types)?;
+        if n == 0 {
+            warn!(
+                "OPR zone {zone_name}: no factory statics matched production_factory_units"
+            );
+        }
+        set_zone_capacity_property(&obj.inner, n)?;
+        info!("OPR zone {zone_name}: Capacity={n}");
+    }
+    Ok(())
+}
+
+const OBJECTIVE_ZONE_KINDS: [&str; 4] = ["AB", "FO", "LO", "PR"];
+
+/// `O` + kind (`AB`/`FO`/`LO`/`PR`) + owner (`B`/`R`/`N`) + display; stem = all after `O` (bflib key).
+fn validate_objective_zone_names(objectives: &[TriggerZone]) -> Result<()> {
+    let mut stems: HashMap<StdString, StdString> = HashMap::new();
+    let mut legacy_key_zones: HashMap<StdString, Vec<StdString>> = HashMap::new();
+    let mut errors: Vec<compact_str::CompactString> = Vec::new();
+
+    for obj in objectives {
+        let Ok(zone_name) = obj.inner.name() else {
+            continue;
+        };
+        if !zone_name.starts_with('O') {
+            continue;
+        }
+        if zone_name.len() <= 4 {
+            errors.push(format_compact!(
+                "zone {zone_name}: too short; expected O + kind (AB/FO/LO/PR) + owner (B/R/N) + display name"
+            ));
+            continue;
+        }
+        let kind = &zone_name[1..3];
+        if !OBJECTIVE_ZONE_KINDS.contains(&kind) {
+            errors.push(format_compact!(
+                "zone {zone_name}: unknown objective kind {kind}; expected AB, FO, LO, or PR"
+            ));
+        }
+        match zone_name.as_bytes()[3] {
+            b'B' | b'R' | b'N' => {}
+            c => errors.push(format_compact!(
+                "zone {zone_name}: invalid owner coalition byte {:?}; expected B, R, or N after kind",
+                c as char
+            )),
+        }
+        let stem = StdString::from(&zone_name[1..]);
+        if let Some(prev) = stems.insert(stem.clone(), StdString::from(zone_name.as_str())) {
+            errors.push(format_compact!(
+                "duplicate objective stem O{stem}: zones {prev} and {zone_name}"
+            ));
+        }
+        legacy_key_zones
+            .entry(StdString::from(&zone_name[3..]))
+            .or_default()
+            .push(StdString::from(zone_name.as_str()));
+    }
+
+    for (legacy_key, zones) in legacy_key_zones {
+        if zones.len() < 2 {
+            continue;
+        }
+        let kinds: HashSet<StdString> = zones.iter().map(|z| StdString::from(&z[1..3])).collect();
+        if kinds.len() > 1 {
+            errors.push(format_compact!(
+                "zones {:?} share owner+display suffix {legacy_key:?} but use different kinds {:?}; \
+                 use distinct display names or coalition letters (e.g. OPRBKutaisi vs OABBKutaisi2)",
+                zones,
+                kinds
+            ));
+        }
+    }
+
+    if !errors.is_empty() {
+        bail!(
+            "FowlTools ERROR: objective zone name validation failed. {}",
+            errors.join(" | ")
+        );
+    }
+    Ok(())
+}
+
+/// OPR* zones must be quad (square) perimeters in the ME, not circles.
+fn validate_opr_zone_geometry(objectives: &[TriggerZone]) -> Result<()> {
+    let mut errors = Vec::new();
+    for obj in objectives {
+        let Ok(zone_name) = obj.inner.name() else {
+            continue;
+        };
+        if zone_name.len() < 4 || &zone_name[1..3] != "PR" {
+            continue;
+        }
+        match obj.inner.typ() {
+            Ok(TriggerZoneTyp::Quad(_)) => {}
+            Ok(TriggerZoneTyp::Circle { .. }) => {
+                errors.push(format_compact!(
+                    "OPR zone {zone_name}: circle trigger zone; use a quad (square) zone in the ME"
+                ));
+            }
+            Err(e) => errors.push(format_compact!(
+                "OPR zone {zone_name}: could not read zone geometry: {e}"
+            )),
+        }
+    }
+    if !errors.is_empty() {
+        bail!(
+            "FowlTools ERROR: OPR* zone geometry validation failed. {}",
+            errors.join(" | ")
+        );
+    }
+    Ok(())
+}
+
+/// Warn when factory static counts suggest overlapping OPR zones or map-wide bleed.
+fn validate_opr_factory_static_counts(
+    base: &LoadedMiz,
+    objectives: &[TriggerZone],
+    factory_types: &HashSet<StdString>,
+) -> Result<()> {
+    if factory_types.is_empty() {
+        return Ok(());
+    }
+    let mut total = 0u32;
+    let mut per_zone: Vec<(StdString, u32)> = Vec::new();
+    for obj in objectives {
+        let Ok(zone_name) = obj.inner.name() else {
+            continue;
+        };
+        if zone_name.len() < 4 || &zone_name[1..3] != "PR" {
+            continue;
+        }
+        let n = count_factory_statics_in_opr_zone(base, obj, factory_types)?;
+        total = total.saturating_add(n);
+        per_zone.push((StdString::from(zone_name.as_str()), n));
+    }
+    for (zone_name, n) in &per_zone {
+        if *n > 32 {
+            warn!(
+                "OPR zone {zone_name}: {n} factory static(s) in zone; \
+                 tighten the quad or reduce matching types"
+            );
+        }
+    }
+    let mut seen_positions: HashMap<(i64, i64), StdString> = HashMap::new();
+    let mut duplicate_positions = 0u32;
+    for obj in objectives {
+        let Ok(zone_name) = obj.inner.name() else {
+            continue;
+        };
+        if zone_name.len() < 4 || &zone_name[1..3] != "PR" {
+            continue;
+        }
+        for (_side, coa) in Side::ALL.into_iter().map(|side| (side, base.mission.coalition(side))) {
+            let coa = coa?;
+            for country in coa.countries()? {
+                let country = country?;
+                for group in country.statics()? {
+                    let group = group?;
+                    for unit in group
+                        .raw_get::<_, Table>("units")?
+                        .pairs::<Value, Table>()
+                    {
+                        let unit = unit?.1;
+                        let typ: String = unit.raw_get("type")?;
+                        if !factory_types.contains(&StdString::from(typ.as_str())) {
+                            continue;
+                        }
+                        let x: f64 = unit.raw_get("x")?;
+                        let y: f64 = unit.raw_get("y")?;
+                        if !obj.contains(Vector2::new(x, y))? {
+                            continue;
+                        }
+                        let key = ((x * 10.).round() as i64, (y * 10.).round() as i64);
+                        if let Some(prev) = seen_positions.insert(key, StdString::from(zone_name.as_str())) {
+                            if prev != StdString::from(zone_name.as_str()) {
+                                duplicate_positions += 1;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+    if duplicate_positions > 0 {
+        warn!(
+            "{duplicate_positions} factory static position(s) fall inside multiple OPR* zones; \
+             bflib links each static once (nearest OPR) — tighten quads to avoid double Capacity counts (total in zones: {total})"
+        );
+    }
+    Ok(())
+}
+
+fn validate_production_zone_counts(objectives: &[TriggerZone]) -> Result<()> {
+    let (opr_blue, opr_red) = count_objective_kind_by_owner(objectives, "PR");
+    let (olo_blue, olo_red) = count_objective_kind_by_owner(objectives, "LO");
+    let mut errors = Vec::new();
+    if opr_blue < olo_blue {
+        errors.push(format_compact!(
+            "Blue has {} OLO* but only {} OPR* zone(s); add at least {} OPR* zone(s) to base.miz",
+            olo_blue,
+            opr_blue,
+            olo_blue - opr_blue
+        ));
+    }
+    if opr_red < olo_red {
+        errors.push(format_compact!(
+            "Red has {} OLO* but only {} OPR* zone(s); add at least {} OPR* zone(s) to base.miz",
+            olo_red,
+            opr_red,
+            olo_red - opr_red
+        ));
+    }
+    if !errors.is_empty() {
+        bail!(
+            "FowlTools ERROR: OPR* >= OLO* validation failed. {}",
+            errors.join(" | ")
+        );
+    }
+    Ok(())
 }
 
 fn compile_tzf_plane_fuel_zones(base: &LoadedMiz) -> Result<Vec<TzfPlaneFuelZone>> {
@@ -10855,6 +11181,25 @@ pub fn run(cfg: &MizCmd) -> Result<()> {
         unresolved_surprising.dedup();
     }
     let mut objectives = compile_objectives(&base).context("compiling objectives")?;
+    validate_objective_zone_names(&objectives)
+        .context("validating O* zone names (unique O+kind+owner+display stems)")?;
+    validate_opr_zone_geometry(&objectives)
+        .context("validating OPR* zones use quad (square) geometry in base.miz")?;
+    validate_production_zone_counts(&objectives)
+        .context("validating OPR* >= OLO* per coalition in base.miz")?;
+    let factory_types: std::collections::HashSet<StdString> = campaign_overlay
+        .as_ref()
+        .map(|o| {
+            o.production_factory_units
+                .iter()
+                .map(|s| StdString::from(s.as_str()))
+                .collect()
+        })
+        .unwrap_or_default();
+    apply_opr_zone_capacity_properties(&base, &objectives, &factory_types)
+        .context("writing OPR* Capacity zone properties from factory statics")?;
+    validate_opr_factory_static_counts(&base, &objectives, &factory_types)
+        .context("checking OPR* factory static counts for overlap")?;
     let tzf_plane_fuel =
         compile_tzf_plane_fuel_zones(&base).context("compiling TZF plane fuel overlays")?;
     if !tzf_plane_fuel.is_empty() {
@@ -11458,9 +11803,12 @@ pub fn run(cfg: &MizCmd) -> Result<()> {
     info!("wrote Fowl mission export to {:?}", export_path);
     let (blue_objectives, red_objectives, neutral_objectives) =
         count_objectives_by_default_owner(&objectives);
+    let (opr_blue, opr_red) = count_objective_kind_by_owner(&objectives, "PR");
     println!("Objectives total - Blue coalition: {blue_objectives}");
     println!("Objectives total - Red coalition: {red_objectives}");
     println!("Objectives total - Neutral coalition: {neutral_objectives}");
+    println!("Objectives production - Blue coalition: {opr_blue}");
+    println!("Objectives production - Red coalition: {opr_red}");
     warn_airbase_objective_bindings_follow_up_summary(
         missing_airbase.as_slice(),
         invalid_airbase.as_slice(),

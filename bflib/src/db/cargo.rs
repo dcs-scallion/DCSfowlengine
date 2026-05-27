@@ -17,7 +17,7 @@ for more details.
 use super::{Db, ephemeral::DeployableIndex, group::SpawnedGroup, objective::Objective};
 use crate::{
     db::group::DeployKind,
-    group, maybe, objective,
+    group, maybe, objective, objective_mut,
     spawnctx::{SpawnCtx, SpawnLoc},
     unit, unit_mut,
 };
@@ -64,6 +64,7 @@ pub enum Unpakistan {
     UnpackedFarp(String),
     Repaired(String),
     RepairedBase(String, u8),
+    RepairedProduction(String, u8),
     TransferedSupplies(String, String),
 }
 
@@ -83,6 +84,9 @@ impl fmt::Display for Unpakistan {
             ),
             Self::Repaired(unit) => write!(f, "repaired a {unit}"),
             Self::RepairedBase(base, logi) => write!(f, "repaired logistics at {base} to %{logi}"),
+            Self::RepairedProduction(opr, pct) => {
+                write!(f, "queued production repair at {opr} (production {pct}%)")
+            }
             Self::TransferedSupplies(from, to) => {
                 write!(f, "transfered supplies from {from} to {to}")
             }
@@ -177,6 +181,9 @@ impl Db {
             .into_iter()
             .find_map(|(oid, obj)| {
                 if obj.owner == side && obj.logi() > 0 && obj.zone.contains(point) {
+                    if matches!(obj.kind, ObjectiveKind::Production) {
+                        return None;
+                    }
                     return Some((oid, obj));
                 }
                 None
@@ -647,7 +654,33 @@ impl Db {
                 for cr in iter() {
                     is_origin |= oid == &cr.origin;
                 }
-                if obj.owner == side && !is_origin && obj.zone.contains(centroid) {
+                if obj.owner == side
+                    && !matches!(obj.kind, ObjectiveKind::Production)
+                    && !is_origin
+                    && obj.zone.contains(centroid)
+                {
+                    Some(*oid)
+                } else {
+                    None
+                }
+            })
+        }
+        fn close_enough_to_production_repair<'a, I: Iterator<Item = &'a Cifo>, F: Fn() -> I>(
+            db: &Db,
+            side: Side,
+            centroid: Vector2,
+            iter: F,
+        ) -> Option<ObjectiveId> {
+            db.persisted.objectives.into_iter().find_map(|(oid, obj)| {
+                let mut is_origin = false;
+                for cr in iter() {
+                    is_origin |= oid == &cr.origin;
+                }
+                if matches!(obj.kind, ObjectiveKind::Production)
+                    && obj.owner == side
+                    && !is_origin
+                    && obj.zone.contains(centroid)
+                {
                     Some(*oid)
                 } else {
                     None
@@ -779,6 +812,50 @@ impl Db {
                 }
             } else {
                 reasons.push("not close enough to a friendly objective".into());
+            }
+        }
+        if !base_repairs.is_empty() {
+            let centroid = centroid2d(base_repairs.iter().map(|(_, c)| c.pos));
+            if let Some(oid) = close_enough_to_production_repair(self, st.side, centroid, || {
+                base_repairs.iter().map(|(_, c)| c)
+            }) {
+                let obj = objective!(self, oid)?;
+                if obj.production >= 100 {
+                    reasons.push("OPR production is already at 100%".into());
+                } else if !obj.can_queue_production_repair_crate() {
+                    reasons.push(
+                        "repair queue is full or would exceed OPR damage (100% - Production)"
+                            .into(),
+                    );
+                } else {
+                    let cost = self.ephemeral.cfg.production_repair_crate_cost;
+                    if cost > 0 {
+                        let _ = self.charge_for_item(
+                            &st.ucid,
+                            oid,
+                            cost,
+                            "for OPR production repair crate",
+                        );
+                    }
+                    let rate = self.ephemeral.cfg.production_repair_rate_seconds;
+                    let now = Utc::now();
+                    let obj = objective_mut!(self, oid)?;
+                    if obj.production_repair == 0 {
+                        obj.production_repair_due = now
+                            + chrono::Duration::seconds(rate.max(1) as i64);
+                    }
+                    obj.production_repair += 1;
+                    self.delete_group(base_repairs.keys().next().unwrap())?;
+                    self.ephemeral.stat(Stat::Repair {
+                        id: oid,
+                        by: st.ucid,
+                    });
+                    let obj = objective!(self, oid)?;
+                    return Ok(Unpakistan::RepairedProduction(
+                        obj.name.clone(),
+                        obj.production,
+                    ));
+                }
             }
         }
         if !supply_transfer.is_empty() {

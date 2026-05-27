@@ -339,6 +339,15 @@ impl Color {
         Color { r: 0., g: 1., b: 0., a }
     }
 
+    pub fn light_green(a: f32) -> Color {
+        Color {
+            r: 0.55,
+            g: 1.,
+            b: 0.55,
+            a,
+        }
+    }
+
     pub fn yellow(a: f32) -> Color {
         Color { r: 0.75, g: 1., b: 0., a }
     }

@@ -548,6 +548,7 @@ impl WarehouseConfig {
                 }
             }
             ObjectiveKind::Farp { .. } => self.farp_max,
+            ObjectiveKind::Production => 0,
         }
     }
 
@@ -569,6 +570,8 @@ pub struct PointsCfg {
     pub air_kill: u32,
     /// Base points awared for each ground kill
     pub ground_kill: u32,
+    /// Points for destroying a static factory unit in an OPR* zone
+    pub production_kill: u32,
     /// Bonus points awarded to heavy sam kills
     pub lr_sam_bonus: u32,
     /// Points awarded for repairing base logistics
@@ -858,6 +861,18 @@ pub struct Cfg {
     pub weapon_target_exclusions: FxHashSet<String>,
     /// how often a base will repair if it has full logistics (Seconds)
     pub repair_time: u32,
+    /// OPR repair crate point cost.
+    #[serde(default)]
+    pub production_repair_crate_cost: u32,
+    /// OPR repair tick interval in seconds.
+    #[serde(default)]
+    pub production_repair_rate_seconds: u32,
+    /// OPR repair progress per tick in percent.
+    #[serde(default)]
+    pub production_repair_percent_per_step: u8,
+    /// DCS unit types counted as OPR factory statics (must also be in `unit_classification`).
+    #[serde(default)]
+    pub production_factory_units: FxHashSet<String>,
     /// The base repair crate
     pub repair_crate: FxHashMap<Side, Crate>,
     /// If the warehouse system is to be used then this should be specified,

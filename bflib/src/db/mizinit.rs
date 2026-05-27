@@ -42,7 +42,7 @@ use bfprotocols::{
     stats::Stat,
 };
 use chrono::prelude::*;
-use compact_str::CompactString;
+use compact_str::{CompactString, format_compact};
 use dcso3::{
     airbase::Airbase,
     centroid2d, coalition::Side, controller::{MissionPoint, PointType}, coord::Coord,
@@ -53,8 +53,8 @@ use dcso3::{
 };
 use enumflags2::BitFlags;
 use fxhash::FxHashSet;
-use log::{debug, error, info};
-use smallvec::SmallVec;
+use log::{debug, error, info, warn};
+use smallvec::{smallvec, SmallVec};
 use tokio::sync::mpsc::UnboundedSender;
 
 impl Db {
@@ -69,6 +69,7 @@ impl Db {
     /// - FO: Fob
     /// - SA: Sam site
     /// - LO: Logistics Objective
+    /// - PR: Production Objective
     ///
     /// Then a 1 character code for the default owner
     /// followed by the display name
@@ -98,11 +99,15 @@ impl Db {
         } else if let Some(name) = name.strip_prefix("LO") {
             let (side, name) = side_and_name(name)?;
             (ObjectiveKind::Logistics, side, name)
+        } else if let Some(name) = name.strip_prefix("PR") {
+            let (side, name) = side_and_name(name)?;
+            (ObjectiveKind::Production, side, name)
         } else {
-            bail!("invalid objective type for {name}, expected AB, FO, of LO")
+            bail!("invalid objective type for {name}, expected AB, FO, LO, or PR")
         };
         let id = ObjectiveId::new();
         let mut logistics_detached = false;
+        let mut production_capacity = 0u16;
         for pr in zone.properties()? {
             let pr = pr?;
             if &*pr.key == "LOGISTICS_DETACHED" {
@@ -114,6 +119,11 @@ impl Db {
                 } else {
                     bail!("invalid value of LOGISTICS_DETACHED {v}")
                 }
+            } else if pr.key.eq_ignore_ascii_case("capacity") {
+                production_capacity = pr
+                    .value
+                    .parse()
+                    .with_context(|| format_compact!("invalid Capacity on objective {name}"))?;
             } else if &*pr.key == "include"
                 || &*pr.key == "include_dyn_slots"
                 || pr.key.eq_ignore_ascii_case("airbaseID")
@@ -149,6 +159,11 @@ impl Db {
             logi: 0,
             supply: 0,
             fuel: 0,
+            production: 100,
+            production_repair: 0,
+            production_capacity,
+            feed_hub: None,
+            production_repair_due: Utc::now(),
             last_change_ts: Utc::now(),
             last_threatened_ts: Utc::now(),
             warehouse: Warehouse::default(),
@@ -225,6 +240,125 @@ impl Db {
         if side != owner {
             for uid in group!(self, gid)?.units.clone().into_iter() {
                 unit_mut!(self, uid)?.dead = true;
+            }
+        }
+        Ok(())
+    }
+
+    fn link_production_statics_from_miz(&mut self, miz: &Miz) -> Result<()> {
+        use super::objective::ObjGroupClass;
+
+        let factories = self.ephemeral.cfg.production_factory_units.clone();
+        if factories.is_empty() {
+            warn!("production_factory_units is empty; OPR factory statics will not be linked");
+            return Ok(());
+        }
+        let mut linked = 0usize;
+        let mut pending: SmallVec<[(Side, ObjectiveId, String, String, String, Vector2, f64); 32]> =
+            smallvec![];
+        for side in Side::ALL {
+            let coa = miz.coalition(side)?;
+            for country in coa.countries()? {
+                let country = country?;
+                for group in country.statics()? {
+                    let group = group?;
+                    let group_name = group.name()?;
+                    let mut unit_name = None;
+                    let mut unit_type = None;
+                    let mut pos = None;
+                    let mut heading = 0f64;
+                    for u in group.units()? {
+                        let u = u?;
+                        unit_type = Some(u.typ()?);
+                        unit_name = Some(u.name()?);
+                        pos = Some(u.pos()?);
+                        heading = u.heading().unwrap_or(0.);
+                        break;
+                    }
+                    let (unit_type, unit_name, pos) = match (unit_type, unit_name, pos) {
+                        (Some(t), Some(n), Some(p)) => (t, n, p),
+                        _ => continue,
+                    };
+                    if !factories.contains(&String::from(unit_type.as_str())) {
+                        continue;
+                    }
+                    if self.persisted.units_by_name.get(unit_name.as_str()).is_some() {
+                        continue;
+                    }
+                    let oid = self
+                        .persisted
+                        .objectives
+                        .into_iter()
+                        .filter(|(_, obj)| {
+                            obj.owner == side
+                                && matches!(obj.kind, ObjectiveKind::Production)
+                                && obj.zone.contains(pos)
+                        })
+                        .min_by(|(_, a), (_, b)| {
+                            let da =
+                                na::distance_squared(&a.zone.pos().into(), &pos.into());
+                            let db =
+                                na::distance_squared(&b.zone.pos().into(), &pos.into());
+                            da.partial_cmp(&db).unwrap_or(std::cmp::Ordering::Equal)
+                        })
+                        .map(|(id, _)| *id);
+                    let Some(oid) = oid else {
+                        continue;
+                    };
+                    pending.push((
+                        side,
+                        oid,
+                        group_name.clone(),
+                        unit_name.clone(),
+                        unit_type.clone(),
+                        pos,
+                        heading,
+                    ));
+                }
+            }
+        }
+        for (side, oid, group_name, unit_name, unit_type, pos, heading) in pending {
+            self.register_production_static_group(
+                side, oid, group_name, unit_name, unit_type, pos, heading,
+            )?;
+            linked += 1;
+        }
+        if linked > 0 {
+            let capacity: u32 = self
+                .persisted
+                .objectives
+                .into_iter()
+                .filter(|(_, o)| matches!(o.kind, ObjectiveKind::Production))
+                .map(|(_, o)| o.production_capacity as u32)
+                .sum();
+            info!("linked {linked} production factory static(s) into OPR zones");
+            if linked as u32 > capacity.saturating_mul(2).max(1) {
+                warn!(
+                    "linked {linked} factory static(s) but sum of OPR Capacity is {capacity}; \
+                     check overlapping OPR zones or factory types matching non-factory buildings"
+                );
+            }
+        }
+        for (_, obj) in self.persisted.objectives.iter_mut_cow() {
+            if !matches!(obj.kind, ObjectiveKind::Production) {
+                continue;
+            }
+            if obj.production_capacity > 0 {
+                continue;
+            }
+            let n = obj
+                .groups
+                .get(&obj.owner)
+                .map(|gs| {
+                    gs.into_iter()
+                        .filter_map(|gid| group!(self, gid).ok())
+                        .filter(|g| g.class == ObjGroupClass::Production)
+                        .map(|g| g.units.len())
+                        .sum::<usize>()
+                })
+                .unwrap_or(0) as u16;
+            if n > 0 {
+                obj.production_capacity = n;
             }
         }
         Ok(())
@@ -445,15 +579,16 @@ impl Db {
             let zone = zone?;
             let name = zone.name()?;
             if name.starts_with('O') {
-                if name.len() > 4 {
-                    if !objective_names.insert(CompactString::from(&name[3..])) {
-                        bail!("duplicate objective name {name}")
-                    }
-                } else {
-                    bail!("malformed objective name {name}")
+                let stem = name
+                    .strip_prefix('O')
+                    .filter(|s| s.len() > 3)
+                    .ok_or_else(|| anyhow!("malformed objective zone name {name}"))?;
+                if !objective_names.insert(CompactString::from(stem)) {
+                    bail!(
+                        "duplicate objective zone stem O{stem} (second zone named {name})"
+                    );
                 }
-                let name = name.strip_prefix("O").unwrap();
-                t.init_objective(lua, zone, name)?
+                t.init_objective(lua, zone, stem)?
             }
         }
         t.build_carrier_slot_maps(miz)?;
@@ -495,9 +630,12 @@ impl Db {
             .into_iter()
             .map(|(id, _)| *id)
             .collect::<Vec<_>>();
+        t.link_production_statics_from_miz(miz)?;
         for id in ids {
-            t.update_objective_status(&id, now)?
+            t.update_objective_status(Some(lua), &id, now)?
         }
+        t.refresh_hub_production_from_opr()
+            .context("OPR feed hubs after factory link")?;
         t.seed_objective_warehouses_from_export(lua)
             .context("seeding objective warehouses from Fowl export")?;
         t.ephemeral.preserve_initial_warehouse_fill = true;
@@ -645,6 +783,8 @@ impl Db {
         }
         self.setup_warehouses_after_load(spctx.lua())
             .context("setting up warehouses")?;
+        self.refresh_hub_production_from_opr()
+            .context("OPR feed hubs before objective markup")?;
         let mut mark_deployed_and_logistics = || -> Result<()> {
             let groups = self
                 .persisted

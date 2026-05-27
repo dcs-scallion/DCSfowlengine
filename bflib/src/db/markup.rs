@@ -29,7 +29,9 @@ use compact_str::{CompactString, format_compact};
 use dcso3::{
     Color, LuaVec3, Vector2, Vector3,
     coalition::Side,
-    trigger::{ArrowSpec, CircleSpec, LineType, MarkId, QuadSpec, SideFilter, TextSpec},
+    trigger::{
+        ArrowSpec, CircleSpec, LineSpec, LineType, MarkId, QuadSpec, SideFilter, TextSpec,
+    },
 };
 
 static BAR_LOOKUP: [&'static str; 13] = [
@@ -56,6 +58,8 @@ pub(super) struct ObjectiveMarkup {
     logi: u8,
     supply: u8,
     fuel: u8,
+    production: u8,
+    production_repair: u16,
     points: i32,
     name: String,
     owner_ring: MarkId,
@@ -70,6 +74,9 @@ pub(super) struct ObjectiveMarkup {
     stats_label_blue: Option<MarkId>,
     pos: Vector2,
     supply_connections: FxHashMap<ObjectiveId, MarkId>,
+    /// OPR → nearest OLO (`lineToAll`, no arrowhead).
+    production_feed_hub: Option<ObjectiveId>,
+    production_feed_line: Option<MarkId>,
 }
 
 fn text_color(side: Side, a: f32) -> Color {
@@ -90,16 +97,54 @@ fn enemy_objective_view(obj_owner: Side, viewer: Side) -> bool {
 
 fn objective_stats_text(obj: &Objective, limited: bool) -> CompactString {
     let get_idx = |val: u8| -> usize { (val as usize * 12 / 100).min(12) };
-    if limited {
-        format_compact!(
+    match (&obj.kind, limited) {
+        (ObjectiveKind::Production, true) => {
+            format_compact!("\n\n{} {:>3} Production", BAR_LOOKUP[get_idx(obj.production)], obj.production)
+        }
+        (ObjectiveKind::Production, false) => {
+            format_compact!(
+                "\n\n{} {:>3} Production\n\nRepair: {}\nPoints: {}",
+                BAR_LOOKUP[get_idx(obj.production)],
+                obj.production,
+                obj.production_repair,
+                obj.points
+            )
+        }
+        (ObjectiveKind::Logistics, true) => {
+            format_compact!(
+                "\n\n{} {:>3} Production\n{} {:>3} Health\n{} {:>3} Logi",
+                BAR_LOOKUP[get_idx(obj.production)],
+                obj.production,
+                BAR_LOOKUP[get_idx(obj.health)],
+                obj.health,
+                BAR_LOOKUP[get_idx(obj.logi)],
+                obj.logi,
+            )
+        }
+        (ObjectiveKind::Logistics, false) => {
+            format_compact!(
+                "\n\n{} {:>3} Production\n{} {:>3} Health\n{} {:>3} Logi\n{} {:>3} Supply\n{} {:>3} Fuel\n\nPoints: {}",
+                BAR_LOOKUP[get_idx(obj.production)],
+                obj.production,
+                BAR_LOOKUP[get_idx(obj.health)],
+                obj.health,
+                BAR_LOOKUP[get_idx(obj.logi)],
+                obj.logi,
+                BAR_LOOKUP[get_idx(obj.supply)],
+                obj.supply,
+                BAR_LOOKUP[get_idx(obj.fuel)],
+                obj.fuel,
+                obj.points
+            )
+        }
+        (_, true) => format_compact!(
             "\n\n{} {:>3} Health\n{} {:>3} Logi",
             BAR_LOOKUP[get_idx(obj.health)],
             obj.health,
             BAR_LOOKUP[get_idx(obj.logi)],
             obj.logi,
-        )
-    } else {
-        format_compact!(
+        ),
+        (_, false) => format_compact!(
             "\n\n{} {:>3} Health\n{} {:>3} Logi\n{} {:>3} Supply\n{} {:>3} Fuel\n\nPoints: {}",
             BAR_LOOKUP[get_idx(obj.health)],
             obj.health,
@@ -110,14 +155,66 @@ fn objective_stats_text(obj: &Objective, limited: bool) -> CompactString {
             BAR_LOOKUP[get_idx(obj.fuel)],
             obj.fuel,
             obj.points
-        )
+        ),
     }
 }
 
 fn objective_map_kind_label(kind: &ObjectiveKind) -> &'static str {
     match kind {
         ObjectiveKind::Logistics => "⌂ HUB",
+        ObjectiveKind::Production => "PR",
         _ => kind.name(),
+    }
+}
+
+/// Lighter than hub `supply_connections` arrows; light green, same alpha as before.
+fn production_feed_line_color() -> Color {
+    Color::light_green(0.25)
+}
+
+fn sync_production_feed_line(
+    t: &mut ObjectiveMarkup,
+    msgq: &mut MsgQ,
+    obj: &Objective,
+    persisted: &Persisted,
+) {
+    if !matches!(obj.kind, ObjectiveKind::Production) {
+        return;
+    }
+    let want_hub = if obj.production > 0 { obj.feed_hub } else { None };
+    if want_hub != t.production_feed_hub {
+        if let Some(id) = t.production_feed_line.take() {
+            msgq.delete_mark(id);
+        }
+        t.production_feed_hub = want_hub;
+    }
+    match want_hub {
+        None => {}
+        Some(hid) => {
+            let hub = match persisted.objectives.get(&hid) {
+                Some(h) => h,
+                None => return,
+            };
+            let (spos, dpos) = arrow_coords(obj, hub);
+            let start = LuaVec3(Vector3::new(spos.x, 0., spos.y));
+            let end = LuaVec3(Vector3::new(dpos.x, 0., dpos.y));
+            let color = production_feed_line_color();
+            let spec = LineSpec {
+                start,
+                end,
+                color,
+                line_type: LineType::Solid,
+                read_only: true,
+            };
+            if let Some(id) = t.production_feed_line {
+                msgq.set_markup_pos_start(id, start);
+                msgq.set_markup_pos_end(id, end);
+            } else {
+                let id = MarkId::new();
+                msgq.line_to(SideFilter::All, id, spec, None);
+                t.production_feed_line = Some(id);
+            }
+        }
     }
 }
 
@@ -138,6 +235,7 @@ impl ObjectiveMarkup {
             capturable_ring,
             threatened_ring,
             supply_connections,
+            production_feed_line,
             label,
             stats_label,
             stats_label_red,
@@ -159,6 +257,9 @@ impl ObjectiveMarkup {
         }
         for (_, id) in supply_connections {
             msgq.delete_mark(id)
+        }
+        if let Some(id) = production_feed_line {
+            msgq.delete_mark(id);
         }
     }
 
@@ -186,6 +287,10 @@ impl ObjectiveMarkup {
             for (_, id) in self.supply_connections.drain() {
                 msgq.delete_mark(id);
             }
+            if let Some(id) = self.production_feed_line.take() {
+                msgq.delete_mark(id);
+            }
+            self.production_feed_hub = None;
         }
         if obj.threatened != self.threatened {
             self.threatened = obj.threatened;
@@ -198,6 +303,8 @@ impl ObjectiveMarkup {
             || self.logi != obj.logi
             || self.supply != obj.supply
             || self.fuel != obj.fuel
+            || self.production != obj.production
+            || self.production_repair != obj.production_repair
             || self.points != obj.points
         {
             if self.logi != obj.logi {
@@ -210,6 +317,8 @@ impl ObjectiveMarkup {
             self.logi = obj.logi;
             self.supply = obj.supply;
             self.fuel = obj.fuel;
+            self.production = obj.production;
+            self.production_repair = obj.production_repair;
             self.points = obj.points;
             if let Some(id) = self.stats_label {
                 msgq.set_markup_text(id, objective_stats_text(obj, false).into());
@@ -244,6 +353,9 @@ impl ObjectiveMarkup {
                 }
             }
         }
+        if self.production != obj.production || self.production_feed_hub != obj.feed_hub {
+            sync_production_feed_line(self, msgq, obj, persisted);
+        }
         for oid in moved {
             if obj.warehouse.destination.contains(oid) {
                 if let Some(id) = self.supply_connections.get(oid) {
@@ -252,6 +364,14 @@ impl ObjectiveMarkup {
                     msgq.set_markup_pos_start(*id, LuaVec3(Vector3::new(dpos.x, 0., dpos.y)));
                     msgq.set_markup_pos_end(*id, LuaVec3(Vector3::new(spos.x, 0., spos.y)));
                 }
+            }
+            if obj.feed_hub == Some(*oid) {
+                sync_production_feed_line(self, msgq, obj, persisted);
+            }
+        }
+        if let Zone::Circle { pos, .. } = obj.zone {
+            if self.pos != pos {
+                sync_production_feed_line(self, msgq, obj, persisted);
             }
         }
     }
@@ -265,7 +385,10 @@ impl ObjectiveMarkup {
     ) -> Self {
         let color_func = |a| text_color(obj.owner, a);
         let all_spec = match obj.kind {
-            ObjectiveKind::Airbase | ObjectiveKind::Fob | ObjectiveKind::Logistics => SideFilter::All,
+            ObjectiveKind::Airbase
+            | ObjectiveKind::Fob
+            | ObjectiveKind::Logistics
+            | ObjectiveKind::Production => SideFilter::All,
             ObjectiveKind::Farp { .. } => obj.owner.into(),
         };
         let mut t = ObjectiveMarkup::default();
@@ -275,6 +398,8 @@ impl ObjectiveMarkup {
         t.logi = obj.logi;
         t.supply = obj.supply;
         t.fuel = obj.fuel;
+        t.production = obj.production;
+        t.production_repair = obj.production_repair;
         let display = resolve_objective_display_name(display_aliases, obj);
         t.name = if matches!(obj.kind, ObjectiveKind::Farp { mobile: true, .. }) {
             format_compact!(" {} ", display).into()
@@ -434,6 +559,7 @@ impl ObjectiveMarkup {
                 t.supply_connections.insert(*oid, id);
             }
         }
+        sync_production_feed_line(&mut t, msgq, obj, persisted);
         t
     }
 }

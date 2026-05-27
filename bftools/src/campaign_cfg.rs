@@ -65,6 +65,8 @@ pub struct CampaignWarehouseOverlay {
     pub defaults: WarehouseDefaultsFromCfg,
     pub warehouse_multipliers: Option<WarehouseMultipliersFromCfg>,
     pub campaign_decade: Option<String>,
+    /// DCS unit types counted as OPR factories (`production_factory_units` in campaign CFG).
+    pub production_factory_units: HashSet<String>,
     /// Which `default_warehouse_*` keys were missing from the CFG JSON entirely.
     /// This usually indicates a typo in the key name.
     pub missing_default_warehouse_keys: Vec<&'static str>,
@@ -147,10 +149,15 @@ pub fn load_overlay(path: &Path) -> Result<CampaignWarehouseOverlay> {
     let warehouse_multipliers = if any { Some(m) } else { None };
     let campaign_decade =
         v.get("campaign_decade").and_then(|n| n.as_str()).map(|s| s.to_string());
+    let production_factory_units = v
+        .get("production_factory_units")
+        .and_then(|n| serde_json::from_value(n.clone()).ok())
+        .unwrap_or_default();
     Ok(CampaignWarehouseOverlay {
         defaults,
         warehouse_multipliers,
         campaign_decade,
+        production_factory_units,
         missing_default_warehouse_keys,
     })
 }

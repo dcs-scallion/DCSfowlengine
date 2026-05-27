@@ -9,6 +9,7 @@ pub enum ObjectiveKind {
     Airbase,
     Fob,
     Logistics,
+    Production,
     Farp {
         spec: Deployable,
         pad_template: String,
@@ -21,21 +22,21 @@ impl ObjectiveKind {
     pub fn is_airbase(&self) -> bool {
         match self {
             Self::Airbase => true,
-            Self::Farp { .. } | Self::Fob | Self::Logistics => false,
+            Self::Farp { .. } | Self::Fob | Self::Logistics | Self::Production => false,
         }
     }
 
     pub fn is_farp(&self) -> bool {
         match self {
             Self::Farp { .. } => true,
-            Self::Airbase | Self::Fob | Self::Logistics => false,
+            Self::Airbase | Self::Fob | Self::Logistics | Self::Production => false,
         }
     }
 
     pub fn is_hub(&self) -> bool {
         match self {
             Self::Logistics => true,
-            Self::Airbase | Self::Farp { .. } | Self::Fob => false,
+            Self::Airbase | Self::Farp { .. } | Self::Fob | Self::Production => false,
         }
     }
 
@@ -45,6 +46,7 @@ impl ObjectiveKind {
             Self::Fob => "FOB",
             Self::Farp { .. } => "FARP",
             Self::Logistics => "Logistics Hub",
+            Self::Production => "Production",
         }
     }
 }

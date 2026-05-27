@@ -67,6 +67,15 @@ impl<'lua> StaticObject<'lua> {
         Ok(self.t.call_method("getLife", ())?)
     }
 
+    pub fn get_life0(&self) -> Result<i64> {
+        Ok(self.t.call_method("getLife0", ())?)
+    }
+
+    /// DCS fortification statics may not implement `getLife0`.
+    pub fn try_get_life0(&self) -> Option<i64> {
+        self.get_life0().ok().filter(|v| *v > 0)
+    }
+
     pub fn is_exist(&self) -> Result<bool> {
         Ok(self.t.call_method("isExist", ())?)
     }

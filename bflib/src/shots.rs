@@ -54,7 +54,7 @@ macro_rules! some {
     };
 }
 
-fn who(db: &Db, id: DcsOid<ClassUnit>) -> Option<Who> {
+pub(crate) fn who(db: &Db, id: DcsOid<ClassUnit>) -> Option<Who> {
     match db.ephemeral.get_uid_by_object_id(&id) {
         Some(uid) => db.unit(uid).ok().map(|u| Who::AI {
             side: u.side,

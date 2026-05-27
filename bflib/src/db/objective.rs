@@ -83,6 +83,10 @@ fn mobile_farp_anchor_ground2(lua: MizLua<'_>, pad_template: &str) -> Option<Vec
     None
 }
 
+fn default_objective_production() -> u8 {
+    100
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 pub enum ObjGroupClass {
     Logi,
@@ -92,6 +96,7 @@ pub enum ObjGroupClass {
     Sr,
     Armor,
     Services,
+    Production,
     Other,
 }
 
@@ -99,10 +104,20 @@ impl ObjGroupClass {
     pub fn is_services(&self) -> bool {
         match self {
             Self::Services => true,
-            Self::Logi | Self::Aaa | Self::Lr | Self::Mr | Self::Sr | Self::Armor | Self::Other => {
-                false
-            }
+            Self::Logi
+            | Self::Aaa
+            | Self::Lr
+            | Self::Mr
+            | Self::Sr
+            | Self::Armor
+            | Self::Production
+            | Self::Other => false,
         }
+    }
+
+    /// ME factory statics in OPR; never spawn/despawn (duplicate static risk).
+    pub fn is_production(&self) -> bool {
+        matches!(self, Self::Production)
     }
 
     pub fn is_logi(&self) -> bool {
@@ -114,6 +129,7 @@ impl ObjGroupClass {
             | Self::Mr
             | Self::Sr
             | Self::Armor
+            | Self::Production
             | Self::Other => false,
         }
     }
@@ -165,6 +181,12 @@ impl From<&str> for ObjGroupClass {
             || s.starts_with("ARMOR")
         {
             ObjGroupClass::Armor
+        } else if s.starts_with("BPROD")
+            || s.starts_with("RPROD")
+            || s.starts_with("NPROD")
+            || s.starts_with("PROD")
+        {
+            ObjGroupClass::Production
         } else {
             ObjGroupClass::Other
         }
@@ -351,6 +373,19 @@ pub struct Objective {
     pub(super) supply: u8,
     #[serde(default)]
     pub(super) fuel: u8,
+    #[serde(default = "default_objective_production")]
+    pub(super) production: u8,
+    #[serde(default)]
+    pub(super) production_repair: u16,
+    /// Factory count from OPR zone `Capacity` (bftools) or linked statics at init.
+    #[serde(default)]
+    pub(super) production_capacity: u16,
+    /// Nearest friendly OLO while `production` > 0; cleared when disconnected.
+    #[serde(default)]
+    pub(super) feed_hub: Option<ObjectiveId>,
+    /// Next OPR repair-queue tick (`production_repair` = queued crates).
+    #[serde(default)]
+    pub(super) production_repair_due: DateTime<Utc>,
     pub(super) threatened: bool,
     pub(super) last_threatened_ts: DateTime<Utc>,
     pub(super) last_change_ts: DateTime<Utc>,
@@ -390,7 +425,32 @@ impl Objective {
         self.logi
     }
 
+    pub(super) fn production_damage_percent(&self) -> u8 {
+        100u8.saturating_sub(self.production)
+    }
+
+    pub(super) fn production_repair_slot_percent(&self) -> u32 {
+        100 / self.production_capacity.max(1) as u32
+    }
+
+    pub(super) fn can_queue_production_repair_crate(&self) -> bool {
+        if !matches!(self.kind, ObjectiveKind::Production) {
+            return false;
+        }
+        let cap = self.production_capacity.max(1);
+        if self.production >= 100 || self.production_repair >= cap {
+            return false;
+        }
+        let damage = self.production_damage_percent() as u32;
+        let queued = self.production_repair as u32;
+        let slot = self.production_repair_slot_percent();
+        (queued + 1) * slot <= damage
+    }
+
     pub fn captureable(&self) -> bool {
+        if matches!(self.kind, ObjectiveKind::Production) {
+            return false;
+        }
         self.logi == 0
     }
 
@@ -405,6 +465,7 @@ impl Objective {
             ObjectiveKind::Airbase => "AB",
             ObjectiveKind::Fob => "FO",
             ObjectiveKind::Logistics => "LO",
+            ObjectiveKind::Production => "PR",
             ObjectiveKind::Farp { .. } => return None,
         };
         let owner = match self.owner {
@@ -418,14 +479,20 @@ impl Objective {
     pub fn is_farp(&self) -> bool {
         match &self.kind {
             ObjectiveKind::Farp { .. } => true,
-            ObjectiveKind::Airbase | ObjectiveKind::Fob | ObjectiveKind::Logistics => false,
+            ObjectiveKind::Airbase
+            | ObjectiveKind::Fob
+            | ObjectiveKind::Logistics
+            | ObjectiveKind::Production => false,
         }
     }
 
     pub fn is_airbase(&self) -> bool {
         match &self.kind {
             ObjectiveKind::Airbase => true,
-            ObjectiveKind::Farp { .. } | ObjectiveKind::Fob | ObjectiveKind::Logistics => false,
+            ObjectiveKind::Farp { .. }
+            | ObjectiveKind::Fob
+            | ObjectiveKind::Logistics
+            | ObjectiveKind::Production => false,
         }
     }
 
@@ -576,6 +643,69 @@ impl Db {
                 Ok((health, logi))
             })
             .unwrap_or(Ok((0, 0)))
+    }
+
+    fn factory_unit_hp_percent(&self, lua: MizLua, unit: &SpawnedUnit) -> Result<u8> {
+        use dcso3::{coalition::Static, static_object::StaticObject};
+        if unit.dead {
+            return Ok(0);
+        }
+        if let Some(id) = self
+            .ephemeral
+            .uid_by_static
+            .iter()
+            .find_map(|(oid, uid)| if uid == &unit.id { Some(oid.clone()) } else { None })
+        {
+            let st = StaticObject::get_instance(lua, &id)?;
+            return Self::static_hp_percent(&st);
+        }
+        match StaticObject::get_by_name(lua, unit.name.as_str()) {
+            Ok(Static::Static(st)) => Self::static_hp_percent(&st),
+            Ok(Static::Airbase(_)) => Ok(100),
+            Err(_) => Ok(100),
+        }
+    }
+
+    fn static_hp_percent(st: &dcso3::static_object::StaticObject) -> Result<u8> {
+        let Ok(life) = st.get_life() else {
+            return Ok(100);
+        };
+        // Fortification statics often lack getLife0 in DCS; treat full life when unknown.
+        Ok(match st.try_get_life0() {
+            Some(l0) => ((life * 100) / l0).clamp(0, 100) as u8,
+            None => if life > 0 { 100 } else { 0 },
+        })
+    }
+
+    fn compute_production_hp(&self, lua: Option<MizLua>, obj: &Objective) -> Result<u8> {
+        let Some(groups) = obj.groups.get(&obj.owner) else {
+            return Ok(0);
+        };
+        let mut sum = 0u32;
+        let mut linked = 0u32;
+        for gid in groups {
+            let group = group!(self, gid)?;
+            if group.class != ObjGroupClass::Production {
+                continue;
+            }
+            for uid in &group.units {
+                linked += 1;
+                let unit = unit!(self, uid)?;
+                let hp = if unit.dead {
+                    0
+                } else if let Some(lua) = lua {
+                    self.factory_unit_hp_percent(lua, unit)?
+                } else {
+                    100
+                };
+                sum += hp as u32;
+            }
+        }
+        let cap = obj.production_capacity.max(linked as u16) as u32;
+        if cap == 0 {
+            return Ok(0);
+        }
+        Ok((sum / cap) as u8)
     }
 
     pub(super) fn delete_objective(&mut self, oid: &ObjectiveId) -> Result<()> {
@@ -800,6 +930,11 @@ impl Db {
             logi: 100,
             supply: 0,
             fuel: 0,
+            production: 100,
+            production_repair: 0,
+            production_capacity: 0,
+            feed_hub: None,
+            production_repair_due: now,
             spawned: true,
             enabled: true,
             threatened: true,
@@ -882,24 +1017,43 @@ impl Db {
 
     pub(super) fn update_objective_status(
         &mut self,
+        lua: Option<MizLua>,
         oid: &ObjectiveId,
         now: DateTime<Utc>,
     ) -> Result<()> {
-        let (kind, health, logi) = {
-            let obj = objective!(self, oid)?;
-            let (health, logi) = self.compute_objective_status(obj)?;
+        let kind = objective!(self, oid)?.kind.clone();
+        let (health, logi, production) = match &kind {
+            ObjectiveKind::Production => {
+                let obj = objective!(self, oid)?;
+                let p = self.compute_production_hp(lua, obj)?;
+                (100, 100, p)
+            }
+            _ => {
+                let obj = objective!(self, oid)?;
+                let (h, l) = self.compute_objective_status(obj)?;
+                (h, l, obj.production)
+            }
+        };
+        {
             let obj = objective_mut!(self, oid)?;
             obj.health = health;
             obj.logi = logi;
+            if matches!(kind, ObjectiveKind::Production) {
+                obj.production = production;
+            }
             obj.last_change_ts = now;
-            (obj.kind.clone(), health, logi)
-        };
+        }
         self.ephemeral.stat(Stat::ObjectiveHealth {
             id: *oid,
             last_change: now,
             health,
             logi,
         });
+        if matches!(kind, ObjectiveKind::Production) && production == 0 {
+            let obj = objective_mut!(self, oid)?;
+            obj.production_repair = 0;
+            obj.production_repair_due = now;
+        }
         if let ObjectiveKind::Farp { .. } = &kind {
             if logi == 0 {
                 self.delete_objective(oid)?;
@@ -955,7 +1109,7 @@ impl Db {
                         if obj.spawned || class == ObjGroupClass::Services {
                             self.ephemeral.push_spawn(gid)
                         }
-                        self.update_objective_status(&oid, now)?;
+                        self.update_objective_status(None, &oid, now)?;
                         self.ephemeral.dirty();
                         return Ok(());
                     }
@@ -1103,7 +1257,7 @@ impl Db {
                 for gid in obj.groups.get(&obj.owner).unwrap_or(&Set::new()) {
                     let group = group!(self, gid)?;
                     let farp = obj.kind.is_farp();
-                    if !farp && !group.class.is_services() {
+                    if !farp && !group.class.is_services() && !group.class.is_production() {
                         for uid in &group.units {
                             let unit = unit_mut!(self, uid)?;
                             if !obj.zone.contains(unit.pos) {
@@ -1124,7 +1278,8 @@ impl Db {
                     let group = group!(self, gid)?;
                     let farp = obj.kind.is_farp();
                     let services = group.class.is_services();
-                    if !farp && !services && group_health!(self, gid)?.0 > 0 {
+                    let production = group.class.is_production();
+                    if !farp && !services && !production && group_health!(self, gid)?.0 > 0 {
                         match group.kind {
                             Some(_) => {
                                 if let Some(oid) = self.ephemeral.object_id_by_gid.get(gid) {
@@ -1203,7 +1358,7 @@ impl Db {
                     .push(*gid);
             }
         }
-        self.update_objective_status(&oid, now)
+        self.update_objective_status(None, &oid, now)
     }
 
     pub fn repair_one_logi_step(
@@ -1236,7 +1391,115 @@ impl Db {
                 }
             }
         }
-        self.update_objective_status(&oid, now)
+        self.update_objective_status(None, &oid, now)
+    }
+
+    pub fn maybe_do_production_repairs(
+        &mut self,
+        lua: MizLua,
+        spctx: &SpawnCtx,
+        idx: &MizIndex,
+        now: DateTime<Utc>,
+    ) -> Result<()> {
+        let rate = self.ephemeral.cfg.production_repair_rate_seconds;
+        if rate == 0 {
+            return Ok(());
+        }
+        let interval = Duration::seconds(rate as i64);
+        let oids: Vec<ObjectiveId> = self
+            .persisted
+            .objectives
+            .into_iter()
+            .filter(|(_, obj)| {
+                matches!(obj.kind, ObjectiveKind::Production)
+                    && obj.production_repair > 0
+                    && obj.production < 100
+                    && now >= obj.production_repair_due
+            })
+            .map(|(id, _)| *id)
+            .collect();
+        let mut refreshed = false;
+        for oid in oids {
+            if self.repair_one_production_factory(lua, spctx, idx, oid, now)? {
+                let obj = objective_mut!(self, oid)?;
+                obj.production_repair = obj.production_repair.saturating_sub(1);
+                obj.production_repair_due = now + interval;
+            }
+            self.update_objective_status(Some(lua), &oid, now)?;
+            refreshed = true;
+        }
+        if refreshed {
+            self.refresh_hub_production_from_opr()
+                .context("hub production after OPR repair")?;
+        }
+        Ok(())
+    }
+
+    fn repair_one_production_factory(
+        &mut self,
+        lua: MizLua,
+        spctx: &SpawnCtx,
+        idx: &MizIndex,
+        oid: ObjectiveId,
+        now: DateTime<Utc>,
+    ) -> Result<bool> {
+        use super::objective::ObjGroupClass;
+        use dcso3::{coalition::Static, static_object::StaticObject};
+
+        let obj = objective!(self, oid)?;
+        let side = obj.owner;
+        let mut target: Option<UnitId> = None;
+        let mut target_hp = 101u8;
+        for gid in obj.groups.get(&side).into_iter().flatten() {
+            let group = group!(self, gid)?;
+            if group.class != ObjGroupClass::Production {
+                continue;
+            }
+            for uid in &group.units {
+                let unit = unit!(self, uid)?;
+                let hp = if unit.dead {
+                    0
+                } else if let Ok(Static::Static(_)) =
+                    StaticObject::get_by_name(lua, unit.name.as_str())
+                {
+                    self.factory_unit_hp_percent(lua, unit).unwrap_or(100)
+                } else {
+                    100
+                };
+                if hp < target_hp {
+                    target_hp = hp;
+                    target = Some(*uid);
+                }
+            }
+        }
+        let Some(uid) = target else {
+            return Ok(false);
+        };
+        if target_hp >= 100 {
+            return Ok(false);
+        }
+        let (unit_name, template_name) = {
+            let unit = unit!(self, uid)?;
+            (unit.name.clone(), {
+                let group = group!(self, unit.group)?;
+                group.template_name.clone()
+            })
+        };
+        if let Ok(Static::Static(st)) = StaticObject::get_by_name(lua, unit_name.as_str()) {
+            let _ = st.destroy();
+        }
+        let tpl = spctx
+            .get_template_ref(idx, GroupKind::Any, side, template_name.as_str())
+            .with_context(|| format_compact!("OPR factory template {template_name}"))?;
+        spctx
+            .spawn(tpl)
+            .with_context(|| format_compact!("respawning factory {unit_name}"))?;
+        if let Some(unit) = self.persisted.units.get_mut_cow(&uid) {
+            unit.dead = false;
+        }
+        self.ephemeral.dirty();
+        let _ = now;
+        Ok(true)
     }
 
     pub fn maybe_do_repairs(&mut self, now: DateTime<Utc>) -> Result<()> {
@@ -1497,6 +1760,22 @@ impl Db {
                     moved.push(oid);
                 }
             }
+        }
+        let now = Utc::now();
+        let production_oids: Vec<ObjectiveId> = self
+            .persisted
+            .objectives
+            .into_iter()
+            .filter(|(_, obj)| matches!(obj.kind, ObjectiveKind::Production))
+            .map(|(id, _)| *id)
+            .collect();
+        let refresh_hubs = !production_oids.is_empty();
+        for oid in production_oids {
+            self.update_objective_status(Some(lua), &oid, now)?;
+        }
+        if refresh_hubs {
+            self.refresh_hub_production_from_opr()
+                .context("refreshing hub feed production after OPR HP update")?;
         }
         for (_, obj) in &self.persisted.objectives {
             self.ephemeral

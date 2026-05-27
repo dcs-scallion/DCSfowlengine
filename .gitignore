@@ -106,6 +106,9 @@ version.texi
 no_llvm_build
 
 # DCS / mission: local archives & scratch (not versioned; use backup disk or release assets)
+miz/Scenarios/80s/Caucasus1985-SARH/base.miz
+miz/Scenarios/80s/Caucasus1985-SARH/Rust_Fowl_Engine_2.0_Caucasus1985-SARH.miz
+miz/Scenarios/80s/Caucasus1985-SARH/Rust_Fowl_Engine_2.0_Caucasus1985-SARH_CFG
 *.7z
 *.rar
 *.zip
