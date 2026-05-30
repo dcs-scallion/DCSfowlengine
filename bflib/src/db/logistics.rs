@@ -43,7 +43,7 @@ use dcso3::{
     LuaVec2, MizLua, String, Vector2,
 };
 use fxhash::{FxHashMap, FxHashSet};
-use log::{error, info, warn};
+use log::{debug, error, info, warn};
 use serde_derive::{Deserialize, Serialize};
 use smallvec::{smallvec, SmallVec};
 
@@ -70,6 +70,21 @@ use std::{
     sync::Arc,
 };
 use tokio::sync::mpsc::UnboundedSender;
+
+#[derive(Debug)]
+struct WarehouseSyncSkipped;
+
+impl std::fmt::Display for WarehouseSyncSkipped {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("warehouse sync skipped")
+    }
+}
+
+impl std::error::Error for WarehouseSyncSkipped {}
+
+fn warehouse_sync_skip(e: &anyhow::Error) -> bool {
+    e.downcast_ref::<WarehouseSyncSkipped>().is_some()
+}
 
 #[derive(Debug, Clone)]
 pub enum LogiStage {
@@ -920,7 +935,7 @@ fn scale_by_delivery_efficiency(base: u32, efficiency_pct: u8) -> u32 {
 }
 
 impl Db {
-    fn warehouse_sync_objective_ids(&self) -> Vec<ObjectiveId> {
+    pub(super) fn warehouse_sync_objective_ids(&self) -> Vec<ObjectiveId> {
         self.persisted
             .objectives
             .into_iter()
@@ -1715,6 +1730,9 @@ impl Db {
         let sync_oids: Vec<ObjectiveId> = self.ephemeral.airbase_by_oid.keys().copied().collect();
         let preserve_fill = self.ephemeral.preserve_initial_warehouse_fill;
         for oid in sync_oids {
+            if matches!(objective!(self, oid)?.kind, ObjectiveKind::Production) {
+                continue;
+            }
             self.sync_warehouse_to_objective(lua, oid)
                 .with_context(|| format_compact!("seed virtual stock from DCS warehouse for {:?}", oid))?;
             if !preserve_fill {
@@ -1811,7 +1829,9 @@ impl Db {
                     Some(oid) => {
                         let start_ts = Utc::now();
                         if let Err(e) = self.sync_warehouse_to_objective(lua, oid) {
-                            error!("failed to sync objective {oid} from warehouse {:?}", e)
+                            if !warehouse_sync_skip(&e) {
+                                error!("failed to sync objective {oid} from warehouse {:?}", e)
+                            }
                         }
                         record_perf(&mut perf.logistics_sync_from, start_ts);
                     }
@@ -1887,7 +1907,9 @@ impl Db {
                     Some(oid) => {
                         let start_ts = Utc::now();
                         if let Err(e) = self.sync_objective_to_warehouse(lua, oid) {
-                            error!("failed to sync objective {oid} to warehouse {:?}", e)
+                            if !warehouse_sync_skip(&e) {
+                                error!("failed to sync objective {oid} to warehouse {:?}", e)
+                            }
                         }
                         record_perf(&mut perf.logistics_sync_to, start_ts);
                     }
@@ -2291,10 +2313,11 @@ impl Db {
         oid: ObjectiveId,
     ) -> Result<(&mut Objective, warehouse::Warehouse<'lua>)> {
         if matches!(objective!(self, oid)?.kind, ObjectiveKind::Production) {
-            bail!(
+            debug!(
                 "warehouse sync skipped for production objective {}",
                 objective!(self, oid)?.name
             );
+            return Err(WarehouseSyncSkipped.into());
         }
         let obj_name = objective!(self, oid)?.name.clone();
         let owner = objective!(self, oid)?.owner;
@@ -2356,6 +2379,13 @@ impl Db {
             .warehouse_resource_meta_cache(lua)
             .context("warehouse resource meta for prune")?;
         let obj = objective_mut!(self, oid)?;
+        if matches!(obj.kind, ObjectiveKind::Production) {
+            debug!(
+                "warehouse sync skipped for production objective {}",
+                obj.name
+            );
+            return Err(WarehouseSyncSkipped.into());
+        }
         let airbase = self
             .ephemeral
             .airbase_by_oid

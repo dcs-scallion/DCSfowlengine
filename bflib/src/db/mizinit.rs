@@ -885,12 +885,7 @@ impl Db {
             .context("warehouses after deferred TISP")?;
         self.ephemeral.defer_initial_hub_distribute = false;
         self.ephemeral.defer_initial_logistics_sync_to = true;
-        let objectives = self
-            .persisted
-            .objectives
-            .into_iter()
-            .map(|(id, _)| *id)
-            .collect();
+        let objectives = self.warehouse_sync_objective_ids().into();
         self.ephemeral.logistics_stage = LogiStage::SyncFromWarehouses { objectives };
         info!("warehouses re-synced after deferred TISP placement (bftools fill preserved)");
         self.ephemeral.dirty();

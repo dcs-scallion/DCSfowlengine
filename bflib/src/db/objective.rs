@@ -1713,12 +1713,7 @@ impl Db {
         }
         if actually_captured.len() > 0 {
             self.ephemeral.logistics_stage = LogiStage::SyncToWarehouses {
-                objectives: self
-                    .persisted
-                    .objectives
-                    .into_iter()
-                    .map(|(oid, _)| *oid)
-                    .collect(),
+                objectives: self.warehouse_sync_objective_ids().into(),
             };
         }
         for gid in to_mark {
