@@ -43,8 +43,113 @@ Logistics Hub → Frontline Objectives → FARPs
 **Route Characteristics**:
 - Automatic distribution every tick interval
 - Prioritizes objectives with lowest supply
-- Distance affects delivery amount
+- When `virtual_resupply` is enabled, hub-to-objective delivery is scaled by distance (see below)
 - Broken routes halt supply flow
+
+### Production zones (OPR) and logistics hubs (OLO)
+
+Fowl maps use trigger zone names `O…` in the mission (see [Objectives](./objectives.md)). Two kinds matter for the supply chain:
+
+| Zone prefix | Kind | Role |
+|-------------|------|------|
+| **OPR\*** | Production | Factory area; output depends on linked production buildings |
+| **OLO\*** | Logistics hub | Central warehouse; receives production and feeds connected objectives |
+
+(\* `R` or `B` in the zone name is the default coalition: `OPR…` Red production, `OLOB…` Blue logistics hub, etc.)
+
+**Two-step virtual pipeline** (when `virtual_resupply` is true in campaign CFG):
+
+```
+OPR (Production) → OLO* (Logistics hub) → objectives with warehouses
+```
+
+1. **OPR → OLO\*** — Each production zone is linked to the **nearest logistics hub of the same coalition**. The hub’s **Production** stat (0–100%) reflects how many factory buildings in the OPR zone are active. Periodic production into the hub inventory is scaled by that percentage (same rounding rule as delivery efficiency: at least 1 unit when base output is non-zero and Production > 0).
+
+2. **OLO\* → objectives** — On each logistics tick, the hub distributes stock to objectives listed in its warehouse destination list. Each objective is supplied by the **nearest owned logistics hub** (`compute_supplier`). When virtual resupply is on, the **amount delivered** is multiplied by a **distance efficiency** (see next section).
+
+When **Production** on an OPR zone is **0%**, it is treated as disconnected: no production feed to the hub and **no** OPR→OLO map line.
+
+### Virtual resupply and distance decay
+
+Campaign flag **`virtual_resupply`** (in `*_CFG`):
+
+- **`true`** — Hub production runs automatically and hubs deliver to connected objectives using **virtual** resupply (no 3D convoys). Delivery amounts use distance decay below.
+- **`false`** — Hub production still runs; **no** automatic hub-to-objective virtual delivery (intended for future physical supply routes). Distance decay is **not** applied (`100%` efficiency).
+
+Distance is **hub center to objective center**, in kilometres (metres / 1000).
+
+**Delivery efficiency** uses exponential decay with a floor (`virtual_resupply_decay` in CFG):
+
+```
+E(d) = f + (100 - f) * exp(-k * d)
+
+k = -ln((r - f) / (100 - f)) / y
+```
+
+| CFG key | Meaning | Engine default |
+|---------|---------|----------------|
+| `reference_distance_km` (`y`) | Distance where efficiency equals `r` | 250 |
+| `efficiency_at_reference_pct` (`r`) | Efficiency at `y` (whole percent, u8) | 25 |
+| `efficiency_floor_pct` (`f`) | Minimum efficiency; distance alone never zeroes delivery | 3 |
+
+Examples with defaults: ~96% at 8 km, 25% at 250 km, ~8% at 500 km, approaching 3% on very long links.
+
+Efficiency is a whole percent (u8), cached per hub–objective pair and recomputed when routes or positions change.
+
+### F10 map supply lines
+
+Two **independent** line types are drawn on the F10 map (do not confuse them):
+
+| Line | Route | Appearance | Meaning |
+|------|-------|------------|---------|
+| **Production feed** | OPR → OLO\* | Narrow **black** shaft (no arrowhead) | Factory link to the hub that receives OPR output |
+| **Supply connection** | OLO\* → objective | Coloured **arrow** (shaft + head) | Virtual resupply route to a warehouse objective |
+
+**Production feed (OPR → OLO\*)**:
+- Drawn only while OPR **Production > 0%** and a feed hub exists
+- **Opacity** scales linearly with Production: full at 100%, hidden at 0%
+- **Width** is half that of supply-connection shafts
+- **No distance decay** on this segment — only the hub Production percentage matters
+
+**Supply connections (OLO\* → objective)**:
+- Drawn for each hub→destination pair in the supply network
+- **Colour** follows delivery efficiency: **green** (100%) → **yellow** → **orange** (floor), matching the decay curve
+- Arrow geometry is custom map markup (not DCS default arrow thickness)
+
+Reading the map: a long **orange** arrow means a far objective still receives some virtual supply but at low efficiency; a **black** OPR→OLO line shows factories feeding the hub, brighter when Production is high.
+
+### Decay curve figure (`virtual_resupply_decay.png`)
+
+To visualise the default (or campaign-specific) decay curve, use the generator script shipped with the user guide:
+
+- **Script:** `user-guide/scripts/generate_virtual_resupply_decay_graph.py`
+- **Output file:** `virtual_resupply_decay.png` (written in the **current working directory**, overwrites if present)
+
+**Typical use in a mission folder:**
+
+1. Copy `generate_virtual_resupply_decay_graph.py` next to your `*_CFG`.
+2. From that folder, run:
+
+```powershell
+py -3 generate_virtual_resupply_decay_graph.py
+```
+
+The script loads `virtual_resupply_decay` from the local `*_CFG` when found; otherwise it uses engine defaults (250 km / 25% / 3%). Requires Python 3 with `matplotlib` and `numpy`.
+
+A reference render is kept in the repo at `user-guide/src/figures/virtual_resupply_decay.png` (regenerate locally after CFG changes).
+
+**Example CFG block:**
+
+```json
+"virtual_resupply": true,
+"virtual_resupply_decay": {
+  "reference_distance_km": 250,
+  "efficiency_at_reference_pct": 25,
+  "efficiency_floor_pct": 3
+}
+```
+
+Omit keys to keep engine defaults; set `virtual_resupply` to `false` to disable virtual hub delivery and distance decay.
 
 ### Supply Ticks
 
@@ -353,12 +458,14 @@ Possible causes:
 - Supply route broken
 - High consumption rate
 - Insufficient tick intervals passed
+- Objective far from its supplying hub (low virtual resupply efficiency when `virtual_resupply` is on)
 
 **Solution**:
 - Check supply route integrity
 - Protect logistics hubs
 - Wait for next supply tick
 - Reduce unnecessary deployments
+- Prefer nearer hubs or capture intermediate objectives to shorten supply links
 
 ### "Logi won't repair"
 
