@@ -20,7 +20,8 @@ use dcso3::{
     env::miz::{GroupId, UnitId},
     net::{Net, PlayerId},
     trigger::{
-        Action, ArrowSpec, CircleSpec, LineSpec, MarkId, QuadSpec, RectSpec, SideFilter, TextSpec,
+        Action, ArrowSpec, CircleSpec, LineSpec, LineType, MarkId, QuadSpec, RectSpec,
+        SideFilter, TextSpec,
     },
 };
 use log::error;
@@ -100,6 +101,16 @@ pub enum Msg {
         spec: LineSpec,
         message: Option<String>,
     },
+    Freeform {
+        id: MarkId,
+        to: SideFilter,
+        points: [LuaVec3; 3],
+        color: Color,
+        fill_color: Color,
+        line_type: LineType,
+        read_only: bool,
+        message: Option<String>,
+    },
     SetMarkupColor {
         id: MarkId,
         color: Color,
@@ -168,7 +179,8 @@ impl MsgQ {
                     | Msg::Quad { id, .. }
                     | Msg::Text { id, .. }
                     | Msg::Arrow { id, .. }
-                    | Msg::Line { id, .. } => {
+                    | Msg::Line { id, .. }
+                    | Msg::Freeform { id, .. } => {
                         if *id == did {
                             push = false;
                             false
@@ -404,6 +416,29 @@ impl MsgQ {
         }))
     }
 
+    pub fn freeform_to(
+        &mut self,
+        to: SideFilter,
+        id: MarkId,
+        points: [LuaVec3; 3],
+        color: Color,
+        fill_color: Color,
+        line_type: LineType,
+        read_only: bool,
+        message: Option<String>,
+    ) {
+        self.0[PRI_LINE].push_back(Cmd::Send(Msg::Freeform {
+            id,
+            to,
+            points,
+            color,
+            fill_color,
+            line_type,
+            read_only,
+            message,
+        }))
+    }
+
     pub fn set_markup_color(&mut self, id: MarkId, color: Color) {
         self.0[PRI_TEXT].push_back(Cmd::Send(Msg::SetMarkupColor { id, color }))
     }
@@ -504,6 +539,25 @@ impl MsgQ {
                     spec,
                     message,
                 }) => act.line_to_all(to, id, spec, message),
+                Cmd::Send(Msg::Freeform {
+                    id,
+                    to,
+                    points,
+                    color,
+                    fill_color,
+                    line_type,
+                    read_only,
+                    message,
+                }) => act.freeform_to_all(
+                    to,
+                    id,
+                    points,
+                    color,
+                    fill_color,
+                    line_type,
+                    read_only,
+                    message,
+                ),
                 Cmd::Send(Msg::SetMarkupColor { id, color }) => act.set_markup_color(id, color),
                 Cmd::Send(Msg::SetMarkupFillColor { id, color }) => {
                     act.set_markup_fill_color(id, color)

@@ -16,6 +16,7 @@ for more details.
 
 use super::{
     aliases::resolve_objective_display_name,
+    logistics::virtual_resupply_delivery_efficiency_cached,
     objective::{Objective, Zone},
     persisted::Persisted,
 };
@@ -30,9 +31,32 @@ use dcso3::{
     Color, LuaVec3, Vector2, Vector3,
     coalition::Side,
     trigger::{
-        ArrowSpec, CircleSpec, LineSpec, LineType, MarkId, QuadSpec, SideFilter, TextSpec,
+        CircleSpec, LineType, MarkId, QuadSpec, SideFilter, TextSpec,
     },
 };
+
+/// Custom hub supply arrow: head length matches prior DCS default; width at 50%.
+const SUPPLY_ARROW_HEAD_LENGTH_M: f64 = 2500.;
+const SUPPLY_ARROW_HEAD_HALF_WIDTH_M: f64 = 500.;
+/// Shaft width at ~60% of prior effective line weight.
+const SUPPLY_ARROW_SHAFT_HALF_WIDTH_M: f64 = 150.;
+const SUPPLY_CONNECTION_ALPHA: f32 = 0.6;
+
+/// OPR→OLO feed shaft: half the supply-line shaft width; alpha at 100% Production.
+const PRODUCTION_FEED_SHAFT_HALF_WIDTH_M: f64 = SUPPLY_ARROW_SHAFT_HALF_WIDTH_M / 2.;
+const PRODUCTION_FEED_LINE_ALPHA: f32 = 0.5;
+
+#[derive(Debug, Clone, Copy)]
+struct SupplyConnectionMark {
+    shaft: MarkId,
+    head: MarkId,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct SupplyConnectionGeometry {
+    shaft: QuadSpec,
+    head: [LuaVec3; 3],
+}
 
 static BAR_LOOKUP: [&'static str; 13] = [
     "░ ░ ░ ░ ░", // 0%
@@ -75,8 +99,8 @@ pub(super) struct ObjectiveMarkup {
     /// Statistika jen pro modrou stranu (když je markup `SideFilter::All`).
     stats_label_blue: Option<MarkId>,
     pos: Vector2,
-    supply_connections: FxHashMap<ObjectiveId, MarkId>,
-    /// OPR → nearest OLO (`lineToAll`, no arrowhead).
+    supply_connections: FxHashMap<ObjectiveId, SupplyConnectionMark>,
+    /// OPR → nearest OLO (quad shaft, no arrowhead).
     production_feed_hub: Option<ObjectiveId>,
     production_feed_line: Option<MarkId>,
 }
@@ -194,9 +218,28 @@ fn objective_map_kind_label(kind: &ObjectiveKind) -> &'static str {
     }
 }
 
-/// Lighter than hub `supply_connections` arrows; light green, same alpha as before.
-fn production_feed_line_color() -> Color {
-    Color::light_green(0.25)
+/// OPR→OLO feed line; black, alpha scales linearly with OPR Production (0–100).
+fn production_feed_line_color(production: u8) -> Color {
+    let alpha = PRODUCTION_FEED_LINE_ALPHA * (f32::from(production) / 100.);
+    Color::black(alpha)
+}
+
+fn production_feed_line_geometry(opr: &Objective, hub: &Objective) -> QuadSpec {
+    let (spos, dpos) = arrow_coords(opr, hub);
+    let dir = (dpos - spos).normalize();
+    let perp = Vector2::new(-dir.y, dir.x);
+    let hw = PRODUCTION_FEED_SHAFT_HALF_WIDTH_M;
+    let v3 = |p: Vector2| LuaVec3(Vector3::new(p.x, 0., p.y));
+    QuadSpec {
+        p0: v3(spos + perp * hw),
+        p1: v3(spos - perp * hw),
+        p2: v3(dpos - perp * hw),
+        p3: v3(dpos + perp * hw),
+        color: Color::black(0.),
+        fill_color: Color::black(0.),
+        line_type: LineType::NoLine,
+        read_only: true,
+    }
 }
 
 fn sync_production_feed_line(
@@ -208,53 +251,29 @@ fn sync_production_feed_line(
     if !matches!(obj.kind, ObjectiveKind::Production) {
         return;
     }
-    let pos = obj.zone.pos();
-    let collapsed = LuaVec3(Vector3::new(pos.x, 0., pos.y));
-    if t.production_feed_line.is_none() {
-        let id = MarkId::new();
-        msgq.line_to(
-            SideFilter::All,
-            id,
-            LineSpec {
-                start: collapsed,
-                end: collapsed,
-                color: Color::light_green(0.),
-                line_type: LineType::Solid,
-                read_only: true,
-            },
-            None,
-        );
-        t.production_feed_line = Some(id);
+    if let Some(id) = t.production_feed_line.take() {
+        msgq.delete_mark(id);
     }
-    let Some(id) = t.production_feed_line else {
-        return;
-    };
     let want_hub = if obj.production > 0 {
         obj.feed_hub
     } else {
         None
     };
     t.production_feed_hub = want_hub;
-    match want_hub {
-        None => {
-            msgq.set_markup_pos_start(id, collapsed);
-            msgq.set_markup_pos_end(id, collapsed);
-            msgq.set_markup_color(id, Color::light_green(0.));
-        }
-        Some(hid) => {
-            let hub = match persisted.objectives.get(&hid) {
-                Some(h) => h,
-                None => return,
-            };
-            let (spos, dpos) = arrow_coords(obj, hub);
-            let start = LuaVec3(Vector3::new(spos.x, 0., spos.y));
-            let end = LuaVec3(Vector3::new(dpos.x, 0., dpos.y));
-            let color = production_feed_line_color();
-            msgq.set_markup_pos_start(id, start);
-            msgq.set_markup_pos_end(id, end);
-            msgq.set_markup_color(id, color);
-        }
-    }
+    let Some(hid) = want_hub else {
+        return;
+    };
+    let hub = match persisted.objectives.get(&hid) {
+        Some(h) => h,
+        None => return,
+    };
+    let mut spec = production_feed_line_geometry(obj, hub);
+    let color = production_feed_line_color(obj.production);
+    spec.color = color;
+    spec.fill_color = color;
+    let id = MarkId::new();
+    msgq.quad_to_all(SideFilter::All, id, spec, None);
+    t.production_feed_line = Some(id);
 }
 
 fn arrow_coords(obj: &Objective, dst: &Objective) -> (Vector2, Vector2) {
@@ -265,6 +284,92 @@ fn arrow_coords(obj: &Objective, dst: &Objective) -> (Vector2, Vector2) {
     let rdir = (pos - dpos).normalize();
     let dpos = dpos + rdir * dst.zone.radius() * 1.1;
     (spos, dpos)
+}
+
+fn supply_connection_geometry(hub: &Objective, dest: &Objective) -> SupplyConnectionGeometry {
+    let (spos, dpos) = arrow_coords(hub, dest);
+    let to_hub = (spos - dpos).normalize();
+    let perp = Vector2::new(-to_hub.y, to_hub.x);
+    let tip = dpos;
+    let base = tip + to_hub * SUPPLY_ARROW_HEAD_LENGTH_M;
+    let hw = SUPPLY_ARROW_HEAD_HALF_WIDTH_M;
+    let shaft_hw = SUPPLY_ARROW_SHAFT_HALF_WIDTH_M;
+    let v3 = |p: Vector2| LuaVec3(Vector3::new(p.x, 0., p.y));
+    SupplyConnectionGeometry {
+        shaft: QuadSpec {
+            p0: v3(spos + perp * shaft_hw),
+            p1: v3(spos - perp * shaft_hw),
+            p2: v3(base - perp * shaft_hw),
+            p3: v3(base + perp * shaft_hw),
+            color: Color::black(0.),
+            fill_color: Color::black(0.),
+            line_type: LineType::NoLine,
+            read_only: true,
+        },
+        head: [
+            v3(tip),
+            v3(base + perp * hw),
+            v3(base - perp * hw),
+        ],
+    }
+}
+
+fn supply_efficiency_color(efficiency_pct: u8, floor_pct: u8) -> Color {
+    if efficiency_pct >= 100 {
+        return Color::green(SUPPLY_CONNECTION_ALPHA);
+    }
+    let span = (100 - floor_pct).max(1) as f32;
+    let t = ((100 - efficiency_pct) as f32 / span).clamp(0., 1.);
+    let (r, g, b) = if t <= 0.5 {
+        let u = t / 0.5;
+        (0.75 * u, 1., 0.)
+    } else {
+        let u = (t - 0.5) / 0.5;
+        (0.75 + 0.25 * u, 1. - 0.5 * u, 0.)
+    };
+    Color::from_rgba(r, g, b, SUPPLY_CONNECTION_ALPHA)
+}
+
+fn sync_supply_connection(
+    msgq: &mut MsgQ,
+    mark: &mut SupplyConnectionMark,
+    to: SideFilter,
+    hub: &Objective,
+    dest: &Objective,
+    color: Color,
+) {
+    let geom = supply_connection_geometry(hub, dest);
+    let mut shaft = geom.shaft;
+    shaft.color = color;
+    shaft.fill_color = color;
+    msgq.delete_mark(mark.shaft);
+    msgq.delete_mark(mark.head);
+    msgq.quad_to_all(to, mark.shaft, shaft, None);
+    msgq.freeform_to(
+        to,
+        mark.head,
+        geom.head,
+        color,
+        color,
+        LineType::NoLine,
+        true,
+        None,
+    );
+}
+
+fn draw_supply_connection(
+    msgq: &mut MsgQ,
+    to: SideFilter,
+    hub: &Objective,
+    dest: &Objective,
+    color: Color,
+) -> SupplyConnectionMark {
+    let mut mark = SupplyConnectionMark {
+        shaft: MarkId::new(),
+        head: MarkId::new(),
+    };
+    sync_supply_connection(msgq, &mut mark, to, hub, dest, color);
+    mark
 }
 
 impl ObjectiveMarkup {
@@ -294,8 +399,9 @@ impl ObjectiveMarkup {
         if let Some(id) = stats_label_blue {
             msgq.delete_mark(id);
         }
-        for (_, id) in supply_connections {
-            msgq.delete_mark(id)
+        for (_, mark) in supply_connections {
+            msgq.delete_mark(mark.shaft);
+            msgq.delete_mark(mark.head);
         }
         if let Some(id) = production_feed_line {
             msgq.delete_mark(id);
@@ -304,6 +410,8 @@ impl ObjectiveMarkup {
 
     pub(super) fn update(
         &mut self,
+        cfg: &Cfg,
+        efficiency_cache: &mut FxHashMap<(ObjectiveId, ObjectiveId), u8>,
         persisted: &Persisted,
         msgq: &mut MsgQ,
         obj: &Objective,
@@ -324,8 +432,9 @@ impl ObjectiveMarkup {
             }
             msgq.set_markup_color(self.owner_ring, color_func(1.));
             
-            for (_, id) in self.supply_connections.drain() {
-                msgq.delete_mark(id);
+            for (_, mark) in self.supply_connections.drain() {
+                msgq.delete_mark(mark.shaft);
+                msgq.delete_mark(mark.head);
             }
             if let Some(id) = self.production_feed_line.take() {
                 msgq.delete_mark(id);
@@ -402,11 +511,24 @@ impl ObjectiveMarkup {
         }
         for oid in moved {
             if obj.warehouse.destination.contains(oid) {
-                if let Some(id) = self.supply_connections.get(oid) {
+                if let Some(mark) = self.supply_connections.get_mut(oid) {
                     let dst = &persisted.objectives[oid];
-                    let (spos, dpos) = arrow_coords(obj, dst);
-                    msgq.set_markup_pos_start(*id, LuaVec3(Vector3::new(dpos.x, 0., dpos.y)));
-                    msgq.set_markup_pos_end(*id, LuaVec3(Vector3::new(spos.x, 0., spos.y)));
+                    let to = if dst.is_farp() {
+                        dst.owner.into()
+                    } else {
+                        SideFilter::All
+                    };
+                    let eff = virtual_resupply_delivery_efficiency_cached(
+                        efficiency_cache,
+                        cfg,
+                        obj,
+                        dst,
+                    );
+                    let color = supply_efficiency_color(
+                        eff,
+                        cfg.virtual_resupply_decay.efficiency_floor_pct,
+                    );
+                    sync_supply_connection(msgq, mark, to, obj, dst, color);
                 }
             }
             if obj.feed_hub == Some(*oid) {
@@ -422,6 +544,7 @@ impl ObjectiveMarkup {
 
     pub(super) fn new(
         cfg: &Cfg,
+        efficiency_cache: &mut FxHashMap<(ObjectiveId, ObjectiveId), u8>,
         msgq: &mut MsgQ,
         obj: &Objective,
         persisted: &Persisted,
@@ -539,19 +662,19 @@ impl ObjectiveMarkup {
             sync_production_feed_line(&mut t, msgq, obj, persisted);
         }
         if let ObjectiveKind::Logistics = obj.kind {
+            let floor = cfg.virtual_resupply_decay.efficiency_floor_pct;
             for oid in &obj.warehouse.destination {
-                let id = MarkId::new();
                 let dobj = &persisted.objectives[oid];
-                let (spos, dpos) = arrow_coords(obj, dobj);
-                msgq.arrow_to(if dobj.is_farp() { dobj.owner.into() } else { all_spec }, id, ArrowSpec {
-                    start: LuaVec3(Vector3::new(dpos.x, 0., dpos.y)),
-                    end: LuaVec3(Vector3::new(spos.x, 0., spos.y)),
-                    color: Color::gray(0.5),
-                    fill_color: Color::gray(0.5),
-                    line_type: LineType::NoLine,
-                    read_only: true,
-                }, None);
-                t.supply_connections.insert(*oid, id);
+                let to = if dobj.is_farp() { dobj.owner.into() } else { all_spec };
+                let eff = virtual_resupply_delivery_efficiency_cached(
+                    efficiency_cache,
+                    cfg,
+                    obj,
+                    dobj,
+                );
+                let color = supply_efficiency_color(eff, floor);
+                let mark = draw_supply_connection(msgq, to, obj, dobj, color);
+                t.supply_connections.insert(*oid, mark);
             }
         }
 

@@ -487,6 +487,68 @@ pub struct CargoConfig {
     pub total_slots: u16,
 }
 
+/// Hub-to-objective virtual resupply efficiency vs distance (exponential decay with floor).
+#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct VirtualResupplyDecayConfig {
+    /// Reference distance in km where efficiency equals `efficiency_at_reference_pct`.
+    #[serde(default = "default_virtual_resupply_decay_reference_distance_km")]
+    pub reference_distance_km: u32,
+    /// Delivery efficiency (0-100) at `reference_distance_km`.
+    #[serde(default = "default_virtual_resupply_decay_efficiency_at_reference_pct")]
+    pub efficiency_at_reference_pct: u8,
+    /// Minimum delivery efficiency (0-100); never zero supply from distance alone.
+    #[serde(default = "default_virtual_resupply_decay_efficiency_floor_pct")]
+    pub efficiency_floor_pct: u8,
+}
+
+fn default_virtual_resupply_decay_reference_distance_km() -> u32 {
+    250
+}
+
+fn default_virtual_resupply_decay_efficiency_at_reference_pct() -> u8 {
+    25
+}
+
+fn default_virtual_resupply_decay_efficiency_floor_pct() -> u8 {
+    3
+}
+
+impl Default for VirtualResupplyDecayConfig {
+    fn default() -> Self {
+        Self {
+            reference_distance_km: default_virtual_resupply_decay_reference_distance_km(),
+            efficiency_at_reference_pct: default_virtual_resupply_decay_efficiency_at_reference_pct(),
+            efficiency_floor_pct: default_virtual_resupply_decay_efficiency_floor_pct(),
+        }
+    }
+}
+
+impl VirtualResupplyDecayConfig {
+    fn decay_rate(&self) -> f64 {
+        let floor = f64::from(self.efficiency_floor_pct);
+        let at_ref = f64::from(self.efficiency_at_reference_pct);
+        let ref_km = f64::from(self.reference_distance_km.max(1));
+        let numer = (at_ref - floor).max(f64::EPSILON);
+        let denom = (100.0 - floor).max(f64::EPSILON);
+        -((numer / denom).ln()) / ref_km
+    }
+
+    /// Whole-percent delivery efficiency at `distance_km` (hub center to objective center).
+    pub fn efficiency_at_distance_km(&self, distance_km: f64) -> u8 {
+        let floor = f64::from(self.efficiency_floor_pct);
+        let at_ref = f64::from(self.efficiency_at_reference_pct);
+        if distance_km <= 0. {
+            return 100;
+        }
+        if at_ref <= floor {
+            return self.efficiency_floor_pct;
+        }
+        let eff = floor + (100.0 - floor) * (-self.decay_rate() * distance_km).exp();
+        eff.round().clamp(floor, 100.) as u8
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct WarehouseConfig {
@@ -901,6 +963,9 @@ pub struct Cfg {
     /// virtual distribution (for future ground/air supply routes).
     #[serde(default)]
     pub virtual_resupply: bool,
+    /// Distance-based hub-to-objective virtual resupply efficiency (ignored when `virtual_resupply` is false).
+    #[serde(default)]
+    pub virtual_resupply_decay: VirtualResupplyDecayConfig,
     /// F10 map marks on objective base groups (RARMOR, RLOGI, …) for the owning coalition.
     #[serde(default)]
     pub objective_group_marks: bool,

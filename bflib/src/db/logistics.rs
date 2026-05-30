@@ -874,6 +874,51 @@ fn prune_disallowed_dcs_weapon_stock<'lua>(
     Ok(())
 }
 
+pub(super) fn hub_to_objective_distance_km(hub: &Objective, dest: &Objective) -> f64 {
+    na::distance(&hub.zone.pos().into(), &dest.zone.pos().into()) / 1000.
+}
+
+pub(super) fn clear_virtual_resupply_efficiency_cache(
+    cache: &mut FxHashMap<(ObjectiveId, ObjectiveId), u8>,
+) {
+    cache.clear();
+}
+
+pub(super) fn invalidate_virtual_resupply_efficiency_for(
+    cache: &mut FxHashMap<(ObjectiveId, ObjectiveId), u8>,
+    oid: ObjectiveId,
+) {
+    cache.retain(|(hub, dest), _| *hub != oid && *dest != oid);
+}
+
+pub(super) fn virtual_resupply_delivery_efficiency_cached(
+    cache: &mut FxHashMap<(ObjectiveId, ObjectiveId), u8>,
+    cfg: &bfprotocols::cfg::Cfg,
+    hub: &Objective,
+    dest: &Objective,
+) -> u8 {
+    if !cfg.virtual_resupply {
+        return 100;
+    }
+    let key = (hub.id, dest.id);
+    if let Some(&eff) = cache.get(&key) {
+        return eff;
+    }
+    let eff = cfg
+        .virtual_resupply_decay
+        .efficiency_at_distance_km(hub_to_objective_distance_km(hub, dest));
+    cache.insert(key, eff);
+    eff
+}
+
+fn scale_by_delivery_efficiency(base: u32, efficiency_pct: u8) -> u32 {
+    if efficiency_pct == 0 || base == 0 {
+        return 0;
+    }
+    let scaled = base.saturating_mul(efficiency_pct as u32) / 100;
+    if scaled == 0 { 1 } else { scaled }
+}
+
 impl Db {
     fn warehouse_sync_objective_ids(&self) -> Vec<ObjectiveId> {
         self.persisted
@@ -1928,6 +1973,7 @@ impl Db {
     }
 
     pub fn setup_supply_lines(&mut self) -> Result<()> {
+        clear_virtual_resupply_efficiency_cache(&mut self.ephemeral.hub_delivery_efficiency);
         let mut suppliers: SmallVec<[(ObjectiveId, Option<ObjectiveId>); 64]> = smallvec![];
         for (oid, obj) in &self.persisted.objectives {
             match obj.kind {
@@ -2081,10 +2127,22 @@ impl Db {
                         }
                         for n in &needed {
                             if n.allocated > 0 {
+                                let amount = scale_by_delivery_efficiency(
+                                    n.allocated,
+                                    virtual_resupply_delivery_efficiency_cached(
+                                        &mut self.ephemeral.hub_delivery_efficiency,
+                                        &self.ephemeral.cfg,
+                                        logi,
+                                        n.obj,
+                                    ),
+                                );
+                                if amount == 0 {
+                                    continue;
+                                }
                                 transfers.push(Transfer {
                                     source: *lid,
                                     target: *n.oid,
-                                    amount: n.allocated,
+                                    amount,
                                     item: $typ(name.clone()),
                                 })
                             }

@@ -351,6 +351,19 @@ impl Color {
     pub fn yellow(a: f32) -> Color {
         Color { r: 0.75, g: 1., b: 0., a }
     }
+
+    pub fn orange(a: f32) -> Color {
+        Color {
+            r: 1.,
+            g: 0.5,
+            b: 0.,
+            a,
+        }
+    }
+
+    pub fn from_rgba(r: f32, g: f32, b: f32, a: f32) -> Color {
+        Color { r, g, b, a }
+    }
 }
 
 impl<'lua> FromLua<'lua> for Color {

@@ -499,6 +499,35 @@ impl<'lua> Action<'lua> {
         )?)
     }
 
+    pub fn freeform_to_all(
+        &self,
+        side: SideFilter,
+        id: MarkId,
+        points: [LuaVec3; 3],
+        color: Color,
+        fill_color: Color,
+        line_type: LineType,
+        read_only: bool,
+        message: Option<String>,
+    ) -> Result<()> {
+        Ok(self.call_function(
+            "markupToAll",
+            (
+                7i64,
+                side,
+                id,
+                points[0],
+                points[1],
+                points[2],
+                color,
+                fill_color,
+                line_type,
+                read_only,
+                message,
+            ),
+        )?)
+    }
+
     pub fn set_markup_radius(&self, id: MarkId, radius: f64) -> Result<()> {
         Ok(self.call_function("setMarkupRadius", (id, radius))?)
     }

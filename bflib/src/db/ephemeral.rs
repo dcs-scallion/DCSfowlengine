@@ -169,6 +169,8 @@ pub struct Ephemeral {
     pub(super) victory: Option<(DateTime<Utc>, Side)>,
     /// `SETTINGS-aliases` zone: internal id → map / UI label.
     pub(super) objective_display_aliases: FxHashMap<std::string::String, std::string::String>,
+    /// Cached hub→destination virtual resupply efficiency (whole percent).
+    pub(super) hub_delivery_efficiency: FxHashMap<(ObjectiveId, ObjectiveId), u8>,
 }
 
 impl Default for Ephemeral {
@@ -220,6 +222,7 @@ impl Default for Ephemeral {
             logistics_stage: LogiStage::default(),
             victory: None,
             objective_display_aliases: FxHashMap::default(),
+            hub_delivery_efficiency: FxHashMap::default(),
         }
     }
 }
@@ -264,6 +267,7 @@ impl Ephemeral {
             obj.id,
             ObjectiveMarkup::new(
                 &self.cfg,
+                &mut self.hub_delivery_efficiency,
                 &mut self.msgs,
                 obj,
                 persisted,
@@ -278,11 +282,29 @@ impl Ephemeral {
         obj: &Objective,
         moved: &[ObjectiveId],
     ) {
+        super::logistics::invalidate_virtual_resupply_efficiency_for(
+            &mut self.hub_delivery_efficiency,
+            obj.id,
+        );
+        for oid in moved {
+            super::logistics::invalidate_virtual_resupply_efficiency_for(
+                &mut self.hub_delivery_efficiency,
+                *oid,
+            );
+        }
         match self.objective_markup.entry(obj.id) {
-            Entry::Occupied(mut e) => e.get_mut().update(persisted, &mut self.msgs, obj, moved),
+            Entry::Occupied(mut e) => e.get_mut().update(
+                &self.cfg,
+                &mut self.hub_delivery_efficiency,
+                persisted,
+                &mut self.msgs,
+                obj,
+                moved,
+            ),
             Entry::Vacant(e) => {
                 e.insert(ObjectiveMarkup::new(
                     &self.cfg,
+                    &mut self.hub_delivery_efficiency,
                     &mut self.msgs,
                     obj,
                     persisted,
