@@ -922,23 +922,33 @@ impl Db {
             .map(|(id, _)| *id)
             .collect();
         for oid in opr_ids {
-            let (owner, pos, production) = {
+            let (owner, pos, production, capacity) = {
                 let obj = objective!(self, oid)?;
-                (obj.owner, obj.zone.pos(), obj.production)
+                (
+                    obj.owner,
+                    obj.zone.pos(),
+                    obj.production,
+                    obj.production_capacity.max(1),
+                )
             };
             let hub = Self::nearest_logistics_hub(&self.persisted, owner, pos);
             let obj = objective_mut!(self, oid)?;
             obj.feed_hub = hub;
             if let Some(hid) = hub {
                 let e = sums.entry(hid).or_insert((0, 0));
-                e.0 = e.0.saturating_add(production as u32);
-                e.1 = e.1.saturating_add(1);
+                e.0 = e.0.saturating_add(u32::from(production) * u32::from(capacity));
+                e.1 = e.1.saturating_add(u32::from(capacity));
             }
         }
         for hid in &self.persisted.logistics_hubs {
             let hub = objective_mut!(self, hid)?;
-            if let Some((sum, n)) = sums.get(hid).copied() {
-                hub.production = (sum / n.max(1)) as u8;
+            if let Some((weighted, cap_sum)) = sums.get(hid).copied() {
+                let denom = cap_sum.max(1) as u64;
+                let numer = weighted as u64;
+                // Round up to whole percents, so steps like 79 (floor) don't show
+                // when the "true" ratio is 79.1+.
+                let prod = ((numer + denom - 1) / denom).min(100);
+                hub.production = prod as u8;
             } else {
                 hub.production = 0;
             }

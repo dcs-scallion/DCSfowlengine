@@ -233,6 +233,17 @@ impl Db {
             .get(name)
             .ok_or_else(|| anyhow!("no such crate {name}"))?
             .clone();
+        if !self.ephemeral.cfg.supply_transfer_players {
+            if let Some(whcfg) = self.ephemeral.cfg.warehouse.as_ref() {
+                if whcfg
+                    .supply_transfer_crate
+                    .get(&st.side)
+                    .is_some_and(|c| c.name.as_str() == name)
+                {
+                    bail!("supply transfer crates are disabled for players")
+                }
+            }
+        }
         if let Some((dep, player)) = dep_idx
             .deployables_by_crates
             .get(&crate_cfg.name)

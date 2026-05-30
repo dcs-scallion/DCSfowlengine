@@ -22,7 +22,7 @@ use chrono::{Duration, prelude::*};
 use dcso3::{
     String,
     event::Shot as ShotEvent,
-    object::{DcsObject, DcsOid},
+    object::{DcsObject, DcsOid, Object},
     unit::{ClassUnit, Unit},
 };
 use fxhash::FxHashMap;
@@ -82,6 +82,20 @@ pub(crate) fn who(db: &Db, id: DcsOid<ClassUnit>) -> Option<Who> {
                 unit: id,
             }),
     }
+}
+
+pub(crate) fn who_from_initiator(db: &Db, initiator: Option<&Object>) -> Option<Who> {
+    initiator
+        .and_then(|i| i.as_unit().ok())
+        .and_then(|u| u.object_id().ok())
+        .and_then(|id| who(db, id))
+        .or_else(|| {
+            initiator
+                .and_then(|i| i.as_weapon().ok())
+                .and_then(|w| w.get_launcher().ok())
+                .and_then(|u| u.object_id().ok())
+                .and_then(|id| who(db, id))
+        })
 }
 
 impl ShotDb {

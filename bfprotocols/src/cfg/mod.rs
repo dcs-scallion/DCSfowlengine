@@ -168,6 +168,12 @@ pub enum UnitTag {
     Boat,
     ALCM,
     NavalSpawnPoint,
+    /// `shipsNoHeliport_kill` — plain naval hull (author assigns per DCS type).
+    ShipNoHeliport,
+    /// `shipsWithHeliport_kill` — naval hull with heliport and warehouse role.
+    ShipWithHeliport,
+    /// `carrier_kill` — aircraft carrier hull tier.
+    ShipCarrier,
 }
 
 #[derive(
@@ -570,6 +576,14 @@ pub struct PointsCfg {
     pub air_kill: u32,
     /// Base points awared for each ground kill
     pub ground_kill: u32,
+    /// Points for destroying a naval unit without heliport and warehouse
+    #[serde(rename = "shipsNoHeliport_kill")]
+    pub ships_no_heliport_kill: u32,
+    /// Points for destroying a naval unit with heliport and warehouse (not an aircraft carrier)
+    #[serde(rename = "shipsWithHeliport_kill")]
+    pub ships_with_heliport_kill: u32,
+    /// Points for destroying an aircraft carrier with warehouse
+    pub carrier_kill: u32,
     /// Points for destroying a static factory unit in an OPR* zone
     pub production_kill: u32,
     /// Bonus points awarded to heavy sam kills
@@ -819,6 +833,10 @@ fn default_lives_birth() -> bool {
     false
 }
 
+fn default_supply_transfer_players() -> bool {
+    true
+}
+
 fn default_ewr_delay() -> u32 {
     60
 }
@@ -867,9 +885,6 @@ pub struct Cfg {
     /// OPR repair tick interval in seconds.
     #[serde(default)]
     pub production_repair_rate_seconds: u32,
-    /// OPR repair progress per tick in percent.
-    #[serde(default)]
-    pub production_repair_percent_per_step: u8,
     /// DCS unit types counted as OPR factory statics (must also be in `unit_classification`).
     #[serde(default)]
     pub production_factory_units: FxHashSet<String>,
@@ -878,6 +893,9 @@ pub struct Cfg {
     /// If the warehouse system is to be used then this should be specified,
     /// otherwise warehouses will be ignored and you should set them to unlimited
     pub warehouse: Option<WarehouseConfig>,
+    /// F10 Cargo: spawn supply transfer crates. AI LogisticsTransfer actions are unaffected.
+    #[serde(default = "default_supply_transfer_players")]
+    pub supply_transfer_players: bool,
     /// When true: periodic production into logistics hubs and virtual hub-to-objective
     /// distribution (no 3D convoys). When false: hub production only; no automatic
     /// virtual distribution (for future ground/air supply routes).

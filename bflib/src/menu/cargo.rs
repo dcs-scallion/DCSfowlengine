@@ -320,17 +320,19 @@ pub(super) fn add_cargo_menu_for_group(
         },
     )?;
     if let Some(whcfg) = &cfg.warehouse {
-        let cr = &whcfg.supply_transfer_crate[&side];
-        mc.add_command_for_group(
-            group,
-            cr.name.clone(),
-            Some(logi.clone()),
-            spawn_crate,
-            ArgTuple {
-                fst: group,
-                snd: cr.name.clone(),
-            },
-        )?;
+        if cfg.supply_transfer_players {
+            let cr = &whcfg.supply_transfer_crate[&side];
+            mc.add_command_for_group(
+                group,
+                cr.name.clone(),
+                Some(logi.clone()),
+                spawn_crate,
+                ArgTuple {
+                    fst: group,
+                    snd: cr.name.clone(),
+                },
+            )?;
+        }
     }
     let mut created_menus: FxHashMap<String, GroupSubMenu> = FxHashMap::default();
     for dep in cfg.deployables.get(side).unwrap_or(&vec![]) {

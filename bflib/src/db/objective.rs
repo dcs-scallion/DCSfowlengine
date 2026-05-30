@@ -380,6 +380,12 @@ pub struct Objective {
     /// Factory count from OPR zone `Capacity` (bftools) or linked statics at init.
     #[serde(default)]
     pub(super) production_capacity: u16,
+    /// Sum of linked factory static HP (0–100 each); drives repair-slot count.
+    #[serde(default)]
+    pub(super) production_hp_sum: u32,
+    /// Factory statics with HP < 100 (one repair crate respawns one unit).
+    #[serde(default)]
+    pub(super) production_repair_need: u16,
     /// Nearest friendly OLO while `production` > 0; cleared when disconnected.
     #[serde(default)]
     pub(super) feed_hub: Option<ObjectiveId>,
@@ -425,26 +431,19 @@ impl Objective {
         self.logi
     }
 
-    pub(super) fn production_damage_percent(&self) -> u8 {
-        100u8.saturating_sub(self.production)
-    }
-
-    pub(super) fn production_repair_slot_percent(&self) -> u32 {
-        100 / self.production_capacity.max(1) as u32
+    /// Crates to reach 100 %: one crate respawns one factory static (HP < 100).
+    pub(super) fn production_repair_slots_needed(&self) -> u16 {
+        self.production_repair_need
     }
 
     pub(super) fn can_queue_production_repair_crate(&self) -> bool {
         if !matches!(self.kind, ObjectiveKind::Production) {
             return false;
         }
-        let cap = self.production_capacity.max(1);
-        if self.production >= 100 || self.production_repair >= cap {
+        if self.production >= 100 {
             return false;
         }
-        let damage = self.production_damage_percent() as u32;
-        let queued = self.production_repair as u32;
-        let slot = self.production_repair_slot_percent();
-        (queued + 1) * slot <= damage
+        self.production_repair < self.production_repair_slots_needed()
     }
 
     pub fn captureable(&self) -> bool {
@@ -677,12 +676,13 @@ impl Db {
         })
     }
 
-    fn compute_production_hp(&self, lua: Option<MizLua>, obj: &Objective) -> Result<u8> {
+    fn compute_production_hp(&self, lua: Option<MizLua>, obj: &Objective) -> Result<(u8, u32, u16)> {
         let Some(groups) = obj.groups.get(&obj.owner) else {
-            return Ok(0);
+            return Ok((0, 0, 0));
         };
         let mut sum = 0u32;
         let mut linked = 0u32;
+        let mut repair_need = 0u16;
         for gid in groups {
             let group = group!(self, gid)?;
             if group.class != ObjGroupClass::Production {
@@ -698,14 +698,17 @@ impl Db {
                 } else {
                     100
                 };
+                if hp < 100 {
+                    repair_need = repair_need.saturating_add(1);
+                }
                 sum += hp as u32;
             }
         }
         let cap = obj.production_capacity.max(linked as u16) as u32;
         if cap == 0 {
-            return Ok(0);
+            return Ok((0, 0, 0));
         }
-        Ok((sum / cap) as u8)
+        Ok(((sum / cap) as u8, sum, repair_need))
     }
 
     pub(super) fn delete_objective(&mut self, oid: &ObjectiveId) -> Result<()> {
@@ -933,6 +936,8 @@ impl Db {
             production: 100,
             production_repair: 0,
             production_capacity: 0,
+            production_hp_sum: 0,
+            production_repair_need: 0,
             feed_hub: None,
             production_repair_due: now,
             spawned: true,
@@ -1022,16 +1027,16 @@ impl Db {
         now: DateTime<Utc>,
     ) -> Result<()> {
         let kind = objective!(self, oid)?.kind.clone();
-        let (health, logi, production) = match &kind {
+        let (health, logi, production, hp_sum, repair_need) = match &kind {
             ObjectiveKind::Production => {
                 let obj = objective!(self, oid)?;
-                let p = self.compute_production_hp(lua, obj)?;
-                (100, 100, p)
+                let (p, sum, need) = self.compute_production_hp(lua, obj)?;
+                (100, 100, p, sum, need)
             }
             _ => {
                 let obj = objective!(self, oid)?;
                 let (h, l) = self.compute_objective_status(obj)?;
-                (h, l, obj.production)
+                (h, l, obj.production, obj.production_hp_sum, obj.production_repair_need)
             }
         };
         {
@@ -1040,6 +1045,8 @@ impl Db {
             obj.logi = logi;
             if matches!(kind, ObjectiveKind::Production) {
                 obj.production = production;
+                obj.production_hp_sum = hp_sum;
+                obj.production_repair_need = repair_need;
             }
             obj.last_change_ts = now;
         }

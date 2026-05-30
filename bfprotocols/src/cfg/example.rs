@@ -1200,6 +1200,12 @@ fn default_unit_classification() -> FxHashMap<Vehicle, UnitTags> {
             ("IL-78M".into(), Aircraft.into()),
             ("Tu-22M3".into(), Aircraft.into()),
             (".Ammunition depot".into(), Logistics | Unarmed),
+            ("REZKY".into(), Boat | ShipNoHeliport),
+            ("Frigate 1135M Rezky".into(), Boat | ShipNoHeliport),
+            ("LHA_Tarawa".into(), Boat | ShipWithHeliport),
+            ("ara_vdm".into(), Boat | ShipWithHeliport),
+            ("Forrestal".into(), Boat | ShipCarrier),
+            ("Stennis".into(), Boat | ShipCarrier),
         ]
         .into_iter()
         .map(|(k, f)| (k, UnitTags::from(f))),
@@ -1877,7 +1883,6 @@ impl Default for Cfg {
             repair_time: 1800,
             production_repair_crate_cost: 50,
             production_repair_rate_seconds: 300,
-            production_repair_percent_per_step: 1,
             production_factory_units: FxHashSet::from_iter([
                 String::from("Building01_PBR"),
                 String::from("Building02_PBR"),
@@ -1902,6 +1907,9 @@ impl Default for Cfg {
                 new_player_join: 25,
                 air_kill: 25,
                 ground_kill: 2,
+                ships_no_heliport_kill: 20,
+                ships_with_heliport_kill: 40,
+                carrier_kill: 100,
                 production_kill: 10,
                 lr_sam_bonus: 5,
                 logistics_repair: 25,
@@ -1932,6 +1940,7 @@ impl Default for Cfg {
                 dynamic_farps_initial_stock_percentage: 100,
             }),
             virtual_resupply: false,
+            supply_transfer_players: true,
             objective_group_marks: false,
             campaign_decade: None,
             default_warehouse_aa_missiles: 0,

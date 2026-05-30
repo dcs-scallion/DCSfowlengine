@@ -131,13 +131,16 @@ pub enum Cmd {
 #[derive(Debug, Clone)]
 pub struct MsgQ(Vec<VecDeque<Cmd>>);
 
+/// DCS F10 draw order: lower index is sent first (under later layers).
+const PRI_PANEL: usize = 0;
+const PRI_LINE: usize = 1;
+const PRI_SHAPE: usize = 2;
+const PRI_TEXT: usize = 3;
+const PRI_COUNT: usize = 4;
+
 impl Default for MsgQ {
     fn default() -> Self {
-        MsgQ(vec![
-            VecDeque::default(),
-            VecDeque::default(),
-            VecDeque::default(),
-        ])
+        MsgQ((0..PRI_COUNT).map(|_| VecDeque::default()).collect())
     }
 }
 
@@ -150,7 +153,7 @@ impl MsgQ {
     }
 
     pub fn send<S: Into<String>>(&mut self, typ: MsgTyp, text: S) {
-        self.send_with_priority(0, typ, text)
+        self.send_with_priority(PRI_PANEL, typ, text)
     }
 
     pub fn delete_mark(&mut self, did: MarkId) {
@@ -184,8 +187,9 @@ impl MsgQ {
         remove(0);
         remove(1);
         remove(2);
+        remove(3);
         if push {
-            self.0[1].push_back(Cmd::DeleteMark(did))
+            self.0[PRI_SHAPE].push_back(Cmd::DeleteMark(did))
         }
     }
 
@@ -198,7 +202,7 @@ impl MsgQ {
     ) -> MarkId {
         let id = MarkId::new();
         self.send_with_priority(
-            1,
+            PRI_SHAPE,
             MsgTyp::Mark {
                 id,
                 to: MarkDest::All,
@@ -219,7 +223,7 @@ impl MsgQ {
     ) -> MarkId {
         let id = MarkId::new();
         self.send_with_priority(
-            1,
+            PRI_SHAPE,
             MsgTyp::Mark {
                 id,
                 to: MarkDest::Side(side),
@@ -241,7 +245,7 @@ impl MsgQ {
     ) -> MarkId {
         let id = MarkId::new();
         self.send_with_priority(
-            1,
+            PRI_SHAPE,
             MsgTyp::Mark {
                 id,
                 to: MarkDest::Group(group),
@@ -256,7 +260,7 @@ impl MsgQ {
     #[allow(dead_code)]
     pub fn panel_to_all<S: Into<String>>(&mut self, display_time: i64, clear_view: bool, text: S) {
         self.send_with_priority(
-            0,
+            PRI_PANEL,
             MsgTyp::Panel {
                 to: PanelDest::All,
                 display_time,
@@ -274,7 +278,7 @@ impl MsgQ {
         text: S,
     ) {
         self.send_with_priority(
-            0,
+            PRI_PANEL,
             MsgTyp::Panel {
                 to: PanelDest::Side(side),
                 display_time,
@@ -292,7 +296,7 @@ impl MsgQ {
         text: S,
     ) {
         self.send_with_priority(
-            0,
+            PRI_PANEL,
             MsgTyp::Panel {
                 to: PanelDest::Group(group),
                 display_time,
@@ -310,7 +314,7 @@ impl MsgQ {
         text: S,
     ) {
         self.send_with_priority(
-            0,
+            PRI_PANEL,
             MsgTyp::Panel {
                 to: PanelDest::Unit(unit),
                 display_time,
@@ -327,7 +331,7 @@ impl MsgQ {
         spec: CircleSpec,
         message: Option<String>,
     ) {
-        self.0[2].push_back(Cmd::Send(Msg::Circle {
+        self.0[PRI_SHAPE].push_back(Cmd::Send(Msg::Circle {
             id,
             to,
             spec,
@@ -343,7 +347,7 @@ impl MsgQ {
         spec: RectSpec,
         message: Option<String>,
     ) {
-        self.0[2].push_back(Cmd::Send(Msg::Rect {
+        self.0[PRI_SHAPE].push_back(Cmd::Send(Msg::Rect {
             id,
             to,
             spec,
@@ -358,7 +362,7 @@ impl MsgQ {
         spec: QuadSpec,
         message: Option<String>,
     ) {
-        self.0[2].push_back(Cmd::Send(Msg::Quad {
+        self.0[PRI_SHAPE].push_back(Cmd::Send(Msg::Quad {
             id,
             to,
             spec,
@@ -367,7 +371,7 @@ impl MsgQ {
     }
 
     pub fn text_to_all(&mut self, to: SideFilter, id: MarkId, spec: TextSpec) {
-        self.0[1].push_back(Cmd::Send(Msg::Text { id, to, spec }))
+        self.0[PRI_TEXT].push_back(Cmd::Send(Msg::Text { id, to, spec }))
     }
 
     pub fn arrow_to(
@@ -377,7 +381,7 @@ impl MsgQ {
         spec: ArrowSpec,
         message: Option<String>,
     ) {
-        self.0[2].push_back(Cmd::Send(Msg::Arrow {
+        self.0[PRI_LINE].push_back(Cmd::Send(Msg::Arrow {
             id,
             to,
             spec,
@@ -392,7 +396,7 @@ impl MsgQ {
         spec: LineSpec,
         message: Option<String>,
     ) {
-        self.0[2].push_back(Cmd::Send(Msg::Line {
+        self.0[PRI_LINE].push_back(Cmd::Send(Msg::Line {
             id,
             to,
             spec,
@@ -401,24 +405,24 @@ impl MsgQ {
     }
 
     pub fn set_markup_color(&mut self, id: MarkId, color: Color) {
-        self.0[2].push_back(Cmd::Send(Msg::SetMarkupColor { id, color }))
+        self.0[PRI_TEXT].push_back(Cmd::Send(Msg::SetMarkupColor { id, color }))
     }
 
     #[allow(dead_code)]
     pub fn set_markup_fill_color(&mut self, id: MarkId, color: Color) {
-        self.0[2].push_back(Cmd::Send(Msg::SetMarkupFillColor { id, color }))
+        self.0[PRI_TEXT].push_back(Cmd::Send(Msg::SetMarkupFillColor { id, color }))
     }
 
     pub fn set_markup_text(&mut self, id: MarkId, text: String) {
-        self.0[2].push_back(Cmd::Send(Msg::SetMarkupText { id, text }))
+        self.0[PRI_TEXT].push_back(Cmd::Send(Msg::SetMarkupText { id, text }))
     }
 
     pub fn set_markup_pos_start(&mut self, id: MarkId, pos: LuaVec3) {
-        self.0[2].push_back(Cmd::Send(Msg::SetMarkupStart { id, pos }))
+        self.0[PRI_TEXT].push_back(Cmd::Send(Msg::SetMarkupStart { id, pos }))
     }
 
     pub fn set_markup_pos_end(&mut self, id: MarkId, pos: LuaVec3) {
-        self.0[2].push_back(Cmd::Send(Msg::SetMarkupEnd { id, pos }))
+        self.0[PRI_TEXT].push_back(Cmd::Send(Msg::SetMarkupEnd { id, pos }))
     }
 
     pub fn len(&self) -> usize {
@@ -427,15 +431,9 @@ impl MsgQ {
 
     pub fn process(&mut self, max_rate: usize, net: &Net, act: &Action) {
         for _ in 0..max_rate {
-            let cmd = match self.0[0].pop_front() {
+            let cmd = match (0..PRI_COUNT).find_map(|pri| self.0[pri].pop_front()) {
                 Some(cmd) => cmd,
-                None => match self.0[1].pop_front() {
-                    Some(cmd) => cmd,
-                    None => match self.0[2].pop_front() {
-                        Some(cmd) => cmd,
-                        None => return,
-                    },
-                },
+                None => return,
             };
             let res = match cmd {
                 Cmd::DeleteMark(id) => act.remove_mark(id),

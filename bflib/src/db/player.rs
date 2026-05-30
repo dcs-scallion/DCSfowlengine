@@ -18,7 +18,7 @@ use super::{Db, MapS, SetS, ephemeral::SlotInfo, group::DeployKind, objective::O
 use crate::{maybe, maybe_mut, objective_mut};
 use anyhow::{Context, Result, anyhow, bail};
 use bfprotocols::{
-    cfg::{LifeType, PointsCfg, UnitTag, Vehicle},
+    cfg::{LifeType, PointsCfg, UnitTag, UnitTags, Vehicle},
     db::{
         group::GroupId,
         objective::{ObjectiveId, ObjectiveKind},
@@ -1310,6 +1310,67 @@ impl Db {
         }
     }
 
+    fn victim_group_id(&self, victim: &Who) -> Option<GroupId> {
+        match victim {
+            Who::AI { gid, .. } => Some(*gid),
+            Who::Player { unit, .. } => self
+                .ephemeral
+                .get_uid_by_object_id(unit)
+                .and_then(|uid| self.persisted.units.get(uid).map(|u| u.group)),
+        }
+    }
+
+    fn dead_target_unit_tags(&self, dead: &Dead) -> Option<UnitTags> {
+        if let Some(gid) = self.victim_group_id(&dead.victim) {
+            if let Some(group) = self.persisted.groups.get(&gid) {
+                for uid in group.units.clone().into_iter() {
+                    let unit = self.persisted.units.get(uid)?;
+                    if let Some(tags) = self
+                        .ephemeral
+                        .cfg
+                        .unit_classification
+                        .get(unit.typ.as_str())
+                    {
+                        if tags.contains(UnitTag::ShipCarrier)
+                            || tags.contains(UnitTag::ShipWithHeliport)
+                            || tags.contains(UnitTag::ShipNoHeliport)
+                        {
+                            return Some(*tags);
+                        }
+                    }
+                }
+            }
+        }
+        dead.shots
+            .iter()
+            .find(|s| !s.target_typ.trim().is_empty())
+            .and_then(|s| {
+                self.ephemeral
+                    .cfg
+                    .unit_classification
+                    .get(s.target_typ.as_str())
+            })
+            .copied()
+            .filter(|tags| {
+                tags.contains(UnitTag::ShipCarrier)
+                    || tags.contains(UnitTag::ShipWithHeliport)
+                    || tags.contains(UnitTag::ShipNoHeliport)
+            })
+    }
+
+    fn ship_kill_points(&self, cfg: &PointsCfg, dead: &Dead) -> Option<u32> {
+        let tags = self.dead_target_unit_tags(dead)?;
+        if tags.contains(UnitTag::ShipCarrier) {
+            Some(cfg.carrier_kill)
+        } else if tags.contains(UnitTag::ShipWithHeliport) {
+            Some(cfg.ships_with_heliport_kill)
+        } else if tags.contains(UnitTag::ShipNoHeliport) {
+            Some(cfg.ships_no_heliport_kill)
+        } else {
+            None
+        }
+    }
+
     pub fn award_kill_points(&mut self, cfg: &PointsCfg, dead: &Dead) {
         let mut hit_by: SmallVec<[(Ucid, bool); 16]> = smallvec![];
         let valid_shots = || {
@@ -1362,22 +1423,27 @@ impl Db {
             }
         }
         if !hit_by.is_empty() {
-            let total_points = (&dead.shots)
-                .into_iter()
-                .find(|s| s.target_typ.trim() != "")
-                .map(|s| &s.target_typ)
-                .and_then(|typ| self.ephemeral.cfg.unit_classification.get(typ.as_str()))
-                .map(|tags| {
-                    if tags.contains(UnitTag::LR | UnitTag::TrackRadar | UnitTag::SAM) {
-                        cfg.ground_kill + cfg.lr_sam_bonus
-                    } else if tags.contains(UnitTag::Aircraft) || tags.contains(UnitTag::Helicopter)
-                    {
-                        cfg.air_kill
-                    } else {
-                        cfg.ground_kill
-                    }
-                })
-                .unwrap_or(cfg.ground_kill);
+            let total_points = self.ship_kill_points(cfg, dead).unwrap_or_else(|| {
+                    (&dead.shots)
+                        .into_iter()
+                        .find(|s| s.target_typ.trim() != "")
+                        .map(|s| &s.target_typ)
+                        .and_then(|typ| {
+                            self.ephemeral.cfg.unit_classification.get(typ.as_str())
+                        })
+                        .map(|tags| {
+                            if tags.contains(UnitTag::LR | UnitTag::TrackRadar | UnitTag::SAM) {
+                                cfg.ground_kill + cfg.lr_sam_bonus
+                            } else if tags.contains(UnitTag::Aircraft)
+                                || tags.contains(UnitTag::Helicopter)
+                            {
+                                cfg.air_kill
+                            } else {
+                                cfg.ground_kill
+                            }
+                        })
+                        .unwrap_or(cfg.ground_kill)
+                });
             let pps = (total_points as f32 / hit_by.len() as f32).ceil() as i32;
             let victim_info = match &dead.victim {
                 Who::Player { ucid, .. } => self.persisted.players.get(ucid).map(|p| VictimInfo {

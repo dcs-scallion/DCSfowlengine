@@ -162,6 +162,8 @@ impl Db {
             production: 100,
             production_repair: 0,
             production_capacity,
+            production_hp_sum: u32::from(production_capacity) * 100,
+            production_repair_need: 0,
             feed_hub: None,
             production_repair_due: Utc::now(),
             last_change_ts: Utc::now(),
@@ -631,6 +633,8 @@ impl Db {
             .map(|(id, _)| *id)
             .collect::<Vec<_>>();
         t.link_production_statics_from_miz(miz)?;
+        t.sync_production_static_uid_map(lua)
+            .context("syncing production factory static object ids")?;
         for id in ids {
             t.update_objective_status(Some(lua), &id, now)?
         }
@@ -656,6 +660,8 @@ impl Db {
     ) -> Result<()> {
         debug!("init slots");
         self.build_carrier_slot_maps(miz)?;
+        self.sync_production_static_uid_map(lua)
+            .context("syncing production factory static object ids after load")?;
         // migrate format changes
         if !self.persisted.migrated_v0 {
             self.persisted.migrated_v0 = true;

@@ -671,16 +671,24 @@ fn on_event(lua: MizLua, ev: Event) -> Result<()> {
             } else if let Some(target) =
                 e.target.as_ref().and_then(|t| t.as_static().ok())
             {
+                let static_id = target.object_id()?;
+                if let Some(who) =
+                    crate::shots::who_from_initiator(&ctx.db, e.initiator.as_ref())
+                {
+                    ctx.db.note_static_hit(static_id.clone(), who);
+                }
                 if target.get_life()? < 1 {
-                    let killer = e
-                        .initiator
-                        .as_ref()
-                        .and_then(|i| i.as_unit().ok())
-                        .and_then(|u| u.object_id().ok())
-                        .and_then(|id| crate::shots::who(&ctx.db, id));
-                    if let Err(e) =
-                        ctx.db.static_dead(&target.object_id()?, start_ts, killer.as_ref())
-                    {
+                    let killer = crate::shots::who_from_initiator(
+                        &ctx.db,
+                        e.initiator.as_ref(),
+                    )
+                    .or_else(|| ctx.db.take_static_hit(&static_id));
+                    if let Err(e) = ctx.db.static_dead(
+                        lua,
+                        &static_id,
+                        start_ts,
+                        killer.as_ref(),
+                    ) {
                         error!("static dead failed {e:?}")
                     }
                 }
@@ -700,7 +708,9 @@ fn on_event(lua: MizLua, ev: Event) -> Result<()> {
                 }
             } else if let Some(st) = e.initiator.as_ref().and_then(|s| s.as_static().ok())
             {
-                if let Err(e) = ctx.db.static_dead(&st.object_id()?, start_ts, None) {
+                let id = st.object_id()?;
+                let killer = ctx.db.take_static_hit(&id);
+                if let Err(e) = ctx.db.static_dead(lua, &id, start_ts, killer.as_ref()) {
                     error!("static killed failed {e:?}")
                 }
             }

@@ -130,6 +130,7 @@ pub struct Ephemeral {
     pub(super) object_id_by_gid: FxHashMap<GroupId, DcsOid<ClassGroup>>,
     pub(super) gid_by_object_id: FxHashMap<DcsOid<ClassGroup>, GroupId>,
     pub(super) uid_by_static: FxHashMap<DcsOid<ClassStatic>, UnitId>,
+    pub(super) static_last_hit: FxHashMap<DcsOid<ClassStatic>, bfprotocols::shots::Who>,
     pub(super) slot_by_miz_gid: FxHashMap<miz::GroupId, SlotId>,
     pub(super) airbase_by_oid: FxHashMap<ObjectiveId, DcsOid<ClassAirbase>>,
     pub(super) airbases_by_oid: FxHashMap<ObjectiveId, SmallVec<[DcsOid<ClassAirbase>; 2]>>,
@@ -190,6 +191,7 @@ impl Default for Ephemeral {
             object_id_by_gid: FxHashMap::default(),
             gid_by_object_id: FxHashMap::default(),
             uid_by_static: FxHashMap::default(),
+            static_last_hit: FxHashMap::default(),
             airbase_by_oid: FxHashMap::default(),
             airbases_by_oid: FxHashMap::default(),
             pad_template_to_objective: FxHashMap::default(),
@@ -244,6 +246,14 @@ impl Ephemeral {
         self.slot_by_miz_gid
             .get(gid)
             .and_then(|sl| self.slot_info.get(sl).map(|s| (*sl, s)))
+    }
+
+    pub(super) fn note_static_hit(&mut self, id: DcsOid<ClassStatic>, who: bfprotocols::shots::Who) {
+        self.static_last_hit.insert(id, who);
+    }
+
+    pub(super) fn take_static_hit(&mut self, id: &DcsOid<ClassStatic>) -> Option<bfprotocols::shots::Who> {
+        self.static_last_hit.remove(id)
     }
 
     pub fn create_objective_markup(&mut self, persisted: &Persisted, obj: &Objective) {
@@ -763,6 +773,22 @@ impl Ephemeral {
             }
         };
         check_unit_classification()?;
+        for (typ, tags) in &cfg.unit_classification {
+            let tier_count = [
+                tags.contains(UnitTag::ShipCarrier),
+                tags.contains(UnitTag::ShipWithHeliport),
+                tags.contains(UnitTag::ShipNoHeliport),
+            ]
+            .into_iter()
+            .filter(|b| *b)
+            .count();
+            if tier_count > 1 {
+                warn!(
+                    "unit_classification {typ:?}: multiple ship kill tier tags; \
+                     use only one of ShipCarrier, ShipWithHeliport, ShipNoHeliport"
+                );
+            }
+        }
         if let Some(VictoryCondition::MapOwned { fraction }) = cfg.auto_reset.map(|vc| vc.condition)
         {
             if fraction > 1. || fraction < 0. {

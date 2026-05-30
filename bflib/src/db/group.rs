@@ -34,7 +34,7 @@ use chrono::prelude::*;
 use compact_str::{format_compact, CompactString};
 use dcso3::{
     azumith3d, centroid2d, centroid3d, change_heading,
-    coalition::Side,
+    coalition::{Side, Static},
     coord::Coord,
     env::miz,
     env::miz::{Group as MizGroup, GroupKind, MizIndex},
@@ -50,7 +50,7 @@ use dcso3::{
 };
 use enumflags2::BitFlags;
 use fxhash::{FxHashMap, FxHashSet};
-use log::{error, warn};
+use log::{debug, error, warn};
 use serde_derive::{Deserialize, Serialize};
 use smallvec::{smallvec, SmallVec};
 use std::{cmp::max, collections::VecDeque};
@@ -1160,6 +1160,53 @@ impl Db {
         Ok(())
     }
 
+    /// ME factory statics may Birth before `link_production_statics_from_miz`; bind DCS ids by name.
+    pub(super) fn sync_production_static_uid_map(&mut self, lua: MizLua) -> Result<()> {
+        use super::objective::ObjGroupClass;
+
+        let mut synced = 0usize;
+        for (uid, unit) in self.persisted.units.into_iter() {
+            let group = match self.persisted.groups.get(&unit.group) {
+                Some(g) => g,
+                None => continue,
+            };
+            if group.class != ObjGroupClass::Production || unit.dead {
+                continue;
+            }
+            match StaticObject::get_by_name(lua, unit.name.as_str()) {
+                Ok(Static::Static(st)) => {
+                    let id = st.object_id()?;
+                    self.ephemeral.uid_by_static.insert(id, *uid);
+                    synced += 1;
+                }
+                Ok(Static::Airbase(_)) => {}
+                Err(e) => warn!(
+                    "production factory static {:?} not in world: {e:?}",
+                    unit.name
+                ),
+            }
+        }
+        if synced > 0 {
+            debug!("synced {synced} production factory static object id(s)");
+        }
+        Ok(())
+    }
+
+    pub(crate) fn note_static_hit(
+        &mut self,
+        id: DcsOid<ClassStatic>,
+        who: bfprotocols::shots::Who,
+    ) {
+        self.ephemeral.note_static_hit(id, who);
+    }
+
+    pub(crate) fn take_static_hit(
+        &mut self,
+        id: &DcsOid<ClassStatic>,
+    ) -> Option<bfprotocols::shots::Who> {
+        self.ephemeral.take_static_hit(id)
+    }
+
     pub fn unit_dead(
         &mut self,
         id: &DcsOid<ClassUnit>,
@@ -1260,12 +1307,31 @@ impl Db {
 
     pub fn static_dead(
         &mut self,
+        lua: MizLua,
         id: &DcsOid<ClassStatic>,
         now: DateTime<Utc>,
         killer: Option<&bfprotocols::shots::Who>,
     ) -> Result<()> {
-        if let Some(uid) = self.ephemeral.uid_by_static.remove(id) {
-            match self.persisted.units.get_mut_cow(&uid) {
+        let uid = match self.ephemeral.uid_by_static.remove(id) {
+            Some(uid) => Some(uid),
+            None => match StaticObject::get_instance(lua, id) {
+                Ok(st) => {
+                    let name = st.get_name()?;
+                    self.persisted.units_by_name.get(name.as_str()).copied()
+                }
+                Err(e) => {
+                    warn!("static_dead: unknown static object {:?}: {e:?}", id);
+                    None
+                }
+            },
+        };
+        let Some(uid) = uid else {
+            return Ok(());
+        };
+        if self.persisted.units.get(&uid).is_some_and(|u| u.dead) {
+            return Ok(());
+        }
+        match self.persisted.units.get_mut_cow(&uid) {
                 None => error!("static_dead: missing unit {:?}", uid),
                 Some(unit) => {
                     unit.dead = true;
@@ -1319,7 +1385,6 @@ impl Db {
                         }
                     }
                 }
-            }
         }
         Ok(())
     }

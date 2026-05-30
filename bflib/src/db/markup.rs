@@ -59,6 +59,8 @@ pub(super) struct ObjectiveMarkup {
     supply: u8,
     fuel: u8,
     production: u8,
+    production_hp_sum: u32,
+    production_repair_need: u16,
     production_repair: u16,
     points: i32,
     name: String,
@@ -95,66 +97,91 @@ fn enemy_objective_view(obj_owner: Side, viewer: Side) -> bool {
     )
 }
 
+/// Pad 0–100 column on infobar rows when DCS drops a digit (e.g. 100 → 99).
+const STAT_VALUE_COL_WIDTH: usize = 5;
+/// Gap between infobar block and value, and between value and label.
+const STAT_BAR_GAP: &str = " ";
+/// Plain rows (Repair, Points): `Label  value` from line start — no infobar alignment.
+const STAT_PLAIN_LABEL_GAP: &str = "  ";
+
+fn stat_value_column(value: &str) -> CompactString {
+    let len = value.chars().count();
+    if len > STAT_VALUE_COL_WIDTH {
+        CompactString::from(value)
+    } else {
+        format_compact!("{:>w$}", value, w = STAT_VALUE_COL_WIDTH)
+    }
+}
+
+fn stat_repair_field(queued: u16, need: u16) -> CompactString {
+    format_compact!("{}/{}", queued, need)
+}
+
+fn stat_plain_row(label: &'static str, value: &str) -> CompactString {
+    format_compact!("{label}{STAT_PLAIN_LABEL_GAP}{value}")
+}
+
+fn stat_plain_repair_row(queued: u16, need: u16) -> CompactString {
+    stat_plain_row("Repair", stat_repair_field(queued, need).as_str())
+}
+
+/// Infobar row: `{bar}{gap}{value}{gap}{label}`.
+fn stat_row(bar: &str, value: &str, label: &'static str) -> CompactString {
+    format_compact!(
+        "{}{}{}{}{}",
+        bar,
+        STAT_BAR_GAP,
+        stat_value_column(value),
+        STAT_BAR_GAP,
+        label
+    )
+}
+
+fn stat_infobar_row(bar: &str, value: u8, label: &'static str) -> CompactString {
+    stat_row(bar, &format_compact!("{}", value.min(100)), label)
+}
+
 fn objective_stats_text(obj: &Objective, limited: bool) -> CompactString {
     let get_idx = |val: u8| -> usize { (val as usize * 12 / 100).min(12) };
     match (&obj.kind, limited) {
         (ObjectiveKind::Production, true) => {
-            format_compact!("\n\n{} {:>3} Production", BAR_LOOKUP[get_idx(obj.production)], obj.production)
+            format_compact!("\n\n{}", stat_infobar_row(BAR_LOOKUP[get_idx(obj.production)], obj.production, "Production"))
         }
         (ObjectiveKind::Production, false) => {
             format_compact!(
-                "\n\n{} {:>3} Production\n\nRepair: {}\nPoints: {}",
-                BAR_LOOKUP[get_idx(obj.production)],
-                obj.production,
-                obj.production_repair,
-                obj.points
+                "\n\n{}\n{}\n{}",
+                stat_infobar_row(BAR_LOOKUP[get_idx(obj.production)], obj.production, "Production"),
+                stat_plain_row("Points", &format_compact!("{}", obj.points)),
+                stat_plain_repair_row(obj.production_repair, obj.production_repair_slots_needed()),
             )
         }
-        (ObjectiveKind::Logistics, true) => {
-            format_compact!(
-                "\n\n{} {:>3} Production\n{} {:>3} Health\n{} {:>3} Logi",
-                BAR_LOOKUP[get_idx(obj.production)],
-                obj.production,
-                BAR_LOOKUP[get_idx(obj.health)],
-                obj.health,
-                BAR_LOOKUP[get_idx(obj.logi)],
-                obj.logi,
-            )
-        }
-        (ObjectiveKind::Logistics, false) => {
-            format_compact!(
-                "\n\n{} {:>3} Production\n{} {:>3} Health\n{} {:>3} Logi\n{} {:>3} Supply\n{} {:>3} Fuel\n\nPoints: {}",
-                BAR_LOOKUP[get_idx(obj.production)],
-                obj.production,
-                BAR_LOOKUP[get_idx(obj.health)],
-                obj.health,
-                BAR_LOOKUP[get_idx(obj.logi)],
-                obj.logi,
-                BAR_LOOKUP[get_idx(obj.supply)],
-                obj.supply,
-                BAR_LOOKUP[get_idx(obj.fuel)],
-                obj.fuel,
-                obj.points
-            )
-        }
+        (ObjectiveKind::Logistics, true) => format_compact!(
+            "\n\n{}\n{}\n{}",
+            stat_infobar_row(BAR_LOOKUP[get_idx(obj.production)], obj.production, "Production"),
+            stat_infobar_row(BAR_LOOKUP[get_idx(obj.health)], obj.health, "Health"),
+            stat_infobar_row(BAR_LOOKUP[get_idx(obj.logi)], obj.logi, "Logi"),
+        ),
+        (ObjectiveKind::Logistics, false) => format_compact!(
+            "\n\n{}\n{}\n{}\n{}\n{}\n{}",
+            stat_infobar_row(BAR_LOOKUP[get_idx(obj.production)], obj.production, "Production"),
+            stat_infobar_row(BAR_LOOKUP[get_idx(obj.health)], obj.health, "Health"),
+            stat_infobar_row(BAR_LOOKUP[get_idx(obj.logi)], obj.logi, "Logi"),
+            stat_infobar_row(BAR_LOOKUP[get_idx(obj.supply)], obj.supply, "Supply"),
+            stat_infobar_row(BAR_LOOKUP[get_idx(obj.fuel)], obj.fuel, "Fuel"),
+            stat_plain_row("Points", &format_compact!("{}", obj.points)),
+        ),
         (_, true) => format_compact!(
-            "\n\n{} {:>3} Health\n{} {:>3} Logi",
-            BAR_LOOKUP[get_idx(obj.health)],
-            obj.health,
-            BAR_LOOKUP[get_idx(obj.logi)],
-            obj.logi,
+            "\n\n{}\n{}",
+            stat_infobar_row(BAR_LOOKUP[get_idx(obj.health)], obj.health, "Health"),
+            stat_infobar_row(BAR_LOOKUP[get_idx(obj.logi)], obj.logi, "Logi"),
         ),
         (_, false) => format_compact!(
-            "\n\n{} {:>3} Health\n{} {:>3} Logi\n{} {:>3} Supply\n{} {:>3} Fuel\n\nPoints: {}",
-            BAR_LOOKUP[get_idx(obj.health)],
-            obj.health,
-            BAR_LOOKUP[get_idx(obj.logi)],
-            obj.logi,
-            BAR_LOOKUP[get_idx(obj.supply)],
-            obj.supply,
-            BAR_LOOKUP[get_idx(obj.fuel)],
-            obj.fuel,
-            obj.points
+            "\n\n{}\n{}\n{}\n{}\n{}",
+            stat_infobar_row(BAR_LOOKUP[get_idx(obj.health)], obj.health, "Health"),
+            stat_infobar_row(BAR_LOOKUP[get_idx(obj.logi)], obj.logi, "Logi"),
+            stat_infobar_row(BAR_LOOKUP[get_idx(obj.supply)], obj.supply, "Supply"),
+            stat_infobar_row(BAR_LOOKUP[get_idx(obj.fuel)], obj.fuel, "Fuel"),
+            stat_plain_row("Points", &format_compact!("{}", obj.points)),
         ),
     }
 }
@@ -162,7 +189,7 @@ fn objective_stats_text(obj: &Objective, limited: bool) -> CompactString {
 fn objective_map_kind_label(kind: &ObjectiveKind) -> &'static str {
     match kind {
         ObjectiveKind::Logistics => "⌂ HUB",
-        ObjectiveKind::Production => "PR",
+        ObjectiveKind::Production => "⌂",
         _ => kind.name(),
     }
 }
@@ -181,15 +208,39 @@ fn sync_production_feed_line(
     if !matches!(obj.kind, ObjectiveKind::Production) {
         return;
     }
-    let want_hub = if obj.production > 0 { obj.feed_hub } else { None };
-    if want_hub != t.production_feed_hub {
-        if let Some(id) = t.production_feed_line.take() {
-            msgq.delete_mark(id);
-        }
-        t.production_feed_hub = want_hub;
+    let pos = obj.zone.pos();
+    let collapsed = LuaVec3(Vector3::new(pos.x, 0., pos.y));
+    if t.production_feed_line.is_none() {
+        let id = MarkId::new();
+        msgq.line_to(
+            SideFilter::All,
+            id,
+            LineSpec {
+                start: collapsed,
+                end: collapsed,
+                color: Color::light_green(0.),
+                line_type: LineType::Solid,
+                read_only: true,
+            },
+            None,
+        );
+        t.production_feed_line = Some(id);
     }
+    let Some(id) = t.production_feed_line else {
+        return;
+    };
+    let want_hub = if obj.production > 0 {
+        obj.feed_hub
+    } else {
+        None
+    };
+    t.production_feed_hub = want_hub;
     match want_hub {
-        None => {}
+        None => {
+            msgq.set_markup_pos_start(id, collapsed);
+            msgq.set_markup_pos_end(id, collapsed);
+            msgq.set_markup_color(id, Color::light_green(0.));
+        }
         Some(hid) => {
             let hub = match persisted.objectives.get(&hid) {
                 Some(h) => h,
@@ -199,21 +250,9 @@ fn sync_production_feed_line(
             let start = LuaVec3(Vector3::new(spos.x, 0., spos.y));
             let end = LuaVec3(Vector3::new(dpos.x, 0., dpos.y));
             let color = production_feed_line_color();
-            let spec = LineSpec {
-                start,
-                end,
-                color,
-                line_type: LineType::Solid,
-                read_only: true,
-            };
-            if let Some(id) = t.production_feed_line {
-                msgq.set_markup_pos_start(id, start);
-                msgq.set_markup_pos_end(id, end);
-            } else {
-                let id = MarkId::new();
-                msgq.line_to(SideFilter::All, id, spec, None);
-                t.production_feed_line = Some(id);
-            }
+            msgq.set_markup_pos_start(id, start);
+            msgq.set_markup_pos_end(id, end);
+            msgq.set_markup_color(id, color);
         }
     }
 }
@@ -270,6 +309,7 @@ impl ObjectiveMarkup {
         obj: &Objective,
         moved: &[ObjectiveId],
     ) {
+        let old_production = self.production;
         if obj.owner != self.side {
             let color_func = |a| text_color(obj.owner, a);
             self.side = obj.owner;
@@ -304,6 +344,8 @@ impl ObjectiveMarkup {
             || self.supply != obj.supply
             || self.fuel != obj.fuel
             || self.production != obj.production
+            || self.production_hp_sum != obj.production_hp_sum
+            || self.production_repair_need != obj.production_repair_need
             || self.production_repair != obj.production_repair
             || self.points != obj.points
         {
@@ -318,6 +360,8 @@ impl ObjectiveMarkup {
             self.supply = obj.supply;
             self.fuel = obj.fuel;
             self.production = obj.production;
+            self.production_hp_sum = obj.production_hp_sum;
+            self.production_repair_need = obj.production_repair_need;
             self.production_repair = obj.production_repair;
             self.points = obj.points;
             if let Some(id) = self.stats_label {
@@ -353,7 +397,7 @@ impl ObjectiveMarkup {
                 }
             }
         }
-        if self.production != obj.production || self.production_feed_hub != obj.feed_hub {
+        if old_production != obj.production || self.production_feed_hub != obj.feed_hub {
             sync_production_feed_line(self, msgq, obj, persisted);
         }
         for oid in moved {
@@ -399,6 +443,8 @@ impl ObjectiveMarkup {
         t.supply = obj.supply;
         t.fuel = obj.fuel;
         t.production = obj.production;
+        t.production_hp_sum = obj.production_hp_sum;
+        t.production_repair_need = obj.production_repair_need;
         t.production_repair = obj.production_repair;
         let display = resolve_objective_display_name(display_aliases, obj);
         t.name = if matches!(obj.kind, ObjectiveKind::Farp { mobile: true, .. }) {
@@ -489,6 +535,26 @@ impl ObjectiveMarkup {
             }
         }
 
+        if matches!(obj.kind, ObjectiveKind::Production) {
+            sync_production_feed_line(&mut t, msgq, obj, persisted);
+        }
+        if let ObjectiveKind::Logistics = obj.kind {
+            for oid in &obj.warehouse.destination {
+                let id = MarkId::new();
+                let dobj = &persisted.objectives[oid];
+                let (spos, dpos) = arrow_coords(obj, dobj);
+                msgq.arrow_to(if dobj.is_farp() { dobj.owner.into() } else { all_spec }, id, ArrowSpec {
+                    start: LuaVec3(Vector3::new(dpos.x, 0., dpos.y)),
+                    end: LuaVec3(Vector3::new(spos.x, 0., spos.y)),
+                    color: Color::gray(0.5),
+                    fill_color: Color::gray(0.5),
+                    line_type: LineType::NoLine,
+                    read_only: true,
+                }, None);
+                t.supply_connections.insert(*oid, id);
+            }
+        }
+
         let bg_color = match obj.owner {
             Side::Red => Color::red(0.8),
             Side::Blue => Color::blue(0.8),
@@ -543,23 +609,6 @@ impl ObjectiveMarkup {
             t.stats_label_blue = None;
         }
 
-        if let ObjectiveKind::Logistics = obj.kind {
-            for oid in &obj.warehouse.destination {
-                let id = MarkId::new();
-                let dobj = &persisted.objectives[oid];
-                let (spos, dpos) = arrow_coords(obj, dobj);
-                msgq.arrow_to(if dobj.is_farp() { dobj.owner.into() } else { all_spec }, id, ArrowSpec {
-                    start: LuaVec3(Vector3::new(dpos.x, 0., dpos.y)),
-                    end: LuaVec3(Vector3::new(spos.x, 0., spos.y)),
-                    color: Color::gray(0.5),
-                    fill_color: Color::gray(0.5),
-                    line_type: LineType::NoLine,
-                    read_only: true,
-                }, None);
-                t.supply_connections.insert(*oid, id);
-            }
-        }
-        sync_production_feed_line(&mut t, msgq, obj, persisted);
         t
     }
 }

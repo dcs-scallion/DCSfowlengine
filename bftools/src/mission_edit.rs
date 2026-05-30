@@ -10010,11 +10010,6 @@ fn apply_opr_zone_capacity_properties(
             continue;
         }
         let n = count_factory_statics_in_opr_zone(base, obj, factory_types)?;
-        if n == 0 {
-            warn!(
-                "OPR zone {zone_name}: no factory statics matched production_factory_units"
-            );
-        }
         set_zone_capacity_property(&obj.inner, n)?;
         info!("OPR zone {zone_name}: Capacity={n}");
     }
@@ -10120,6 +10115,122 @@ fn validate_opr_zone_geometry(objectives: &[TriggerZone]) -> Result<()> {
         );
     }
     Ok(())
+}
+
+/// Each OPR* zone must contain at least one ME static whose type is in `production_factory_units`.
+fn validate_opr_zones_have_factory_statics(
+    base: &LoadedMiz,
+    objectives: &[TriggerZone],
+    factory_types: &std::collections::HashSet<StdString>,
+) -> Result<()> {
+    let mut opr_zones: Vec<(String, &TriggerZone)> = Vec::new();
+    for obj in objectives {
+        let Ok(zone_name) = obj.inner.name() else {
+            continue;
+        };
+        if zone_name.len() < 4 || &zone_name[1..3] != "PR" {
+            continue;
+        }
+        opr_zones.push((zone_name.clone(), obj));
+    }
+    if opr_zones.is_empty() {
+        return Ok(());
+    }
+    if factory_types.is_empty() {
+        bail!(
+            "FowlTools ERROR: base.miz defines OPR* zone(s) but campaign CFG has no production_factory_units; \
+             add production_factory_units to the Fowl *_CFG JSON"
+        );
+    }
+    let mut errors: Vec<compact_str::CompactString> = Vec::new();
+    for (zone_name, obj) in &opr_zones {
+        let n = count_factory_statics_in_opr_zone(base, obj, factory_types)?;
+        if n == 0 {
+            errors.push(format_compact!(
+                "OPR zone {zone_name}: no static matching production_factory_units; \
+                 place at least one factory unit listed in production_factory_units inside this zone in the ME"
+            ));
+        }
+    }
+    if !errors.is_empty() {
+        bail!(
+            "FowlTools ERROR: OPR* factory static validation failed. {}",
+            errors.join(" | ")
+        );
+    }
+    Ok(())
+}
+
+/// Factory statics inside OPR* zones, once per static per coalition (overlap-safe).
+fn count_production_factories_by_coalition(
+    base: &LoadedMiz,
+    objectives: &[TriggerZone],
+    factory_types: &std::collections::HashSet<StdString>,
+) -> Result<(u32, u32)> {
+    if factory_types.is_empty() {
+        return Ok((0, 0));
+    }
+    let mut opr_zones: Vec<(Side, &TriggerZone)> = Vec::new();
+    for obj in objectives {
+        let Ok(zone_name) = obj.inner.name() else {
+            continue;
+        };
+        if zone_name.len() < 4 || &zone_name[1..3] != "PR" {
+            continue;
+        }
+        let side = match zone_name.as_bytes()[3] {
+            b'B' => Side::Blue,
+            b'R' => Side::Red,
+            _ => continue,
+        };
+        opr_zones.push((side, obj));
+    }
+    if opr_zones.is_empty() {
+        return Ok((0, 0));
+    }
+    let mut blue = 0u32;
+    let mut red = 0u32;
+    for (_side, coa) in Side::ALL.into_iter().map(|side| (side, base.mission.coalition(side))) {
+        let coa = coa?;
+        for country in coa.countries()? {
+            let country = country?;
+            for group in country.statics()? {
+                let group = group?;
+                for unit in group
+                    .raw_get::<_, Table>("units")?
+                    .pairs::<Value, Table>()
+                {
+                    let unit = unit?.1;
+                    let typ: String = unit.raw_get("type")?;
+                    if !factory_types.contains(&StdString::from(typ.as_str())) {
+                        continue;
+                    }
+                    let x: f64 = unit.raw_get("x")?;
+                    let y: f64 = unit.raw_get("y")?;
+                    let pos = Vector2::new(x, y);
+                    let mut in_blue = false;
+                    let mut in_red = false;
+                    for (side, zone) in &opr_zones {
+                        if !zone.contains(pos)? {
+                            continue;
+                        }
+                        match side {
+                            Side::Blue => in_blue = true,
+                            Side::Red => in_red = true,
+                            Side::Neutral => {}
+                        }
+                    }
+                    if in_blue {
+                        blue += 1;
+                    }
+                    if in_red {
+                        red += 1;
+                    }
+                }
+            }
+        }
+    }
+    Ok((blue, red))
 }
 
 /// Warn when factory static counts suggest overlapping OPR zones or map-wide bleed.
@@ -11196,6 +11307,8 @@ pub fn run(cfg: &MizCmd) -> Result<()> {
                 .collect()
         })
         .unwrap_or_default();
+    validate_opr_zones_have_factory_statics(&base, &objectives, &factory_types)
+        .context("validating each OPR* zone contains production_factory_units")?;
     apply_opr_zone_capacity_properties(&base, &objectives, &factory_types)
         .context("writing OPR* Capacity zone properties from factory statics")?;
     validate_opr_factory_static_counts(&base, &objectives, &factory_types)
@@ -11804,11 +11917,18 @@ pub fn run(cfg: &MizCmd) -> Result<()> {
     let (blue_objectives, red_objectives, neutral_objectives) =
         count_objectives_by_default_owner(&objectives);
     let (opr_blue, opr_red) = count_objective_kind_by_owner(&objectives, "PR");
+    let (fact_blue, fact_red) =
+        count_production_factories_by_coalition(&base, &objectives, &factory_types)
+            .context("counting production factory statics per coalition")?;
     println!("Objectives total - Blue coalition: {blue_objectives}");
     println!("Objectives total - Red coalition: {red_objectives}");
     println!("Objectives total - Neutral coalition: {neutral_objectives}");
-    println!("Objectives production - Blue coalition: {opr_blue}");
-    println!("Objectives production - Red coalition: {opr_red}");
+    println!(
+        "Objectives production - Blue coalition: {opr_blue}  ( total number of production factories {fact_blue})"
+    );
+    println!(
+        "Objectives production - Red coalition: {opr_red}  ( total number of production factories {fact_red})"
+    );
     warn_airbase_objective_bindings_follow_up_summary(
         missing_airbase.as_slice(),
         invalid_airbase.as_slice(),
