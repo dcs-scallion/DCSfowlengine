@@ -1056,11 +1056,6 @@ impl Db {
             health,
             logi,
         });
-        if matches!(kind, ObjectiveKind::Production) && production == 0 {
-            let obj = objective_mut!(self, oid)?;
-            obj.production_repair = 0;
-            obj.production_repair_due = now;
-        }
         if let ObjectiveKind::Farp { .. } = &kind {
             if logi == 0 {
                 self.delete_objective(oid)?;
