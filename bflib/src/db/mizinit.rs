@@ -662,6 +662,8 @@ impl Db {
         self.build_carrier_slot_maps(miz)?;
         self.sync_production_static_uid_map(lua)
             .context("syncing production factory static object ids after load")?;
+        self.apply_persisted_production_factory_statics(lua)
+            .context("applying persisted production factory static state")?;
         // migrate format changes
         if !self.persisted.migrated_v0 {
             self.persisted.migrated_v0 = true;
@@ -804,6 +806,7 @@ impl Db {
             for (_, obj) in &self.persisted.objectives {
                 self.ephemeral.create_objective_markup(&self.persisted, obj)
             }
+            self.ephemeral.sync_front_line(&self.persisted);
             Ok(())
         };
         mark_deployed_and_logistics().context("marking deployed and logistics")?;

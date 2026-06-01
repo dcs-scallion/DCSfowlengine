@@ -1707,6 +1707,7 @@ impl Db {
             }
         }
         if actually_captured.len() > 0 {
+            self.ephemeral.sync_front_line(&self.persisted);
             self.ephemeral.logistics_stage = LogiStage::SyncToWarehouses {
                 objectives: self.warehouse_sync_objective_ids().into(),
             };
@@ -1778,6 +1779,7 @@ impl Db {
             self.ephemeral
                 .update_objective_markup(&self.persisted, obj, &moved)
         }
+        self.ephemeral.sync_front_line(&self.persisted);
         Ok(())
     }
 }

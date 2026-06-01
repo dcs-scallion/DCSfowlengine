@@ -1328,7 +1328,8 @@ impl Db {
                 continue;
             };
             for (name, item) in &profile.equipment {
-                let dcs_name = String::from(name.as_str());
+                let dcs_name =
+                    resolve_export_equipment_dcs_name(name.as_str(), &resource_meta);
                 let meta = resource_meta.get(&dcs_name).copied();
                 if !equipment_allowed_for_objective(
                     export,
@@ -1609,15 +1610,18 @@ impl Db {
                             continue;
                         };
                         for (name, _) in &obj.warehouse.equipment {
-                            let export_key = name.as_str();
-                            let mut keep = profile.equipment.contains_key(export_key);
+                            let mut keep = profile_export_equipment_has(
+                                profile,
+                                name.as_str(),
+                                resource_meta.as_ref(),
+                            );
                             if keep {
                                 let meta = resource_meta.get(name).copied();
                                 keep = equipment_allowed_for_objective(
                                     export,
                                     obj,
                                     obj.owner,
-                                    export_key,
+                                    name.as_str(),
                                     meta,
                                 );
                             }
@@ -1643,7 +1647,10 @@ impl Db {
                             if item.baseline == 0 {
                                 continue;
                             }
-                            let dcs_name = String::from(name.as_str());
+                            let dcs_name = resolve_export_equipment_dcs_name(
+                                name.as_str(),
+                                resource_meta.as_ref(),
+                            );
                             let meta = resource_meta.get(&dcs_name).copied();
                             if !equipment_allowed_for_objective(
                                 export,
@@ -2097,12 +2104,24 @@ impl Db {
         let mut transfers: Vec<Transfer> = vec![];
         for lid in &self.persisted.logistics_hubs {
             let logi = objective!(self, lid)?;
-            let mut needed: SmallVec<[Needed; 64]> = logi
-                .warehouse
-                .destination
-                .into_iter()
-                .filter_map(|oid| Some((oid, self.persisted.objectives.get(oid)?)))
-                .filter(|(_, obj)| logi.owner == obj.owner && (obj.supply < 100 || obj.fuel < 100))
+            let hub_destinations = || {
+                logi.warehouse
+                    .destination
+                    .into_iter()
+                    .filter_map(|oid| Some((oid, self.persisted.objectives.get(oid)?)))
+                    .filter(|(_, obj)| logi.owner == obj.owner)
+            };
+            let mut needed_equipment: SmallVec<[Needed; 64]> = hub_destinations()
+                .filter(|(_, obj)| obj.supply < 100)
+                .map(|(oid, obj)| Needed {
+                    oid,
+                    obj,
+                    demanded: 0,
+                    allocated: 0,
+                })
+                .collect();
+            let mut needed_liquid: SmallVec<[Needed; 64]> = hub_destinations()
+                .filter(|(_, obj)| obj.fuel < 100)
                 .map(|(oid, obj)| Needed {
                     oid,
                     obj,
@@ -2111,18 +2130,18 @@ impl Db {
                 })
                 .collect();
             macro_rules! schedule_transfers {
-                ($typ:expr, $from:ident, $get:ident) => {
+                ($typ:expr, $from:ident, $get:ident, $needed:ident) => {
                     for (name, inv) in &logi.warehouse.$from {
                         if inv.stored == 0 {
                             continue;
                         }
-                        needed.sort_by(|n0, n1| {
+                        $needed.sort_by(|n0, n1| {
                             let i0 = n0.obj.$get(name);
                             let i1 = n1.obj.$get(name);
                             i0.stored.cmp(&i1.stored)
                         });
                         let mut total_demanded = 0;
-                        for n in &mut needed {
+                        for n in &mut $needed {
                             let inv = n.obj.$get(name);
                             let demanded = if inv.stored <= inv.capacity {
                                 inv.capacity - inv.stored
@@ -2136,7 +2155,7 @@ impl Db {
                         let mut have = inv.stored;
                         let mut total_filled = 0;
                         while have > 0 && total_filled < total_demanded {
-                            for n in &mut needed {
+                            for n in &mut $needed {
                                 if have == 0 {
                                     break;
                                 }
@@ -2147,7 +2166,7 @@ impl Db {
                                 have -= amount;
                             }
                         }
-                        for n in &needed {
+                        for n in &$needed {
                             if n.allocated > 0 {
                                 let amount = scale_by_delivery_efficiency(
                                     n.allocated,
@@ -2172,8 +2191,13 @@ impl Db {
                     }
                 };
             }
-            schedule_transfers!(TransferItem::Equipment, equipment, get_equipment);
-            schedule_transfers!(TransferItem::Liquid, liquids, get_liquids);
+            schedule_transfers!(
+                TransferItem::Equipment,
+                equipment,
+                get_equipment,
+                needed_equipment
+            );
+            schedule_transfers!(TransferItem::Liquid, liquids, get_liquids, needed_liquid);
         }
         Ok(transfers)
     }
@@ -2277,7 +2301,7 @@ impl Db {
             let mut n = 0;
             let mut sum: u32 = 0;
             for (_, inv) in &obj.warehouse.equipment {
-                if inv.stored == 0 {
+                if inv.capacity == 0 {
                     continue;
                 }
                 if let Some(pct) = inv.percent() {

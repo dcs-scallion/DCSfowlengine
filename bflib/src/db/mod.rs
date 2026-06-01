@@ -41,6 +41,7 @@ pub mod actions;
 pub mod aliases;
 pub mod cargo;
 pub mod ephemeral;
+pub mod front_line;
 pub mod group;
 pub mod logistics;
 pub mod markup;

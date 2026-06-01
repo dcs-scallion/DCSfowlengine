@@ -18,6 +18,7 @@ use super::{
     cargo::Cargo,
     group::{SpawnedGroup, SpawnedUnit},
     logistics::LogiStage,
+    front_line::FrontLine,
     markup::ObjectiveMarkup,
     objective::{Objective, Zone},
     persisted::Persisted,
@@ -171,6 +172,7 @@ pub struct Ephemeral {
     pub(super) objective_display_aliases: FxHashMap<std::string::String, std::string::String>,
     /// Cached hub→destination virtual resupply efficiency (whole percent).
     pub(super) hub_delivery_efficiency: FxHashMap<(ObjectiveId, ObjectiveId), u8>,
+    front_line: FrontLine,
 }
 
 impl Default for Ephemeral {
@@ -223,6 +225,7 @@ impl Default for Ephemeral {
             victory: None,
             objective_display_aliases: FxHashMap::default(),
             hub_delivery_efficiency: FxHashMap::default(),
+            front_line: FrontLine::default(),
         }
     }
 }
@@ -318,6 +321,10 @@ impl Ephemeral {
         if let Some(mk) = self.objective_markup.remove(oid) {
             mk.remove(&mut self.msgs)
         }
+    }
+
+    pub(super) fn sync_front_line(&mut self, persisted: &Persisted) {
+        self.front_line.sync(&self.cfg, persisted, &mut self.msgs);
     }
 
     pub fn push_sync_warehouse(&mut self, oid: ObjectiveId, vehicle: Vehicle) {

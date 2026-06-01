@@ -50,7 +50,7 @@ use dcso3::{
 };
 use enumflags2::BitFlags;
 use fxhash::{FxHashMap, FxHashSet};
-use log::{debug, error, warn};
+use log::{debug, error, info, warn};
 use serde_derive::{Deserialize, Serialize};
 use smallvec::{smallvec, SmallVec};
 use std::{cmp::max, collections::VecDeque};
@@ -1188,6 +1188,40 @@ impl Db {
         }
         if synced > 0 {
             debug!("synced {synced} production factory static object id(s)");
+        }
+        Ok(())
+    }
+
+    /// After mission load DCS respawns ME factory statics at full health; apply persisted `dead`.
+    pub(super) fn apply_persisted_production_factory_statics(&mut self, lua: MizLua) -> Result<()> {
+        use super::objective::ObjGroupClass;
+
+        let mut destroyed = 0usize;
+        for (_, unit) in self.persisted.units.into_iter() {
+            if !matches!(
+                self.persisted.groups.get(&unit.group),
+                Some(g) if g.class == ObjGroupClass::Production
+            ) {
+                continue;
+            }
+            if !unit.dead {
+                continue;
+            }
+            match StaticObject::get_by_name(lua, unit.name.as_str()) {
+                Ok(Static::Static(st)) => {
+                    let id = st.object_id()?;
+                    st.destroy()?;
+                    self.ephemeral.uid_by_static.remove(&id);
+                    destroyed += 1;
+                }
+                Ok(Static::Airbase(_)) => {}
+                Err(_) => (),
+            }
+        }
+        if destroyed > 0 {
+            info!(
+                "destroyed {destroyed} production factory static(s) to match persisted state"
+            );
         }
         Ok(())
     }
