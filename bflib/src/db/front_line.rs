@@ -53,7 +53,7 @@ const CORNER_REVERSE_DOT: f64 = -0.01;
 
 #[derive(Debug, Default)]
 pub(super) struct FrontLine {
-    marks: Vec<MarkId>,
+    marks_by_key: FxHashMap<QuadKey, MarkId>,
     participant_count: usize,
     owner_revision: u64,
     segment_count: usize,
@@ -90,6 +90,46 @@ struct WallEdge {
     a: Vector2,
     b: Vector2,
     axis: WallAxis,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+struct QuadKey {
+    p0x: i64,
+    p0z: i64,
+    p1x: i64,
+    p1z: i64,
+    p2x: i64,
+    p2z: i64,
+    p3x: i64,
+    p3z: i64,
+    color_tag: i8,
+}
+
+fn quant_m(v: f64) -> i64 {
+    v.round() as i64
+}
+
+fn quad_key(spec: &QuadSpec) -> QuadKey {
+    let color_tag = if spec.color == side_color(Side::Red) {
+        1
+    } else if spec.color == side_color(Side::Blue) {
+        2
+    } else if spec.color == side_color(Side::Neutral) {
+        3
+    } else {
+        0
+    };
+    QuadKey {
+        p0x: quant_m(spec.p0.x),
+        p0z: quant_m(spec.p0.z),
+        p1x: quant_m(spec.p1.x),
+        p1z: quant_m(spec.p1.z),
+        p2x: quant_m(spec.p2.x),
+        p2z: quant_m(spec.p2.z),
+        p3x: quant_m(spec.p3.x),
+        p3z: quant_m(spec.p3.z),
+        color_tag,
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -849,7 +889,7 @@ pub(crate) fn export_water_grid(
 
 impl FrontLine {
     fn clear(&mut self, msgq: &mut MsgQ) {
-        for id in self.marks.drain(..) {
+        for (_, id) in self.marks_by_key.drain() {
             msgq.delete_mark(id);
         }
         self.participant_count = 0;
@@ -859,7 +899,7 @@ impl FrontLine {
 
     pub fn sync(&mut self, cfg: &Cfg, persisted: &Persisted, msgq: &mut MsgQ) {
         if !cfg.front_line {
-            if !self.marks.is_empty() || self.participant_count > 0 {
+            if !self.marks_by_key.is_empty() || self.participant_count > 0 {
                 self.clear(msgq);
             }
             return;
@@ -868,7 +908,7 @@ impl FrontLine {
         let sites = collect_sites(persisted);
         let participant_count = sites.len();
         if participant_count < 2 {
-            if !self.marks.is_empty() || self.participant_count > 0 {
+            if !self.marks_by_key.is_empty() || self.participant_count > 0 {
                 self.clear(msgq);
             }
             return;
@@ -886,18 +926,32 @@ impl FrontLine {
         if revision == self.owner_revision
             && participant_count == self.participant_count
             && seg_count == self.segment_count
-            && !self.marks.is_empty()
+            && !self.marks_by_key.is_empty()
         {
             return;
         }
 
-        for id in self.marks.drain(..) {
-            msgq.delete_mark(id);
-        }
+        let mut want_by_key: FxHashMap<QuadKey, QuadSpec> = FxHashMap::default();
         for spec in want {
+            want_by_key.insert(quad_key(&spec), spec);
+        }
+
+        let old_keys: Vec<QuadKey> = self.marks_by_key.keys().copied().collect();
+        for key in old_keys {
+            if !want_by_key.contains_key(&key) {
+                if let Some(id) = self.marks_by_key.remove(&key) {
+                    msgq.delete_mark(id);
+                }
+            }
+        }
+
+        for (key, spec) in want_by_key {
+            if self.marks_by_key.contains_key(&key) {
+                continue;
+            }
             let id = MarkId::new();
             msgq.quad_to_all(SideFilter::All, id, spec, None);
-            self.marks.push(id);
+            self.marks_by_key.insert(key, id);
         }
 
         self.participant_count = participant_count;
