@@ -633,6 +633,34 @@ fn default_tk_window() -> u32 {
     24
 }
 
+/// ME static in OFO / OLO / OAB zones (`objective_static_units` CFG map key = DCS unit type).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ObjectiveStaticUnitCfg {
+    /// O+kind letters from trigger zone names: `FO`, `LO`, `AB`.
+    pub zones: FxHashSet<String>,
+    /// Points awarded to the enemy coalition when this static is destroyed.
+    pub kill_points: u32,
+}
+
+impl ObjectiveStaticUnitCfg {
+    pub fn allows_kind(&self, kind: &ObjectiveKind) -> bool {
+        self.zones
+            .iter()
+            .any(|z| objective_zone_kind_matches(z, kind))
+    }
+}
+
+/// `FO` / `LO` / `AB` letters from O+kind coalition objective zone names.
+pub fn objective_zone_kind_matches(zone_letter: &str, kind: &ObjectiveKind) -> bool {
+    matches!(
+        (zone_letter, kind),
+        ("FO", ObjectiveKind::Fob)
+            | ("LO", ObjectiveKind::Logistics)
+            | ("AB", ObjectiveKind::Airbase)
+    )
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct PointsCfg {
@@ -954,6 +982,9 @@ pub struct Cfg {
     /// DCS unit types counted as OPR factory statics (must also be in `unit_classification`).
     #[serde(default)]
     pub production_factory_units: FxHashSet<String>,
+    /// ME statics in OFO / OLO / OAB zones (map key = DCS unit type; must be in `unit_classification`).
+    #[serde(default)]
+    pub objective_static_units: FxHashMap<String, ObjectiveStaticUnitCfg>,
     /// The base repair crate
     pub repair_crate: FxHashMap<Side, Crate>,
     /// If the warehouse system is to be used then this should be specified,

@@ -97,6 +97,8 @@ pub enum ObjGroupClass {
     Armor,
     Services,
     Production,
+    /// ME static in OFO / OLO / OAB (CFG `objective_static_units`).
+    ObjectiveStatic,
     Other,
 }
 
@@ -111,6 +113,7 @@ impl ObjGroupClass {
             | Self::Sr
             | Self::Armor
             | Self::Production
+            | Self::ObjectiveStatic
             | Self::Other => false,
         }
     }
@@ -118,6 +121,11 @@ impl ObjGroupClass {
     /// ME factory statics in OPR; never spawn/despawn (duplicate static risk).
     pub fn is_production(&self) -> bool {
         matches!(self, Self::Production)
+    }
+
+    /// ME-placed static tied to an objective; never spawn/despawn.
+    pub fn is_me_objective_static(&self) -> bool {
+        matches!(self, Self::Production | Self::ObjectiveStatic)
     }
 
     pub fn is_logi(&self) -> bool {
@@ -130,6 +138,7 @@ impl ObjGroupClass {
             | Self::Sr
             | Self::Armor
             | Self::Production
+            | Self::ObjectiveStatic
             | Self::Other => false,
         }
     }
@@ -798,6 +807,19 @@ impl Db {
         Ok(())
     }
 
+    pub(super) fn refresh_objective_after_static_change(
+        &mut self,
+        oid: ObjectiveId,
+        now: DateTime<Utc>,
+    ) -> Result<()> {
+        self.update_objective_status(None, &oid, now)?;
+        if let Some(obj) = self.persisted.objectives.get(&oid) {
+            self.ephemeral
+                .update_objective_markup(&self.persisted, obj, &[]);
+        }
+        Ok(())
+    }
+
     pub(super) fn delete_objective(&mut self, oid: &ObjectiveId) -> Result<()> {
         let obj = self
             .persisted
@@ -1346,7 +1368,10 @@ impl Db {
                 for gid in obj.groups.get(&obj.owner).unwrap_or(&Set::new()) {
                     let group = group!(self, gid)?;
                     let farp = obj.kind.is_farp();
-                    if !farp && !group.class.is_services() && !group.class.is_production() {
+                    if !farp
+                        && !group.class.is_services()
+                        && !group.class.is_me_objective_static()
+                    {
                         for uid in &group.units {
                             let unit = unit_mut!(self, uid)?;
                             if !obj.zone.contains(unit.pos) {
@@ -1367,8 +1392,8 @@ impl Db {
                     let group = group!(self, gid)?;
                     let farp = obj.kind.is_farp();
                     let services = group.class.is_services();
-                    let production = group.class.is_production();
-                    if !farp && !services && !production && group_health!(self, gid)?.0 > 0 {
+                    let me_static = group.class.is_me_objective_static();
+                    if !farp && !services && !me_static && group_health!(self, gid)?.0 > 0 {
                         match group.kind {
                             Some(_) => {
                                 if let Some(oid) = self.ephemeral.object_id_by_gid.get(gid) {

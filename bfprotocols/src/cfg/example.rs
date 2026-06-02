@@ -16,7 +16,7 @@ for more details.
 
 use super::*;
 use dcso3::coalition::Side;
-use fxhash::FxHashMap;
+use fxhash::{FxHashMap, FxHashSet};
 use netidx::path::Path as NetIdxPath;
 
 fn default_red_troops() -> Vec<Troop> {
@@ -1150,6 +1150,7 @@ fn default_unit_classification() -> FxHashMap<Vehicle, UnitTags> {
                 SAM | AAA | SR | OpticallyGuided | Launcher,
             ),
             ("Cow".into(), Logistics | Unarmed),
+            ("Command Center".into(), ControlUnit | Unarmed),
             ("FARP Ammo Dump Coating".into(), Logistics | Unarmed),
             ("FARP Fuel Depot".into(), Logistics | Unarmed),
             ("FARP Tent".into(), Logistics | Unarmed),
@@ -1893,6 +1894,17 @@ impl Default for Cfg {
                 String::from("Tech combine"),
                 String::from("Workshop A"),
             ]),
+            objective_static_units: FxHashMap::from_iter([(
+                String::from("Command Center"),
+                ObjectiveStaticUnitCfg {
+                    zones: FxHashSet::from_iter([
+                        String::from("AB"),
+                        String::from("FO"),
+                        String::from("LO"),
+                    ]),
+                    kill_points: 25,
+                },
+            )]),
             repair_crate: default_repair_crate(),
             name_filter: Some("^[a-zA-Z0-9<>|= ]+$".try_into().unwrap()),
             shutdown: Some(10),

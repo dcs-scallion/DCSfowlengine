@@ -1121,6 +1121,54 @@ impl Db {
         pos: Vector2,
         heading: f64,
     ) -> Result<()> {
+        self.register_me_objective_static_group(
+            side,
+            oid,
+            group_name,
+            unit_name,
+            unit_type,
+            pos,
+            heading,
+            super::objective::ObjGroupClass::Production,
+            "production factory",
+        )
+    }
+
+    pub(super) fn register_objective_static_group(
+        &mut self,
+        side: Side,
+        oid: ObjectiveId,
+        group_name: String,
+        unit_name: String,
+        unit_type: String,
+        pos: Vector2,
+        heading: f64,
+    ) -> Result<()> {
+        self.register_me_objective_static_group(
+            side,
+            oid,
+            group_name,
+            unit_name,
+            unit_type,
+            pos,
+            heading,
+            super::objective::ObjGroupClass::ObjectiveStatic,
+            "objective static",
+        )
+    }
+
+    fn register_me_objective_static_group(
+        &mut self,
+        side: Side,
+        oid: ObjectiveId,
+        group_name: String,
+        unit_name: String,
+        unit_type: String,
+        pos: Vector2,
+        heading: f64,
+        class: super::objective::ObjGroupClass,
+        class_label: &str,
+    ) -> Result<()> {
         if self.persisted.units_by_name.get(unit_name.as_str()).is_some() {
             return Ok(());
         }
@@ -1129,7 +1177,7 @@ impl Db {
             .cfg
             .unit_classification
             .get(unit_type.as_str())
-            .ok_or_else(|| anyhow!("production factory unit type not classified: {unit_type}"))?;
+            .ok_or_else(|| anyhow!("{class_label} unit type not classified: {unit_type}"))?;
         let gid = GroupId::new();
         let uid = UnitId::new();
         let position = {
@@ -1165,7 +1213,7 @@ impl Db {
             side,
             kind: None,
             origin: DeployKind::Objective { origin: oid },
-            class: super::objective::ObjGroupClass::Production,
+            class,
             units: SetS::from_iter([uid]),
             tags,
         };
@@ -1193,17 +1241,15 @@ impl Db {
         Ok(())
     }
 
-    /// ME factory statics may Birth before `link_production_statics_from_miz`; bind DCS ids by name.
+    /// ME objective statics may Birth before linking; bind DCS ids by name.
     pub(super) fn sync_production_static_uid_map(&mut self, lua: MizLua) -> Result<()> {
-        use super::objective::ObjGroupClass;
-
         let mut synced = 0usize;
         for (uid, unit) in self.persisted.units.into_iter() {
             let group = match self.persisted.groups.get(&unit.group) {
                 Some(g) => g,
                 None => continue,
             };
-            if group.class != ObjGroupClass::Production || unit.dead {
+            if !group.class.is_me_objective_static() || unit.dead {
                 continue;
             }
             match StaticObject::get_by_name(lua, unit.name.as_str()) {
@@ -1214,26 +1260,24 @@ impl Db {
                 }
                 Ok(Static::Airbase(_)) => {}
                 Err(e) => warn!(
-                    "production factory static {:?} not in world: {e:?}",
+                    "ME objective static {:?} not in world: {e:?}",
                     unit.name
                 ),
             }
         }
         if synced > 0 {
-            debug!("synced {synced} production factory static object id(s)");
+            debug!("synced {synced} ME objective static object id(s)");
         }
         Ok(())
     }
 
     /// After mission load DCS respawns ME factory statics at full health; apply persisted `dead`.
     pub(super) fn apply_persisted_production_factory_statics(&mut self, lua: MizLua) -> Result<()> {
-        use super::objective::ObjGroupClass;
-
         let mut destroyed = 0usize;
         for (_, unit) in self.persisted.units.into_iter() {
             if !matches!(
                 self.persisted.groups.get(&unit.group),
-                Some(g) if g.class == ObjGroupClass::Production
+                Some(g) if g.class.is_me_objective_static()
             ) {
                 continue;
             }
@@ -1253,7 +1297,7 @@ impl Db {
         }
         if destroyed > 0 {
             info!(
-                "destroyed {destroyed} production factory static(s) to match persisted state"
+                "destroyed {destroyed} ME objective static(s) to match persisted state"
             );
         }
         Ok(())
@@ -1485,50 +1529,79 @@ impl Db {
         if self.persisted.units.get(&uid).is_some_and(|u| u.dead) {
             return Ok(());
         }
-        match self.persisted.units.get_mut_cow(&uid) {
-                None => error!("static_dead: missing unit {:?}", uid),
-                Some(unit) => {
-                    unit.dead = true;
-                    unit.hp_percent = 0;
-                    let gid = unit.group;
-                    self.ephemeral.dirty();
-                    if let Some(oid) =
-                        self.persisted.objectives_by_group.get(&gid).copied()
-                    {
-                        let group = group!(self, gid)?;
-                        if group.class == super::objective::ObjGroupClass::Production {
-                            let obj = objective!(self, oid)?;
-                            if let Some(killer) = killer {
-                                if *killer.side() != obj.owner {
-                                    if let Some(pts) = self.ephemeral.cfg.points.as_ref() {
-                                        let award = pts.production_kill as i32;
-                                        if award > 0 {
-                                            if let Some(ucid) = killer.ucid() {
-                                                self.adjust_points(
-                                                    ucid,
-                                                    award,
-                                                    &format_compact!(
-                                                        "for destroying factory at {}",
-                                                        obj.name
-                                                    ),
-                                                );
-                                            }
-                                        }
-                                    }
+        let (gid, unit_type) = {
+            let unit = match self.persisted.units.get_mut_cow(&uid) {
+                None => {
+                    error!("static_dead: missing unit {:?}", uid);
+                    return Ok(());
+                }
+                Some(unit) => unit,
+            };
+            unit.dead = true;
+            unit.hp_percent = 0;
+            (unit.group, unit.typ.clone())
+        };
+        self.ephemeral.dirty();
+        if let Some(oid) = self.persisted.objectives_by_group.get(&gid).copied() {
+            let group = group!(self, gid)?;
+            if group.class == super::objective::ObjGroupClass::Production {
+                let obj = objective!(self, oid)?;
+                if let Some(killer) = killer {
+                    if *killer.side() != obj.owner {
+                        if let Some(pts) = self.ephemeral.cfg.points.as_ref() {
+                            let award = pts.production_kill as i32;
+                            if award > 0 {
+                                if let Some(ucid) = killer.ucid() {
+                                    self.adjust_points(
+                                        ucid,
+                                        award,
+                                        &format_compact!(
+                                            "for destroying factory at {}",
+                                            obj.name
+                                        ),
+                                    );
                                 }
                             }
                         }
-                        self.refresh_production_objective_after_factory_change(oid, now)?;
                     }
-                    if self.persisted.deployed.contains(&gid)
-                        || self.persisted.troops.contains(&gid)
-                        || self.persisted.crates.contains(&gid)
-                    {
-                        if self.group_health(&gid)?.0 == 0 {
-                            self.delete_group(&gid)?
+                }
+                self.refresh_production_objective_after_factory_change(oid, now)?;
+            } else if group.class == super::objective::ObjGroupClass::ObjectiveStatic {
+                let obj = objective!(self, oid)?;
+                if let Some(killer) = killer {
+                    if *killer.side() != obj.owner {
+                        let award = self
+                            .ephemeral
+                            .cfg
+                            .objective_static_units
+                            .get(unit_type.as_str())
+                            .map(|c| c.kill_points as i32)
+                            .unwrap_or(0);
+                        if award > 0 {
+                            if let Some(ucid) = killer.ucid() {
+                                self.adjust_points(
+                                    ucid,
+                                    award,
+                                    &format_compact!(
+                                        "for destroying {} at {}",
+                                        unit_type.as_str(),
+                                        obj.name
+                                    ),
+                                );
+                            }
                         }
                     }
                 }
+                self.refresh_objective_after_static_change(oid, now)?;
+            }
+        }
+        if self.persisted.deployed.contains(&gid)
+            || self.persisted.troops.contains(&gid)
+            || self.persisted.crates.contains(&gid)
+        {
+            if self.group_health(&gid)?.0 == 0 {
+                self.delete_group(&gid)?
+            }
         }
         Ok(())
     }

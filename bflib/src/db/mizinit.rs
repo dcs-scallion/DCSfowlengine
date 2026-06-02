@@ -366,6 +366,89 @@ impl Db {
         Ok(())
     }
 
+    fn link_objective_statics_from_miz(&mut self, miz: &Miz) -> Result<()> {
+        let statics = self.ephemeral.cfg.objective_static_units.clone();
+        if statics.is_empty() {
+            return Ok(());
+        }
+        let mut linked = 0usize;
+        let mut pending: SmallVec<[(Side, ObjectiveId, String, String, String, Vector2, f64); 32]> =
+            smallvec![];
+        for side in Side::ALL {
+            let coa = miz.coalition(side)?;
+            for country in coa.countries()? {
+                let country = country?;
+                for group in country.statics()? {
+                    let group = group?;
+                    let group_name = group.name()?;
+                    let mut unit_name = None;
+                    let mut unit_type = None;
+                    let mut pos = None;
+                    let mut heading = 0f64;
+                    for u in group.units()? {
+                        let u = u?;
+                        unit_type = Some(u.typ()?);
+                        unit_name = Some(u.name()?);
+                        pos = Some(u.pos()?);
+                        heading = u.heading().unwrap_or(0.);
+                        break;
+                    }
+                    let (unit_type, unit_name, pos) = match (unit_type, unit_name, pos) {
+                        (Some(t), Some(n), Some(p)) => (t, n, p),
+                        _ => continue,
+                    };
+                    if !statics.contains_key(unit_type.as_str()) {
+                        continue;
+                    }
+                    if self.persisted.units_by_name.get(unit_name.as_str()).is_some() {
+                        continue;
+                    }
+                    let oid = self
+                        .persisted
+                        .objectives
+                        .into_iter()
+                        .filter(|(_, obj)| {
+                            obj.owner == side
+                                && statics
+                                    .get(unit_type.as_str())
+                                    .is_some_and(|c| c.allows_kind(&obj.kind))
+                                && obj.zone.contains(pos)
+                        })
+                        .min_by(|(_, a), (_, b)| {
+                            let da =
+                                na::distance_squared(&a.zone.pos().into(), &pos.into());
+                            let db =
+                                na::distance_squared(&b.zone.pos().into(), &pos.into());
+                            da.partial_cmp(&db).unwrap_or(std::cmp::Ordering::Equal)
+                        })
+                        .map(|(id, _)| *id);
+                    let Some(oid) = oid else {
+                        continue;
+                    };
+                    pending.push((
+                        side,
+                        oid,
+                        group_name.clone(),
+                        unit_name.clone(),
+                        unit_type.clone(),
+                        pos,
+                        heading,
+                    ));
+                }
+            }
+        }
+        for (side, oid, group_name, unit_name, unit_type, pos, heading) in pending {
+            self.register_objective_static_group(
+                side, oid, group_name, unit_name, unit_type, pos, heading,
+            )?;
+            linked += 1;
+        }
+        if linked > 0 {
+            info!("linked {linked} objective static(s) into OFO/OLO/OAB zones");
+        }
+        Ok(())
+    }
+
     fn zone_from_trigger(zone: &TriggerZone<'_>) -> Result<Zone> {
         Ok(match zone.typ()? {
             TriggerZoneTyp::Quad(points) => Zone::Quad {
@@ -633,6 +716,7 @@ impl Db {
             .map(|(id, _)| *id)
             .collect::<Vec<_>>();
         t.link_production_statics_from_miz(miz)?;
+        t.link_objective_statics_from_miz(miz)?;
         t.sync_production_static_uid_map(lua)
             .context("syncing production factory static object ids")?;
         t.sync_production_factory_hp_from_dcs(lua, now)
