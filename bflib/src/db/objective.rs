@@ -644,7 +644,7 @@ impl Db {
             .unwrap_or(Ok((0, 0)))
     }
 
-    fn factory_unit_hp_percent(&self, lua: MizLua, unit: &SpawnedUnit) -> Result<u8> {
+    fn factory_unit_hp_from_dcs(&self, lua: MizLua, unit: &SpawnedUnit) -> Result<u8> {
         use dcso3::{coalition::Static, static_object::StaticObject};
         if unit.dead {
             return Ok(0);
@@ -665,18 +665,36 @@ impl Db {
         }
     }
 
-    fn static_hp_percent(st: &dcso3::static_object::StaticObject) -> Result<u8> {
+    pub(super) fn static_hp_percent(st: &dcso3::static_object::StaticObject) -> Result<u8> {
         let Ok(life) = st.get_life() else {
             return Ok(100);
         };
-        // Fortification statics often lack getLife0 in DCS; treat full life when unknown.
         Ok(match st.try_get_life0() {
             Some(l0) => ((life * 100) / l0).clamp(0, 100) as u8,
             None => if life > 0 { 100 } else { 0 },
         })
     }
 
-    fn compute_production_hp(&self, lua: Option<MizLua>, obj: &Objective) -> Result<(u8, u32, u16)> {
+    pub(super) fn apply_factory_hp_to_dcs(
+        st: &dcso3::static_object::StaticObject,
+        hp_percent: u8,
+    ) -> Result<()> {
+        if hp_percent >= 100 {
+            return Ok(());
+        }
+        if hp_percent == 0 {
+            st.clone().destroy()?;
+            return Ok(());
+        }
+        let Some(l0) = st.try_get_life0() else {
+            return Ok(());
+        };
+        let life = ((i64::from(hp_percent) * l0) / 100).max(1);
+        st.set_life(life)?;
+        Ok(())
+    }
+
+    fn compute_production_hp(&self, obj: &Objective) -> Result<(u8, u32, u16)> {
         let Some(groups) = obj.groups.get(&obj.owner) else {
             return Ok((0, 0, 0));
         };
@@ -691,13 +709,7 @@ impl Db {
             for uid in &group.units {
                 linked += 1;
                 let unit = unit!(self, uid)?;
-                let hp = if unit.dead {
-                    0
-                } else if let Some(lua) = lua {
-                    self.factory_unit_hp_percent(lua, unit)?
-                } else {
-                    100
-                };
+                let hp = if unit.dead { 0 } else { unit.hp_percent };
                 if hp < 100 {
                     repair_need = repair_need.saturating_add(1);
                 }
@@ -709,6 +721,81 @@ impl Db {
             return Ok((0, 0, 0));
         }
         Ok(((sum / cap) as u8, sum, repair_need))
+    }
+
+    /// One-time DCS read at mission init (not periodic poll).
+    pub(super) fn sync_production_factory_hp_from_dcs(
+        &mut self,
+        lua: MizLua,
+        now: DateTime<Utc>,
+    ) -> Result<()> {
+        let uids: Vec<UnitId> = self
+            .persisted
+            .units
+            .into_iter()
+            .filter_map(|(uid, unit)| {
+                let g = self.persisted.groups.get(&unit.group)?;
+                if g.class == ObjGroupClass::Production {
+                    Some(*uid)
+                } else {
+                    None
+                }
+            })
+            .collect();
+        for uid in uids {
+            if unit!(self, uid)?.dead {
+                continue;
+            }
+            let unit = unit!(self, uid)?;
+            let hp = self.factory_unit_hp_from_dcs(lua, unit)?;
+            if let Some(unit) = self.persisted.units.get_mut_cow(&uid) {
+                unit.hp_percent = hp;
+                unit.dead = hp == 0;
+            }
+        }
+        self.refresh_all_production_objectives(now)
+            .context("refreshing OPR after factory HP sync")?;
+        Ok(())
+    }
+
+    pub(super) fn refresh_all_production_objectives(
+        &mut self,
+        now: DateTime<Utc>,
+    ) -> Result<()> {
+        let oids: Vec<ObjectiveId> = self
+            .persisted
+            .objectives
+            .into_iter()
+            .filter(|(_, obj)| matches!(obj.kind, ObjectiveKind::Production))
+            .map(|(id, _)| *id)
+            .collect();
+        for oid in oids {
+            self.update_objective_status(None, &oid, now)?;
+        }
+        self.refresh_hub_production_from_opr()
+            .context("hub production after OPR refresh")?;
+        Ok(())
+    }
+
+    pub(super) fn refresh_production_objective_after_factory_change(
+        &mut self,
+        oid: ObjectiveId,
+        now: DateTime<Utc>,
+    ) -> Result<()> {
+        self.update_objective_status(None, &oid, now)?;
+        self.refresh_hub_production_from_opr()
+            .context("hub production after factory state change")?;
+        if let Some(obj) = self.persisted.objectives.get(&oid) {
+            self.ephemeral
+                .update_objective_markup(&self.persisted, obj, &[]);
+        }
+        for hid in self.persisted.logistics_hubs.clone().into_iter() {
+            if let Some(hub) = self.persisted.objectives.get(&hid) {
+                self.ephemeral
+                    .update_objective_markup(&self.persisted, hub, &[]);
+            }
+        }
+        Ok(())
     }
 
     pub(super) fn delete_objective(&mut self, oid: &ObjectiveId) -> Result<()> {
@@ -1022,7 +1109,7 @@ impl Db {
 
     pub(super) fn update_objective_status(
         &mut self,
-        lua: Option<MizLua>,
+        _lua: Option<MizLua>,
         oid: &ObjectiveId,
         now: DateTime<Utc>,
     ) -> Result<()> {
@@ -1030,7 +1117,7 @@ impl Db {
         let (health, logi, production, hp_sum, repair_need) = match &kind {
             ObjectiveKind::Production => {
                 let obj = objective!(self, oid)?;
-                let (p, sum, need) = self.compute_production_hp(lua, obj)?;
+                let (p, sum, need) = self.compute_production_hp(obj)?;
                 (100, 100, p, sum, need)
             }
             _ => {
@@ -1427,7 +1514,7 @@ impl Db {
                 obj.production_repair = obj.production_repair.saturating_sub(1);
                 obj.production_repair_due = now + interval;
             }
-            self.update_objective_status(Some(lua), &oid, now)?;
+            self.update_objective_status(None, &oid, now)?;
             refreshed = true;
         }
         if refreshed {
@@ -1459,15 +1546,7 @@ impl Db {
             }
             for uid in &group.units {
                 let unit = unit!(self, uid)?;
-                let hp = if unit.dead {
-                    0
-                } else if let Ok(Static::Static(_)) =
-                    StaticObject::get_by_name(lua, unit.name.as_str())
-                {
-                    self.factory_unit_hp_percent(lua, unit).unwrap_or(100)
-                } else {
-                    100
-                };
+                let hp = if unit.dead { 0 } else { unit.hp_percent };
                 if hp < target_hp {
                     target_hp = hp;
                     target = Some(*uid);
@@ -1498,9 +1577,10 @@ impl Db {
             .with_context(|| format_compact!("respawning factory {unit_name}"))?;
         if let Some(unit) = self.persisted.units.get_mut_cow(&uid) {
             unit.dead = false;
+            unit.hp_percent = 100;
         }
         self.ephemeral.dirty();
-        let _ = now;
+        let _ = (lua, now);
         Ok(true)
     }
 
@@ -1758,22 +1838,6 @@ impl Db {
                     moved.push(oid);
                 }
             }
-        }
-        let now = Utc::now();
-        let production_oids: Vec<ObjectiveId> = self
-            .persisted
-            .objectives
-            .into_iter()
-            .filter(|(_, obj)| matches!(obj.kind, ObjectiveKind::Production))
-            .map(|(id, _)| *id)
-            .collect();
-        let refresh_hubs = !production_oids.is_empty();
-        for oid in production_oids {
-            self.update_objective_status(Some(lua), &oid, now)?;
-        }
-        if refresh_hubs {
-            self.refresh_hub_production_from_opr()
-                .context("refreshing hub feed production after OPR HP update")?;
         }
         for (_, obj) in &self.persisted.objectives {
             self.ephemeral

@@ -635,8 +635,16 @@ impl Db {
         t.link_production_statics_from_miz(miz)?;
         t.sync_production_static_uid_map(lua)
             .context("syncing production factory static object ids")?;
+        t.sync_production_factory_hp_from_dcs(lua, now)
+            .context("syncing production factory HP from DCS at init")?;
         for id in ids {
-            t.update_objective_status(Some(lua), &id, now)?
+            if matches!(
+                t.persisted.objectives.get(&id),
+                Some(obj) if matches!(obj.kind, ObjectiveKind::Production)
+            ) {
+                continue;
+            }
+            t.update_objective_status(None, &id, now)?
         }
         t.refresh_hub_production_from_opr()
             .context("OPR feed hubs after factory link")?;
@@ -664,6 +672,10 @@ impl Db {
             .context("syncing production factory static object ids after load")?;
         self.apply_persisted_production_factory_statics(lua)
             .context("applying persisted production factory static state")?;
+        self.apply_persisted_production_factory_hp(lua)
+            .context("applying persisted production factory HP after load")?;
+        self.refresh_all_production_objectives(Utc::now())
+            .context("refreshing OPR production from persisted factory HP")?;
         // migrate format changes
         if !self.persisted.migrated_v0 {
             self.persisted.migrated_v0 = true;

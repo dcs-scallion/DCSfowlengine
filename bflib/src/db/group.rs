@@ -123,7 +123,11 @@ pub enum DeployKind {
     },
 }
 
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+fn default_factory_hp() -> u8 {
+    100
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SpawnedUnit {
     pub name: String,
     pub id: UnitId,
@@ -139,10 +143,37 @@ pub struct SpawnedUnit {
     pub heading: f64,
     pub position: Position3,
     pub dead: bool,
+    /// OPR factory static HP; event-driven updates, persisted across saves.
+    #[serde(default = "default_factory_hp")]
+    pub hp_percent: u8,
     #[serde(skip)]
     pub moved: Option<DateTime<Utc>>,
     #[serde(skip)]
     pub airborne_velocity: Option<Vector3>,
+}
+
+impl Default for SpawnedUnit {
+    fn default() -> Self {
+        Self {
+            name: String::from(""),
+            id: UnitId::default(),
+            group: GroupId::default(),
+            side: Side::Neutral,
+            typ: Vehicle(String::from("")),
+            tags: UnitTags::default(),
+            template_name: String::from(""),
+            spawn_pos: Vector2::default(),
+            spawn_heading: 0.,
+            spawn_position: Position3::default(),
+            pos: Vector2::default(),
+            heading: 0.,
+            position: Position3::default(),
+            dead: false,
+            hp_percent: default_factory_hp(),
+            moved: None,
+            airborne_velocity: None,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -880,6 +911,7 @@ impl Db {
                 pos: pos.position,
                 heading: pos.heading,
                 dead: false,
+                hp_percent: 100,
                 moved: None,
                 airborne_velocity: None,
             };
@@ -1122,6 +1154,7 @@ impl Db {
             pos,
             heading,
             dead: false,
+            hp_percent: 100,
             moved: None,
             airborne_velocity: None,
         };
@@ -1222,6 +1255,93 @@ impl Db {
             info!(
                 "destroyed {destroyed} production factory static(s) to match persisted state"
             );
+        }
+        Ok(())
+    }
+
+    /// DCS respawns ME statics at full HP; apply persisted partial damage after load.
+    pub(super) fn apply_persisted_production_factory_hp(&mut self, lua: MizLua) -> Result<()> {
+        use super::objective::ObjGroupClass;
+
+        let mut adjusted = 0usize;
+        for (_, unit) in self.persisted.units.into_iter() {
+            if !matches!(
+                self.persisted.groups.get(&unit.group),
+                Some(g) if g.class == ObjGroupClass::Production
+            ) {
+                continue;
+            }
+            if unit.dead || unit.hp_percent >= 100 {
+                continue;
+            }
+            match StaticObject::get_by_name(lua, unit.name.as_str()) {
+                Ok(Static::Static(st)) => {
+                    if Self::apply_factory_hp_to_dcs(&st, unit.hp_percent).is_ok() {
+                        adjusted += 1;
+                    }
+                }
+                Ok(Static::Airbase(_)) => {}
+                Err(_) => (),
+            }
+        }
+        if adjusted > 0 {
+            info!(
+                "applied persisted HP to {adjusted} production factory static(s) after load"
+            );
+        }
+        Ok(())
+    }
+
+    pub fn production_static_damaged(
+        &mut self,
+        lua: MizLua,
+        id: &DcsOid<ClassStatic>,
+        now: DateTime<Utc>,
+    ) -> Result<()> {
+        use super::objective::ObjGroupClass;
+
+        let uid = match self.ephemeral.uid_by_static.get(id).copied() {
+            Some(uid) => uid,
+            None => match StaticObject::get_instance(lua, id) {
+                Ok(st) => {
+                    let name = st.get_name()?;
+                    match self.persisted.units_by_name.get(name.as_str()).copied() {
+                        Some(uid) => {
+                            self.ephemeral.uid_by_static.insert(id.clone(), uid);
+                            uid
+                        }
+                        None => return Ok(()),
+                    }
+                }
+                Err(_) => return Ok(()),
+            },
+        };
+        let gid = match self.persisted.units.get(&uid) {
+            Some(u) => u.group,
+            None => return Ok(()),
+        };
+        if !matches!(
+            self.persisted.groups.get(&gid),
+            Some(g) if g.class == ObjGroupClass::Production
+        ) {
+            return Ok(());
+        }
+        let st = StaticObject::get_instance(lua, id)?;
+        let hp = Self::static_hp_percent(&st)?;
+        let oid = self.persisted.objectives_by_group.get(&gid).copied();
+        match self.persisted.units.get_mut_cow(&uid) {
+            None => return Ok(()),
+            Some(unit) => {
+                if unit.dead && hp == 0 {
+                    return Ok(());
+                }
+                unit.hp_percent = hp;
+                unit.dead = hp == 0;
+                self.ephemeral.dirty();
+            }
+        }
+        if let Some(oid) = oid {
+            self.refresh_production_objective_after_factory_change(oid, now)?;
         }
         Ok(())
     }
@@ -1369,6 +1489,7 @@ impl Db {
                 None => error!("static_dead: missing unit {:?}", uid),
                 Some(unit) => {
                     unit.dead = true;
+                    unit.hp_percent = 0;
                     let gid = unit.group;
                     self.ephemeral.dirty();
                     if let Some(oid) =
@@ -1397,18 +1518,7 @@ impl Db {
                                 }
                             }
                         }
-                        self.update_objective_status(None, &oid, now)?;
-                        self.refresh_hub_production_from_opr()
-                            .context("hub production after factory static death")?;
-                        for hid in self.persisted.logistics_hubs.clone().into_iter() {
-                            if let Some(hub) = self.persisted.objectives.get(&hid) {
-                                self.ephemeral.update_objective_markup(
-                                    &self.persisted,
-                                    hub,
-                                    &[],
-                                );
-                            }
-                        }
+                        self.refresh_production_objective_after_factory_change(oid, now)?;
                     }
                     if self.persisted.deployed.contains(&gid)
                         || self.persisted.troops.contains(&gid)

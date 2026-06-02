@@ -691,6 +691,10 @@ fn on_event(lua: MizLua, ev: Event) -> Result<()> {
                     ) {
                         error!("static dead failed {e:?}")
                     }
+                } else if let Err(e) =
+                    ctx.db.production_static_damaged(lua, &static_id, start_ts)
+                {
+                    error!("production factory damaged failed {e:?}")
                 }
             }
         }

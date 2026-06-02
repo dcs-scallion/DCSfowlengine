@@ -67,6 +67,10 @@ impl<'lua> StaticObject<'lua> {
         Ok(self.t.call_method("getLife", ())?)
     }
 
+    pub fn set_life(&self, life: i64) -> Result<()> {
+        Ok(self.t.call_method("setLife", life)?)
+    }
+
     pub fn get_life0(&self) -> Result<i64> {
         Ok(self.t.call_method("getLife0", ())?)
     }
