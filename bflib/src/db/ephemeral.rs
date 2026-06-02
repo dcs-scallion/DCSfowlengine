@@ -327,6 +327,15 @@ impl Ephemeral {
         self.front_line.sync(&self.cfg, persisted, &mut self.msgs);
     }
 
+    pub(crate) fn load_front_line_water_grid(
+        &mut self,
+        state_path: &std::path::Path,
+        theatre: &str,
+    ) {
+        self.front_line
+            .load_water_grid_from_file(state_path, theatre, &self.cfg);
+    }
+
     pub fn push_sync_warehouse(&mut self, oid: ObjectiveId, vehicle: Vehicle) {
         self.sync_warehouse.push((oid, vehicle));
     }

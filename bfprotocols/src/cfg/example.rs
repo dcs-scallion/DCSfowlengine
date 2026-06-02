@@ -1944,6 +1944,7 @@ impl Default for Cfg {
             supply_transfer_players: true,
             objective_group_marks: false,
             front_line: false,
+            front_line_grid_size_meters: 2500.,
             campaign_decade: None,
             default_warehouse_aa_missiles: 0,
             default_warehouse_ag_missiles: 0,

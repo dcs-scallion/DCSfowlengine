@@ -590,6 +590,10 @@ pub struct WarehouseConfig {
     pub dynamic_farps_initial_stock_percentage: u8,
 }
 
+fn default_front_line_grid_size_meters() -> f64 {
+    2500.
+}
+
 fn default_fob_max() -> u32 {
     1
 }
@@ -972,6 +976,9 @@ pub struct Cfg {
     /// F10 dashed lines between adjacent objectives held by different coalitions.
     #[serde(default)]
     pub front_line: bool,
+    /// Grid cell size (meters) for front line computation. Smaller = finer lines, more quads.
+    #[serde(default = "default_front_line_grid_size_meters")]
+    pub front_line_grid_size_meters: f64,
     /// Decade label for bftools (`weapon{campaign_decade}.miz`); core gameplay ignores unless referenced elsewhere.
     #[serde(default)]
     pub campaign_decade: Option<String>,

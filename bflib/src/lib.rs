@@ -28,7 +28,7 @@ mod spawnctx;
 
 extern crate nalgebra as na;
 use crate::db::player::SlotAuth;
-use admin::{run_admin_commands, AdminCommand, AdminResult};
+use admin::{AdminCommand, AdminResult, run_admin_commands, theatre_slug};
 use anyhow::{anyhow, bail, Context as AnyhowContext, Result};
 use bfprotocols::{
     cfg::{Cfg, LifeType},
@@ -1505,6 +1505,12 @@ fn delayed_init_miz(lua: MizLua) -> Result<()> {
             Arc::clone(&fowl_export),
         )
             .context("loading the saved state")?;
+    }
+    if ctx.db.ephemeral.cfg.front_line {
+        let theatre = theatre_slug(lua);
+        ctx.db
+            .ephemeral
+            .load_front_line_water_grid(&path, theatre.as_str());
     }
     ctx.shutdown = ctx
         .db

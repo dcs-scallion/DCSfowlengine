@@ -119,7 +119,7 @@ simple_enum!(LineType, u8, [
     Dotted => 3,
     DotDash => 4,
     LongDash => 5,
-    TwoDash => 6
+    Dot2 => 6 // ME style "dot2" / API Two Dash
 ]);
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize)]

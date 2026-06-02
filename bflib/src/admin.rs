@@ -19,6 +19,7 @@ use crate::{
     bg::Task,
     db::{
         Db, SetS,
+        front_line::export_water_grid,
         group::DeployKind,
         objective::Objective,
     },
@@ -168,6 +169,7 @@ pub enum AdminCommand {
     },
     Shutdown,
     AirbaseExport,
+    ScanWater,
 }
 
 impl AdminCommand {
@@ -200,6 +202,7 @@ impl AdminCommand {
             "reset [winner]: shutdown the server and reset the campaign state",
             "shutdown: shutdown the server",
             "airbaseexport: export runtime airbase IDs and warehouse links",
+            "scanwater: export front-line water grid near objectives",
         ]
     }
 }
@@ -318,6 +321,8 @@ impl FromStr for AdminCommand {
             Ok(Self::Shutdown)
         } else if s.trim() == "airbaseexport" {
             Ok(Self::AirbaseExport)
+        } else if s.trim() == "scanwater" {
+            Ok(Self::ScanWater)
         } else if let Some(s) = s.strip_prefix("add-admin ") {
             Ok(Self::AddAdmin { player: s.into() })
         } else if let Some(s) = s.strip_prefix("remove-admin ") {
@@ -991,7 +996,7 @@ fn dcs_version_slug(ctx: &Context, lua: MizLua) -> std::string::String {
     slugify(&ver, true)
 }
 
-fn theatre_slug(lua: MizLua) -> std::string::String {
+pub(crate) fn theatre_slug(lua: MizLua) -> std::string::String {
     let l = lua.inner();
     let theatre: std::string::String = match l
         .load(
@@ -1399,6 +1404,19 @@ pub(super) fn run_admin_commands(ctx: &mut Context, lua: MizLua) -> Result<Admin
                 Ok(path) => reply_ok!("airbase export written to {:?}", path),
                 Err(e) => reply_err!("airbase export failed {:?}", e),
             },
+            AdminCommand::ScanWater => {
+                let theatre = theatre_slug(lua);
+                match export_water_grid(
+                    &ctx.db.ephemeral.cfg,
+                    &ctx.db.persisted,
+                    &ctx.miz_state_path,
+                    theatre.as_str(),
+                    lua,
+                ) {
+                    Ok(path) => reply_ok!("water grid export written to {:?}", path),
+                    Err(e) => reply_err!("water grid export failed {:?}", e),
+                }
+            }
             AdminCommand::AddAdmin { player } => match add_admin(ctx, &player) {
                 Ok(()) => reply_ok!("{player} is now an admin"),
                 Err(e) => reply_err!("failed to make {player} an admin {e:?}"),

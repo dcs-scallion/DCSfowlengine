@@ -41,4 +41,3 @@ simplelog = { workspace = true }
 smallvec = { workspace = true }
 tokio = { workspace = true }
 zstd = { workspace = true }
-spade = { workspace = true }
