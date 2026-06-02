@@ -1079,6 +1079,41 @@ fn push_client_air_group_to_cjtf(
     Ok(())
 }
 
+/// Re-stamp datalink ownship `missionUnitId` after a new `unitId` is assigned (weapon clone keeps layout).
+fn patch_datalink_mission_unit_ids(unit: &Table) -> Result<()> {
+    if let Ok(Some(dl)) = unit.raw_get::<_, Option<Table>>("datalinks") {
+        let uid = unit.raw_get::<_, i64>("unitId")?;
+        let mut ok = false;
+        if let Ok(ownship) =
+            dl.raw_get_path::<Table>(&path!["Link16", "network", "teamMembers", 1])
+        {
+            ownship.raw_set("missionUnitId", uid)?;
+            ok = true;
+        }
+        if let Ok(presets) =
+            dl.raw_get_path::<Sequence<Table>>(&path!["IDM", "network", "presets"])
+        {
+            for preset in presets {
+                let preset = preset?;
+                if let Ok(ownship) = preset.raw_get_path::<Table>(&path!["members", 1]) {
+                    ownship.raw_set("missionUnitId", uid)?;
+                    ok = true;
+                }
+            }
+        }
+        if let Ok(ownship) =
+            dl.raw_get_path::<Table>(&path!["SADL", "network", "teamMembers", 1])
+        {
+            ownship.raw_set("missionUnitId", uid)?;
+            ok = true;
+        }
+        if !ok {
+            bail!("unknown data link pattern, can't find ownship")
+        }
+    }
+    Ok(())
+}
+
 struct VehicleTemplates {
     plane_slots: HashMap<Side, HashMap<String, Group<'static>>>,
     helicopter_slots: HashMap<Side, HashMap<String, Group<'static>>>,
@@ -1272,6 +1307,139 @@ impl VehicleTemplates {
             .or_else(|| map.get(&side.opposite()).and_then(|m| m.get(unit_type)))
     }
 
+    fn table_for_side_only<'a>(
+        map: &'a HashMap<Side, HashMap<String, Table<'static>>>,
+        side: Side,
+        unit_type: &str,
+    ) -> Option<&'a Table<'static>> {
+        map.get(&side).and_then(|m| m.get(unit_type))
+    }
+
+    fn unit_is_client_skill(unit: &Table) -> bool {
+        unit.raw_get::<_, String>("skill")
+            .map(|s| s.as_str() == "Client")
+            .unwrap_or(false)
+    }
+
+    fn is_cjtf_country(country: &Table) -> Result<bool> {
+        let id: Country = country.raw_get("id")?;
+        Ok(matches!(id, Country::CJTF_BLUE | Country::CJTF_RED))
+    }
+
+    fn is_fowl_managed_client_air_group(group: &Table) -> Result<bool> {
+        if group.raw_get::<_, bool>("dynSpawnTemplate").unwrap_or(false) {
+            return Ok(false);
+        }
+        let gname: String = group.raw_get("name").unwrap_or_default();
+        if is_dynamic_template_group_name(gname.as_str()) {
+            return Ok(false);
+        }
+        Ok(true)
+    }
+
+    fn ingest_unit_weapon_profile(
+        side: Side,
+        unit_type: &str,
+        unit: &Table<'static>,
+        payload: &mut HashMap<Side, HashMap<String, Table<'static>>>,
+        payload_all: &mut HashMap<Side, Vec<Table<'static>>>,
+        payload_variants: &mut HashMap<Side, HashMap<String, Vec<Table<'static>>>>,
+        prop_aircraft: &mut HashMap<Side, HashMap<String, Table<'static>>>,
+        radio: &mut HashMap<Side, HashMap<String, Table<'static>>>,
+        frequency: &mut HashMap<Side, HashMap<String, Value<'static>>>,
+    ) {
+        if !Self::unit_is_client_skill(unit) {
+            return;
+        }
+        let unit_type = String::from(unit_type);
+        if let Ok(w) = unit.raw_get::<_, Table>("payload") {
+            payload_all.entry(side).or_default().push(w.clone());
+            payload_variants
+                .entry(side)
+                .or_default()
+                .entry(unit_type.clone())
+                .or_default()
+                .push(w.clone());
+            payload.entry(side).or_default().insert(unit_type.clone(), w);
+        }
+        if let Ok(w) = unit.raw_get("AddPropAircraft") {
+            prop_aircraft.entry(side).or_default().insert(unit_type.clone(), w);
+        }
+        if let Ok(w) = unit.raw_get("Radio") {
+            radio.entry(side).or_default().insert(unit_type.clone(), w);
+        }
+        if let Ok(v) = unit.raw_get("frequency") {
+            frequency.entry(side).or_default().insert(unit_type, v);
+        }
+    }
+
+    /// ME mission payload + module props from `weapon*.miz` (per coalition only).
+    fn apply_weapon_template_client_unit(
+        &self,
+        lua: &Lua,
+        side: Side,
+        unit_type: &str,
+        unit: &Table,
+        stn: &mut u64,
+    ) -> Result<String> {
+        if let Some(w) = Self::table_for_side_only(&self.payload, side, unit_type) {
+            unit.set("payload", w.deep_clone(lua)?)?;
+        } else {
+            warn!("no weapon*.miz mission payload for {side}/{unit_type}");
+        }
+
+        let stn_string =
+            if let Some(tmpl) = Self::table_for_side_only(&self.prop_aircraft, side, unit_type) {
+                let tmpl = tmpl.deep_clone(lua)?;
+                let stn_string = Self::stamp_stn_on_add_prop_table(&tmpl, stn)?;
+                unit.set("AddPropAircraft", tmpl)?;
+                stn_string
+            } else {
+                warn!("no weapon*.miz AddPropAircraft for {side}/{unit_type}");
+                String::from("")
+            };
+
+        if let Some(w) = self.radio.get(&side).and_then(|t| t.get(unit_type)) {
+            unit.set("Radio", w.deep_clone(lua)?)?;
+        }
+        if let Some(v) = self.frequency.get(&side).and_then(|t| t.get(unit_type)) {
+            unit.set("frequency", v.deep_clone(lua)?)?;
+        }
+        Ok(stn_string)
+    }
+
+    fn stamp_stn_on_add_prop_table(ap: &Table, stn: &mut u64) -> Result<String> {
+        if ap.contains_key("STN_L16")? {
+            ap.raw_set("STN_L16", String::from(format_compact!("{:005o}", *stn)))?;
+            let s = String::from(format_compact!(" STN#{:005o}", *stn));
+            *stn += 1;
+            Ok(s)
+        } else {
+            Ok(String::from(""))
+        }
+    }
+
+    fn patch_emitted_dynamic_spawn_unit(
+        &self,
+        lua: &Lua,
+        side: Side,
+        unit_type: &str,
+        unit: &Table,
+    ) -> Result<()> {
+        unit.raw_set("password", Value::Nil)?;
+        let mut stn_unused = 0u64;
+        self.apply_weapon_template_client_unit(
+            lua,
+            side,
+            unit_type,
+            unit,
+            &mut stn_unused,
+        )?;
+        patch_datalink_mission_unit_ids(unit)?;
+        zero_dynamic_spawn_template_unit_fuel(unit)?;
+        Ok(())
+    }
+
     fn new(wep: &LoadedMiz) -> Result<Self> {
         let mut plane_slots: HashMap<Side, HashMap<String, Group>> = HashMap::new();
         let mut helicopter_slots: HashMap<Side, HashMap<String, Group>> = HashMap::new();
@@ -1320,16 +1488,7 @@ impl VehicleTemplates {
                                 unit.raw_get("type").context("getting dt unit type")?;
                             dt_weapon_source
                                 .insert((side, st, unit_type.clone()), group.clone());
-                            if let Ok(w) = unit.raw_get::<_, Table>("payload") {
-                                payload_all.entry(side).or_default().push(w.clone());
-                                payload_variants
-                                    .entry(side)
-                                    .or_default()
-                                    .entry(unit_type.clone())
-                                    .or_default()
-                                    .push(w.clone());
-                                payload.entry(side).or_default().insert(unit_type, w);
-                            }
+                            // Mission payload maps: static slot templates only (not zzDT rows in weapon).
                         }
                         info!("registered dynamic template from weapon.miz: {gname}");
                         continue;
@@ -1341,6 +1500,9 @@ impl VehicleTemplates {
                         .pairs::<Value, Table>()
                     {
                         let unit = unit?.1;
+                        if !Self::unit_is_client_skill(&unit) {
+                            continue;
+                        }
                         let unit_type: String =
                             unit.raw_get("type").context("getting units")?;
                         match st {
@@ -1350,29 +1512,18 @@ impl VehicleTemplates {
                             SlotType::Plane => plane_slots.entry(side).or_default(),
                         }
                         .insert(unit_type.clone(), group.clone());
-                        info!("adding payload template: {unit_type}");
-                        if let Ok(w) = unit.raw_get::<_, Table>("payload") {
-                            payload_all.entry(side).or_default().push(w.clone());
-                            payload_variants
-                                .entry(side)
-                                .or_default()
-                                .entry(unit_type.clone())
-                                .or_default()
-                                .push(w.clone());
-                            payload.entry(side).or_default().insert(unit_type.clone(), w);
-                        }
-                        if let Ok(w) = unit.raw_get("AddPropAircraft") {
-                            prop_aircraft
-                                .entry(side)
-                                .or_default()
-                                .insert(unit_type.clone(), w);
-                        }
-                        if let Ok(w) = unit.raw_get("Radio") {
-                            radio.entry(side).or_default().insert(unit_type.clone(), w);
-                        }
-                        if let Ok(v) = unit.raw_get("frequency") {
-                            frequency.entry(side).or_default().insert(unit_type, v);
-                        }
+                        info!("adding client slot template: {unit_type}");
+                        Self::ingest_unit_weapon_profile(
+                            side,
+                            &unit_type,
+                            &unit,
+                            &mut payload,
+                            &mut payload_all,
+                            &mut payload_variants,
+                            &mut prop_aircraft,
+                            &mut radio,
+                            &mut frequency,
+                        );
                     }
                 }
             }
@@ -1997,44 +2148,6 @@ impl VehicleTemplates {
     }
 
     fn generate_slots(&self, lua: &Lua, base: &mut LoadedMiz) -> Result<()> {
-        fn set_dl_mizuid(unit: &Table) -> Result<()> {
-            if let Ok(Some(dl)) = unit.raw_get::<_, Option<Table>>("datalinks") {
-                let uid = unit.raw_get::<_, i64>("unitId")?;
-                let mut ok = false;
-                if let Ok(ownship) = dl.raw_get_path::<Table>(&path![
-                    "Link16",
-                    "network",
-                    "teamMembers",
-                    1
-                ]) {
-                    ownship.raw_set("missionUnitId", uid)?;
-                    ok = true;
-                }
-                if let Ok(presets) = dl
-                    .raw_get_path::<Sequence<Table>>(&path!["IDM", "network", "presets"])
-                {
-                    for preset in presets {
-                        let preset = preset?;
-                        if let Ok(ownship) =
-                            preset.raw_get_path::<Table>(&path!["members", 1])
-                        {
-                            ownship.raw_set("missionUnitId", uid)?;
-                            ok = true;
-                        }
-                    }
-                }
-                if let Ok(ownship) =
-                    dl.raw_get_path::<Table>(&path!["SADL", "network", "teamMembers", 1])
-                {
-                    ownship.raw_set("missionUnitId", uid)?;
-                    ok = true;
-                }
-                if !ok {
-                    bail!("unknown data link pattern, can't find ownship")
-                }
-            }
-            Ok(())
-        }
         let idx = base.mission.index()?;
         let static_creation_settings =
             Self::load_zone_creation_settings(base, "SETTINGS-static-slots-creation")?;
@@ -2226,8 +2339,20 @@ impl VehicleTemplates {
                             if naval_link_unit.is_some() {
                                 zero_dynamic_spawn_template_unit_fuel(&u)?;
                             }
-                            set_dl_mizuid(&u)
+                            patch_datalink_mission_unit_ids(&u)
                                 .with_context(|| format_compact!("unit {u:?}"))?;
+                            let unit_type: String = u.raw_get("type")?;
+                            let mut stn_unused = 0u64;
+                            self.apply_weapon_template_client_unit(
+                                lua,
+                                *side,
+                                &unit_type,
+                                &u,
+                                &mut stn_unused,
+                            )
+                            .with_context(|| {
+                                format_compact!("static slot {vehicle} in zone {zone_name}")
+                            })?;
                             uid.next();
                         }
                         if let Some(id) = naval_link_unit {
@@ -2298,10 +2423,6 @@ impl VehicleTemplates {
         lua: &'static Lua,
         base: &mut LoadedMiz,
     ) -> Result<DynamicSpawnEmit> {
-        // NOTE: DT_* templates used to re-stamp datalink missionUnitId fields here.
-        // We intentionally strip `datalinks` from DT_* now (to keep templates small),
-        // so this is no longer needed.
-
         let idx = base.mission.index()?;
         let naval_dynamic_spawn_settings =
             Self::load_zone_creation_settings(base, SETTINGS_DYNAMIC_SPAWN_TTDN_ZONE)?;
@@ -2309,8 +2430,6 @@ impl VehicleTemplates {
         let mut gid = idx.max_gid();
         uid.next();
         gid.next();
-        // NOTE: We no longer stamp Link16 STN into DT_* templates (to keep them minimal).
-
         // Optional dynamic template filters from trigger zones:
         // - TTD*  = land dynamic template definitions
         // - TTDN* = naval dynamic template definitions
@@ -2414,60 +2533,7 @@ impl VehicleTemplates {
         specs.sort_by(|a, b| a.0.to_str().cmp(b.0.to_str()).then(a.2.cmp(&b.2)));
         // Emit dynamic templates for every aircraft/helicopter template present in weapon.miz.
         // Per-objective TTD/TTDN policy is applied later when warehouse rows are filled/pruned.
-
-        // Dynamic templates are created off-map, so we cannot reuse their pylons directly.
-        // However, DCS expects `payload.pylons` to be present for weapon selection UI.
-        // Here we capture pylons from already-generated static slots (same `Side` + `unit_type`)
-        // and later merge them into the dynamic templates' payload (keeping `restricted`).
-        let mut wanted_types: HashMap<Side, HashSet<String>> = HashMap::default();
-        for (side, _, unit_type, _) in &specs {
-            wanted_types.entry(*side).or_default().insert(unit_type.clone());
-        }
-        let mut pylons_by_side_type: HashMap<(Side, String), Table<'static>> =
-            HashMap::default();
-        for side in [Side::Red, Side::Blue] {
-            if let Some(wanted) = wanted_types.get(&side) {
-                let coa = base.mission.coalition(side)?;
-                for country in coa.raw_get::<_, Table>("country")?.pairs::<Value, Table>()
-                {
-                    let country = country?.1;
-                    for group in vehicle(&country, "plane")?
-                        .chain(vehicle(&country, "helicopter")?)
-                    {
-                        let group = group?;
-                        for unit in
-                            group.raw_get::<_, Table>("units")?.pairs::<Value, Table>()
-                        {
-                            let unit = unit?.1;
-                            let unit_type: String = unit.raw_get("type")?;
-                            if !wanted.contains(&unit_type) {
-                                continue;
-                            }
-                            if pylons_by_side_type
-                                .contains_key(&(side, unit_type.clone()))
-                            {
-                                continue;
-                            }
-                            let payload: Table<'static> = match unit.raw_get("payload") {
-                                Ok(p) => p,
-                                Err(_) => continue,
-                            };
-                            let pylons: Table<'static> = match payload.raw_get("pylons") {
-                                Ok(p) => p,
-                                Err(_) => continue,
-                            };
-                            // Use a robust non-empty heuristic.
-                            // `payload.pylons` may use different key types depending on source.
-                            let has_any_pylons =
-                                pylons.clone().pairs::<Value, Value>().next().is_some();
-                            if has_any_pylons {
-                                pylons_by_side_type.insert((side, unit_type), pylons);
-                            }
-                        }
-                    }
-                }
-            }
-        }
+        // zzDT mission payload comes only from weapon*.miz (never static CJTF slots).
 
         let mut link_by_side_type: HashMap<(Side, String), GroupId> = HashMap::new();
         let mut emitted_names: HashSet<String> = HashSet::new();
@@ -2547,41 +2613,13 @@ impl VehicleTemplates {
                 u.set_id(uid)?;
                 u.set_name(String::from(format_compact!("{group_name}-{unit_ord}")))?;
                 u.raw_set("skill", "Client")?;
-                u.raw_set("password", Value::Nil)?;
-
-                // Keep DT_* units small. These templates are only used to populate the
-                // dynamic-spawn payload UI; large avionics/radio/datalink blobs can make
-                // Mission Editor enumeration extremely slow.
-                u.raw_set("datalinks", Value::Nil)?;
-                u.raw_set("Radio", Value::Nil)?;
-                u.raw_set("AddPropAircraft", Value::Nil)?;
-
-                // Apply full weapon payload + coalition-specific radio so dynamic spawns
-                // behave the same as statically generated slots.
-                if let Some(w) =
-                    Self::table_for_side_or_opposite(&self.payload, side, &unit_type)
-                {
-                    let payload_tbl = w.deep_clone(lua)?;
-                    let pylons = pylons_by_side_type
-                        .get(&(side, unit_type.clone()))
-                        .or_else(|| {
-                            pylons_by_side_type.get(&(side.opposite(), unit_type.clone()))
-                        });
-                    if let Some(pylons) = pylons {
-                        payload_tbl.raw_set("pylons", pylons.deep_clone(lua)?)?;
-                    }
-                    u.set("payload", payload_tbl)?;
-                }
-
-                if let Some(v) = self.frequency.get(&side).and_then(|t| t.get(&unit_type))
-                {
-                    u.set("frequency", v.deep_clone(lua)?)?;
-                }
-
-                zero_dynamic_spawn_template_unit_fuel(&u)?;
-
-                // If a src template contained an unknown datalink pattern, we no longer
-                // care here because we stripped datalinks above.
+                self.patch_emitted_dynamic_spawn_unit(
+                    lua,
+                    side,
+                    &unit_type,
+                    &u,
+                )
+                .with_context(|| format_compact!("{group_name} unit {unit_ord}"))?;
                 uid.next();
             }
 
@@ -2703,30 +2741,14 @@ impl VehicleTemplates {
                     u.set_id(uid)?;
                     u.set_name(String::from(format_compact!("{group_name}-{unit_ord}")))?;
                     u.raw_set("skill", "Client")?;
-                    u.raw_set("password", Value::Nil)?;
                     u.raw_set("alt", 0)?;
-                    u.raw_set("datalinks", Value::Nil)?;
-                    u.raw_set("Radio", Value::Nil)?;
-                    u.raw_set("AddPropAircraft", Value::Nil)?;
-                    if let Some(w) =
-                        Self::table_for_side_or_opposite(&self.payload, *side, &unit_type)
-                    {
-                        let payload_tbl = w.deep_clone(lua)?;
-                        let pylons = pylons_by_side_type
-                            .get(&(*side, unit_type.clone()))
-                            .or_else(|| {
-                                pylons_by_side_type
-                                    .get(&(side.opposite(), unit_type.clone()))
-                            });
-                        if let Some(pylons) = pylons {
-                            payload_tbl.raw_set("pylons", pylons.deep_clone(lua)?)?;
-                        }
-                        u.set("payload", payload_tbl)?;
-                    }
-                    if let Some(v) = self.frequency.get(side).and_then(|t| t.get(&unit_type)) {
-                        u.set("frequency", v.deep_clone(lua)?)?;
-                    }
-                    zero_dynamic_spawn_template_unit_fuel(&u)?;
+                    self.patch_emitted_dynamic_spawn_unit(
+                        lua,
+                        *side,
+                        &unit_type,
+                        &u,
+                    )
+                    .with_context(|| format_compact!("{group_name} unit {unit_ord}"))?;
                     uid.next();
                 }
                 apply_dynamic_template_group_visibility(&tmpl, slot_kind)?;
@@ -2760,18 +2782,23 @@ impl VehicleTemplates {
         let mut slots: HashMap<String, HashMap<String, usize>> = HashMap::default();
         let mut replace_count: HashMap<String, isize> = HashMap::new();
         let mut stn = 1u64;
-        //apply weapon/APA templates to mission table in self
-        info!("replacing slots with template payloads");
+        info!("applying weapon*.miz client profiles (CJTF slots only)");
         for (side, coa) in
             Side::ALL.into_iter().map(|side| (side, base.mission.coalition(side)))
         {
             let coa = coa?;
             for country in coa.raw_get::<_, Table>("country")?.pairs::<Value, Table>() {
                 let country = country?.1;
+                if !Self::is_cjtf_country(&country)? {
+                    continue;
+                }
                 for group in vehicle(&country, "plane").context("getting planes")?.chain(
                     vehicle(&country, "helicopter").context("getting helicopters")?,
                 ) {
                     let group = group.context("getting group")?;
+                    if !Self::is_fowl_managed_client_air_group(&group)? {
+                        continue;
+                    }
                     for unit in group
                         .raw_get::<_, Table>("units")
                         .context("getting units")?
@@ -2783,55 +2810,13 @@ impl VehicleTemplates {
                             continue;
                         }
                         let unit_type: String = unit.raw_get("type")?;
-                        match Self::table_for_side_or_opposite(
-                            &self.payload,
+                        let stn_string = self.apply_weapon_template_client_unit(
+                            lua,
                             side,
                             &unit_type,
-                        ) {
-                            Some(w) => unit.set("payload", w.deep_clone(lua)?)?,
-                            None => {
-                                if !unit.contains_key("payload")? {
-                                    warn!("no payload table for {side}/{unit_type}");
-                                }
-                            }
-                        }
-                        let stn_string = match Self::table_for_side_or_opposite(
-                            &self.prop_aircraft,
-                            side,
-                            &unit_type,
-                        ) {
-                            None => String::from(""),
-                            Some(tmpl) => {
-                                let tmpl = tmpl.deep_clone(lua)?;
-                                let stn = if tmpl.contains_key("STN_L16")? {
-                                    tmpl.raw_set(
-                                        "STN_L16",
-                                        String::from(format_compact!("{:005o}", stn)),
-                                    )?;
-                                    let s = String::from(format_compact!(
-                                        " STN#{:005o}",
-                                        stn
-                                    ));
-                                    stn += 1;
-                                    s
-                                } else {
-                                    String::from("")
-                                };
-                                unit.set("AddPropAircraft", tmpl)?;
-                                stn
-                            }
-                        };
-                        // Radio presets are coalition-specific; do not fall back to opposite side.
-                        if let Some(w) =
-                            self.radio.get(&side).and_then(|t| t.get(&unit_type))
-                        {
-                            unit.set("Radio", w.deep_clone(lua)?)?
-                        }
-                        if let Some(v) =
-                            self.frequency.get(&side).and_then(|t| t.get(&unit_type))
-                        {
-                            unit.set("frequency", v.deep_clone(lua)?)?
-                        }
+                            &unit,
+                            &mut stn,
+                        )?;
                         if carrier_pad_from_client_group(base, &group)?.is_some() {
                             zero_dynamic_spawn_template_unit_fuel(&unit)?;
                         }
@@ -2927,7 +2912,7 @@ impl VehicleTemplates {
             }
         }
         for (unit_type, amount) in replace_count {
-            info!("replaced {amount} radio/payloads for {unit_type}");
+            info!("patched {amount} client slot(s) for {unit_type}");
         }
         for (obj, slots) in slots {
             info!("objective {obj} slots:");
