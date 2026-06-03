@@ -321,52 +321,96 @@ fn sync_warehouse_to_obj(
     Ok(())
 }
 
-/// Ground DEP FARP: ME pad may still carry full stock; drop DCS rows not in virtual or above virtual `stored`.
-fn prune_dep_farp_dcs_warehouse_to_virtual<'lua>(
+/// Drop DCS rows not in virtual; optional full profile row registration (capture reseed).
+fn apply_virtual_warehouse_to_dcs<'lua>(
     obj: &Objective,
     warehouse: &warehouse::Warehouse<'lua>,
+    export_farp_liquids_tons: bool,
+    establish_profile_rows: bool,
 ) -> Result<()> {
     let inv = warehouse
         .get_inventory(None)
-        .context("warehouse getInventory for FARP virtual prune")?;
+        .context("warehouse getInventory for virtual apply")?;
     let trim_equipment = |items: warehouse::ItemInventory<'_>| -> Result<()> {
-            items.for_each(|name, qty| {
-                if qty == 0 {
-                    return Ok(());
-                }
-                let target = obj
-                    .warehouse
-                    .equipment
-                    .get(name.as_str())
-                    .map(|i| i.stored)
-                    .unwrap_or(0);
-                if qty != target {
-                    warehouse
-                        .set_item(name.clone(), target)
-                        .with_context(|| format_compact!("set_item {name} to {target}"))?;
-                }
-                Ok(())
-            })
-        };
-    trim_equipment(inv.weapons().context("warehouse weapons for FARP prune")?)?;
-    trim_equipment(inv.aircraft().context("warehouse aircraft for FARP prune")?)?;
+        items.for_each(|name, qty| {
+            if qty == 0 {
+                return Ok(());
+            }
+            let in_virtual = obj.warehouse.equipment.get(name.as_str()).is_some();
+            if !in_virtual {
+                warehouse
+                    .remove_item(name.clone(), qty)
+                    .with_context(|| format_compact!("remove_item orphan {name}"))?;
+                return Ok(());
+            }
+            let Some(inv) = obj.warehouse.equipment.get(name.as_str()) else {
+                return Ok(());
+            };
+            let target = inv.stored;
+            if qty != target {
+                warehouse
+                    .set_item(name.clone(), target)
+                    .with_context(|| format_compact!("set_item {name} to {target}"))?;
+            }
+            Ok(())
+        })
+    };
+    trim_equipment(inv.weapons().context("warehouse weapons for virtual apply")?)?;
+    trim_equipment(inv.aircraft().context("warehouse aircraft for virtual apply")?)?;
     for typ in LiquidType::ALL {
         let target = obj
             .warehouse
             .liquids
             .get(&typ)
-            .map(|i| fowl_liquid_tons_to_dcs_kg(i.stored))
+            .map(|i| {
+                if export_farp_liquids_tons {
+                    fowl_liquid_tons_to_dcs_kg(i.stored)
+                } else {
+                    i.stored
+                }
+            })
             .unwrap_or(0);
         let current = warehouse
             .get_liquid_amount(typ)
             .with_context(|| format_compact!("get_liquid_amount {typ:?}"))?;
-        if current != target {
+        if obj.warehouse.liquids.get(&typ).is_none() {
+            if current > 0 {
+                warehouse
+                    .remove_liquid(typ, current)
+                    .with_context(|| format_compact!("remove_liquid orphan {typ:?}"))?;
+            }
+        } else if current != target {
             warehouse
                 .set_liquid_amount(typ, target)
                 .with_context(|| format_compact!("set_liquid_amount {typ:?} to {target} kg"))?;
         }
     }
+    if establish_profile_rows {
+        for (name, inv) in &obj.warehouse.equipment {
+            warehouse
+                .set_item(name.clone(), inv.stored)
+                .with_context(|| format_compact!("establish warehouse item {name}"))?;
+        }
+        for (typ, inv) in &obj.warehouse.liquids {
+            let kg = if export_farp_liquids_tons {
+                fowl_liquid_tons_to_dcs_kg(inv.stored)
+            } else {
+                inv.stored
+            };
+            warehouse
+                .set_liquid_amount(*typ, kg)
+                .with_context(|| format_compact!("establish warehouse liquid {typ:?}"))?;
+        }
+    }
     Ok(())
+}
+
+/// Ground DEP FARP: ME pad may still carry full stock; drop DCS rows not in virtual or above virtual `stored`.
+fn reconcile_dcs_warehouse_to_virtual<'lua>(
+    obj: &Objective,
+    warehouse: &warehouse::Warehouse<'lua>,
+) -> Result<()> {
+    apply_virtual_warehouse_to_dcs(obj, warehouse, true, false)
 }
 
 fn equipment_capacity_for_discovered_row(
@@ -934,6 +978,43 @@ fn scale_by_delivery_efficiency(base: u32, efficiency_pct: u8) -> u32 {
     if scaled == 0 { 1 } else { scaled }
 }
 
+fn nearest_logistics_hub_filtered(
+    persisted: &Persisted,
+    owner: Side,
+    pos: Vector2,
+    hub_ok: impl Fn(&Objective) -> bool,
+) -> Option<ObjectiveId> {
+    persisted
+        .logistics_hubs
+        .into_iter()
+        .filter_map(|hid| {
+            let hub = persisted.objectives.get(hid)?;
+            if hub.owner != owner || !hub_ok(hub) {
+                return None;
+            }
+            let dist = na::distance_squared(&pos.into(), &hub.zone.pos().into());
+            Some((*hid, dist))
+        })
+        .min_by(|(_, a), (_, b)| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal))
+        .map(|(hid, _)| hid)
+}
+
+pub(super) fn nearest_logistics_hub(
+    persisted: &Persisted,
+    owner: Side,
+    pos: Vector2,
+) -> Option<ObjectiveId> {
+    nearest_logistics_hub_filtered(persisted, owner, pos, |hub| hub.is_normal_logistics_hub())
+}
+
+pub(super) fn nearest_normal_logistics_hub(
+    persisted: &Persisted,
+    owner: Side,
+    pos: Vector2,
+) -> Option<ObjectiveId> {
+    nearest_logistics_hub_filtered(persisted, owner, pos, |hub| hub.is_normal_logistics_hub())
+}
+
 impl Db {
     pub(super) fn warehouse_sync_objective_ids(&self) -> Vec<ObjectiveId> {
         self.persisted
@@ -950,26 +1031,6 @@ impl Db {
         }
         let scaled = base.saturating_mul(production as u32) / 100;
         if scaled == 0 { 1 } else { scaled }
-    }
-
-    pub(super) fn nearest_logistics_hub(
-        persisted: &Persisted,
-        owner: Side,
-        pos: Vector2,
-    ) -> Option<ObjectiveId> {
-        persisted
-            .logistics_hubs
-            .into_iter()
-            .filter_map(|hid| {
-                let hub = persisted.objectives.get(hid)?;
-                if hub.owner != owner {
-                    return None;
-                }
-                let dist = na::distance_squared(&pos.into(), &hub.zone.pos().into());
-                Some((*hid, dist))
-            })
-            .min_by(|(_, a), (_, b)| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal))
-            .map(|(hid, _)| hid)
     }
 
     pub(super) fn refresh_hub_production_from_opr(&mut self) -> Result<()> {
@@ -991,7 +1052,7 @@ impl Db {
                     obj.production_capacity.max(1),
                 )
             };
-            let hub = Self::nearest_logistics_hub(&self.persisted, owner, pos);
+            let hub = nearest_logistics_hub(&self.persisted, owner, pos);
             let obj = objective_mut!(self, oid)?;
             obj.feed_hub = hub;
             if let Some(hid) = hub {
@@ -1368,6 +1429,79 @@ impl Db {
         }
         self.ephemeral.dirty();
         Ok(())
+    }
+
+    /// Replace virtual warehouse rows with the export profile for `obj.owner`.
+    fn apply_export_profile_to_objective_virtual_warehouse(
+        obj: &mut Objective,
+        export: &FowlMizExport,
+        resource_meta: &FxHashMap<String, WarehouseResourceMeta>,
+    ) -> Result<bool> {
+        if matches!(obj.kind, ObjectiveKind::Production) {
+            return Ok(false);
+        }
+        let profile = if objective_is_ground_dep_farp(obj) {
+            dep_farp_export_profile(export, obj)
+        } else {
+            objective_coalition_stock_for_objective(export, obj)
+        };
+        let Some(profile) = profile else {
+            return Ok(false);
+        };
+        let supplier = obj.warehouse.supplier;
+        obj.warehouse = Warehouse {
+            supplier,
+            ..Warehouse::default()
+        };
+        for (name, item) in &profile.equipment {
+            if item.baseline == 0 {
+                continue;
+            }
+            let dcs_name = resolve_export_equipment_dcs_name(name.as_str(), resource_meta);
+            let meta = resource_meta.get(&dcs_name).copied();
+            if !equipment_allowed_for_objective(export, obj, obj.owner, name.as_str(), meta) {
+                continue;
+            }
+            obj.warehouse.equipment.insert_cow(
+                dcs_name,
+                Inventory {
+                    stored: 0,
+                    capacity: item.baseline,
+                },
+            );
+        }
+        for (key, liq) in &profile.liquids {
+            if liq.baseline == 0 {
+                continue;
+            }
+            let typ = liquid_type_from_export_key(key)
+                .with_context(|| format_compact!("capture warehouse {:?}", obj.name))?;
+            obj.warehouse.liquids.insert_cow(
+                typ,
+                Inventory {
+                    stored: 0,
+                    capacity: liq.baseline,
+                },
+            );
+        }
+        Ok(true)
+    }
+
+    fn apply_capture_spoils_to_virtual(
+        obj: &mut Objective,
+        equipment: &FxHashMap<String, u32>,
+        liquids: &FxHashMap<LiquidType, u32>,
+    ) {
+        for (name, inv) in obj.warehouse.equipment.iter_mut_cow() {
+            if let Some(&stored) = equipment.get(name.as_str()) {
+                inv.stored = stored.min(inv.capacity);
+            }
+        }
+        for (typ, inv) in obj.warehouse.liquids.iter_mut_cow() {
+            if let Some(&stored) = liquids.get(typ) {
+                inv.stored = stored.min(inv.capacity);
+            }
+        }
     }
 
     pub(super) fn setup_warehouses_after_load(&mut self, lua: MizLua) -> Result<()> {
@@ -1928,10 +2062,89 @@ impl Db {
     }
 
     pub(super) fn capture_warehouse(&mut self, lua: MizLua, oid: ObjectiveId) -> Result<()> {
-        let whcfg = match self.ephemeral.cfg.warehouse.as_ref() {
-            Some(cfg) => cfg,
-            None => return Ok(()),
-        };
+        if self.ephemeral.cfg.warehouse.is_none() {
+            return Ok(());
+        }
+        let export = Arc::clone(&self.ephemeral.fowl_miz_export);
+        if export_has_objective_stock(export.as_ref()) {
+            let resource_meta = self
+                .warehouse_resource_meta_cache(lua)
+                .context("resource meta for capture warehouse")?;
+            let (preserved_fuel, spoils_eq, spoils_liq) = {
+                let obj = objective!(self, oid)?;
+                let mut spoils_eq: FxHashMap<String, u32> = FxHashMap::default();
+                for (k, v) in &obj.warehouse.equipment {
+                    spoils_eq.insert(k.clone(), v.stored);
+                }
+                let mut spoils_liq: FxHashMap<LiquidType, u32> = FxHashMap::default();
+                for (k, v) in &obj.warehouse.liquids {
+                    spoils_liq.insert(*k, v.stored);
+                }
+                (obj.fuel, spoils_eq, spoils_liq)
+            };
+            let reseeded = {
+                let obj = objective_mut!(self, oid)?;
+                Self::apply_export_profile_to_objective_virtual_warehouse(
+                    obj,
+                    export.as_ref(),
+                    resource_meta.as_ref(),
+                )?
+            };
+            if reseeded {
+                {
+                    let obj = objective_mut!(self, oid)?;
+                    Self::apply_capture_spoils_to_virtual(obj, &spoils_eq, &spoils_liq);
+                }
+                match self.sync_objective_to_warehouse(lua, oid) {
+                    Ok((obj, wh)) => {
+                        let dep_farp = objective_is_ground_dep_farp_export(export.as_ref(), obj);
+                        if let Err(e) = apply_virtual_warehouse_to_dcs(
+                            obj,
+                            &wh,
+                            dep_farp,
+                            true,
+                        ) {
+                            error!("apply DCS warehouse after capture {oid}: {e:?}");
+                        }
+                    }
+                    Err(e) if warehouse_sync_skip(&e) => (),
+                    Err(e) => error!("sync warehouse after capture {oid}: {e:?}"),
+                }
+                {
+                    let obj = objective_mut!(self, oid)?;
+                    obj.fuel = preserved_fuel;
+                }
+                self.update_supply_status()
+                    .context("supply status after capture warehouse reseed")?;
+                {
+                    let obj = objective_mut!(self, oid)?;
+                    if obj.fuel != preserved_fuel {
+                        obj.fuel = preserved_fuel;
+                        self.ephemeral.stat(Stat::ObjectiveSupply {
+                            id: oid,
+                            supply: obj.supply,
+                            fuel: preserved_fuel,
+                        });
+                    }
+                }
+                info!(
+                    "capture warehouse {:?}: reseeded to {:?} profile with spoils (fuel {}% preserved)",
+                    objective!(self, oid)?.name,
+                    objective!(self, oid)?.owner,
+                    preserved_fuel
+                );
+                return Ok(());
+            }
+            if objective!(self, oid)?.is_occupied_logistics_hub() {
+                warn!(
+                    "capture warehouse {:?}: no objective_stock profile for {:?}; \
+                     rebuild Fowl export or check sortie _fowl_export.json",
+                    objective!(self, oid)?.name,
+                    objective!(self, oid)?.owner
+                );
+            }
+        }
+        let whcfg = self.ephemeral.cfg.warehouse.as_ref().unwrap();
         let obj = objective_mut!(self, oid)?;
         let other_production = match self.ephemeral.production_by_side.get(&obj.owner.opposite()) {
             Some(q) => Arc::clone(q),
@@ -2054,7 +2267,7 @@ impl Db {
                 };
                 for oid in &self.persisted.logistics_hubs {
                     let logi = objective_mut!(self, oid)?;
-                    if logi.owner == side {
+                    if logi.owner == side && logi.is_normal_logistics_hub() {
                         for (name, inv) in logi.warehouse.equipment.iter_mut_cow() {
                             if let Some(eq) = production.equipment.get(name) {
                                 *inv += Self::scale_production_amount(eq.production, logi.production);
@@ -2199,6 +2412,127 @@ impl Db {
             );
             schedule_transfers!(TransferItem::Liquid, liquids, get_liquids, needed_liquid);
         }
+        for occ_id in self
+            .persisted
+            .logistics_hubs
+            .into_iter()
+            .copied()
+            .collect::<Vec<_>>()
+        {
+            let (occ_owner, occ_pos, need_supply, need_fuel) = {
+                let occ = objective!(self, occ_id)?;
+                if !occ.is_occupied_logistics_hub() {
+                    continue;
+                }
+                (
+                    occ.owner,
+                    occ.zone.pos(),
+                    occ.supply < 100,
+                    occ.fuel < 100,
+                )
+            };
+            if !need_supply && !need_fuel {
+                continue;
+            }
+            let Some(supplier_id) = nearest_normal_logistics_hub(
+                &self.persisted,
+                occ_owner,
+                occ_pos,
+            ) else {
+                continue;
+            };
+            if supplier_id == occ_id {
+                continue;
+            }
+            let logi = objective!(self, supplier_id)?;
+            let occ = objective!(self, occ_id)?;
+            let mut needed_equipment: SmallVec<[Needed; 1]> = if need_supply {
+                smallvec![Needed {
+                    oid: &occ_id,
+                    obj: occ,
+                    demanded: 0,
+                    allocated: 0,
+                }]
+            } else {
+                smallvec![]
+            };
+            let mut needed_liquid: SmallVec<[Needed; 1]> = if need_fuel {
+                smallvec![Needed {
+                    oid: &occ_id,
+                    obj: occ,
+                    demanded: 0,
+                    allocated: 0,
+                }]
+            } else {
+                smallvec![]
+            };
+            macro_rules! schedule_occupied_transfers {
+                ($typ:expr, $from:ident, $get:ident, $needed:ident) => {
+                    for (name, inv) in &logi.warehouse.$from {
+                        if inv.stored == 0 {
+                            continue;
+                        }
+                        $needed.sort_by(|n0, n1| {
+                            let i0 = n0.obj.$get(name);
+                            let i1 = n1.obj.$get(name);
+                            i0.stored.cmp(&i1.stored)
+                        });
+                        let mut total_demanded = 0;
+                        for n in &mut $needed {
+                            let inv = n.obj.$get(name);
+                            let demanded = if inv.stored <= inv.capacity {
+                                inv.capacity - inv.stored
+                            } else {
+                                0
+                            };
+                            total_demanded += demanded;
+                            n.demanded = demanded;
+                            n.allocated = 0;
+                        }
+                        let mut have = inv.stored;
+                        let mut total_filled = 0;
+                        while have > 0 && total_filled < total_demanded {
+                            for n in &mut $needed {
+                                if have == 0 {
+                                    break;
+                                }
+                                let allocation = max(1, have >> 3);
+                                let amount = min(allocation, n.demanded - n.allocated);
+                                n.allocated += amount;
+                                total_filled += amount;
+                                have -= amount;
+                            }
+                        }
+                        for n in &$needed {
+                            if n.allocated > 0 {
+                                let amount = scale_by_delivery_efficiency(n.allocated, 100);
+                                if amount == 0 {
+                                    continue;
+                                }
+                                transfers.push(Transfer {
+                                    source: supplier_id,
+                                    target: occ_id,
+                                    amount,
+                                    item: $typ(name.clone()),
+                                })
+                            }
+                        }
+                    }
+                };
+            }
+            schedule_occupied_transfers!(
+                TransferItem::Equipment,
+                equipment,
+                get_equipment,
+                needed_equipment
+            );
+            schedule_occupied_transfers!(
+                TransferItem::Liquid,
+                liquids,
+                get_liquids,
+                needed_liquid
+            );
+        }
         Ok(transfers)
     }
 
@@ -2222,7 +2556,7 @@ impl Db {
                         .into_iter()
                         .filter_map(|lid| {
                             let obj = &self.persisted.objectives[lid];
-                            if obj.owner != side {
+                            if obj.owner != side || obj.is_occupied_logistics_hub() {
                                 None
                             } else {
                                 Some(Needed {
@@ -2370,7 +2704,7 @@ impl Db {
         let obj = objective_mut!(self, oid)?;
         if objective_is_ground_dep_farp_export(export.as_ref(), obj) {
             let keep_virtual = skip_dep_hydrate || dep_farp_has_persisted_virtual_stock(obj);
-            prune_dep_farp_dcs_warehouse_to_virtual(obj, &warehouse)
+            reconcile_dcs_warehouse_to_virtual(obj, &warehouse)
                 .context("pruning ground DEP FARP DCS warehouse to virtual stock")?;
             if !keep_virtual {
                 self.ephemeral.dep_farp_authoritative_until.remove(&oid);
@@ -2426,7 +2760,7 @@ impl Db {
         sync_obj_to_warehouse(obj, &warehouse, dep_farp_export)
             .context("syncing warehouse to objective")?;
         if dep_farp_export {
-            prune_dep_farp_dcs_warehouse_to_virtual(obj, &warehouse)
+            reconcile_dcs_warehouse_to_virtual(obj, &warehouse)
                 .context("pruning ground DEP FARP DCS warehouse after virtual push")?;
         }
         Ok((obj, warehouse))

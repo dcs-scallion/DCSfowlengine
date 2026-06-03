@@ -315,6 +315,35 @@ impl Ephemeral {
                 ));
             }
         }
+        if !moved.is_empty() {
+            use super::logistics::nearest_normal_logistics_hub;
+            for occ_id in persisted.logistics_hubs.into_iter() {
+                if *occ_id == obj.id {
+                    continue;
+                }
+                let Some(occ) = persisted.objectives.get(occ_id) else {
+                    continue;
+                };
+                if !occ.is_occupied_logistics_hub() {
+                    continue;
+                }
+                let refresh = nearest_normal_logistics_hub(persisted, occ.owner, occ.zone.pos())
+                    .is_some_and(|anchor| moved.contains(&anchor) || moved.contains(occ_id));
+                if !refresh {
+                    continue;
+                }
+                if let Entry::Occupied(mut e) = self.objective_markup.entry(*occ_id) {
+                    e.get_mut().update(
+                        &self.cfg,
+                        &mut self.hub_delivery_efficiency,
+                        persisted,
+                        &mut self.msgs,
+                        occ,
+                        moved,
+                    );
+                }
+            }
+        }
     }
 
     pub fn remove_objective_markup(&mut self, oid: &ObjectiveId) {
@@ -323,8 +352,17 @@ impl Ephemeral {
         }
     }
 
-    pub(super) fn sync_front_line(&mut self, persisted: &Persisted) {
-        self.front_line.sync(&self.cfg, persisted, &mut self.msgs);
+    /// Re-queue PRI_OVERLAY after underlay (PRI_LINE) updates; DCS stacks by send order.
+    pub(super) fn refresh_objective_overlay_layer(&mut self, persisted: &Persisted) {
+        for (_, obj) in persisted.objectives.into_iter() {
+            if let Some(mk) = self.objective_markup.get_mut(&obj.id) {
+                mk.raise_overlay(&mut self.msgs, obj);
+            }
+        }
+    }
+
+    pub(super) fn sync_front_line(&mut self, persisted: &Persisted) -> bool {
+        self.front_line.sync(&self.cfg, persisted, &mut self.msgs)
     }
 
     pub(crate) fn load_front_line_water_grid(

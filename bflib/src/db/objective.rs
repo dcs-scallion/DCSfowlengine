@@ -142,6 +142,11 @@ impl ObjGroupClass {
             | Self::Other => false,
         }
     }
+
+    /// Logi % and capture gate (`captureable` when logi == 0); not logi repair spawn.
+    pub fn counts_toward_logi_pct(&self) -> bool {
+        matches!(self, Self::Logi | Self::ObjectiveStatic)
+    }
 }
 
 impl From<&str> for ObjGroupClass {
@@ -374,6 +379,9 @@ pub struct Objective {
     pub id: ObjectiveId,
     pub name: String,
     pub owner: Side,
+    /// Default coalition from ME zone name (`OLOB…` / `OLOR…`); fixed for campaign life.
+    #[serde(default)]
+    pub(super) nominal_owner: Option<Side>,
     pub(super) kind: ObjectiveKind,
     pub(super) groups: MapS<Side, Set<GroupId>>,
     pub(super) health: u8,
@@ -466,6 +474,22 @@ impl Objective {
         self.owner
     }
 
+    pub(super) fn nominal_owner(&self) -> Side {
+        self.nominal_owner.unwrap_or(self.owner)
+    }
+
+    pub(super) fn is_occupied_logistics_hub(&self) -> bool {
+        matches!(self.kind, ObjectiveKind::Logistics)
+            && self.owner != self.nominal_owner()
+            && matches!(self.nominal_owner(), Side::Red | Side::Blue)
+    }
+
+    pub(super) fn is_normal_logistics_hub(&self) -> bool {
+        matches!(self.kind, ObjectiveKind::Logistics)
+            && self.owner == self.nominal_owner()
+            && matches!(self.nominal_owner(), Side::Red | Side::Blue)
+    }
+
     /// `O…` trigger zone name in the `.miz` (`mizinit::init_objective`): `O` + kind (`AB` / `FO` / `LO`)
     /// + default-owner letter + label. Deployed FARPs are not `O` triggers → `None`.
     pub fn fowl_o_trigger_zone_name(&self) -> Option<std::string::String> {
@@ -476,7 +500,7 @@ impl Objective {
             ObjectiveKind::Production => "PR",
             ObjectiveKind::Farp { .. } => return None,
         };
-        let owner = match self.owner {
+        let owner = match self.nominal_owner() {
             Side::Blue => "B",
             Side::Red => "R",
             Side::Neutral => "N",
@@ -626,10 +650,7 @@ impl Db {
                 let mut logi_alive = 0;
                 for gid in groups {
                     let group = group!(self, gid)?;
-                    let logi = match &group.class {
-                        ObjGroupClass::Logi => true,
-                        _ => false,
-                    };
+                    let logi = group.class.counts_toward_logi_pct();
                     for uid in &group.units {
                         let unit = unit!(self, uid)?;
                         if !unit.tags.contains(UnitTag::Invincible) {
@@ -1038,6 +1059,7 @@ impl Db {
             },
             zone: Zone::Circle { pos, radius: 2000. },
             owner: side,
+            nominal_owner: Some(side),
             health: 100,
             logi: 100,
             supply: 0,
@@ -1813,6 +1835,8 @@ impl Db {
         }
         if actually_captured.len() > 0 {
             self.ephemeral.sync_front_line(&self.persisted);
+            self.ephemeral
+                .refresh_objective_overlay_layer(&self.persisted);
             self.ephemeral.logistics_stage = LogiStage::SyncToWarehouses {
                 objectives: self.warehouse_sync_objective_ids().into(),
             };
@@ -1864,11 +1888,33 @@ impl Db {
                 }
             }
         }
+        let now = Utc::now();
+        let oids: Vec<ObjectiveId> = self
+            .persisted
+            .objectives
+            .into_iter()
+            .map(|(id, _)| *id)
+            .collect();
+        for oid in oids {
+            self.update_objective_status(None, &oid, now)?;
+        }
         for (_, obj) in &self.persisted.objectives {
             self.ephemeral
                 .update_objective_markup(&self.persisted, obj, &moved)
         }
-        self.ephemeral.sync_front_line(&self.persisted);
+        let underlay_dirty = self.ephemeral.sync_front_line(&self.persisted);
+        if underlay_dirty {
+            self.ephemeral
+                .refresh_objective_overlay_layer(&self.persisted);
+        }
+        let net = dcso3::net::Net::singleton(lua).context("net for markup flush")?;
+        let act = dcso3::trigger::Trigger::singleton(lua)
+            .context("trigger for markup flush")?
+            .action()
+            .context("action for markup flush")?;
+        while self.ephemeral.msgs.len() > 0 {
+            self.ephemeral.msgs.process(100, &net, &act);
+        }
         Ok(())
     }
 }

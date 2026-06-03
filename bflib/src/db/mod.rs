@@ -17,7 +17,7 @@ for more details.
 extern crate nalgebra as na;
 use self::{group::DeployKind, persisted::Persisted};
 use crate::{bg::Task, db::ephemeral::Ephemeral, jtac::JtId};
-use anyhow::{Result, anyhow};
+use anyhow::{Context, Result, anyhow};
 use bfprotocols::{
     cfg::{
         Action, ActionKind, AwacsCfg, Cfg, Deployable, DeployableEwr, DeployableJtac, DroneCfg,
@@ -33,6 +33,7 @@ use dcso3::{
     Vector3, centroid3d,
     coalition::Side,
     env::miz::{Miz, MizIndex},
+    MizLua,
 };
 use std::{cmp::max, fs::File, path::Path, sync::Arc};
 use tokio::sync::mpsc::UnboundedSender;
@@ -223,6 +224,8 @@ impl Db {
         GroupId::setseq(max(db.persisted.gid, GroupId::seq()));
         UnitId::setseq(max(db.persisted.uid, UnitId::seq()));
         db.ephemeral.set_cfg(miz, idx, cfg, to_bg, fowl_miz_export)?;
+        db.apply_nominal_owners_from_miz(miz)
+            .context("applying nominal owners from ME zone names")?;
         Ok(db)
     }
 
@@ -356,5 +359,20 @@ impl Db {
                     },
                 }
             }))
+    }
+
+    pub fn flush_markup_messages(&mut self, lua: MizLua) -> Result<()> {
+        if self.ephemeral.msgs().len() == 0 {
+            return Ok(());
+        }
+        let net = dcso3::net::Net::singleton(lua).context("net for markup flush")?;
+        let act = dcso3::trigger::Trigger::singleton(lua)
+            .context("trigger for markup flush")?
+            .action()
+            .context("action for markup flush")?;
+        while self.ephemeral.msgs().len() > 0 {
+            self.ephemeral.msgs().process(100, &net, &act);
+        }
+        Ok(())
     }
 }

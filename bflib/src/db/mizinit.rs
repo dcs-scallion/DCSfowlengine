@@ -105,6 +105,11 @@ impl Db {
         } else {
             bail!("invalid objective type for {name}, expected AB, FO, LO, or PR")
         };
+        if matches!(kind, ObjectiveKind::Logistics) && owner == Side::Neutral {
+            bail!(
+                "logistics objective OLON{name} is not allowed; use OLOB* or OLOR* in the ME zone name"
+            );
+        }
         let id = ObjectiveId::new();
         let mut logistics_detached = false;
         let mut production_capacity = 0u16;
@@ -154,6 +159,7 @@ impl Db {
             name: name.clone(),
             kind,
             owner,
+            nominal_owner: Some(owner),
             groups: MapS::new(),
             health: 0,
             logi: 0,
@@ -903,6 +909,8 @@ impl Db {
                 self.ephemeral.create_objective_markup(&self.persisted, obj)
             }
             self.ephemeral.sync_front_line(&self.persisted);
+            self.ephemeral
+                .refresh_objective_overlay_layer(&self.persisted);
             Ok(())
         };
         mark_deployed_and_logistics().context("marking deployed and logistics")?;
@@ -989,5 +997,62 @@ impl Db {
         info!("warehouses re-synced after deferred TISP placement (bftools fill preserved)");
         self.ephemeral.dirty();
         Ok(())
+    }
+
+    /// ME zone names keep the default coalition letter; refresh after save load.
+    pub(in crate::db) fn apply_nominal_owners_from_miz(&mut self, miz: &Miz) -> Result<()> {
+        for zone in miz.triggers()? {
+            let zone = zone?;
+            let full = zone.name()?;
+            if !full.starts_with('O') {
+                continue;
+            }
+            let stem = match full.strip_prefix('O').filter(|s| s.len() > 3) {
+                Some(s) => s,
+                None => continue,
+            };
+            let (kind, nominal, name) = Self::parse_objective_zone_stem(stem)
+                .with_context(|| format_compact!("objective zone {full}"))?;
+            if !matches!(kind, ObjectiveKind::Logistics) {
+                continue;
+            }
+            let Some(oid) = self.persisted.objectives_by_name.get(name.as_str()).copied() else {
+                continue;
+            };
+            let obj = objective_mut!(self, oid)?;
+            if matches!(obj.kind, ObjectiveKind::Logistics) {
+                obj.nominal_owner = Some(nominal);
+            }
+        }
+        Ok(())
+    }
+
+    fn parse_objective_zone_stem(stem: &str) -> Result<(ObjectiveKind, Side, String)> {
+        fn side_and_name(s: &str) -> Result<(Side, String)> {
+            if let Some(name) = s.strip_prefix("R") {
+                Ok((Side::Red, String::from(name)))
+            } else if let Some(name) = s.strip_prefix("B") {
+                Ok((Side::Blue, String::from(name)))
+            } else if let Some(name) = s.strip_prefix("N") {
+                Ok((Side::Neutral, String::from(name)))
+            } else {
+                bail!("invalid default coalition {s} expected B, R, or N prefix")
+            }
+        }
+        if let Some(name) = stem.strip_prefix("AB") {
+            let (side, name) = side_and_name(name)?;
+            Ok((ObjectiveKind::Airbase, side, name))
+        } else if let Some(name) = stem.strip_prefix("FO") {
+            let (side, name) = side_and_name(name)?;
+            Ok((ObjectiveKind::Fob, side, name))
+        } else if let Some(name) = stem.strip_prefix("LO") {
+            let (side, name) = side_and_name(name)?;
+            Ok((ObjectiveKind::Logistics, side, name))
+        } else if let Some(name) = stem.strip_prefix("PR") {
+            let (side, name) = side_and_name(name)?;
+            Ok((ObjectiveKind::Production, side, name))
+        } else {
+            bail!("invalid objective type for {stem}, expected AB, FO, LO, or PR")
+        }
     }
 }

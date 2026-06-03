@@ -144,10 +144,14 @@ pub struct MsgQ(Vec<VecDeque<Cmd>>);
 
 /// DCS F10 draw order: lower index is sent first (under later layers).
 const PRI_PANEL: usize = 0;
+/// Supply arrows, production feed, front line, occupied-hub lines.
 const PRI_LINE: usize = 1;
+/// Objective zone rings, threat/capturable circles.
 const PRI_SHAPE: usize = 2;
 const PRI_TEXT: usize = 3;
-const PRI_COUNT: usize = 4;
+/// Objective name + infobar stats (top layer; re-sent after underlay updates).
+const PRI_OVERLAY: usize = 4;
+const PRI_COUNT: usize = 5;
 
 impl Default for MsgQ {
     fn default() -> Self {
@@ -167,7 +171,7 @@ impl MsgQ {
         self.send_with_priority(PRI_PANEL, typ, text)
     }
 
-    pub fn delete_mark(&mut self, did: MarkId) {
+    fn cancel_pending_mark_cmds(&mut self, did: MarkId) -> bool {
         let mut push = true;
         let mut remove = |pri: usize| {
             self.0[pri].retain(|cmd| match cmd {
@@ -196,12 +200,22 @@ impl MsgQ {
                 },
             })
         };
-        remove(0);
-        remove(1);
-        remove(2);
-        remove(3);
-        if push {
-            self.0[PRI_SHAPE].push_back(Cmd::DeleteMark(did))
+        for pri in 0..PRI_COUNT {
+            remove(pri);
+        }
+        push
+    }
+
+    pub fn delete_mark(&mut self, did: MarkId) {
+        if self.cancel_pending_mark_cmds(did) {
+            self.0[PRI_SHAPE].push_back(Cmd::DeleteMark(did));
+        }
+    }
+
+    /// Underlay shapes use PRI_LINE; delete must run on that queue before re-send.
+    pub fn delete_underlay_mark(&mut self, did: MarkId) {
+        if self.cancel_pending_mark_cmds(did) {
+            self.0[PRI_LINE].push_front(Cmd::DeleteMark(did));
         }
     }
 
@@ -382,8 +396,27 @@ impl MsgQ {
         }))
     }
 
+    pub fn quad_to_underlay(
+        &mut self,
+        to: SideFilter,
+        id: MarkId,
+        spec: QuadSpec,
+        message: Option<String>,
+    ) {
+        self.0[PRI_LINE].push_back(Cmd::Send(Msg::Quad {
+            id,
+            to,
+            spec,
+            message,
+        }))
+    }
+
     pub fn text_to_all(&mut self, to: SideFilter, id: MarkId, spec: TextSpec) {
         self.0[PRI_TEXT].push_back(Cmd::Send(Msg::Text { id, to, spec }))
+    }
+
+    pub fn text_to_overlay(&mut self, to: SideFilter, id: MarkId, spec: TextSpec) {
+        self.0[PRI_OVERLAY].push_back(Cmd::Send(Msg::Text { id, to, spec }))
     }
 
     pub fn arrow_to(
@@ -427,6 +460,29 @@ impl MsgQ {
         read_only: bool,
         message: Option<String>,
     ) {
+        self.0[PRI_SHAPE].push_back(Cmd::Send(Msg::Freeform {
+            id,
+            to,
+            points,
+            color,
+            fill_color,
+            line_type,
+            read_only,
+            message,
+        }))
+    }
+
+    pub fn freeform_to_underlay(
+        &mut self,
+        to: SideFilter,
+        id: MarkId,
+        points: [LuaVec3; 3],
+        color: Color,
+        fill_color: Color,
+        line_type: LineType,
+        read_only: bool,
+        message: Option<String>,
+    ) {
         self.0[PRI_LINE].push_back(Cmd::Send(Msg::Freeform {
             id,
             to,
@@ -443,21 +499,41 @@ impl MsgQ {
         self.0[PRI_TEXT].push_back(Cmd::Send(Msg::SetMarkupColor { id, color }))
     }
 
+    pub fn set_overlay_markup_color(&mut self, id: MarkId, color: Color) {
+        self.0[PRI_OVERLAY].push_back(Cmd::Send(Msg::SetMarkupColor { id, color }))
+    }
+
     #[allow(dead_code)]
     pub fn set_markup_fill_color(&mut self, id: MarkId, color: Color) {
         self.0[PRI_TEXT].push_back(Cmd::Send(Msg::SetMarkupFillColor { id, color }))
+    }
+
+    pub fn set_overlay_markup_fill_color(&mut self, id: MarkId, color: Color) {
+        self.0[PRI_OVERLAY].push_back(Cmd::Send(Msg::SetMarkupFillColor { id, color }))
     }
 
     pub fn set_markup_text(&mut self, id: MarkId, text: String) {
         self.0[PRI_TEXT].push_back(Cmd::Send(Msg::SetMarkupText { id, text }))
     }
 
+    pub fn set_overlay_markup_text(&mut self, id: MarkId, text: String) {
+        self.0[PRI_OVERLAY].push_back(Cmd::Send(Msg::SetMarkupText { id, text }))
+    }
+
     pub fn set_markup_pos_start(&mut self, id: MarkId, pos: LuaVec3) {
         self.0[PRI_TEXT].push_back(Cmd::Send(Msg::SetMarkupStart { id, pos }))
     }
 
+    pub fn set_overlay_markup_pos_start(&mut self, id: MarkId, pos: LuaVec3) {
+        self.0[PRI_OVERLAY].push_back(Cmd::Send(Msg::SetMarkupStart { id, pos }))
+    }
+
     pub fn set_markup_pos_end(&mut self, id: MarkId, pos: LuaVec3) {
         self.0[PRI_TEXT].push_back(Cmd::Send(Msg::SetMarkupEnd { id, pos }))
+    }
+
+    pub fn set_overlay_markup_pos_end(&mut self, id: MarkId, pos: LuaVec3) {
+        self.0[PRI_OVERLAY].push_back(Cmd::Send(Msg::SetMarkupEnd { id, pos }))
     }
 
     pub fn len(&self) -> usize {

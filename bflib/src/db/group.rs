@@ -1436,6 +1436,10 @@ impl Db {
                 let health = group_health!(self, gid)?.0;
                 if let Some(oid) = self.persisted.objectives_by_group.get(&gid).copied() {
                     self.update_objective_status(None, &oid, now)?;
+                    if let Some(obj) = self.persisted.objectives.get(&oid) {
+                        self.ephemeral
+                            .update_objective_markup(&self.persisted, obj, &[]);
+                    }
                     self.ephemeral.units_potentially_close_to_enemies.remove(&uid);
                     if health == 0 {
                         if let Some(id) = self.ephemeral.group_marks.remove(&gid) {

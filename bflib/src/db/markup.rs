@@ -16,7 +16,7 @@ for more details.
 
 use super::{
     aliases::resolve_objective_display_name,
-    logistics::virtual_resupply_delivery_efficiency_cached,
+    logistics::{nearest_normal_logistics_hub, virtual_resupply_delivery_efficiency_cached},
     objective::{Objective, Zone},
     persisted::Persisted,
 };
@@ -45,6 +45,9 @@ const SUPPLY_CONNECTION_ALPHA: f32 = 0.6;
 /// OPR→OLO feed shaft: half the supply-line shaft width; alpha at 100% Production.
 const PRODUCTION_FEED_SHAFT_HALF_WIDTH_M: f64 = SUPPLY_ARROW_SHAFT_HALF_WIDTH_M / 2.;
 const PRODUCTION_FEED_LINE_ALPHA: f32 = 0.5;
+/// Normal OLO → occupied OLO resupply link (virtual, 100% delivery).
+const OCCUPIED_HUB_SUPPLY_LINE_ALPHA: f32 = 0.5;
+const OCCUPIED_HUB_SUPPLY_SHAFT_HALF_WIDTH_M: f64 = PRODUCTION_FEED_SHAFT_HALF_WIDTH_M * 2.;
 
 #[derive(Debug, Clone, Copy)]
 struct SupplyConnectionMark {
@@ -103,6 +106,9 @@ pub(super) struct ObjectiveMarkup {
     /// OPR → nearest OLO (quad shaft, no arrowhead).
     production_feed_hub: Option<ObjectiveId>,
     production_feed_line: Option<MarkId>,
+    /// Nearest normal OLO → occupied OLO (solid coalition-colored line).
+    occupied_supply_anchor: Option<ObjectiveId>,
+    occupied_supply_line: Option<MarkId>,
 }
 
 fn text_color(side: Side, a: f32) -> Color {
@@ -242,6 +248,24 @@ fn production_feed_line_geometry(opr: &Objective, hub: &Objective) -> QuadSpec {
     }
 }
 
+fn occupied_hub_supply_line_geometry(anchor: &Objective, occ: &Objective) -> QuadSpec {
+    let (spos, dpos) = arrow_coords(anchor, occ);
+    let dir = (dpos - spos).normalize();
+    let perp = Vector2::new(-dir.y, dir.x);
+    let hw = OCCUPIED_HUB_SUPPLY_SHAFT_HALF_WIDTH_M;
+    let v3 = |p: Vector2| LuaVec3(Vector3::new(p.x, 0., p.y));
+    QuadSpec {
+        p0: v3(spos + perp * hw),
+        p1: v3(spos - perp * hw),
+        p2: v3(dpos - perp * hw),
+        p3: v3(dpos + perp * hw),
+        color: Color::black(0.),
+        fill_color: Color::black(0.),
+        line_type: LineType::NoLine,
+        read_only: true,
+    }
+}
+
 fn sync_production_feed_line(
     t: &mut ObjectiveMarkup,
     msgq: &mut MsgQ,
@@ -252,7 +276,7 @@ fn sync_production_feed_line(
         return;
     }
     if let Some(id) = t.production_feed_line.take() {
-        msgq.delete_mark(id);
+        msgq.delete_underlay_mark(id);
     }
     let want_hub = if obj.production > 0 {
         obj.feed_hub
@@ -272,8 +296,38 @@ fn sync_production_feed_line(
     spec.color = color;
     spec.fill_color = color;
     let id = MarkId::new();
-    msgq.quad_to_all(SideFilter::All, id, spec, None);
+    msgq.quad_to_underlay(SideFilter::All, id, spec, None);
     t.production_feed_line = Some(id);
+}
+
+fn sync_occupied_hub_supply_line(
+    t: &mut ObjectiveMarkup,
+    msgq: &mut MsgQ,
+    obj: &Objective,
+    persisted: &Persisted,
+) {
+    if let Some(id) = t.occupied_supply_line.take() {
+        msgq.delete_underlay_mark(id);
+    }
+    t.occupied_supply_anchor = None;
+    if !obj.is_occupied_logistics_hub() {
+        return;
+    }
+    let Some(aid) = nearest_normal_logistics_hub(persisted, obj.owner, obj.zone.pos()) else {
+        return;
+    };
+    let anchor = match persisted.objectives.get(&aid) {
+        Some(h) => h,
+        None => return,
+    };
+    t.occupied_supply_anchor = Some(aid);
+    let mut spec = occupied_hub_supply_line_geometry(anchor, obj);
+    let color = text_color(obj.owner, OCCUPIED_HUB_SUPPLY_LINE_ALPHA);
+    spec.color = color;
+    spec.fill_color = color;
+    let id = MarkId::new();
+    msgq.quad_to_underlay(SideFilter::All, id, spec, None);
+    t.occupied_supply_line = Some(id);
 }
 
 fn arrow_coords(obj: &Objective, dst: &Objective) -> (Vector2, Vector2) {
@@ -342,10 +396,10 @@ fn sync_supply_connection(
     let mut shaft = geom.shaft;
     shaft.color = color;
     shaft.fill_color = color;
-    msgq.delete_mark(mark.shaft);
-    msgq.delete_mark(mark.head);
-    msgq.quad_to_all(to, mark.shaft, shaft, None);
-    msgq.freeform_to(
+    msgq.delete_underlay_mark(mark.shaft);
+    msgq.delete_underlay_mark(mark.head);
+    msgq.quad_to_underlay(to, mark.shaft, shaft, None);
+    msgq.freeform_to_underlay(
         to,
         mark.head,
         geom.head,
@@ -372,6 +426,119 @@ fn draw_supply_connection(
     mark
 }
 
+fn overlay_side_filter(obj: &Objective) -> SideFilter {
+    match obj.kind {
+        ObjectiveKind::Airbase
+        | ObjectiveKind::Fob
+        | ObjectiveKind::Logistics
+        | ObjectiveKind::Production => SideFilter::All,
+        ObjectiveKind::Farp { .. } => obj.owner.into(),
+    }
+}
+
+fn remove_objective_overlay_marks(msgq: &mut MsgQ, t: &mut ObjectiveMarkup) {
+    msgq.delete_mark(t.label);
+    if let Some(id) = t.stats_label.take() {
+        msgq.delete_mark(id);
+    }
+    if let Some(id) = t.stats_label_red.take() {
+        msgq.delete_mark(id);
+    }
+    if let Some(id) = t.stats_label_blue.take() {
+        msgq.delete_mark(id);
+    }
+}
+
+/// Name + infobar stats; recreate after supply/front-line shapes so DCS draws text on top.
+fn install_objective_overlay_marks(msgq: &mut MsgQ, t: &mut ObjectiveMarkup, obj: &Objective) {
+    let color_func = |a| text_color(obj.owner, a);
+    let all_spec = overlay_side_filter(obj);
+    let pos3 = Vector3::new(t.pos.x, 0., t.pos.y);
+    let bg_color = match obj.owner {
+        Side::Red => Color::red(0.8),
+        Side::Blue => Color::blue(0.8),
+        _ => Color::black(0.8),
+    };
+    t.label = MarkId::new();
+    msgq.text_to_overlay(all_spec, t.label, TextSpec {
+        pos: LuaVec3(Vector3::new(pos3.x + 1500., 1., pos3.z + 2500.)),
+        color: Color::white(1.0),
+        fill_color: bg_color,
+        font_size: 11,
+        read_only: true,
+        text: t.name.clone().into(),
+    });
+    let stats_pos = LuaVec3(Vector3::new(pos3.x + 1500., 1., pos3.z + 2500.));
+    let make_stats_spec = |text: CompactString| TextSpec {
+        pos: stats_pos,
+        color: color_func(1.0),
+        fill_color: Color::black(0.0),
+        font_size: 10,
+        read_only: true,
+        text: text.into(),
+    };
+    if all_spec == SideFilter::All {
+        let id_r = MarkId::new();
+        let id_b = MarkId::new();
+        msgq.text_to_overlay(
+            SideFilter::Red,
+            id_r,
+            make_stats_spec(objective_stats_text(
+                obj,
+                enemy_objective_view(obj.owner, Side::Red),
+            )),
+        );
+        msgq.text_to_overlay(
+            SideFilter::Blue,
+            id_b,
+            make_stats_spec(objective_stats_text(
+                obj,
+                enemy_objective_view(obj.owner, Side::Blue),
+            )),
+        );
+        t.stats_label_red = Some(id_r);
+        t.stats_label_blue = Some(id_b);
+        t.stats_label = None;
+    } else {
+        let id = MarkId::new();
+        msgq.text_to_overlay(all_spec, id, make_stats_spec(objective_stats_text(obj, false)));
+        t.stats_label = Some(id);
+        t.stats_label_red = None;
+        t.stats_label_blue = None;
+    }
+}
+
+fn sync_overlay_cache_from_objective(t: &mut ObjectiveMarkup, obj: &Objective) {
+    t.health = obj.health;
+    t.logi = obj.logi;
+    t.supply = obj.supply;
+    t.fuel = obj.fuel;
+    t.production = obj.production;
+    t.production_hp_sum = obj.production_hp_sum;
+    t.production_repair_need = obj.production_repair_need;
+    t.production_repair = obj.production_repair;
+    t.points = obj.points;
+}
+
+fn refresh_objective_overlay_text(msgq: &mut MsgQ, t: &ObjectiveMarkup, obj: &Objective) {
+    let pos = obj.zone.pos();
+    let pos3 = Vector3::new(pos.x, 0., pos.y);
+    msgq.set_overlay_markup_pos_start(
+        t.label,
+        LuaVec3(Vector3::new(pos3.x + 1500., 1., pos3.z + 2500.)),
+    );
+    let stats_pos = LuaVec3(Vector3::new(pos3.x + 1500., 1., pos3.z + 2500.));
+    if let Some(id) = t.stats_label {
+        msgq.set_overlay_markup_pos_start(id, stats_pos);
+    }
+    if let Some(id) = t.stats_label_red {
+        msgq.set_overlay_markup_pos_start(id, stats_pos);
+    }
+    if let Some(id) = t.stats_label_blue {
+        msgq.set_overlay_markup_pos_start(id, stats_pos);
+    }
+}
+
 impl ObjectiveMarkup {
     pub(super) fn remove(self, msgq: &mut MsgQ) {
         let ObjectiveMarkup {
@@ -380,6 +547,7 @@ impl ObjectiveMarkup {
             threatened_ring,
             supply_connections,
             production_feed_line,
+            occupied_supply_line,
             label,
             stats_label,
             stats_label_red,
@@ -400,11 +568,14 @@ impl ObjectiveMarkup {
             msgq.delete_mark(id);
         }
         for (_, mark) in supply_connections {
-            msgq.delete_mark(mark.shaft);
-            msgq.delete_mark(mark.head);
+            msgq.delete_underlay_mark(mark.shaft);
+            msgq.delete_underlay_mark(mark.head);
         }
         if let Some(id) = production_feed_line {
-            msgq.delete_mark(id);
+            msgq.delete_underlay_mark(id);
+        }
+        if let Some(id) = occupied_supply_line {
+            msgq.delete_underlay_mark(id);
         }
     }
 
@@ -422,22 +593,22 @@ impl ObjectiveMarkup {
             let color_func = |a| text_color(obj.owner, a);
             self.side = obj.owner;
             if let Some(id) = self.stats_label {
-                msgq.set_markup_color(id, color_func(1.));
+                msgq.set_overlay_markup_color(id, color_func(1.));
             }
             if let Some(id) = self.stats_label_red {
-                msgq.set_markup_color(id, color_func(1.));
+                msgq.set_overlay_markup_color(id, color_func(1.));
             }
             if let Some(id) = self.stats_label_blue {
-                msgq.set_markup_color(id, color_func(1.));
+                msgq.set_overlay_markup_color(id, color_func(1.));
             }
             msgq.set_markup_color(self.owner_ring, color_func(1.));
             
             for (_, mark) in self.supply_connections.drain() {
-                msgq.delete_mark(mark.shaft);
-                msgq.delete_mark(mark.head);
+                msgq.delete_underlay_mark(mark.shaft);
+                msgq.delete_underlay_mark(mark.head);
             }
             if let Some(id) = self.production_feed_line.take() {
-                msgq.delete_mark(id);
+                msgq.delete_underlay_mark(id);
             }
             self.production_feed_hub = None;
         }
@@ -474,13 +645,13 @@ impl ObjectiveMarkup {
             self.production_repair = obj.production_repair;
             self.points = obj.points;
             if let Some(id) = self.stats_label {
-                msgq.set_markup_text(id, objective_stats_text(obj, false).into());
+                msgq.set_overlay_markup_text(id, objective_stats_text(obj, false).into());
             } else if let (Some(id_r), Some(id_b)) = (self.stats_label_red, self.stats_label_blue) {
-                msgq.set_markup_text(
+                msgq.set_overlay_markup_text(
                     id_r,
                     objective_stats_text(obj, enemy_objective_view(obj.owner, Side::Red)).into(),
                 );
-                msgq.set_markup_text(
+                msgq.set_overlay_markup_text(
                     id_b,
                     objective_stats_text(obj, enemy_objective_view(obj.owner, Side::Blue)).into(),
                 );
@@ -493,16 +664,16 @@ impl ObjectiveMarkup {
                 msgq.set_markup_pos_start(self.owner_ring, v3);
                 msgq.set_markup_pos_start(self.capturable_ring, v3);
                 msgq.set_markup_pos_start(self.threatened_ring, v3);
-                msgq.set_markup_pos_start(self.label, LuaVec3(Vector3::new(pos.x + 1450., 1., pos.y + 1750.)));
-                let stats_pos = LuaVec3(Vector3::new(pos.x + 1500., 1., pos.y + 1250.));
+                msgq.set_overlay_markup_pos_start(self.label, LuaVec3(Vector3::new(pos.x + 1500., 1., pos.y + 2500.)));
+                let stats_pos = LuaVec3(Vector3::new(pos.x + 1500., 1., pos.y + 2500.));
                 if let Some(id) = self.stats_label {
-                    msgq.set_markup_pos_start(id, stats_pos);
+                    msgq.set_overlay_markup_pos_start(id, stats_pos);
                 }
                 if let Some(id) = self.stats_label_red {
-                    msgq.set_markup_pos_start(id, stats_pos);
+                    msgq.set_overlay_markup_pos_start(id, stats_pos);
                 }
                 if let Some(id) = self.stats_label_blue {
-                    msgq.set_markup_pos_start(id, stats_pos);
+                    msgq.set_overlay_markup_pos_start(id, stats_pos);
                 }
             }
         }
@@ -540,6 +711,23 @@ impl ObjectiveMarkup {
                 sync_production_feed_line(self, msgq, obj, persisted);
             }
         }
+        if matches!(obj.kind, ObjectiveKind::Logistics) {
+            let want_anchor = if obj.is_occupied_logistics_hub() {
+                nearest_normal_logistics_hub(persisted, obj.owner, obj.zone.pos())
+            } else {
+                None
+            };
+            if want_anchor != self.occupied_supply_anchor || self.pos != obj.zone.pos() {
+                sync_occupied_hub_supply_line(self, msgq, obj, persisted);
+            }
+        }
+        refresh_objective_overlay_text(msgq, self, obj);
+    }
+
+    pub(super) fn raise_overlay(&mut self, msgq: &mut MsgQ, obj: &Objective) {
+        remove_objective_overlay_marks(msgq, self);
+        install_objective_overlay_marks(msgq, self, obj);
+        sync_overlay_cache_from_objective(self, obj);
     }
 
     pub(super) fn new(
@@ -676,61 +864,10 @@ impl ObjectiveMarkup {
                 let mark = draw_supply_connection(msgq, to, obj, dobj, color);
                 t.supply_connections.insert(*oid, mark);
             }
+            sync_occupied_hub_supply_line(&mut t, msgq, obj, persisted);
         }
 
-        let bg_color = match obj.owner {
-            Side::Red => Color::red(0.8),
-            Side::Blue => Color::blue(0.8),
-            _ => Color::black(0.8),
-        };
-
-        msgq.text_to_all(all_spec, t.label, TextSpec {
-            pos: LuaVec3(Vector3::new(pos3.x + 1500., 1., pos3.z + 2500.)),
-            color: Color::white(1.0),
-            fill_color: bg_color,
-            font_size: 11,
-            read_only: true,
-            text: t.name.clone().into(),
-        });
-
-        let stats_pos = LuaVec3(Vector3::new(pos3.x + 1500., 1., pos3.z + 2500.));
-        let make_stats_spec = |text: CompactString| TextSpec {
-            pos: stats_pos,
-            color: color_func(1.0),
-            fill_color: Color::black(0.0),
-            font_size: 10,
-            read_only: true,
-            text: text.into(),
-        };
-        if all_spec == SideFilter::All {
-            let id_r = MarkId::new();
-            let id_b = MarkId::new();
-            msgq.text_to_all(
-                SideFilter::Red,
-                id_r,
-                make_stats_spec(objective_stats_text(
-                    obj,
-                    enemy_objective_view(obj.owner, Side::Red),
-                )),
-            );
-            msgq.text_to_all(
-                SideFilter::Blue,
-                id_b,
-                make_stats_spec(objective_stats_text(
-                    obj,
-                    enemy_objective_view(obj.owner, Side::Blue),
-                )),
-            );
-            t.stats_label_red = Some(id_r);
-            t.stats_label_blue = Some(id_b);
-            t.stats_label = None;
-        } else {
-            let id = MarkId::new();
-            msgq.text_to_all(all_spec, id, make_stats_spec(objective_stats_text(obj, false)));
-            t.stats_label = Some(id);
-            t.stats_label_red = None;
-            t.stats_label_blue = None;
-        }
+        install_objective_overlay_marks(msgq, &mut t, obj);
 
         t
     }

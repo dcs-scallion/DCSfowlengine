@@ -534,6 +534,12 @@ fn on_player_try_change_slot(
     res
 }
 
+fn flush_markup_if_pending(ctx: &mut Context, lua: MizLua) {
+    if let Err(e) = ctx.db.flush_markup_messages(lua) {
+        error!("could not flush markup messages {e:?}");
+    }
+}
+
 fn unit_killed(
     lua: MizLua,
     ctx: &mut Context,
@@ -547,6 +553,8 @@ fn unit_killed(
     }
     if let Err(e) = ctx.db.unit_dead(&id, Utc::now()) {
         error!("unit dead failed for {:?} {:?}", id, e);
+    } else {
+        flush_markup_if_pending(ctx, lua);
     }
     Ok(())
 }
@@ -690,6 +698,8 @@ fn on_event(lua: MizLua, ev: Event) -> Result<()> {
                         killer.as_ref(),
                     ) {
                         error!("static dead failed {e:?}")
+                    } else {
+                        flush_markup_if_pending(ctx, lua);
                     }
                 } else if let Err(e) =
                     ctx.db.production_static_damaged(lua, &static_id, start_ts)
@@ -716,6 +726,8 @@ fn on_event(lua: MizLua, ev: Event) -> Result<()> {
                 let killer = ctx.db.take_static_hit(&id);
                 if let Err(e) = ctx.db.static_dead(lua, &id, start_ts, killer.as_ref()) {
                     error!("static killed failed {e:?}")
+                } else {
+                    flush_markup_if_pending(ctx, lua);
                 }
             }
         }

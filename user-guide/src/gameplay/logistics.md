@@ -69,6 +69,25 @@ OPR (Production) → OLO* (Logistics hub) → objectives with warehouses
 
 When **Production** on an OPR zone is **0%**, it is treated as disconnected: no production feed to the hub and **no** OPR→OLO map line.
 
+### Captured logistics hubs (occupied OLO)
+
+A logistics hub is **occupied** when its **current owner** differs from the **default coalition in the ME zone name** (the `R` or `B` after `OLO` in the trigger zone, e.g. `OLOBTbilisi` is Blue by default; if Red holds it, that hub is occupied for Red).
+
+| Rule | Normal OLO (`owner` matches zone letter) | Occupied OLO |
+|------|------------------------------------------|--------------|
+| OPR link / black feed line | Yes | **No** — no OPR production into the hub |
+| Hub **Production** from factories | Yes | **No** (stays 0% from OPR) |
+| Stock from `deliver_production` | Yes | **No** |
+| **Inbound** resupply | OPR + virtual network | **Virtual only** from the **nearest normal** OLO of the **occupier**, same trigger as other objectives (**supply** or **fuel** &lt; 100%) |
+| Inbound delivery efficiency | N/A (OPR path) | **100%** — no distance decay on that leg |
+| **Outbound** to frontline objectives | Yes (decay applies) | **Yes** — same as a normal hub for the occupier |
+
+**Re-capture** by the original coalition (`owner` matches the zone name again) restores normal OLO behaviour and OPR links.
+
+**ME naming**: logistics zones must be **`OLOB*`** or **`OLOR*`** only — **`OLON*`** (neutral) is rejected at mission build and campaign start.
+
+**F10 map**: occupied hubs show a **solid** line (same shaft width as hub→objective supply arrows, no arrowhead) from the nearest **normal** friendly OLO to the captured hub, in the **occupier’s** coalition colour at **50%** opacity. This is separate from the black OPR feed and the coloured supply arrows to objectives.
+
 ### Virtual resupply and distance decay
 
 Campaign flag **`virtual_resupply`** (in `*_CFG`):
@@ -103,6 +122,7 @@ Two **independent** line types are drawn on the F10 map (do not confuse them):
 | Line | Route | Appearance | Meaning |
 |------|-------|------------|---------|
 | **Production feed** | OPR → OLO\* | Narrow **black** shaft (no arrowhead) | Factory link to the hub that receives OPR output |
+| **Occupied hub link** | Normal OLO → occupied OLO | **Solid** shaft (supply-line width), coalition colour, 50% opacity | Captured hub fed virtually from nearest normal hub (100% on that leg) |
 | **Supply connection** | OLO\* → objective | Coloured **arrow** (shaft + head) | Virtual resupply route to a warehouse objective |
 
 **Production feed (OPR → OLO\*)**:

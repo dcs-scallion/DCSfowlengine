@@ -10297,6 +10297,28 @@ fn validate_opr_factory_static_counts(
     Ok(())
 }
 
+fn validate_logistics_zones_not_neutral(objectives: &[TriggerZone]) -> Result<()> {
+    let mut bad = Vec::new();
+    for obj in objectives {
+        let Ok(zone_name) = obj.inner.name() else {
+            continue;
+        };
+        if zone_name.len() >= 4
+            && zone_name.starts_with("OLO")
+            && zone_name.as_bytes()[3] == b'N'
+        {
+            bad.push(zone_name.clone());
+        }
+    }
+    if !bad.is_empty() {
+        bail!(
+            "FowlTools ERROR: neutral logistics zones OLON* are not allowed (use OLOB* or OLOR*): {:?}",
+            bad
+        );
+    }
+    Ok(())
+}
+
 fn validate_production_zone_counts(objectives: &[TriggerZone]) -> Result<()> {
     let (opr_blue, opr_red) = count_objective_kind_by_owner(objectives, "PR");
     let (olo_blue, olo_red) = count_objective_kind_by_owner(objectives, "LO");
@@ -11281,6 +11303,8 @@ pub fn run(cfg: &MizCmd) -> Result<()> {
         .context("validating O* zone names (unique O+kind+owner+display stems)")?;
     validate_opr_zone_geometry(&objectives)
         .context("validating OPR* zones use quad (square) geometry in base.miz")?;
+    validate_logistics_zones_not_neutral(&objectives)
+        .context("validating OLO* zones are OLOB* or OLOR* (not OLON*)")?;
     validate_production_zone_counts(&objectives)
         .context("validating OPR* >= OLO* per coalition in base.miz")?;
     let factory_types: std::collections::HashSet<StdString> = campaign_overlay

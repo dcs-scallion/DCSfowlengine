@@ -890,19 +890,20 @@ pub(crate) fn export_water_grid(
 impl FrontLine {
     fn clear(&mut self, msgq: &mut MsgQ) {
         for (_, id) in self.marks_by_key.drain() {
-            msgq.delete_mark(id);
+            msgq.delete_underlay_mark(id);
         }
         self.participant_count = 0;
         self.owner_revision = 0;
         self.segment_count = 0;
     }
 
-    pub fn sync(&mut self, cfg: &Cfg, persisted: &Persisted, msgq: &mut MsgQ) {
+    pub fn sync(&mut self, cfg: &Cfg, persisted: &Persisted, msgq: &mut MsgQ) -> bool {
         if !cfg.front_line {
             if !self.marks_by_key.is_empty() || self.participant_count > 0 {
                 self.clear(msgq);
+                return true;
             }
-            return;
+            return false;
         }
 
         let sites = collect_sites(persisted);
@@ -910,8 +911,9 @@ impl FrontLine {
         if participant_count < 2 {
             if !self.marks_by_key.is_empty() || self.participant_count > 0 {
                 self.clear(msgq);
+                return true;
             }
-            return;
+            return false;
         }
 
         let revision = owner_revision(persisted);
@@ -928,7 +930,7 @@ impl FrontLine {
             && seg_count == self.segment_count
             && !self.marks_by_key.is_empty()
         {
-            return;
+            return false;
         }
 
         let mut want_by_key: FxHashMap<QuadKey, QuadSpec> = FxHashMap::default();
@@ -940,7 +942,7 @@ impl FrontLine {
         for key in old_keys {
             if !want_by_key.contains_key(&key) {
                 if let Some(id) = self.marks_by_key.remove(&key) {
-                    msgq.delete_mark(id);
+                    msgq.delete_underlay_mark(id);
                 }
             }
         }
@@ -950,13 +952,14 @@ impl FrontLine {
                 continue;
             }
             let id = MarkId::new();
-            msgq.quad_to_all(SideFilter::All, id, spec, None);
+            msgq.quad_to_underlay(SideFilter::All, id, spec, None);
             self.marks_by_key.insert(key, id);
         }
 
         self.participant_count = participant_count;
         self.owner_revision = revision;
         self.segment_count = seg_count;
+        true
     }
 
     pub fn load_water_grid_from_file(&mut self, state_path: &Path, theatre: &str, cfg: &Cfg) {
