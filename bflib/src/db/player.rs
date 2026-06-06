@@ -64,6 +64,7 @@ pub enum SlotAuth {
     NotRegistered(Side),
     VehicleNotAvailable(Vehicle),
     Denied,
+    AirborneDeslotBlocked,
 }
 
 pub enum RegErr {

@@ -31,7 +31,7 @@ use crate::db::player::SlotAuth;
 use admin::{AdminCommand, AdminResult, run_admin_commands, theatre_slug};
 use anyhow::{anyhow, bail, Context as AnyhowContext, Result};
 use bfprotocols::{
-    cfg::{Cfg, LifeType},
+    cfg::{Cfg, LifeType, UnitTag},
     db::objective::ObjectiveId,
     fowl_miz_export::FowlMizExport,
     perf::{Perf, PerfInner},
@@ -450,6 +450,14 @@ fn process_slot_rejection(ctx: &mut Context, id: PlayerId, ucid: Ucid, rej: Slot
             ));
             ctx.db.ephemeral.msgs().send(MsgTyp::Chat(Some(id)), msg);
         }
+        SlotAuth::AirborneDeslotBlocked => {
+            ctx.db.ephemeral.msgs().send(
+                MsgTyp::Chat(Some(id)),
+                format_compact!(
+                    "cannot deslot while airborne; use F1 to return to your aircraft or land at a friendly base"
+                ),
+            );
+        }
         SlotAuth::NotRegistered(_) => warn!("unexpected NotRegistered"),
         SlotAuth::Yes(_) => warn!("slot was not rejected!"),
     }
@@ -463,8 +471,28 @@ fn try_occupy_slot(
     side: Side,
     slot: SlotId,
 ) -> Result<bool> {
+    let miz = MizLua::from_env(lua);
+    if let Some((_, fly_slot)) = blocked_aircraft_slot(ctx, &ifo.ucid) {
+        if slot_exits_aircraft(&slot) {
+            process_slot_rejection(ctx, id, ifo.ucid, SlotAuth::AirborneDeslotBlocked);
+            return Ok(false);
+        }
+        if same_flyable_slot(&slot, &fly_slot) {
+            if let Some((unit_id, side, fly_slot)) = blocked_aircraft_unit(ctx, &ifo.ucid) {
+                try_airborne_cockpit_restore(
+                    miz, ctx, &unit_id, ifo.ucid, side, fly_slot, "f1",
+                );
+            }
+            ctx.db.ephemeral.cancel_force_to_spectators(&ifo.ucid);
+        }
+    } else if slot_exits_aircraft(&slot) {
+        if airborne_deslot_block(ctx, miz, ifo.ucid, None).is_some() {
+            process_slot_rejection(ctx, id, ifo.ucid, SlotAuth::AirborneDeslotBlocked);
+            return Ok(false);
+        }
+    }
     let now = Utc::now();
-    match ctx.db.try_occupy_slot(MizLua::from_env(lua), now, side, slot, &ifo.ucid) {
+    match ctx.db.try_occupy_slot(miz, now, side, slot, &ifo.ucid) {
         SlotAuth::NotRegistered(side) => {
             let name = ifo.name.clone();
             match ctx.db.register_player(ifo.ucid, name.clone(), side) {
@@ -499,6 +527,238 @@ fn try_occupy_slot(
             Ok(false)
         }
     }
+}
+
+fn slot_exits_aircraft(slot: &SlotId) -> bool {
+    !matches!(slot, SlotId::Unit(_) | SlotId::MultiCrew(_, _))
+}
+
+fn same_flyable_slot(a: &SlotId, b: &SlotId) -> bool {
+    match (a.as_unit_id(), b.as_unit_id()) {
+        (Some(ua), Some(ub)) => ua == ub,
+        _ => a == b,
+    }
+}
+
+fn blocked_aircraft_slot(ctx: &Context, ucid: &Ucid) -> Option<(Side, SlotId)> {
+    ctx.db.ephemeral.airborne_release_block_for_ucid(ucid)
+}
+
+fn blocked_aircraft_unit(
+    ctx: &Context,
+    ucid: &Ucid,
+) -> Option<(DcsOid<ClassUnit>, Side, SlotId)> {
+    ctx.db
+        .ephemeral
+        .airborne_release_block
+        .iter()
+        .find(|(_, (u, _, _))| *u == *ucid)
+        .map(|(id, (_, side, slot))| (id.clone(), *side, *slot))
+}
+
+fn try_airborne_cockpit_restore(
+    lua: MizLua,
+    ctx: &mut Context,
+    unit_id: &DcsOid<ClassUnit>,
+    ucid: Ucid,
+    side: Side,
+    slot: SlotId,
+    source: &str,
+) {
+    const MAX_ATTEMPTS: u8 = 3;
+    let attempts = ctx
+        .db
+        .ephemeral
+        .airborne_reslot_attempts
+        .entry(unit_id.clone())
+        .or_insert(0);
+    if *attempts >= MAX_ATTEMPTS {
+        return;
+    }
+    *attempts += 1;
+    let Some(player_id) = ctx.connected.id_by_ucid.get(&ucid).copied() else {
+        return;
+    };
+    let Ok(net) = Net::singleton(lua) else {
+        return;
+    };
+    if let Ok((_, cur)) = net.get_slot(player_id) {
+        if same_flyable_slot(&cur, &slot) {
+            info!("airborne cockpit already occupied ({source}) for {ucid:?}");
+            return;
+        }
+    }
+    ctx.db.ephemeral.cancel_force_to_spectators(&ucid);
+    match net.force_player_slot(player_id, side, slot) {
+        Ok(()) => info!("airborne cockpit restore ok ({source}) for {ucid:?}"),
+        Err(e) => warn!("airborne cockpit restore failed ({source}) for {ucid:?}: {e:?}"),
+    }
+}
+
+fn schedule_airborne_restore_retries(
+    lua: MizLua,
+    unit_id: DcsOid<ClassUnit>,
+) -> Result<()> {
+    let timer = Timer::singleton(lua)?;
+    for delay in [0.5_f32, 2.] {
+        let when = timer.get_time()? + delay;
+        let unit_id = unit_id.clone();
+        timer.schedule_function(when, mlua::Value::Nil, move |lua, _, _| {
+            let ctx = unsafe { Context::get_mut() };
+            let Some((ucid, side, slot)) = ctx
+                .db
+                .ephemeral
+                .airborne_release_block
+                .get(&unit_id)
+                .map(|(u, s, sl)| (*u, *s, *sl))
+            else {
+                return Ok(None);
+            };
+            try_airborne_cockpit_restore(lua, ctx, &unit_id, ucid, side, slot, "retry");
+            Ok(None)
+        })?;
+    }
+    Ok(())
+}
+
+fn is_aircraft_slot(db: &Db, slot: &SlotId) -> bool {
+    let Some(sifo) = db.ephemeral.get_slot_info(slot) else {
+        return false;
+    };
+    if sifo.ground_start {
+        return false;
+    }
+    match db.ephemeral.cfg.unit_classification.get(&sifo.typ) {
+        Some(tags) => tags.contains(UnitTag::Aircraft) || tags.contains(UnitTag::Helicopter),
+        None => true,
+    }
+}
+
+fn unit_in_active_flight(
+    ctx: &Context,
+    db: &Db,
+    lua: MizLua,
+    ucid: &Ucid,
+    unit_id: Option<&DcsOid<ClassUnit>>,
+) -> bool {
+    if let Some(id) = unit_id {
+        if ctx.airborne.contains(id) {
+            return true;
+        }
+        if let Ok(unit) = Unit::get_instance(lua, id) {
+            if unit.is_exist().unwrap_or(false) && unit.in_air().unwrap_or(false) {
+                return true;
+            }
+        }
+    }
+    if db
+        .persisted
+        .players
+        .get(ucid)
+        .and_then(|p| p.airborne)
+        .is_some()
+    {
+        return true;
+    }
+    db.persisted
+        .players
+        .get(ucid)
+        .and_then(|p| p.current_slot.as_ref())
+        .and_then(|(_, inst)| inst.as_ref())
+        .is_some_and(|inst| inst.in_air)
+}
+
+fn airborne_deslot_block(
+    ctx: &Context,
+    lua: MizLua,
+    ucid: Ucid,
+    unit_id: Option<&DcsOid<ClassUnit>>,
+) -> Option<(Side, SlotId)> {
+    if !ctx.db.ephemeral.cfg.block_airborne_deslot {
+        return None;
+    }
+    if let Some(id) = unit_id {
+        if let Some((_, side, slot)) = ctx.db.ephemeral.airborne_release_block.get(id) {
+            return Some((*side, *slot));
+        }
+    }
+    if let Some((side, slot)) = ctx.db.ephemeral.airborne_release_block_for_ucid(&ucid) {
+        return Some((side, slot));
+    }
+    let slot = unit_id
+        .and_then(|id| ctx.db.ephemeral.get_slot_by_object_id(id).copied())
+        .or_else(|| {
+            ctx.db
+                .persisted
+                .players
+                .get(&ucid)
+                .and_then(|p| p.current_slot.as_ref().map(|(s, _)| *s))
+        })
+        .or_else(|| ctx.db.ephemeral.slot_for_ucid(&ucid))?;
+    if !is_aircraft_slot(&ctx.db, &slot) {
+        return None;
+    }
+    if !unit_in_active_flight(ctx, &ctx.db, lua, &ucid, unit_id) {
+        return None;
+    }
+    let side = ctx
+        .db
+        .ephemeral
+        .get_slot_info(&slot)
+        .map(|s| s.side)
+        .unwrap_or(ctx.db.persisted.players.get(&ucid)?.side);
+    Some((side, slot))
+}
+
+fn register_airborne_release_block(
+    ctx: &mut Context,
+    unit_id: &DcsOid<ClassUnit>,
+    ucid: Ucid,
+    side: Side,
+    slot: SlotId,
+) {
+    ctx.db
+        .ephemeral
+        .register_airborne_release_block(unit_id.clone(), ucid, side, slot);
+    ctx.db.ephemeral.cancel_force_to_spectators(&ucid);
+}
+
+fn notify_airborne_release_blocked(ctx: &mut Context, ucid: Ucid) {
+    let Some(player_id) = ctx.connected.id_by_ucid.get(&ucid).copied() else {
+        return;
+    };
+    if !ctx.db.ephemeral.airborne_release_warned.insert(ucid) {
+        return;
+    }
+    ctx.db.ephemeral.cancel_force_to_spectators(&ucid);
+    ctx.db.ephemeral.msgs().send(
+        MsgTyp::Chat(Some(player_id)),
+        format_compact!(
+            "cannot deslot while airborne; use F1 to select your aircraft or land at a friendly base"
+        ),
+    );
+    info!("airborne RELEASE SLOT blocked for {ucid:?}");
+}
+
+fn on_player_change_slot(lua: HooksLua, id: PlayerId) -> Result<()> {
+    let start_ts = Utc::now();
+    let ctx = unsafe { Context::get_mut() };
+    let res = (|| {
+        let ifo = ctx
+            .connected
+            .get_or_lookup_player_info(lua, id)?
+            .clone();
+        let (_, slot) = Net::singleton(MizLua::from_env(lua))?.get_slot(id)?;
+        if blocked_aircraft_slot(ctx, &ifo.ucid).is_some() && slot_exits_aircraft(&slot) {
+            return Ok(());
+        }
+        Ok(())
+    })();
+    record_perf(
+        &mut Arc::make_mut(&mut unsafe { Perf::get_mut() }.inner).dcs_hooks,
+        start_ts,
+    );
+    res
 }
 
 fn on_player_try_change_slot(
@@ -546,6 +806,25 @@ fn unit_killed(
     id: DcsOid<ClassUnit>,
     now: DateTime<Utc>,
 ) -> Result<()> {
+    if ctx.db.ephemeral.cfg.block_airborne_deslot {
+        if let Some((ucid, side, slot)) = ctx
+            .db
+            .ephemeral
+            .airborne_release_block
+            .get(&id)
+            .map(|(u, s, sl)| (*u, *s, *sl))
+        {
+            try_airborne_cockpit_restore(lua, ctx, &id, ucid, side, slot, "pilotdead");
+            info!("suppressed unit death after blocked RELEASE SLOT for unit {id:?}");
+            return Ok(());
+        }
+        if let Some(ucid) = ctx.db.player_in_unit(false, &id) {
+            if airborne_deslot_block(ctx, lua, ucid, Some(&id)).is_some() {
+                info!("suppressed unit death after blocked RELEASE SLOT for {ucid:?}");
+                return Ok(());
+            }
+        }
+    }
     ctx.recently_landed.remove(&id);
     ctx.shots_out.dead(id.clone(), now);
     if let Err(e) = ctx.jtac.unit_dead(lua, &mut ctx.db, &id) {
@@ -611,6 +890,28 @@ fn on_event(lua: MizLua, ev: Event) -> Result<()> {
         }
         Event::PlayerLeaveUnit(e) => {
             if let Some(initiator) = e.initiator {
+                if let Some(ucid) = ctx.db.player_in_unit(false, &initiator) {
+                    if let Some((side, slot)) =
+                        airborne_deslot_block(ctx, lua, ucid, Some(&initiator))
+                    {
+                        try_airborne_cockpit_restore(
+                            lua, ctx, &initiator, ucid, side, slot, "leave",
+                        );
+                        register_airborne_release_block(
+                            ctx, &initiator, ucid, side, slot,
+                        );
+                        if let Err(e) =
+                            schedule_airborne_restore_retries(lua, initiator.clone())
+                        {
+                            warn!("airborne cockpit retry schedule failed {e:?}");
+                        }
+                        notify_airborne_release_blocked(ctx, ucid);
+                        return Ok(());
+                    }
+                }
+                if ctx.db.ephemeral.airborne_release_block.contains_key(&initiator) {
+                    return Ok(());
+                }
                 if let Some(ucid) = ctx.db.player_in_unit(false, &initiator) {
                     if let Some(player) = ctx.db.player(&ucid) {
                         if let Some((_, Some(inst))) = player.current_slot.as_ref() {
@@ -773,6 +1074,9 @@ fn on_event(lua: MizLua, ev: Event) -> Result<()> {
         Event::Land(e) | Event::PostponedLand(e) => {
             if let Ok(unit) = e.initiator.as_unit() {
                 let id = unit.object_id()?;
+                if let Some(ucid) = ctx.db.player_in_unit(false, &id) {
+                    ctx.db.ephemeral.clear_airborne_release_block_ucid(&ucid);
+                }
                 if !ctx.recently_born.contains_key(&id) && ctx.airborne.remove(&id) {
                     ctx.recently_landed.insert(id, Utc::now());
                 }
@@ -1477,6 +1781,10 @@ fn delayed_init_miz(lua: MizLua) -> Result<()> {
     };
     debug!("sortie is {:?}", ctx.sortie);
     let cfg = Arc::new(Cfg::load(&path)?);
+    info!(
+        "campaign cfg: block_airborne_deslot={}",
+        cfg.block_airborne_deslot
+    );
     let export_path = FowlMizExport::path(&path);
     let fowl_export = Arc::new(FowlMizExport::load_required(&path)?);
     info!("loaded Fowl mission export from {:?}", export_path);
@@ -1621,6 +1929,7 @@ fn init_hooks(lua: HooksLua) -> Result<()> {
     info!("setting user hooks");
     UserHooks::new(lua)
         .on_player_try_change_slot(on_player_try_change_slot)?
+        .on_player_change_slot(on_player_change_slot)?
         .on_mission_load_end(on_mission_load_end)?
         .on_player_try_connect(on_player_try_connect)?
         .on_player_try_send_chat(on_player_try_send_chat)?

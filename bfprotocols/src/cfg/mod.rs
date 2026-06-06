@@ -927,6 +927,10 @@ fn default_lives_birth() -> bool {
     false
 }
 
+fn default_block_airborne_deslot() -> bool {
+    false
+}
+
 fn default_supply_transfer_players() -> bool {
     true
 }
@@ -1087,6 +1091,10 @@ pub struct Cfg {
     /// instead of on takeoff.
     #[serde(default = "default_lives_birth")]
     pub lives_birth: bool,
+    /// If true, aircraft/helicopter pilots cannot move to spectators while
+    /// `Player::airborne` is set (after takeoff until a friendly landing clears it).
+    #[serde(default = "default_block_airborne_deslot")]
+    pub block_airborne_deslot: bool,
     /// Available actions per side
     #[serde(default)]
     pub actions: FxHashMap<Side, IndexMap<String, Action, FxBuildHasher>>,
