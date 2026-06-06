@@ -126,6 +126,10 @@ impl<'lua> Unit<'lua> {
         Ok(self.t.call_method("getName", ())?)
     }
 
+    pub fn set_name(&self, name: String) -> Result<()> {
+        Ok(self.t.call_method("setName", name)?)
+    }
+
     pub fn get_player_name(&self) -> Result<Option<String>> {
         Ok(self.t.call_method("getPlayerName", ())?)
     }

@@ -249,6 +249,10 @@ struct Context {
     recently_landed: FxHashMap<DcsOid<ClassUnit>, DateTime<Utc>>,
     recently_born: FxHashMap<DcsOid<ClassUnit>, DateTime<Utc>>,
     airborne: FxHashSet<DcsOid<ClassUnit>>,
+    /// Undamaged + fueled at last check; voluntary ejection penalty eligibility.
+    airborne_voluntary_eject: FxHashSet<Ucid>,
+    /// Deslot penalty deferred so disconnect can cancel before apply.
+    pending_airborne_deslot_penalty: FxHashMap<Ucid, DateTime<Utc>>,
     captureable: FxHashMap<ObjectiveId, usize>,
     shots_out: ShotDb,
     menu_init_queue: IndexSet<SlotId, FxBuildHasher>,
@@ -422,7 +426,7 @@ fn process_slot_rejection(ctx: &mut Context, id: PlayerId, ucid: Ucid, rej: Slot
             );
         }
         SlotAuth::NoLives(typ) => {
-            let msg = match lives(&mut ctx.db, &ucid, Some(typ), true) {
+            let msg = match lives(&mut ctx.db, &ucid, Some(typ), true, LivesFormat::Chat) {
                 Ok(s) => s,
                 Err(e) => {
                     error!("failed to get lives for {} {:?}", ucid, e);
@@ -450,13 +454,17 @@ fn process_slot_rejection(ctx: &mut Context, id: PlayerId, ucid: Ucid, rej: Slot
             ));
             ctx.db.ephemeral.msgs().send(MsgTyp::Chat(Some(id)), msg);
         }
-        SlotAuth::AirborneDeslotBlocked => {
-            ctx.db.ephemeral.msgs().send(
-                MsgTyp::Chat(Some(id)),
+        SlotAuth::AirborneDeslotBlocked { remaining_secs } => {
+            let msg = if remaining_secs > 0 {
                 format_compact!(
-                    "cannot deslot while airborne; use F1 to return to your aircraft or land at a friendly base"
-                ),
-            );
+                    "slot change blocked: {remaining_secs}s remaining (airborne deslot penalty)"
+                )
+            } else {
+                format_compact!(
+                    "cannot switch to observer/spectator slots while airborne"
+                )
+            };
+            ctx.db.ephemeral.msgs().send(MsgTyp::Chat(Some(id)), msg);
         }
         SlotAuth::NotRegistered(_) => warn!("unexpected NotRegistered"),
         SlotAuth::Yes(_) => warn!("slot was not rejected!"),
@@ -472,26 +480,25 @@ fn try_occupy_slot(
     slot: SlotId,
 ) -> Result<bool> {
     let miz = MizLua::from_env(lua);
-    if let Some((_, fly_slot)) = blocked_aircraft_slot(ctx, &ifo.ucid) {
-        if slot_exits_aircraft(&slot) {
-            process_slot_rejection(ctx, id, ifo.ucid, SlotAuth::AirborneDeslotBlocked);
-            return Ok(false);
-        }
-        if same_flyable_slot(&slot, &fly_slot) {
-            if let Some((unit_id, side, fly_slot)) = blocked_aircraft_unit(ctx, &ifo.ucid) {
-                try_airborne_cockpit_restore(
-                    miz, ctx, &unit_id, ifo.ucid, side, fly_slot, "f1",
-                );
-            }
-            ctx.db.ephemeral.cancel_force_to_spectators(&ifo.ucid);
-        }
-    } else if slot_exits_aircraft(&slot) {
-        if airborne_deslot_block(ctx, miz, ifo.ucid, None).is_some() {
-            process_slot_rejection(ctx, id, ifo.ucid, SlotAuth::AirborneDeslotBlocked);
+    let now = Utc::now();
+    sanitize_airborne_slot_lock(ctx, miz, &ifo.ucid, now);
+    if ctx.db.ephemeral.cfg.airborne_deslot_block {
+        if let Some(secs) = ctx.db.airborne_observer_penalty_remaining(&ifo.ucid, now) {
+            process_slot_rejection(
+                ctx,
+                id,
+                ifo.ucid,
+                SlotAuth::AirborneDeslotBlocked { remaining_secs: secs },
+            );
             return Ok(false);
         }
     }
-    let now = Utc::now();
+    if slot_exits_aircraft(&slot) {
+        if let Some(rej) = in_flight_exit_slot_block(ctx, miz, &ifo.ucid) {
+            process_slot_rejection(ctx, id, ifo.ucid, rej);
+            return Ok(false);
+        }
+    }
     match ctx.db.try_occupy_slot(miz, now, side, slot, &ifo.ucid) {
         SlotAuth::NotRegistered(side) => {
             let name = ifo.name.clone();
@@ -533,92 +540,226 @@ fn slot_exits_aircraft(slot: &SlotId) -> bool {
     !matches!(slot, SlotId::Unit(_) | SlotId::MultiCrew(_, _))
 }
 
-fn same_flyable_slot(a: &SlotId, b: &SlotId) -> bool {
-    match (a.as_unit_id(), b.as_unit_id()) {
-        (Some(ua), Some(ub)) => ua == ub,
-        _ => a == b,
-    }
-}
-
-fn blocked_aircraft_slot(ctx: &Context, ucid: &Ucid) -> Option<(Side, SlotId)> {
-    ctx.db.ephemeral.airborne_release_block_for_ucid(ucid)
-}
-
-fn blocked_aircraft_unit(
-    ctx: &Context,
-    ucid: &Ucid,
-) -> Option<(DcsOid<ClassUnit>, Side, SlotId)> {
-    ctx.db
-        .ephemeral
-        .airborne_release_block
-        .iter()
-        .find(|(_, (u, _, _))| *u == *ucid)
-        .map(|(id, (_, side, slot))| (id.clone(), *side, *slot))
-}
-
-fn try_airborne_cockpit_restore(
-    lua: MizLua,
+fn in_flight_exit_slot_block(
     ctx: &mut Context,
-    unit_id: &DcsOid<ClassUnit>,
-    ucid: Ucid,
-    side: Side,
-    slot: SlotId,
-    source: &str,
-) {
-    const MAX_ATTEMPTS: u8 = 3;
-    let attempts = ctx
-        .db
-        .ephemeral
-        .airborne_reslot_attempts
-        .entry(unit_id.clone())
-        .or_insert(0);
-    if *attempts >= MAX_ATTEMPTS {
-        return;
+    lua: MizLua,
+    ucid: &Ucid,
+) -> Option<SlotAuth> {
+    if !ctx.db.ephemeral.cfg.airborne_deslot_block {
+        return None;
     }
-    *attempts += 1;
-    let Some(player_id) = ctx.connected.id_by_ucid.get(&ucid).copied() else {
-        return;
-    };
-    let Ok(net) = Net::singleton(lua) else {
-        return;
-    };
-    if let Ok((_, cur)) = net.get_slot(player_id) {
-        if same_flyable_slot(&cur, &slot) {
-            info!("airborne cockpit already occupied ({source}) for {ucid:?}");
-            return;
+    let now = Utc::now();
+    if let Some(secs) = ctx.db.airborne_observer_penalty_remaining(ucid, now) {
+        return Some(SlotAuth::AirborneDeslotBlocked { remaining_secs: secs });
+    }
+    if player_unit_in_air(ctx, lua, ucid, None) {
+        return Some(SlotAuth::AirborneDeslotBlocked { remaining_secs: 0 });
+    }
+    None
+}
+
+fn player_unit_in_air(
+    ctx: &Context,
+    lua: MizLua,
+    ucid: &Ucid,
+    unit_id: Option<&DcsOid<ClassUnit>>,
+) -> bool {
+    let db = &ctx.db;
+    let mut ids: SmallVec<[DcsOid<ClassUnit>; 2]> = smallvec![];
+    if let Some(id) = unit_id {
+        ids.push(id.clone());
+    }
+    if let Some(slot) = db.ephemeral.slot_for_ucid(ucid) {
+        if let Some(id) = db.ephemeral.get_object_id_by_slot(&slot) {
+            if !ids.iter().any(|i| i == id) {
+                ids.push(id.clone());
+            }
         }
     }
-    ctx.db.ephemeral.cancel_force_to_spectators(&ucid);
-    match net.force_player_slot(player_id, side, slot) {
-        Ok(()) => info!("airborne cockpit restore ok ({source}) for {ucid:?}"),
-        Err(e) => warn!("airborne cockpit restore failed ({source}) for {ucid:?}: {e:?}"),
+    if let Some((slot, _)) = db
+        .persisted
+        .players
+        .get(ucid)
+        .and_then(|p| p.current_slot.as_ref())
+    {
+        if let Some(id) = db.ephemeral.get_object_id_by_slot(slot) {
+            if !ids.iter().any(|i| i == id) {
+                ids.push(id.clone());
+            }
+        }
+    }
+    for id in ids {
+        let Ok(unit) = Unit::get_instance(lua, &id) else {
+            continue;
+        };
+        if unit.is_exist().unwrap_or(false) && unit.in_air().unwrap_or(false) {
+            return true;
+        }
+    }
+    false
+}
+
+fn sanitize_airborne_slot_lock(ctx: &mut Context, lua: MizLua, ucid: &Ucid, now: DateTime<Utc>) {
+    let _ = ctx.db.airborne_observer_penalty_remaining(ucid, now);
+    if player_unit_in_air(ctx, lua, ucid, None) {
+        return;
+    }
+    clear_stale_airborne_session(ctx, *ucid);
+}
+
+fn clear_stale_airborne_session(ctx: &mut Context, ucid: Ucid) {
+    ctx.airborne_voluntary_eject.remove(&ucid);
+    ctx.airborne.retain(|id| ctx.db.player_in_unit(false, id) != Some(ucid));
+    ctx.db.clear_airborne_session(&ucid);
+}
+
+fn sanitize_connected_airborne_locks(ctx: &mut Context, lua: MizLua, now: DateTime<Utc>) {
+    let ucids: SmallVec<[Ucid; 16]> = ctx.connected.id_by_ucid.keys().copied().collect();
+    for ucid in ucids {
+        sanitize_airborne_slot_lock(ctx, lua, &ucid, now);
     }
 }
 
-fn schedule_airborne_restore_retries(
-    lua: MizLua,
-    unit_id: DcsOid<ClassUnit>,
-) -> Result<()> {
-    let timer = Timer::singleton(lua)?;
-    for delay in [0.5_f32, 2.] {
-        let when = timer.get_time()? + delay;
-        let unit_id = unit_id.clone();
-        timer.schedule_function(when, mlua::Value::Nil, move |lua, _, _| {
-            let ctx = unsafe { Context::get_mut() };
-            let Some((ucid, side, slot)) = ctx
-                .db
-                .ephemeral
-                .airborne_release_block
-                .get(&unit_id)
-                .map(|(u, s, sl)| (*u, *s, *sl))
-            else {
-                return Ok(None);
-            };
-            try_airborne_cockpit_restore(lua, ctx, &unit_id, ucid, side, slot, "retry");
-            Ok(None)
-        })?;
+#[derive(Debug, Clone, Copy)]
+enum AirbornePenaltyReason {
+    Deslot,
+    VoluntaryEjection,
+}
+
+impl AirbornePenaltyReason {
+    fn violation_all(self, name: &str) -> CompactString {
+        match self {
+            Self::Deslot => format_compact!(
+                "{name} performed unauthorized deslot while airborne"
+            ),
+            Self::VoluntaryEjection => format_compact!(
+                "{name} performed voluntary ejection while airborne"
+            ),
+        }
     }
-    Ok(())
+
+    fn violation_player(self) -> &'static str {
+        match self {
+            Self::Deslot => "Unauthorized deslot while airborne",
+            Self::VoluntaryEjection => "Voluntary ejection while airborne",
+        }
+    }
+}
+
+fn notify_airborne_observer_penalty(
+    ctx: &mut Context,
+    ucid: Ucid,
+    penalty_secs: u32,
+    reason: AirbornePenaltyReason,
+) {
+    let penalty_mins = penalty_secs.div_ceil(60);
+    let penalty_points = ctx.db.ephemeral.cfg.airborne_deslot_penalty_points;
+    let name = ctx
+        .db
+        .player(&ucid)
+        .map(|p| p.name.clone())
+        .unwrap_or_else(|| "unknown".into());
+    let penalty_detail = format_compact!(
+        "{penalty_points} points deducted, may not slot for {penalty_mins} min"
+    );
+    ctx.db.ephemeral.msgs().send(
+        MsgTyp::Chat(None),
+        format_compact!(
+            "{}: {penalty_detail}",
+            reason.violation_all(&name)
+        ),
+    );
+    if let Some(player_id) = ctx.connected.id_by_ucid.get(&ucid).copied() {
+        ctx.db.ephemeral.msgs().send(
+            MsgTyp::Chat(Some(player_id)),
+            format_compact!(
+                "{}: {penalty_points} points deducted, you may not slot for {penalty_mins} min",
+                reason.violation_player()
+            ),
+        );
+    }
+    info!(
+        "airborne observer penalty {penalty_secs}s ({reason:?}) for {ucid:?} ({name}): {penalty_points} points"
+    );
+}
+
+const AIRBORNE_DESLOT_PENALTY_DEBOUNCE: Duration = Duration::seconds(1);
+
+fn penalize_airborne_exit(
+    ctx: &mut Context,
+    ucid: Ucid,
+    now: DateTime<Utc>,
+    reason: AirbornePenaltyReason,
+) {
+    let penalty_secs = ctx.db.ephemeral.cfg.airborne_deslot_penalty_secs;
+    if ctx.db.apply_airborne_observer_penalty(&ucid, now) {
+        notify_airborne_observer_penalty(ctx, ucid, penalty_secs, reason);
+    }
+    ctx.db.ephemeral.cancel_force_to_spectators(&ucid);
+}
+
+fn schedule_airborne_deslot_penalty(ctx: &mut Context, ucid: Ucid, when: DateTime<Utc>) {
+    ctx.pending_airborne_deslot_penalty.insert(ucid, when);
+}
+
+fn cancel_airborne_deslot_penalty(ctx: &mut Context, ucid: &Ucid) {
+    ctx.pending_airborne_deslot_penalty.remove(ucid);
+}
+
+fn process_pending_airborne_deslot_penalties(ctx: &mut Context, now: DateTime<Utc>) {
+    let pending: SmallVec<[(Ucid, DateTime<Utc>); 8]> = ctx
+        .pending_airborne_deslot_penalty
+        .iter()
+        .map(|(&ucid, &when)| (ucid, when))
+        .collect();
+    for (ucid, scheduled) in pending {
+        if now - scheduled < AIRBORNE_DESLOT_PENALTY_DEBOUNCE {
+            continue;
+        }
+        ctx.pending_airborne_deslot_penalty.remove(&ucid);
+        if ctx.connected.id_by_ucid.contains_key(&ucid) {
+            penalize_airborne_exit(ctx, ucid, now, AirbornePenaltyReason::Deslot);
+        } else {
+            info!("airborne deslot penalty skipped for {ucid:?} (disconnected)");
+        }
+    }
+}
+
+fn finish_airborne_exit(ctx: &mut Context, ucid: Ucid, unit_id: &DcsOid<ClassUnit>) {
+    ctx.airborne.remove(unit_id);
+    clear_stale_airborne_session(ctx, ucid);
+}
+
+fn mark_airborne_voluntary_eject(ctx: &mut Context, ucid: Ucid) {
+    ctx.airborne_voluntary_eject.insert(ucid);
+}
+
+fn clear_airborne_voluntary_eject_on_damage(ctx: &mut Context, unit_id: &DcsOid<ClassUnit>) {
+    if !ctx.airborne.contains(unit_id) {
+        return;
+    }
+    let Some(ucid) = ctx.db.player_in_unit(false, unit_id) else {
+        return;
+    };
+    ctx.airborne_voluntary_eject.remove(&ucid);
+}
+
+fn sync_airborne_voluntary_eject_fuel(ctx: &mut Context, lua: MizLua) {
+    let ucids: SmallVec<[Ucid; 8]> = ctx.airborne_voluntary_eject.iter().copied().collect();
+    for ucid in ucids {
+        let Some(slot) = ctx.db.ephemeral.slot_for_ucid(&ucid) else {
+            continue;
+        };
+        let Some(id) = ctx.db.ephemeral.get_object_id_by_slot(&slot).cloned() else {
+            continue;
+        };
+        let Ok(unit) = Unit::get_instance(lua, &id) else {
+            continue;
+        };
+        if unit.get_fuel().ok().is_some_and(|f| f <= 0.) {
+            ctx.airborne_voluntary_eject.remove(&ucid);
+        }
+    }
 }
 
 fn is_aircraft_slot(db: &Db, slot: &SlotId) -> bool {
@@ -636,36 +777,11 @@ fn is_aircraft_slot(db: &Db, slot: &SlotId) -> bool {
 
 fn unit_in_active_flight(
     ctx: &Context,
-    db: &Db,
     lua: MizLua,
     ucid: &Ucid,
     unit_id: Option<&DcsOid<ClassUnit>>,
 ) -> bool {
-    if let Some(id) = unit_id {
-        if ctx.airborne.contains(id) {
-            return true;
-        }
-        if let Ok(unit) = Unit::get_instance(lua, id) {
-            if unit.is_exist().unwrap_or(false) && unit.in_air().unwrap_or(false) {
-                return true;
-            }
-        }
-    }
-    if db
-        .persisted
-        .players
-        .get(ucid)
-        .and_then(|p| p.airborne)
-        .is_some()
-    {
-        return true;
-    }
-    db.persisted
-        .players
-        .get(ucid)
-        .and_then(|p| p.current_slot.as_ref())
-        .and_then(|(_, inst)| inst.as_ref())
-        .is_some_and(|inst| inst.in_air)
+    player_unit_in_air(ctx, lua, ucid, unit_id)
 }
 
 fn airborne_deslot_block(
@@ -674,16 +790,11 @@ fn airborne_deslot_block(
     ucid: Ucid,
     unit_id: Option<&DcsOid<ClassUnit>>,
 ) -> Option<(Side, SlotId)> {
-    if !ctx.db.ephemeral.cfg.block_airborne_deslot {
+    if !ctx.db.ephemeral.cfg.airborne_deslot_block {
         return None;
     }
-    if let Some(id) = unit_id {
-        if let Some((_, side, slot)) = ctx.db.ephemeral.airborne_release_block.get(id) {
-            return Some((*side, *slot));
-        }
-    }
-    if let Some((side, slot)) = ctx.db.ephemeral.airborne_release_block_for_ucid(&ucid) {
-        return Some((side, slot));
+    if !unit_in_active_flight(ctx, lua, &ucid, unit_id) {
+        return None;
     }
     let slot = unit_id
         .and_then(|id| ctx.db.ephemeral.get_slot_by_object_id(id).copied())
@@ -698,9 +809,6 @@ fn airborne_deslot_block(
     if !is_aircraft_slot(&ctx.db, &slot) {
         return None;
     }
-    if !unit_in_active_flight(ctx, &ctx.db, lua, &ucid, unit_id) {
-        return None;
-    }
     let side = ctx
         .db
         .ephemeral
@@ -710,48 +818,14 @@ fn airborne_deslot_block(
     Some((side, slot))
 }
 
-fn register_airborne_release_block(
-    ctx: &mut Context,
-    unit_id: &DcsOid<ClassUnit>,
-    ucid: Ucid,
-    side: Side,
-    slot: SlotId,
-) {
-    ctx.db
-        .ephemeral
-        .register_airborne_release_block(unit_id.clone(), ucid, side, slot);
-    ctx.db.ephemeral.cancel_force_to_spectators(&ucid);
-}
-
-fn notify_airborne_release_blocked(ctx: &mut Context, ucid: Ucid) {
-    let Some(player_id) = ctx.connected.id_by_ucid.get(&ucid).copied() else {
-        return;
-    };
-    if !ctx.db.ephemeral.airborne_release_warned.insert(ucid) {
-        return;
-    }
-    ctx.db.ephemeral.cancel_force_to_spectators(&ucid);
-    ctx.db.ephemeral.msgs().send(
-        MsgTyp::Chat(Some(player_id)),
-        format_compact!(
-            "cannot deslot while airborne; use F1 to select your aircraft or land at a friendly base"
-        ),
-    );
-    info!("airborne RELEASE SLOT blocked for {ucid:?}");
-}
-
 fn on_player_change_slot(lua: HooksLua, id: PlayerId) -> Result<()> {
     let start_ts = Utc::now();
     let ctx = unsafe { Context::get_mut() };
     let res = (|| {
-        let ifo = ctx
+        let _ifo = ctx
             .connected
             .get_or_lookup_player_info(lua, id)?
             .clone();
-        let (_, slot) = Net::singleton(MizLua::from_env(lua))?.get_slot(id)?;
-        if blocked_aircraft_slot(ctx, &ifo.ucid).is_some() && slot_exits_aircraft(&slot) {
-            return Ok(());
-        }
         Ok(())
     })();
     record_perf(
@@ -806,21 +880,12 @@ fn unit_killed(
     id: DcsOid<ClassUnit>,
     now: DateTime<Utc>,
 ) -> Result<()> {
-    if ctx.db.ephemeral.cfg.block_airborne_deslot {
-        if let Some((ucid, side, slot)) = ctx
-            .db
-            .ephemeral
-            .airborne_release_block
-            .get(&id)
-            .map(|(u, s, sl)| (*u, *s, *sl))
-        {
-            try_airborne_cockpit_restore(lua, ctx, &id, ucid, side, slot, "pilotdead");
-            info!("suppressed unit death after blocked RELEASE SLOT for unit {id:?}");
-            return Ok(());
-        }
+    if ctx.db.ephemeral.cfg.airborne_deslot_block {
         if let Some(ucid) = ctx.db.player_in_unit(false, &id) {
-            if airborne_deslot_block(ctx, lua, ucid, Some(&id)).is_some() {
-                info!("suppressed unit death after blocked RELEASE SLOT for {ucid:?}");
+            if ctx.db.persisted.players.get(&ucid).and_then(|p| p.airborne).is_some()
+                || airborne_deslot_block(ctx, lua, ucid, Some(&id)).is_some()
+            {
+                info!("suppressed campaign unit death after airborne exit for {ucid:?}");
                 return Ok(());
             }
         }
@@ -891,26 +956,12 @@ fn on_event(lua: MizLua, ev: Event) -> Result<()> {
         Event::PlayerLeaveUnit(e) => {
             if let Some(initiator) = e.initiator {
                 if let Some(ucid) = ctx.db.player_in_unit(false, &initiator) {
-                    if let Some((side, slot)) =
-                        airborne_deslot_block(ctx, lua, ucid, Some(&initiator))
-                    {
-                        try_airborne_cockpit_restore(
-                            lua, ctx, &initiator, ucid, side, slot, "leave",
-                        );
-                        register_airborne_release_block(
-                            ctx, &initiator, ucid, side, slot,
-                        );
-                        if let Err(e) =
-                            schedule_airborne_restore_retries(lua, initiator.clone())
-                        {
-                            warn!("airborne cockpit retry schedule failed {e:?}");
-                        }
-                        notify_airborne_release_blocked(ctx, ucid);
+                    if airborne_deslot_block(ctx, lua, ucid, Some(&initiator)).is_some() {
+                        schedule_airborne_deslot_penalty(ctx, ucid, start_ts);
+                        finish_airborne_exit(ctx, ucid, &initiator);
+                        ctx.db.player_deslot(&ucid);
                         return Ok(());
                     }
-                }
-                if ctx.db.ephemeral.airborne_release_block.contains_key(&initiator) {
-                    return Ok(());
                 }
                 if let Some(ucid) = ctx.db.player_in_unit(false, &initiator) {
                     if let Some(player) = ctx.db.player(&ucid) {
@@ -959,6 +1010,12 @@ fn on_event(lua: MizLua, ev: Event) -> Result<()> {
         }
         Event::Hit(e) | Event::Kill(e) => {
             if let Some(target) = e.target.as_ref().and_then(|t| t.as_unit().ok()) {
+                let target_id = target.object_id()?;
+                if let (Ok(life), Ok(life0)) = (target.get_life(), target.get_life0()) {
+                    if life < life0 {
+                        clear_airborne_voluntary_eject_on_damage(ctx, &target_id);
+                    }
+                }
                 let dead = target.get_life()? < 1;
                 if let Some(shooter) = e.initiator.and_then(|u| u.as_unit().ok()) {
                     if let Err(e) = ctx.shots_out.hit(
@@ -1033,11 +1090,65 @@ fn on_event(lua: MizLua, ev: Event) -> Result<()> {
             }
         }
         Event::Ejection(e) => {
-            if let Ok(unit) = e.initiator.as_unit() {
-                let id = unit.object_id()?;
+            if let Ok(aircraft) = e.initiator.as_unit() {
+                let id = aircraft.object_id()?;
+                let ucid = ctx.db.player_in_unit(false, &id);
+                if ctx.db.csar_enabled() {
+                    if let (Some(ucid), Ok(pilot)) = (ucid, e.target.as_unit()) {
+                        if let Err(e) =
+                            ctx.db.on_csar_ejection(lua, &aircraft, &pilot, ucid, start_ts)
+                        {
+                            error!("csar ejection failed {e:?}");
+                        } else {
+                            flush_markup_if_pending(ctx, lua);
+                        }
+                    }
+                }
+                if let Some(ucid) = ucid {
+                    let voluntary = ctx.airborne_voluntary_eject.contains(&ucid);
+                    let was_in_flight = voluntary
+                        || player_unit_in_air(ctx, lua, &ucid, Some(&id))
+                        || ctx
+                            .db
+                            .persisted
+                            .players
+                            .get(&ucid)
+                            .and_then(|p| p.airborne)
+                            .is_some();
+                    if was_in_flight {
+                        if voluntary {
+                            penalize_airborne_exit(
+                                ctx,
+                                ucid,
+                                start_ts,
+                                AirbornePenaltyReason::VoluntaryEjection,
+                            );
+                        } else {
+                            info!(
+                                "ejection bailout: no observer penalty for {ucid:?} (damaged or no fuel)"
+                            );
+                        }
+                    }
+                    finish_airborne_exit(ctx, ucid, &id);
+                    ctx.db.player_deslot(&ucid);
+                }
                 if let Err(e) = unit_killed(lua, ctx, id, start_ts) {
                     error!("2 unit killed failed {}", e)
                 }
+            }
+        }
+        Event::LandingAfterEjection => {
+            if ctx.db.csar_enabled() {
+                let ucids: SmallVec<[Ucid; 4]> =
+                    ctx.db.csar_active_ucids().collect();
+                for ucid in ucids {
+                    if let Err(e) =
+                        ctx.db.on_csar_landing_after_ejection(lua, start_ts, &ucid)
+                    {
+                        warn!("csar landing update failed for {ucid:?}: {e:?}");
+                    }
+                }
+                flush_markup_if_pending(ctx, lua);
             }
         }
         Event::Takeoff(e) | Event::PostponedTakeoff(e) => {
@@ -1051,8 +1162,15 @@ fn on_event(lua: MizLua, ev: Event) -> Result<()> {
                     let position = unit.get_ground_position()?.0;
                     match ctx.db.takeoff(Utc::now(), slot, &unit, position) {
                         Err(e) => error!("could not process takeoff, {:?}", e),
-                        Ok(TakeoffRes::NoLifeTaken) => (),
+                        Ok(TakeoffRes::NoLifeTaken) => {
+                            if let Some(ucid) = ctx.db.player_in_unit(false, &id) {
+                                mark_airborne_voluntary_eject(ctx, ucid);
+                            }
+                        }
                         Ok(TakeoffRes::TookLife(typ)) => {
+                            if let Some(ucid) = ctx.db.player_in_unit(false, &id) {
+                                mark_airborne_voluntary_eject(ctx, ucid);
+                            }
                             if let Err(e) =
                                 message_life(ctx, &slot, Some(typ), "life taken\n")
                             {
@@ -1075,7 +1193,7 @@ fn on_event(lua: MizLua, ev: Event) -> Result<()> {
             if let Ok(unit) = e.initiator.as_unit() {
                 let id = unit.object_id()?;
                 if let Some(ucid) = ctx.db.player_in_unit(false, &id) {
-                    ctx.db.ephemeral.clear_airborne_release_block_ucid(&ucid);
+                    ctx.airborne_voluntary_eject.remove(&ucid);
                 }
                 if !ctx.recently_born.contains_key(&id) && ctx.airborne.remove(&id) {
                     ctx.recently_landed.insert(id, Utc::now());
@@ -1110,6 +1228,19 @@ fn on_event(lua: MizLua, ev: Event) -> Result<()> {
     Ok(())
 }
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(crate) enum LivesFormat {
+    Chat,
+    Panel,
+}
+
+fn life_type_user_label(db: &Db, typ: LifeType, format: LivesFormat) -> CompactString {
+    match format {
+        LivesFormat::Panel => db.life_type_panel_label(typ).into(),
+        LivesFormat::Chat => db::csar::life_type_display_label(typ).into(),
+    }
+}
+
 /// After a life is returned: always show banked total (`cur/n`), never `1+cur/n`.
 fn format_lives_total(db: &mut Db, ucid: &Ucid, typ: LifeType) -> Result<CompactString> {
     db.maybe_reset_lives(ucid, Utc::now())?;
@@ -1117,16 +1248,80 @@ fn format_lives_total(db: &mut Db, ucid: &Ucid, typ: LifeType) -> Result<Compact
     let cfg = &db.ephemeral.cfg;
     let (n, reset_after) = cfg.default_lives[&typ];
     let now = Utc::now();
-    Ok(match player.lives.get(&typ) {
-        None => format_compact!("{typ} {n}/{n}"),
+    let label = life_type_user_label(db, typ, LivesFormat::Panel);
+    Ok(format_life_type(
+        &label,
+        typ,
+        player,
+        cfg,
+        now,
+        false,
+        None,
+        n,
+        reset_after,
+        LivesFormat::Panel,
+    ))
+}
+
+fn format_lives_reset_remaining(d: Duration) -> CompactString {
+    let d = d.max(Duration::zero());
+    let hrs = d.num_hours();
+    let min = d.num_minutes() - hrs * 60;
+    format_compact!("{hrs}:{min:02}")
+}
+
+fn format_life_type(
+    label: &str,
+    _typ: LifeType,
+    player: &db::player::Player,
+    cfg: &Cfg,
+    now: DateTime<Utc>,
+    include_slot_reserve: bool,
+    active_life_type: Option<LifeType>,
+    n: u8,
+    reset_after: u32,
+    format: LivesFormat,
+) -> CompactString {
+    let body = match player.lives.get(&_typ) {
+        None => format_compact!("{label} {n}/{n}"),
         Some((reset, cur)) => {
             let since_reset = now - *reset;
-            let reset = chatcmd::format_duration(
+            let reset = format_lives_reset_remaining(
                 Duration::seconds(reset_after as i64) - since_reset,
             );
-            format_compact!("{typ} {cur}/{n} resetting in {reset}")
+            if include_slot_reserve
+                && cfg.limited_lives
+                && cfg.lives_birth
+                && active_life_type == Some(_typ)
+            {
+                format_compact!("{label} 1+{cur}/{n} RST {reset}")
+            } else {
+                format_compact!("{label} {cur}/{n} RST {reset}")
+            }
         }
-    })
+    };
+    match format {
+        LivesFormat::Chat => format_compact!("[ {body} ]"),
+        LivesFormat::Panel => body,
+    }
+}
+
+fn format_downed_pilots_line(db: &Db, ucid: &Ucid, format: LivesFormat) -> CompactString {
+    let counts = db.csar_downed_counts(ucid);
+    if counts.is_empty() {
+        return CompactString::default();
+    }
+    let mut parts: SmallVec<[CompactString; 5]> = smallvec![];
+    for typ in db::csar::LIFE_TYPE_DISPLAY_ORDER {
+        if let Some(n) = counts.get(&typ) {
+            let label = life_type_user_label(db, typ, format);
+            parts.push(match format {
+                LivesFormat::Chat => format_compact!("[ {label} {n} ]"),
+                LivesFormat::Panel => format_compact!("{label} {n}"),
+            });
+        }
+    }
+    format_compact!(", Downed pilots : {}", parts.join(""))
 }
 
 fn lives(
@@ -1134,12 +1329,11 @@ fn lives(
     ucid: &Ucid,
     typfilter: Option<LifeType>,
     include_slot_reserve: bool,
+    format: LivesFormat,
 ) -> Result<CompactString> {
     db.maybe_reset_lives(ucid, Utc::now())?;
     let player = db.player(ucid).ok_or_else(|| anyhow!("no such player {:?}", ucid))?;
     let cfg = &db.ephemeral.cfg;
-    let lives = &player.lives;
-    let mut msg = CompactString::new("");
     let active_life_type = player
         .current_slot
         .as_ref()
@@ -1147,36 +1341,32 @@ fn lives(
         .and_then(|sifo| cfg.life_types.get(&sifo.typ))
         .copied();
     let now = Utc::now();
-    let mut first = true;
-    for (typ, (n, reset_after)) in &cfg.default_lives {
-        if typfilter.is_none() || Some(*typ) == typfilter {
-            if !first {
-                msg.push_str(" | ");
-            }
-            first = false;
-            match lives.get(typ) {
-                None => msg.push_str(&format_compact!("{typ} {n}/{n}")),
-                Some((reset, cur)) => {
-                    let since_reset = now - *reset;
-                    let reset = chatcmd::format_duration(
-                        Duration::seconds(*reset_after as i64) - since_reset,
-                    );
-                    if include_slot_reserve
-                        && cfg.limited_lives
-                        && cfg.lives_birth
-                        && active_life_type == Some(*typ)
-                    {
-                        msg.push_str(&format_compact!(
-                            "{typ} 1+{cur}/{n} resetting in {reset}"
-                        ));
-                    } else {
-                        msg.push_str(&format_compact!(
-                            "{typ} {cur}/{n} resetting in {reset}"
-                        ));
-                    }
-                }
-            }
+    let mut parts: SmallVec<[CompactString; 6]> = smallvec![];
+    for typ in db::csar::LIFE_TYPE_DISPLAY_ORDER {
+        if typfilter.is_some() && typfilter != Some(typ) {
+            continue;
         }
+        let Some(&(n, reset_after)) = cfg.default_lives.get(&typ) else {
+            continue;
+        };
+        let label = life_type_user_label(db, typ, format);
+        parts.push(format_life_type(
+            &label,
+            typ,
+            player,
+            cfg,
+            now,
+            include_slot_reserve,
+            active_life_type,
+            n,
+            reset_after,
+            format,
+        ));
+    }
+    let mut msg = format_compact!("Your lives : ");
+    msg.push_str(&parts.join(""));
+    if typfilter.is_none() {
+        msg.push_str(&format_downed_pilots_line(db, ucid, format));
     }
     Ok(msg)
 }
@@ -1195,7 +1385,7 @@ fn message_life(
         .ok_or_else(|| anyhow!("no player in slot {:?}", slot))?
         .clone();
     let mut msg = CompactString::new(msg);
-    if let Ok(lives) = lives(&mut ctx.db, &ucid, typ, true) {
+    if let Ok(lives) = lives(&mut ctx.db, &ucid, typ, true, LivesFormat::Panel) {
         msg.push_str(&lives)
     }
     ctx.db.ephemeral.msgs().panel_to_unit(10, false, uid, msg);
@@ -1231,8 +1421,11 @@ fn advise_captureable(ctx: &mut Context) -> Result<()> {
         let dur = ctx.captureable.entry(*oid).or_default();
         *dur += 1;
         if *dur == 10 {
-            let m =
-                format_compact!("{} is now capturable", ctx.db.objective(oid)?.name());
+            let obj = ctx.db.objective(oid)?;
+            let m = format_compact!(
+                "{} is now capturable",
+                ctx.db.objective_f10_map_label(obj)
+            );
             ctx.db.ephemeral.msgs().panel_to_all(30, false, m);
         }
     }
@@ -1242,7 +1435,7 @@ fn advise_captureable(ctx: &mut Context) -> Result<()> {
 
 fn advise_captured(ctx: &mut Context, lua: MizLua, ts: DateTime<Utc>) -> Result<()> {
     for (side, oid) in ctx.db.check_capture(lua, ts)? {
-        let name = ctx.db.objective(&oid)?.name();
+        let name = ctx.db.objective_f10_map_label(ctx.db.objective(&oid)?);
         let mcap = format_compact!("our forces have captured {}", name);
         let mlost = format_compact!("we have lost {}", name);
         ctx.db.ephemeral.msgs().panel_to_side(15, false, side, mcap);
@@ -1267,6 +1460,7 @@ fn generate_ewr_reports(ctx: &mut Context, now: DateTime<Utc>) -> Result<()> {
             ucid,
             player,
             inst,
+            &ctx.db,
             ctx.db.ephemeral.cfg.ewr_mode,
             ctx.db.ephemeral.cfg.ewr_delay,
         );
@@ -1579,13 +1773,19 @@ fn run_slow_timed_events(
                 for oid in threatened {
                     let obj = ctx.db.objective(&oid)?;
                     let owner = obj.owner();
-                    let msg = format_compact!("enemies spotted near {}", obj.name());
+                    let msg = format_compact!(
+                        "enemies spotted near {}",
+                        ctx.db.objective_f10_map_label(obj)
+                    );
                     ctx.db.ephemeral.msgs().panel_to_side(10, false, owner, msg)
                 }
                 for oid in cleared {
                     let obj = ctx.db.objective(&oid)?;
                     let owner = obj.owner();
-                    let msg = format_compact!("{} is no longer threatened", obj.name());
+                    let msg = format_compact!(
+                        "{} is no longer threatened",
+                        ctx.db.objective_f10_map_label(obj)
+                    );
                     ctx.db.ephemeral.msgs().panel_to_side(10, false, owner, msg)
                 }
             }
@@ -1637,6 +1837,7 @@ fn run_timed_events(
         Err(e) => error!("could not update player positions {e}"),
         Ok((i, dead)) => {
             ctx.last_player_position = i;
+            sync_airborne_voluntary_eject_fuel(ctx, lua);
             for id in dead {
                 if let Err(e) = unit_killed(lua, ctx, id.clone(), ts) {
                     error!("unit killed failed {:?} {:?}", id, e)
@@ -1645,6 +1846,8 @@ fn run_timed_events(
         }
     }
     record_perf(&mut perf.player_positions, ts);
+    sanitize_connected_airborne_locks(ctx, lua, ts);
+    process_pending_airborne_deslot_penalties(ctx, ts);
 
     match run_slow_timed_events(lua, ctx, perf, path, ts) {
         Ok(AdminResult::Continue) => (),
@@ -1782,8 +1985,11 @@ fn delayed_init_miz(lua: MizLua) -> Result<()> {
     debug!("sortie is {:?}", ctx.sortie);
     let cfg = Arc::new(Cfg::load(&path)?);
     info!(
-        "campaign cfg: block_airborne_deslot={}",
-        cfg.block_airborne_deslot
+        "campaign cfg: airborne_deslot_block={} airborne_deslot_penalty_secs={} airborne_deslot_penalty_points={} csar={}",
+        cfg.airborne_deslot_block,
+        cfg.airborne_deslot_penalty_secs,
+        cfg.airborne_deslot_penalty_points,
+        cfg.csar.enabled
     );
     let export_path = FowlMizExport::path(&path);
     let fowl_export = Arc::new(FowlMizExport::load_required(&path)?);
@@ -1878,6 +2084,10 @@ fn delayed_init_miz(lua: MizLua) -> Result<()> {
         ctx.db.ephemeral.msgs().send(MsgTyp::Chat(Some(id)), welcome);
     }
     info!("starting timed events");
+    ctx.db.rebuild_csar_marks();
+    if let Err(e) = ctx.db.flush_markup_messages(lua) {
+        warn!("csar mark rebuild flush failed {e:?}");
+    }
     start_timed_events(ctx, lua, path).context("starting the timed events loop")?;
     Ok(())
 }
@@ -1896,6 +2106,7 @@ fn on_player_disconnect(_: HooksLua, id: PlayerId) -> Result<()> {
     let ctx = unsafe { Context::get_mut() };
     if let Some(ifo) = ctx.connected.player_disconnected(id) {
         info!("deslotting disconnected player {}", ifo.ucid);
+        cancel_airborne_deslot_penalty(ctx, &ifo.ucid);
         ctx.db.player_disconnected(&ifo.ucid)
     }
     record_perf(

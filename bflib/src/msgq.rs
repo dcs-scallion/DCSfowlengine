@@ -56,6 +56,7 @@ pub enum MsgTyp {
         to: MarkDest,
         position: LuaVec3,
         read_only: bool,
+        message: Option<String>,
     },
 }
 
@@ -234,6 +235,7 @@ impl MsgQ {
                 to: MarkDest::All,
                 position: LuaVec3(Vector3::new(position.x, 0., position.y)),
                 read_only,
+                message: None,
             },
             text,
         );
@@ -255,10 +257,47 @@ impl MsgQ {
                 to: MarkDest::Side(side),
                 position: LuaVec3(Vector3::new(position.x, 0., position.y)),
                 read_only,
+                message: None,
             },
             text,
         );
         id
+    }
+
+    pub fn coalition_point_mark(
+        &mut self,
+        side: Side,
+        id: MarkId,
+        position: LuaVec3,
+        read_only: bool,
+        label: String,
+        message: Option<String>,
+    ) {
+        self.0[PRI_SHAPE].push_back(Cmd::Send(Msg::Message {
+            typ: MsgTyp::Mark {
+                id,
+                to: MarkDest::Side(side),
+                position,
+                read_only,
+                message,
+            },
+            text: label,
+        }));
+    }
+
+    pub fn circle_to_side(
+        &mut self,
+        side: Side,
+        id: MarkId,
+        spec: CircleSpec,
+        message: Option<String>,
+    ) {
+        self.0[PRI_SHAPE].push_back(Cmd::Send(Msg::Circle {
+            id,
+            to: side.into(),
+            spec,
+            message,
+        }));
     }
 
     #[allow(dead_code)]
@@ -277,6 +316,7 @@ impl MsgQ {
                 to: MarkDest::Group(group),
                 position: LuaVec3(Vector3::new(position.x, 0., position.y)),
                 read_only,
+                message: None,
             },
             text,
         );
@@ -554,13 +594,21 @@ impl MsgQ {
                         to,
                         position,
                         read_only,
+                        message,
                     } => match to {
-                        MarkDest::All => act.mark_to_all(id, text, position, read_only, None),
-                        MarkDest::Side(side) => {
-                            act.mark_to_coalition(id, text, position, side, read_only, None)
+                        MarkDest::All => {
+                            act.mark_to_all(id, text, position, read_only, message)
                         }
+                        MarkDest::Side(side) => act.mark_to_coalition(
+                            id,
+                            text,
+                            position,
+                            side,
+                            read_only,
+                            message,
+                        ),
                         MarkDest::Group(group) => {
-                            act.mark_to_group(id, text, position, group, read_only, None)
+                            act.mark_to_group(id, text, position, group, read_only, message)
                         }
                     },
                     MsgTyp::Chat(to) => match to {

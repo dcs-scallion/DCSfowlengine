@@ -143,12 +143,10 @@ pub struct Ephemeral {
     used_pad_templates: FxHashSet<String>,
     pub(super) global_pad_templates: FxHashSet<String>,
     force_to_spectators: BTreeMap<DateTime<Utc>, SmallVec<[Ucid; 1]>>,
-    /// Active RELEASE SLOT block: suppress PilotDead deslot until friendly landing.
-    pub(crate) airborne_release_block: FxHashMap<DcsOid<ClassUnit>, (Ucid, Side, SlotId)>,
-    /// Chat hint already sent for active RELEASE SLOT block.
-    pub(crate) airborne_release_warned: FxHashSet<Ucid>,
-    /// `force_player_slot` restore attempts per unit (cap avoids event storms).
-    pub(crate) airborne_reslot_attempts: FxHashMap<DcsOid<ClassUnit>, u8>,
+    /// Ejected pilot DCS unit id -> owning player (CSAR).
+    pub(super) csar_pilot_unit: FxHashMap<DcsOid<ClassUnit>, Ucid>,
+    /// Pilot units to destroy on next CSAR tick (life reset without MizLua).
+    pub(super) pending_csar_pilot_destroy: Vec<DcsOid<ClassUnit>>,
     pub(super) units_able_to_move: IndexSet<UnitId, FxBuildHasher>,
     pub(super) groups_with_move_missions: FxHashMap<GroupId, Vector2>,
     pub(super) units_potentially_close_to_enemies: FxHashSet<UnitId>,
@@ -210,9 +208,8 @@ impl Default for Ephemeral {
             used_pad_templates: FxHashSet::default(),
             global_pad_templates: FxHashSet::default(),
             force_to_spectators: BTreeMap::default(),
-            airborne_release_block: FxHashMap::default(),
-            airborne_release_warned: FxHashSet::default(),
-            airborne_reslot_attempts: FxHashMap::default(),
+            csar_pilot_unit: FxHashMap::default(),
+            pending_csar_pilot_destroy: Vec::default(),
             units_able_to_move: IndexSet::default(),
             groups_with_move_missions: FxHashMap::default(),
             units_potentially_close_to_enemies: FxHashSet::default(),
@@ -704,41 +701,6 @@ impl Ephemeral {
     ) -> BTreeMap<DateTime<Utc>, SmallVec<[Ucid; 1]>> {
         let keep = self.force_to_spectators.split_off(&now);
         mem::replace(&mut self.force_to_spectators, keep)
-    }
-
-    pub fn register_airborne_release_block(
-        &mut self,
-        unit: DcsOid<ClassUnit>,
-        ucid: Ucid,
-        side: Side,
-        slot: SlotId,
-    ) {
-        self.airborne_release_block
-            .insert(unit, (ucid, side, slot));
-    }
-
-    pub fn clear_airborne_release_block_ucid(&mut self, ucid: &Ucid) {
-        let units: SmallVec<[DcsOid<ClassUnit>; 1]> = self
-            .airborne_release_block
-            .iter()
-            .filter(|(_, (u, _, _))| *u == *ucid)
-            .map(|(id, _)| id.clone())
-            .collect();
-        for id in units {
-            self.airborne_release_block.remove(&id);
-            self.airborne_reslot_attempts.remove(&id);
-        }
-        self.airborne_release_warned.remove(ucid);
-    }
-
-    pub fn airborne_release_block_for_ucid(
-        &self,
-        ucid: &Ucid,
-    ) -> Option<(Side, SlotId)> {
-        self.airborne_release_block
-            .values()
-            .find(|(u, _, _)| *u == *ucid)
-            .map(|(_, side, slot)| (*side, *slot))
     }
 
     pub fn cancel_force_to_spectators(&mut self, ucid: &Ucid) {

@@ -1979,7 +1979,10 @@ impl Default for Cfg {
             artillery_mission_range: 15000,
             alcm_mission_range: 600000,
             lock_sides: true,
-            block_airborne_deslot: true,
+            airborne_deslot_block: true,
+            airborne_deslot_penalty_secs: 300,
+            airborne_deslot_penalty_points: 0,
+            csar: CsarCfg { enabled: false },
             side_switches: Some(1),
             max_crates: Some(4),
             default_lives: FxHashMap::from_iter([

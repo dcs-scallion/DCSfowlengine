@@ -927,8 +927,23 @@ fn default_lives_birth() -> bool {
     false
 }
 
-fn default_block_airborne_deslot() -> bool {
+fn default_airborne_deslot_block() -> bool {
     false
+}
+
+fn default_airborne_deslot_penalty_secs() -> u32 {
+    300
+}
+
+fn default_airborne_deslot_penalty_points() -> u32 {
+    0
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct CsarCfg {
+    /// Keep ejected pilots in the world and hide them from JTAC (future CSAR missions).
+    #[serde(default)]
+    pub enabled: bool,
 }
 
 fn default_supply_transfer_players() -> bool {
@@ -1091,10 +1106,19 @@ pub struct Cfg {
     /// instead of on takeoff.
     #[serde(default = "default_lives_birth")]
     pub lives_birth: bool,
-    /// If true, aircraft/helicopter pilots cannot move to spectators while
-    /// `Player::airborne` is set (after takeoff until a friendly landing clears it).
-    #[serde(default = "default_block_airborne_deslot")]
-    pub block_airborne_deslot: bool,
+    /// If true, penalize RELEASE SLOT / ejection while airborne: block observer-type
+    /// slots for `airborne_deslot_penalty_secs` (wall clock, persisted across reconnect).
+    #[serde(default = "default_airborne_deslot_block")]
+    pub airborne_deslot_block: bool,
+    /// Observer/spectator lockout after leaving an airborne aircraft slot (seconds).
+    /// Only used when `airborne_deslot_block` is true; 0 disables the penalty timer.
+    #[serde(default = "default_airborne_deslot_penalty_secs")]
+    pub airborne_deslot_penalty_secs: u32,
+    /// Points deducted when an airborne deslot penalty is applied. 0 disables.
+    #[serde(default = "default_airborne_deslot_penalty_points")]
+    pub airborne_deslot_penalty_points: u32,
+    #[serde(default)]
+    pub csar: CsarCfg,
     /// Available actions per side
     #[serde(default)]
     pub actions: FxHashMap<Side, IndexMap<String, Action, FxBuildHasher>>,

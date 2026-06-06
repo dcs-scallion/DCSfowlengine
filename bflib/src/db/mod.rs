@@ -41,6 +41,7 @@ use tokio::sync::mpsc::UnboundedSender;
 pub mod actions;
 pub mod aliases;
 pub mod cargo;
+pub mod csar;
 pub mod ephemeral;
 pub mod front_line;
 pub mod group;
@@ -192,6 +193,25 @@ impl Db {
         aliases::resolve_objective_display_name(
             &self.ephemeral.objective_display_aliases,
             obj,
+        )
+    }
+
+    /// Alias plus F10 map kind suffix (`Senaki ⌂ HUB`, …).
+    pub fn objective_f10_map_label(&self, obj: &objective::Objective) -> String {
+        aliases::resolve_objective_f10_map_label(
+            &self.ephemeral.objective_display_aliases,
+            obj,
+        )
+    }
+
+    pub fn settings_display_name(&self, key: &str) -> String {
+        aliases::resolve_settings_alias(&self.ephemeral.objective_display_aliases, key)
+    }
+
+    pub fn life_type_panel_label(&self, typ: bfprotocols::cfg::LifeType) -> String {
+        aliases::resolve_life_type_panel_label(
+            &self.ephemeral.objective_display_aliases,
+            csar::life_type_display_label(typ),
         )
     }
 

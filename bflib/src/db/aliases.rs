@@ -97,6 +97,17 @@ fn objective_alias_lookup_keys(obj: &Objective) -> Vec<std::string::String> {
     keys
 }
 
+/// Generic lookup: internal key → alias value when present in `SETTINGS-aliases`.
+pub fn resolve_settings_alias(
+    aliases: &FxHashMap<String, std::string::String>,
+    key: &str,
+) -> std::string::String {
+    aliases
+        .get(key)
+        .cloned()
+        .unwrap_or_else(|| key.to_string())
+}
+
 /// User-facing label for map markup; `obj.name` stays the internal id for logistics and save.
 pub fn resolve_objective_display_name(
     aliases: &FxHashMap<String, std::string::String>,
@@ -124,6 +135,41 @@ pub fn resolve_objective_display_name(
         return display.clone();
     }
     obj.name.to_string()
+}
+
+/// Kind suffix appended to the alias on F10 objective overlay labels.
+pub fn objective_map_kind_label(kind: &ObjectiveKind) -> &'static str {
+    match kind {
+        ObjectiveKind::Logistics => "⌂ HUB",
+        ObjectiveKind::Production => "⌂",
+        _ => kind.name(),
+    }
+}
+
+/// Panel / map popup label for a life type: alias plus category when aliased.
+pub fn resolve_life_type_panel_label(
+    aliases: &FxHashMap<String, std::string::String>,
+    internal: &str,
+) -> std::string::String {
+    let alias = resolve_settings_alias(aliases, internal);
+    if alias.as_str() == internal {
+        alias
+    } else {
+        format!("{alias} {internal}")
+    }
+}
+
+/// F10 map overlay label: alias (when set) plus objective kind suffix.
+pub fn resolve_objective_f10_map_label(
+    aliases: &FxHashMap<String, std::string::String>,
+    obj: &Objective,
+) -> std::string::String {
+    let display = resolve_objective_display_name(aliases, obj);
+    if matches!(obj.kind, ObjectiveKind::Farp { mobile: true, .. }) {
+        display
+    } else {
+        format!("{} {}", display, objective_map_kind_label(&obj.kind))
+    }
 }
 
 fn push_token(out: &mut Vec<std::string::String>, s: &str) {

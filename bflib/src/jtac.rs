@@ -1658,6 +1658,13 @@ impl Jtacs {
             if player.side == jtac.side {
                 continue;
             }
+            if db.csar_hidden_from_jtac(ucid) {
+                let id = EnId::Player(*ucid);
+                if let Err(e) = jtac.remove_contact(lua, db, &id) {
+                    warn!("could not remove csar downed contact {ucid} {e:?}")
+                }
+                continue;
+            }
             let id = EnId::Player(*ucid);
             saw_units.insert(id);
             let detected = detected.entry(id).or_default();

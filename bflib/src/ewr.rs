@@ -160,6 +160,7 @@ impl Ewr {
         let aircraft: SmallVec<[(EnId, Side, Position3, Vector3); 128]> = {
             let players = db
                 .instanced_players()
+                .filter(|(ucid, _, _)| !db.csar_downed_pilot(ucid))
                 .filter(|(_, _, inst)| inst.in_air)
                 .map(|(ucid, player, inst)| {
                     (
@@ -259,6 +260,7 @@ impl Ewr {
         ucid: &Ucid,
         player: &Player,
         inst: &InstancedPlayer,
+        db: &Db,
         ewr_mode: EwrMode,
         ewr_delay: u32,
     ) -> SmallVec<[GibBraa; 64]> {
@@ -278,6 +280,11 @@ impl Ewr {
             let age = (now - track.last).num_seconds();
             let include = (friendly && track.side == side) || (!friendly && track.side != side);
             if include && age <= 120 && tucid != &ownship {
+                if let EnId::Player(pid) = tucid {
+                    if db.csar_downed_pilot(pid) {
+                        return age <= 120;
+                    }
+                }
                 let cpos = Vector2::new(track.pos.p.x, track.pos.p.z);
                 let range = na::distance(&pos.into(), &cpos.into());
                 let bearing = radians_to_degrees(azumith2d_to(pos, cpos));

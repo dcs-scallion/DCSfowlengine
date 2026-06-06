@@ -14,7 +14,7 @@ FITNESS FOR A PARTICULAR PURPOSE. See the GNU Affero Public License
 for more details.
 */
 
-use super::{Db, MapS, SetS, ephemeral::SlotInfo, group::DeployKind, objective::Objective};
+use super::{Db, MapS, SetS, csar::CsarDowned, ephemeral::SlotInfo, group::DeployKind, objective::Objective};
 use crate::{maybe, maybe_mut, objective_mut};
 use anyhow::{Context, Result, anyhow, bail};
 use bfprotocols::{
@@ -39,7 +39,8 @@ use dcso3::{
 };
 use log::{debug, error, info, warn};
 use netidx::utils::Either;
-use serde_derive::{Deserialize, Serialize};
+use serde::Deserialize;
+use serde_derive::Serialize;
 use smallvec::{SmallVec, smallvec};
 use std::cmp::{max, min};
 
@@ -64,7 +65,9 @@ pub enum SlotAuth {
     NotRegistered(Side),
     VehicleNotAvailable(Vehicle),
     Denied,
-    AirborneDeslotBlocked,
+    AirborneDeslotBlocked {
+        remaining_secs: u32,
+    },
 }
 
 pub enum RegErr {
@@ -80,7 +83,7 @@ pub enum TakeoffRes {
     OutOfPoints,
 }
 
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct InstancedPlayer {
     pub unit_name: String,
     pub position: Position3,
@@ -103,6 +106,12 @@ pub struct Player {
     pub crates: SetS<GroupId>,
     #[serde(default)]
     pub airborne: Option<LifeType>,
+    /// Wall-clock end of observer/spectator lockout after airborne RELEASE / ejection.
+    #[serde(default)]
+    pub airborne_observer_penalty_until: Option<DateTime<Utc>>,
+    /// Downed pilots awaiting CSAR (one entry per ejection; keyed by life type).
+    #[serde(default)]
+    pub csar_downed: Vec<CsarDowned>,
     #[serde(default)]
     pub points: i32,
     #[serde(default)]
@@ -120,6 +129,69 @@ pub struct Player {
 }
 
 impl Db {
+    pub fn apply_airborne_observer_penalty(&mut self, ucid: &Ucid, now: DateTime<Utc>) -> bool {
+        let secs = self.ephemeral.cfg.airborne_deslot_penalty_secs;
+        if !self.ephemeral.cfg.airborne_deslot_block || secs == 0 {
+            return false;
+        }
+        let Some(player) = self.persisted.players.get_mut_cow(ucid) else {
+            return false;
+        };
+        if player
+            .airborne_observer_penalty_until
+            .is_some_and(|until| now < until)
+        {
+            return false;
+        }
+        player.airborne_observer_penalty_until =
+            Some(now + Duration::seconds(secs as i64));
+        player.current_slot.take();
+        player.changing_slots = false;
+        self.ephemeral.dirty();
+        let penalty_points = self.ephemeral.cfg.airborne_deslot_penalty_points;
+        if penalty_points > 0 {
+            self.adjust_points(
+                ucid,
+                -(penalty_points as i32),
+                "airborne deslot penalty",
+            );
+        }
+        true
+    }
+
+    pub fn airborne_observer_penalty_remaining(
+        &mut self,
+        ucid: &Ucid,
+        now: DateTime<Utc>,
+    ) -> Option<u32> {
+        let max_secs = self.ephemeral.cfg.airborne_deslot_penalty_secs.max(1) as i64;
+        let player = self.persisted.players.get_mut_cow(ucid)?;
+        let mut until = player.airborne_observer_penalty_until?;
+        let cap = now + Duration::seconds(max_secs);
+        if until > cap {
+            warn!("airborne penalty capped for {ucid:?}");
+            until = cap;
+            player.airborne_observer_penalty_until = Some(until);
+            self.ephemeral.dirty();
+        }
+        if now >= until {
+            player.airborne_observer_penalty_until = None;
+            self.ephemeral.dirty();
+            return None;
+        }
+        Some((until - now).num_seconds().max(0) as u32)
+    }
+
+    pub fn clear_airborne_session(&mut self, ucid: &Ucid) {
+        if let Some(player) = self.persisted.players.get_mut_cow(ucid) {
+            player.airborne = None;
+            if let Some((_, Some(inst))) = &mut player.current_slot {
+                inst.in_air = false;
+            }
+            self.ephemeral.dirty();
+        }
+    }
+
     /// Clear persisted slot state after ephemeral mappings are already gone.
     pub fn sync_player_deslot_state(&mut self, ucid: &Ucid, slot: Option<SlotId>) {
         if let Some(player) = self.persisted.players.get_mut_cow(ucid) {
@@ -240,6 +312,7 @@ impl Db {
 
     pub fn player_reset_lives(&mut self, ucid: &Ucid) -> Result<()> {
         maybe_mut!(self.persisted.players, ucid, "player")?.lives = MapS::new();
+        self.clear_csar_downed(ucid);
         self.ephemeral.stat(Stat::Life {
             id: *ucid,
             lives: MapS::new(),
@@ -249,15 +322,27 @@ impl Db {
     }
 
     pub fn instanced_players(&self) -> impl Iterator<Item = (&Ucid, &Player, &InstancedPlayer)> {
-        self.ephemeral.players_by_slot.values().filter_map(|ucid| {
-            self.persisted.players.get(ucid).and_then(|player| {
-                player
-                    .current_slot
-                    .as_ref()
-                    .and_then(|(_, inst)| inst.as_ref())
-                    .map(|inst| (ucid, player, inst))
+        self.ephemeral
+            .players_by_slot
+            .values()
+            .filter_map(|ucid| {
+                self.persisted.players.get(ucid).and_then(|player| {
+                    player
+                        .current_slot
+                        .as_ref()
+                        .and_then(|(_, inst)| inst.as_ref())
+                        .map(|inst| (ucid, player, inst))
+                })
             })
-        })
+            .chain(self.ephemeral.csar_pilot_unit.iter().filter_map(|(pilot_oid, ucid)| {
+                self.persisted.players.get(ucid).and_then(|player| {
+                    player
+                        .csar_downed
+                        .iter()
+                        .find(|c| c.pilot_unit == *pilot_oid)
+                        .map(|csar| (ucid, player, &csar.inst))
+                })
+            }))
     }
 
     pub fn player_in_unit(&self, include_deployed: bool, id: &DcsOid<ClassUnit>) -> Option<Ucid> {
@@ -521,30 +606,40 @@ impl Db {
 
     pub fn maybe_reset_lives(&mut self, ucid: &Ucid, now: DateTime<Utc>) -> Result<()> {
         let mut lt_to_reset: SmallVec<[LifeType; 2]> = smallvec![];
-        let player = self
-            .persisted
-            .players
-            .get_mut_cow(ucid)
-            .ok_or_else(|| anyhow!("no such player {:?}", ucid))?;
-        for (lt, (reset, _n)) in player.lives.into_iter() {
-            let reset_after = Duration::seconds(
-                maybe!(self.ephemeral.cfg.default_lives, lt, "default life")?.1 as i64,
-            );
-            if now - reset >= reset_after {
-                lt_to_reset.push(*lt);
-            }
-        }
         let mut reset = false;
-        for lt in lt_to_reset {
-            player.lives.remove_cow(&lt);
-            reset = true;
-            self.ephemeral.dirty();
-        }
+        let lives_after = {
+            let player = self
+                .persisted
+                .players
+                .get_mut_cow(ucid)
+                .ok_or_else(|| anyhow!("no such player {:?}", ucid))?;
+            for (lt, (reset_ts, _n)) in player.lives.into_iter() {
+                let reset_after = Duration::seconds(
+                    maybe!(self.ephemeral.cfg.default_lives, lt, "default life")?.1 as i64,
+                );
+                if now - reset_ts >= reset_after {
+                    lt_to_reset.push(*lt);
+                }
+            }
+            for lt in &lt_to_reset {
+                player.lives.remove_cow(lt);
+                reset = true;
+                self.ephemeral.dirty();
+            }
+            if reset {
+                player.lives.clone()
+            } else {
+                MapS::new()
+            }
+        };
         if reset {
             self.ephemeral.stat(Stat::Life {
                 id: *ucid,
-                lives: player.lives.clone(),
+                lives: lives_after,
             });
+        }
+        for lt in lt_to_reset {
+            self.clear_csar_downed_for_life_type(ucid, lt);
         }
         Ok(())
     }
@@ -784,6 +879,8 @@ impl Db {
                         lives: MapS::new(),
                         crates: SetS::new(),
                         airborne: None,
+                        airborne_observer_penalty_until: None,
+                        csar_downed: vec![],
                         points,
                         provisional_points: 0,
                         current_slot: None,
@@ -848,8 +945,30 @@ impl Db {
         let mut dead: Vec<DcsOid<ClassUnit>> = vec![];
         let mut unit: Option<Unit> = None;
         let coord = Coord::singleton(lua)?;
+        if self.csar_enabled() {
+            self.flush_pending_csar_destroys(lua);
+        }
         for ucid in ids {
             let mut inform_cost = None;
+            if self.csar_enabled() {
+                if let Err(e) = self.update_csar_downed_positions(lua, now, ucid) {
+                    warn!("csar position update failed for {ucid:?}: {e:?}");
+                }
+                let active_in_slot = self
+                    .ephemeral
+                    .players_by_slot
+                    .values()
+                    .any(|u| u == ucid);
+                if !active_in_slot
+                    && self
+                        .persisted
+                        .players
+                        .get(ucid)
+                        .is_some_and(|p| !p.csar_downed.is_empty())
+                {
+                    continue;
+                }
+            }
             if let Some(player) = self.persisted.players.get_mut_cow(ucid) {
                 if let Some((slot, Some(inst))) = &mut player.current_slot {
                     if let Some(id) = self.ephemeral.object_id_by_slot.get(slot) {

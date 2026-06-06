@@ -15,7 +15,7 @@ for more details.
 */
 
 use super::{
-    aliases::resolve_objective_display_name,
+    aliases::resolve_objective_f10_map_label,
     logistics::{nearest_normal_logistics_hub, virtual_resupply_delivery_efficiency_cached},
     objective::{Objective, Zone},
     persisted::Persisted,
@@ -213,14 +213,6 @@ fn objective_stats_text(obj: &Objective, limited: bool) -> CompactString {
             stat_infobar_row(BAR_LOOKUP[get_idx(obj.fuel)], obj.fuel, "Fuel"),
             stat_plain_row("Points", &format_compact!("{}", obj.points)),
         ),
-    }
-}
-
-fn objective_map_kind_label(kind: &ObjectiveKind) -> &'static str {
-    match kind {
-        ObjectiveKind::Logistics => "⌂ HUB",
-        ObjectiveKind::Production => "⌂",
-        _ => kind.name(),
     }
 }
 
@@ -757,12 +749,8 @@ impl ObjectiveMarkup {
         t.production_hp_sum = obj.production_hp_sum;
         t.production_repair_need = obj.production_repair_need;
         t.production_repair = obj.production_repair;
-        let display = resolve_objective_display_name(display_aliases, obj);
-        t.name = if matches!(obj.kind, ObjectiveKind::Farp { mobile: true, .. }) {
-            format_compact!(" {} ", display).into()
-        } else {
-            format_compact!(" {} {} ", display, objective_map_kind_label(&obj.kind)).into()
-        };
+        let label = resolve_objective_f10_map_label(display_aliases, obj);
+        t.name = format_compact!(" {} ", label).into();
         t.pos = obj.zone.pos();
         let pos3 = Vector3::new(t.pos.x, 0., t.pos.y);
 
