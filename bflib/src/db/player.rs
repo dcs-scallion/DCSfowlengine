@@ -179,7 +179,8 @@ impl Db {
             self.ephemeral.dirty();
             return None;
         }
-        Some((until - now).num_seconds().max(0) as u32)
+        let ms = (until - now).num_milliseconds().max(0);
+        Some(((ms + 999) / 1000) as u32)
     }
 
     pub fn clear_airborne_session(&mut self, ucid: &Ucid) {

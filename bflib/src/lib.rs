@@ -460,9 +460,7 @@ fn process_slot_rejection(ctx: &mut Context, id: PlayerId, ucid: Ucid, rej: Slot
                     "slot change blocked: {remaining_secs}s remaining (airborne deslot penalty)"
                 )
             } else {
-                format_compact!(
-                    "cannot switch to observer/spectator slots while airborne"
-                )
+                format_compact!("cannot switch to observer/spectator slots while airborne")
             };
             ctx.db.ephemeral.msgs().send(MsgTyp::Chat(Some(id)), msg);
         }
@@ -628,21 +626,8 @@ enum AirbornePenaltyReason {
 
 impl AirbornePenaltyReason {
     fn violation_all(self, name: &str) -> CompactString {
-        match self {
-            Self::Deslot => format_compact!(
-                "{name} performed unauthorized deslot while airborne"
-            ),
-            Self::VoluntaryEjection => format_compact!(
-                "{name} performed voluntary ejection while airborne"
-            ),
-        }
-    }
-
-    fn violation_player(self) -> &'static str {
-        match self {
-            Self::Deslot => "Unauthorized deslot while airborne",
-            Self::VoluntaryEjection => "Voluntary ejection while airborne",
-        }
+        let _ = self;
+        format_compact!("{name} performed forbidden deslot while airborne")
     }
 }
 
@@ -659,25 +644,13 @@ fn notify_airborne_observer_penalty(
         .player(&ucid)
         .map(|p| p.name.clone())
         .unwrap_or_else(|| "unknown".into());
-    let penalty_detail = format_compact!(
-        "{penalty_points} points deducted, may not slot for {penalty_mins} min"
-    );
     ctx.db.ephemeral.msgs().send(
         MsgTyp::Chat(None),
         format_compact!(
-            "{}: {penalty_detail}",
+            "{}: {penalty_points} points deducted, may not slot for {penalty_mins} min",
             reason.violation_all(&name)
         ),
     );
-    if let Some(player_id) = ctx.connected.id_by_ucid.get(&ucid).copied() {
-        ctx.db.ephemeral.msgs().send(
-            MsgTyp::Chat(Some(player_id)),
-            format_compact!(
-                "{}: {penalty_points} points deducted, you may not slot for {penalty_mins} min",
-                reason.violation_player()
-            ),
-        );
-    }
     info!(
         "airborne observer penalty {penalty_secs}s ({reason:?}) for {ucid:?} ({name}): {penalty_points} points"
     );
@@ -891,6 +864,12 @@ fn unit_killed(
         }
     }
     ctx.recently_landed.remove(&id);
+    if ctx.db.csar_enabled() {
+        if let Some(ucid) = ctx.db.csar_pilot_ucid(&id) {
+            ctx.db.on_csar_pilot_killed(&id, &ucid);
+            flush_markup_if_pending(ctx, lua);
+        }
+    }
     ctx.shots_out.dead(id.clone(), now);
     if let Err(e) = ctx.jtac.unit_dead(lua, &mut ctx.db, &id) {
         error!("jtac unit dead failed for {:?} {:?}", id, e)
@@ -1139,8 +1118,7 @@ fn on_event(lua: MizLua, ev: Event) -> Result<()> {
         }
         Event::LandingAfterEjection => {
             if ctx.db.csar_enabled() {
-                let ucids: SmallVec<[Ucid; 4]> =
-                    ctx.db.csar_active_ucids().collect();
+                let ucids = ctx.db.csar_active_ucids();
                 for ucid in ucids {
                     if let Err(e) =
                         ctx.db.on_csar_landing_after_ejection(lua, start_ts, &ucid)
@@ -2084,7 +2062,7 @@ fn delayed_init_miz(lua: MizLua) -> Result<()> {
         ctx.db.ephemeral.msgs().send(MsgTyp::Chat(Some(id)), welcome);
     }
     info!("starting timed events");
-    ctx.db.rebuild_csar_marks();
+    ctx.db.refresh_csar_after_load(lua);
     if let Err(e) = ctx.db.flush_markup_messages(lua) {
         warn!("csar mark rebuild flush failed {e:?}");
     }
