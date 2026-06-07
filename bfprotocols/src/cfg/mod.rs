@@ -944,6 +944,12 @@ pub struct CsarCfg {
     /// Keep ejected pilots in the world and hide them from JTAC (future CSAR missions).
     #[serde(default)]
     pub enabled: bool,
+    /// Late-activated ME group name for downed pilot (MOOSE CSAR template), red side.
+    #[serde(default)]
+    pub pilot_template_red: Option<String>,
+    /// Late-activated ME group name for downed pilot (MOOSE CSAR template), blue side.
+    #[serde(default)]
+    pub pilot_template_blue: Option<String>,
 }
 
 fn default_supply_transfer_players() -> bool {

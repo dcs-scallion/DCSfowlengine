@@ -1668,7 +1668,14 @@ impl Jtacs {
             let id = EnId::Player(*ucid);
             saw_units.insert(id);
             let detected = detected.entry(id).or_default();
-            let tags = db.ephemeral.cfg.unit_classification[&inst.typ];
+            let Some(tags) = db.ephemeral.cfg.unit_classification.get(&inst.typ) else {
+                let typ = &inst.typ;
+                warn!("jtac: unknown unit type {typ} for player {ucid:?}");
+                if let Err(e) = jtac.remove_contact(lua, db, &id) {
+                    warn!("could not remove unknown-type jtac contact {ucid} {e:?}");
+                }
+                continue;
+            };
             if !tags.contains(jtac.filter) {
                 if let Err(e) = jtac.remove_contact(lua, db, &id) {
                     warn!("could not filter player contact {ucid} {e:?}")

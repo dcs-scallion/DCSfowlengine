@@ -64,7 +64,7 @@ use dcso3::{
     trigger::Trigger,
     unit::{ClassUnit, Unit},
     world::{HandlerId, MarkPanel, World},
-    HooksLua, LuaEnv, MizLua, String,
+    HooksLua, LuaEnv, MizLua, Position3, String,
 };
 use ewr::Ewr;
 use fxhash::{FxBuildHasher, FxHashMap, FxHashSet};
@@ -303,10 +303,15 @@ impl Context {
 
     fn do_bg_task(&self, task: bg::Task) {
         if let Some(to_bg) = &self.to_background {
-            match to_bg.send(task) {
-                Ok(()) => (),
-                Err(_) => panic!("background thread is dead"),
+            if let Err(e) = to_bg.send(task) {
+                error!("background thread is dead, dropped task: {e:?}");
             }
+        }
+    }
+
+    fn persist_campaign_state(&mut self) {
+        if let Some(snap) = self.db.maybe_snapshot() {
+            self.do_bg_task(bg::Task::SaveState(self.miz_state_path.clone(), snap));
         }
     }
 
@@ -1080,6 +1085,7 @@ fn on_event(lua: MizLua, ev: Event) -> Result<()> {
                             error!("csar ejection failed {e:?}");
                         } else {
                             flush_markup_if_pending(ctx, lua);
+                            ctx.persist_campaign_state();
                         }
                     }
                 }
@@ -1116,17 +1122,32 @@ fn on_event(lua: MizLua, ev: Event) -> Result<()> {
                 }
             }
         }
-        Event::LandingAfterEjection => {
+        Event::LandingAfterEjection(e) => {
             if ctx.db.csar_enabled() {
-                let ucids = ctx.db.csar_active_ucids();
-                for ucid in ucids {
-                    if let Err(e) =
-                        ctx.db.on_csar_landing_after_ejection(lua, start_ts, &ucid)
-                    {
-                        warn!("csar landing update failed for {ucid:?}: {e:?}");
+                let landing_pos = e
+                    .initiator
+                    .get_position()
+                    .or_else(|_| {
+                        e.initiator.get_point().map(|p| Position3 {
+                            p,
+                            x: p,
+                            y: p,
+                            z: p,
+                        })
+                    });
+                match landing_pos {
+                    Ok(pos) => {
+                        match ctx.db.on_csar_landing_after_ejection(lua, start_ts, pos) {
+                            Ok(true) => {
+                                flush_markup_if_pending(ctx, lua);
+                                ctx.persist_campaign_state();
+                            }
+                            Ok(false) => (),
+                            Err(e) => warn!("csar landing update failed: {e:?}"),
+                        }
                     }
+                    Err(e) => warn!("csar landing event missing position: {e:?}"),
                 }
-                flush_markup_if_pending(ctx, lua);
             }
         }
         Event::Takeoff(e) | Event::PostponedTakeoff(e) => {
@@ -1824,6 +1845,9 @@ fn run_timed_events(
         }
     }
     record_perf(&mut perf.player_positions, ts);
+    if ctx.db.csar_enabled() {
+        ctx.db.update_all_csar_pilots(lua, ts);
+    }
     sanitize_connected_airborne_locks(ctx, lua, ts);
     process_pending_airborne_deslot_penalties(ctx, ts);
 
@@ -1922,14 +1946,17 @@ fn start_timed_events(ctx: &mut Context, lua: MizLua, path: PathBuf) -> Result<(
                     println!("removing timer event");
                     return Ok(None);
                 }
-                Err(e) => match e.downcast_ref::<anyhow::Error>() {
-                    Some(e) => {
-                        error!("run_timed_events panicked {e:?} {}", Backtrace::capture())
-                    }
-                    None => {
-                        error!("run_timed_events panicked {e:?} {}", Backtrace::capture())
-                    }
-                },
+                Err(e) => {
+                    let detail = e
+                        .downcast_ref::<anyhow::Error>()
+                        .map(|e| format!("{e:?}"))
+                        .or_else(|| e.downcast_ref::<&str>().map(|s| (*s).to_string()))
+                        .unwrap_or_else(|| format!("{e:?}"));
+                    error!(
+                        "run_timed_events panicked {detail} {}",
+                        Backtrace::capture()
+                    );
+                }
             }
             Ok(Some(now + 1.))
         }
@@ -2066,6 +2093,7 @@ fn delayed_init_miz(lua: MizLua) -> Result<()> {
     if let Err(e) = ctx.db.flush_markup_messages(lua) {
         warn!("csar mark rebuild flush failed {e:?}");
     }
+    ctx.persist_campaign_state();
     start_timed_events(ctx, lua, path).context("starting the timed events loop")?;
     Ok(())
 }

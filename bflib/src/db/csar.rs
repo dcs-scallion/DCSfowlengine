@@ -15,28 +15,35 @@ for more details.
 */
 
 use super::{Db, player::InstancedPlayer};
-use crate::msgq::MsgQ;
-use anyhow::{Context, Result};
+use crate::{
+    msgq::MsgQ,
+    spawnctx::{SpawnCtx, Spawned},
+};
+use anyhow::{Context, Result, bail};
 use bfprotocols::cfg::{LifeType, Vehicle};
 use bfprotocols::stats::EnId;
 use chrono::prelude::*;
 use dcso3::{
-    coalition::Side,
+    coalition::{Coalition, Side},
     controller::Command,
     coord::Coord,
+    country,
+    env::miz::{self, GroupKind, Miz, MizIndex, Skill},
+    group::Group,
+    group::GroupCategory,
     net::Ucid,
-    object::{DcsObject, DcsOid, ObjectCategory},
+    object::{DcsObject, DcsOid},
     trigger::{CircleSpec, LineType, MarkId},
     unit::{ClassUnit, Unit},
-    world::{SearchVolume, World},
-    Color, LuaVec3, MizLua, String,
+    Position3,
+    Color, LuaVec3, LuaEnv, MizLua, String,
 };
-use fxhash::FxHashMap;
+use na::Vector2;
+use fxhash::{FxHashMap, FxHashSet};
 use log::{info, warn};
+use mlua::{FromLua, Value};
 use serde_derive::{Deserialize, Serialize};
-use smallvec::{smallvec, SmallVec};
-use std::cell::RefCell;
-use std::rc::Rc;
+use smallvec::SmallVec;
 
 pub const LIFE_TYPE_DISPLAY_ORDER: [LifeType; 5] = [
     LifeType::Standard,
@@ -57,7 +64,6 @@ pub fn life_type_display_label(lt: LifeType) -> &'static str {
 }
 
 const CSAR_LANDED_CIRCLE_RADIUS_M: f64 = 500.;
-const CSAR_PILOT_REBIND_RADIUS_M: f64 = 150.;
 
 /// Downed pilot awaiting CSAR (persisted; future pickup/rescue hooks).
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -70,6 +76,9 @@ pub struct CsarDowned {
     #[serde(default)]
     pub landed: bool,
     pub inst: InstancedPlayer,
+    /// Ejection point for engine logic; map marks use `inst.position` only after `landed`.
+    #[serde(default)]
+    pub eject_position: Option<Position3>,
     #[serde(default)]
     pub circle_mark_id: Option<MarkId>,
     #[serde(default)]
@@ -77,6 +86,15 @@ pub struct CsarDowned {
     /// Stored pilot unit id is stale (DCS replaces parachute with ground pilot).
     #[serde(default)]
     pub pilot_unit_stale: bool,
+    /// DCS type name of the ejection pilot unit (for respawn after mission reload).
+    #[serde(default)]
+    pub pilot_type_name: String,
+    #[serde(default = "default_csar_pilot_category")]
+    pub pilot_category: GroupCategory,
+}
+
+fn default_csar_pilot_category() -> GroupCategory {
+    GroupCategory::Airplane
 }
 
 fn default_csar_life_type() -> LifeType {
@@ -140,11 +158,12 @@ fn delete_csar_marks(msgs: &mut MsgQ, csar: &mut CsarDowned) {
     }
 }
 
-fn prepare_csar_pilot_unit(pilot: &Unit) {
+fn prepare_csar_pilot_unit(pilot: &Unit, landed: bool) {
     let _ = pilot.set_name(String::from(""));
     if let Ok(ctrl) = pilot.get_controller() {
-        if let Err(e) = ctrl.set_command(Command::SetImmortal(false)) {
-            warn!("csar: SetImmortal(false) failed: {e:?}");
+        let immortal = !landed;
+        if let Err(e) = ctrl.set_command(Command::SetImmortal(immortal)) {
+            warn!("csar: SetImmortal({immortal}) failed: {e:?}");
         }
         if let Err(e) = ctrl.set_command(Command::SetInvisible(false)) {
             warn!("csar: SetInvisible(false) failed: {e:?}");
@@ -156,42 +175,188 @@ fn csar_pilot_type_name(unit: &Unit) -> Option<String> {
     unit.get_type_name().ok()
 }
 
-fn is_csar_pilot_type(type_name: &str) -> bool {
-    type_name.contains("Pilot") || type_name.contains("Parachute")
+fn csar_infantry_type_candidates(side: Side) -> &'static [&'static str] {
+    match side {
+        Side::Red => &["Soldier AK", "Infantry AK", "Infantry AK-74"],
+        Side::Blue => &["Soldier M4", "Infantry M4", "Infantry M4 Georgia"],
+        Side::Neutral => &["Soldier M4", "Infantry M4"],
+    }
 }
 
-fn rebind_csar_pilot_unit(
+fn csar_spawn_names(ucid: &Ucid, ejected_at: DateTime<Utc>) -> (String, String) {
+    let tag = format!("{ucid}_{}", ejected_at.timestamp());
+    (
+        format!("FowlCsar_{tag}").into(),
+        format!("FowlCsarPilot_{tag}").into(),
+    )
+}
+
+fn coalition_country_for_side(lua: MizLua, side: Side) -> Result<country::Country> {
+    let miz = Miz::singleton(lua)?;
+    let coa = miz.coalition(side)?;
+    let countries = coa.countries()?;
+    let country = countries
+        .first()
+        .with_context(|| format!("no countries for coalition {side:?}"))?;
+    country.id()
+}
+
+fn try_spawn_csar_pilot_infantry(
     lua: MizLua,
+    ucid: &Ucid,
+    side: Side,
+    csar: &CsarDowned,
+    type_name: &str,
+) -> Result<DcsOid<ClassUnit>> {
+    let country = coalition_country_for_side(lua, side)?;
+    let pos = csar.inst.position.p.0;
+    let map_x = pos.x;
+    let map_y = pos.z;
+    let alt = pos.y;
+    let (group_name, unit_name) = csar_spawn_names(ucid, csar.ejected_at);
+    let lua_inner = lua.inner();
+    let group_tbl = lua_inner.create_table()?;
+    group_tbl.raw_set("name", group_name.as_str())?;
+    group_tbl.raw_set("task", "Ground Nothing")?;
+    group_tbl.raw_set("x", map_x)?;
+    group_tbl.raw_set("y", map_y)?;
+    group_tbl.raw_set("hidden", false)?;
+    group_tbl.raw_set("uncontrolled", true)?;
+    group_tbl.raw_set("start_time", 0i64)?;
+    let route = lua_inner.create_table()?;
+    route.raw_set("points", lua_inner.create_table()?)?;
+    group_tbl.raw_set("route", route)?;
+    let units = lua_inner.create_table()?;
+    let unit_tbl = lua_inner.create_table()?;
+    unit_tbl.raw_set("name", unit_name.as_str())?;
+    unit_tbl.raw_set("type", type_name)?;
+    unit_tbl.raw_set("x", map_x)?;
+    unit_tbl.raw_set("y", map_y)?;
+    unit_tbl.raw_set("alt", alt)?;
+    unit_tbl.raw_set("heading", 0f64)?;
+    unit_tbl.raw_set("skill", Skill::Average)?;
+    unit_tbl.raw_set("speed", 0f64)?;
+    unit_tbl.raw_set("payload", lua_inner.create_table()?)?;
+    units.raw_set(1, unit_tbl)?;
+    group_tbl.raw_set("units", units)?;
+    let group_data = miz::Group::from_lua(Value::Table(group_tbl), lua_inner)
+        .map_err(|e| anyhow::anyhow!("csar pilot group table: {e}"))?;
+    let spawned = Coalition::singleton(lua)?
+        .add_group(country, GroupCategory::Ground, group_data)
+        .with_context(|| format!("spawning csar infantry pilot type {type_name}"))?;
+    let pilot = spawned
+        .get_unit(1)
+        .with_context(|| format!("csar pilot group has no unit type {type_name}"))?;
+    prepare_csar_pilot_unit(&pilot, csar.landed);
+    let id = pilot.object_id()?;
+    info!(
+        "csar: spawned infantry pilot unit {id:?} type {type_name} at [{map_x}, {alt}, {map_y}] for {ucid:?}"
+    );
+    Ok(id)
+}
+
+fn try_spawn_csar_pilot_from_template(
+    lua: MizLua,
+    idx: &MizIndex,
+    ucid: &Ucid,
+    side: Side,
+    csar: &CsarDowned,
+    template_name: &str,
+) -> Result<DcsOid<ClassUnit>> {
+    let spctx = SpawnCtx::new(lua)?;
+    let template = spctx
+        .get_template(idx, GroupKind::Any, side, template_name)
+        .with_context(|| format!("csar pilot template {template_name}"))?;
+    let pos = csar.inst.position.p.0;
+    let (group_name, unit_name) = csar_spawn_names(ucid, csar.ejected_at);
+    template.group.set_name(group_name)?;
+    template.group.set("lateActivation", false)?;
+    template.group.set("hidden", false)?;
+    template.group.set("uncontrolled", true)?;
+    template.group.set("x", pos.x)?;
+    template.group.set("y", pos.z)?;
+    let units = template.group.units()?;
+    let mut first = true;
+    for unit in units {
+        let unit = unit?;
+        if first {
+            unit.set_name(unit_name.clone())?;
+            unit.set_pos(Vector2::new(pos.x, pos.z))?;
+            unit.set_alt(pos.y)?;
+            first = false;
+        }
+    }
+    if first {
+        bail!("csar pilot template {template_name} has no units");
+    }
+    let spawned = spctx
+        .spawn(template)
+        .with_context(|| format!("spawning csar pilot from template {template_name}"))?;
+    let pilot = match spawned {
+        Spawned::Group(group) => group
+            .get_unit(1)
+            .with_context(|| format!("csar pilot template {template_name} has no unit"))?,
+        Spawned::Static => {
+            bail!("csar pilot template {template_name} is a static object")
+        }
+    };
+    prepare_csar_pilot_unit(&pilot, csar.landed);
+    let id = pilot.object_id()?;
+    info!(
+        "csar: spawned template pilot unit {id:?} from {template_name} at [{}, {}, {}] for {ucid:?}",
+        pos.x, pos.y, pos.z
+    );
+    Ok(id)
+}
+
+pub(crate) fn is_fowl_csar_group_name(name: &str) -> bool {
+    name.starts_with("FowlCsar_")
+}
+
+pub(crate) fn is_fowl_csar_unit_unit(unit: &Unit) -> bool {
+    unit.get_group()
+        .ok()
+        .and_then(|g| g.get_name().ok())
+        .is_some_and(|name| is_fowl_csar_group_name(name.as_str()))
+}
+
+fn is_fowl_csar_unit(lua: MizLua, pilot_unit: &DcsOid<ClassUnit>) -> bool {
+    Unit::get_instance(lua, pilot_unit)
+        .ok()
+        .is_some_and(|u| is_fowl_csar_unit_unit(&u))
+}
+
+fn destroy_csar_spawn_group(lua: MizLua, ucid: &Ucid, csar: &CsarDowned) {
+    let (group_name, _) = csar_spawn_names(ucid, csar.ejected_at);
+    if let Ok(group) = Group::get_by_name(lua, group_name.as_str()) {
+        if let Err(e) = group.destroy() {
+            warn!("csar: failed to destroy spawn group {group_name}: {e:?}");
+        }
+    }
+}
+
+fn lookup_csar_pilot_unit(
+    lua: MizLua,
+    ucid: &Ucid,
     csar: &CsarDowned,
 ) -> Result<Option<DcsOid<ClassUnit>>> {
-    let center = LuaVec3(csar.inst.position.p.0);
-    let vol = SearchVolume::Sphere {
-        point: center,
-        radius: CSAR_PILOT_REBIND_RADIUS_M,
-    };
-    let found = Rc::new(RefCell::new(None::<DcsOid<ClassUnit>>));
-    let found_cb = found.clone();
-    World::singleton(lua)?.search_objects(ObjectCategory::Unit, vol, mlua::Value::Nil, move |_, obj, _| {
-        let unit = match obj.as_unit() {
-            Ok(u) => u,
-            Err(_) => return Ok(true),
-        };
-        if !unit.is_exist().unwrap_or(false) {
-            return Ok(true);
-        }
-        let Some(type_name) = csar_pilot_type_name(&unit) else {
-            return Ok(true);
-        };
-        if !is_csar_pilot_type(&type_name) {
-            return Ok(true);
-        }
-        if let Ok(id) = unit.object_id() {
-            prepare_csar_pilot_unit(&unit);
-            *found_cb.borrow_mut() = Some(id);
-        }
-        Ok(true)
-    })?;
-    Ok(found.borrow().clone().filter(|id| *id != csar.pilot_unit))
+    let (_, unit_name) = csar_spawn_names(ucid, csar.ejected_at);
+    match Unit::get_by_name(lua, unit_name.as_str()) {
+        Ok(unit) if unit.is_exist().unwrap_or(false) => Ok(Some(unit.object_id()?)),
+        _ => Ok(None),
+    }
+}
+
+fn refresh_csar_inst_from_unit(
+    csar: &mut CsarDowned,
+    unit: &Unit,
+    now: DateTime<Utc>,
+) -> Result<()> {
+    csar.inst.position = unit.get_position()?;
+    csar.inst.velocity = unit.get_velocity()?.0;
+    csar.inst.in_air = unit.in_air()?;
+    csar.inst.moved = Some(now);
+    Ok(())
 }
 
 fn set_csar_pilot_landed(csar: &mut CsarDowned, now: DateTime<Utc>, ucid: &Ucid) -> bool {
@@ -208,12 +373,6 @@ fn set_csar_pilot_landed(csar: &mut CsarDowned, now: DateTime<Utc>, ucid: &Ucid)
     true
 }
 
-fn csar_landed_needs_marks(player: &super::player::Player) -> bool {
-    player.csar_downed.iter().any(|c| {
-        c.landed && (c.circle_mark_id.is_none() || c.point_mark_id.is_none())
-    })
-}
-
 enum CsarPilotMissingAction {
     Rebound,
     Killed,
@@ -226,20 +385,18 @@ fn sync_csar_pilot_mark(
     player_name: &str,
     life_type_label: &str,
     csar: &mut CsarDowned,
-    force_reposition: bool,
 ) {
     if !csar.landed {
-        delete_csar_marks(msgs, csar);
+        if csar.circle_mark_id.is_some() || csar.point_mark_id.is_some() {
+            delete_csar_marks(msgs, csar);
+        }
+        return;
+    }
+    if csar.circle_mark_id.is_some() && csar.point_mark_id.is_some() {
         return;
     }
     let pos = LuaVec3(csar.inst.position.p.0);
     let label = csar_pilot_mark_label(player_name, life_type_label);
-    if let (Some(_), Some(_)) = (csar.circle_mark_id, csar.point_mark_id) {
-        if !force_reposition {
-            return;
-        }
-        delete_csar_marks(msgs, csar);
-    }
     let mark_body = csar_pilot_mark_message(player_name, life_type_label);
     let circle_id = MarkId::new();
     let spec = CircleSpec {
@@ -279,6 +436,66 @@ impl Db {
         self.ephemeral.cfg.csar.enabled
     }
 
+    fn csar_pilot_template_name(&self, side: Side) -> Option<&str> {
+        let cfg = &self.ephemeral.cfg.csar;
+        match side {
+            Side::Red => cfg.pilot_template_red.as_ref().map(|s| s.as_str()),
+            Side::Blue => cfg.pilot_template_blue.as_ref().map(|s| s.as_str()),
+            Side::Neutral => cfg
+                .pilot_template_blue
+                .as_ref()
+                .or(cfg.pilot_template_red.as_ref())
+                .map(|s| s.as_str()),
+        }
+    }
+
+    fn spawn_csar_pilot_unit(
+        &self,
+        lua: MizLua,
+        ucid: &Ucid,
+        side: Side,
+        csar: &CsarDowned,
+    ) -> Result<Option<DcsOid<ClassUnit>>> {
+        let idx = &self.ephemeral.miz_idx;
+        let mut last_err = None;
+        if let Some(template) = self.csar_pilot_template_name(side) {
+            match try_spawn_csar_pilot_from_template(lua, idx, ucid, side, csar, template) {
+                Ok(id) => return Ok(Some(id)),
+                Err(e) => {
+                    warn!("csar: spawn from template {template} failed: {e:?}");
+                    last_err = Some(e);
+                }
+            }
+            destroy_csar_spawn_group(lua, ucid, csar);
+        }
+        for type_name in csar_infantry_type_candidates(side) {
+            match try_spawn_csar_pilot_infantry(lua, ucid, side, csar, type_name) {
+                Ok(id) => return Ok(Some(id)),
+                Err(e) => {
+                    warn!("csar: spawn as infantry {type_name} failed: {e:?}");
+                    last_err = Some(e);
+                }
+            }
+        }
+        destroy_csar_spawn_group(lua, ucid, csar);
+        for type_name in csar_infantry_type_candidates(side) {
+            match try_spawn_csar_pilot_infantry(lua, ucid, side, csar, type_name) {
+                Ok(id) => return Ok(Some(id)),
+                Err(e) => {
+                    warn!(
+                        "csar: respawn as infantry {type_name} after group cleanup failed: {e:?}"
+                    );
+                    last_err = Some(e);
+                }
+            }
+        }
+        if let Some(e) = last_err {
+            Err(e)
+        } else {
+            Ok(None)
+        }
+    }
+
     pub fn csar_downed_pilot(&self, ucid: &Ucid) -> bool {
         self.csar_enabled()
             && self
@@ -313,7 +530,25 @@ impl Db {
         ucid: &Ucid,
         old_id: &DcsOid<ClassUnit>,
         new_id: DcsOid<ClassUnit>,
-    ) {
+    ) -> bool {
+        if let Some(owner) = self.ephemeral.csar_pilot_unit.get(&new_id) {
+            if *owner != *ucid {
+                warn!(
+                    "csar: pilot unit {new_id:?} claimed by {owner:?}, not {ucid:?}"
+                );
+                return false;
+            }
+        }
+        if self.persisted.players.get(ucid).is_some_and(|p| {
+            p.csar_downed
+                .iter()
+                .any(|c| c.pilot_unit == new_id && c.pilot_unit != *old_id)
+        }) {
+            warn!(
+                "csar: pilot unit {new_id:?} already tracked for another downed pilot {ucid:?}"
+            );
+            return false;
+        }
         self.ephemeral.csar_pilot_unit.remove(old_id);
         self.ephemeral
             .csar_pilot_unit
@@ -329,33 +564,76 @@ impl Db {
             }
         }
         info!("csar: rebound downed pilot unit for {ucid:?} to {new_id:?}");
+        true
+    }
+
+    fn refresh_csar_inst_for_pilot(
+        &mut self,
+        lua: MizLua,
+        ucid: &Ucid,
+        pilot_unit: &DcsOid<ClassUnit>,
+        now: DateTime<Utc>,
+    ) -> Result<()> {
+        let unit = Unit::get_instance(lua, pilot_unit)?;
+        if let Some(player) = self.persisted.players.get_mut_cow(ucid) {
+            if let Some(entry) = player
+                .csar_downed
+                .iter_mut()
+                .find(|c| c.pilot_unit == *pilot_unit)
+            {
+                if !entry.landed {
+                    refresh_csar_inst_from_unit(entry, &unit, now)?;
+                }
+            }
+        }
+        Ok(())
+    }
+
+    fn respawn_csar_pilot_unit(
+        &mut self,
+        lua: MizLua,
+        ucid: &Ucid,
+        side: Side,
+        old_id: &DcsOid<ClassUnit>,
+        csar: &CsarDowned,
+    ) -> Result<Option<DcsOid<ClassUnit>>> {
+        let Some(new_id) = self.spawn_csar_pilot_unit(lua, ucid, side, csar)? else {
+            warn!(
+                "csar: respawn failed for {ucid:?} ({})",
+                csar.life_type
+            );
+            return Ok(None);
+        };
+        if self.apply_csar_pilot_rebind(ucid, old_id, new_id.clone()) {
+            Ok(Some(new_id))
+        } else {
+            Self::destroy_csar_pilot_unit(lua, &new_id);
+            Ok(None)
+        }
     }
 
     fn handle_csar_pilot_unit_missing(
         &mut self,
         lua: MizLua,
         ucid: &Ucid,
+        side: Side,
         pilot_unit: &DcsOid<ClassUnit>,
         csar: &CsarDowned,
+        now: DateTime<Utc>,
     ) -> Result<CsarPilotMissingAction> {
-        if let Some(new_id) = rebind_csar_pilot_unit(lua, csar)? {
-            self.apply_csar_pilot_rebind(ucid, pilot_unit, new_id);
-            return Ok(CsarPilotMissingAction::Rebound);
-        }
-        if csar.landed {
-            if csar.pilot_unit_stale {
-                return Ok(CsarPilotMissingAction::Killed);
-            }
-            if let Some(player) = self.persisted.players.get_mut_cow(ucid) {
-                if let Some(entry) = player
-                    .csar_downed
-                    .iter_mut()
-                    .find(|c| c.pilot_unit == *pilot_unit)
-                {
-                    entry.pilot_unit_stale = true;
+        if let Some(new_id) = lookup_csar_pilot_unit(lua, ucid, csar)? {
+            if new_id != *pilot_unit {
+                if self.apply_csar_pilot_rebind(ucid, pilot_unit, new_id.clone()) {
+                    self.refresh_csar_inst_for_pilot(lua, ucid, &new_id, now)?;
+                    return Ok(CsarPilotMissingAction::Rebound);
                 }
+            } else if Self::csar_pilot_unit_alive(lua, &new_id) {
+                return Ok(CsarPilotMissingAction::AwaitRebind);
             }
-            return Ok(CsarPilotMissingAction::AwaitRebind);
+        }
+        if let Some(new_id) = self.respawn_csar_pilot_unit(lua, ucid, side, pilot_unit, csar)? {
+            self.refresh_csar_inst_for_pilot(lua, ucid, &new_id, now)?;
+            return Ok(CsarPilotMissingAction::Rebound);
         }
         if let Some(player) = self.persisted.players.get_mut_cow(ucid) {
             if let Some(entry) = player
@@ -403,34 +681,228 @@ impl Db {
         self.csar_active_ucids()
     }
 
-    /// After load or new mission: rebuild ephemeral pilot map, drop stale mark ids, redraw marks.
+    /// After load or new mission: respawn pilot units, redraw marks.
     pub fn refresh_csar_after_load(&mut self, lua: MizLua) {
         if !self.csar_enabled() {
             return;
         }
         self.ephemeral.csar_pilot_unit.clear();
         for ucid in self.csar_downed_ucids() {
-            let Some(player) = self.persisted.players.get_mut_cow(&ucid) else {
+            let Some(side) = self.persisted.players.get(&ucid).map(|p| p.side) else {
                 continue;
             };
-            for csar in &mut player.csar_downed {
-                csar.circle_mark_id = None;
-                csar.point_mark_id = None;
-                csar.pilot_unit_stale = true;
+            if let Some(player) = self.persisted.players.get_mut_cow(&ucid) {
+                for csar in &mut player.csar_downed {
+                    csar.circle_mark_id = None;
+                    csar.point_mark_id = None;
+                    csar.pilot_unit_stale = false;
+                }
+            }
+            let len = self
+                .persisted
+                .players
+                .get(&ucid)
+                .map(|p| p.csar_downed.len())
+                .unwrap_or(0);
+            let mut claimed: FxHashSet<DcsOid<ClassUnit>> = FxHashSet::default();
+            for idx in 0..len {
+                self.ensure_csar_pilot_at_index(lua, &ucid, side, idx, &mut claimed);
+            }
+        }
+        self.rebuild_csar_marks();
+        self.ephemeral.dirty();
+    }
+
+    fn csar_pilot_unit_alive(lua: MizLua, pilot_unit: &DcsOid<ClassUnit>) -> bool {
+        Unit::get_instance(lua, pilot_unit)
+            .ok()
+            .and_then(|u| u.is_exist().ok())
+            .unwrap_or(false)
+    }
+
+    fn ensure_csar_pilot_at_index(
+        &mut self,
+        lua: MizLua,
+        ucid: &Ucid,
+        side: Side,
+        idx: usize,
+        claimed: &mut FxHashSet<DcsOid<ClassUnit>>,
+    ) {
+        let csar_snap = {
+            let Some(player) = self.persisted.players.get(ucid) else {
+                return;
+            };
+            let Some(csar) = player.csar_downed.get(idx) else {
+                return;
+            };
+            csar.clone()
+        };
+        if let Ok(Some(existing)) = lookup_csar_pilot_unit(lua, ucid, &csar_snap) {
+            if !claimed.contains(&existing) {
+                if let Some(player) = self.persisted.players.get_mut_cow(ucid) {
+                    if let Some(csar) = player.csar_downed.get_mut(idx) {
+                        csar.pilot_unit = existing.clone();
+                        csar.pilot_unit_stale = false;
+                    }
+                }
+                claimed.insert(existing.clone());
+                self.ephemeral.csar_pilot_unit.insert(existing, *ucid);
+                info!(
+                    "csar: relinked downed pilot for {ucid:?} ({}) after load",
+                    csar_snap.life_type
+                );
+                return;
+            }
+        }
+        if Self::csar_pilot_unit_alive(lua, &csar_snap.pilot_unit) {
+            if is_fowl_csar_unit(lua, &csar_snap.pilot_unit) && !claimed.contains(&csar_snap.pilot_unit)
+            {
+                if let Some(player) = self.persisted.players.get_mut_cow(ucid) {
+                    if let Some(csar) = player.csar_downed.get_mut(idx) {
+                        csar.pilot_unit_stale = false;
+                    }
+                }
+                claimed.insert(csar_snap.pilot_unit.clone());
                 self.ephemeral
                     .csar_pilot_unit
-                    .insert(csar.pilot_unit.clone(), ucid);
+                    .insert(csar_snap.pilot_unit.clone(), *ucid);
+                return;
+            }
+            Self::destroy_csar_pilot_unit(lua, &csar_snap.pilot_unit);
+        }
+        match self.spawn_csar_pilot_unit(lua, ucid, side, &csar_snap) {
+            Ok(Some(new_id)) if !claimed.contains(&new_id) => {
+                if let Some(player) = self.persisted.players.get_mut_cow(ucid) {
+                    if let Some(csar) = player.csar_downed.get_mut(idx) {
+                        csar.pilot_unit = new_id.clone();
+                    }
+                }
+                claimed.insert(new_id.clone());
+                self.ephemeral
+                    .csar_pilot_unit
+                    .insert(new_id, *ucid);
+                info!(
+                    "csar: restored downed pilot for {ucid:?} ({}) after load",
+                    csar_snap.life_type
+                );
+            }
+            Ok(None) => {
+                if let Some(player) = self.persisted.players.get_mut_cow(ucid) {
+                    if let Some(csar) = player.csar_downed.get_mut(idx) {
+                        csar.pilot_unit_stale = true;
+                    }
+                }
+                warn!(
+                    "csar: no pilot type to respawn for {ucid:?} ({})",
+                    csar_snap.life_type
+                );
+            }
+            Ok(Some(_)) => {
+                if let Some(player) = self.persisted.players.get_mut_cow(ucid) {
+                    if let Some(csar) = player.csar_downed.get_mut(idx) {
+                        csar.pilot_unit_stale = true;
+                    }
+                }
+                warn!(
+                    "csar: respawn id collision for {ucid:?} ({})",
+                    csar_snap.life_type
+                );
+            }
+            Err(e) => {
+                if let Some(player) = self.persisted.players.get_mut_cow(ucid) {
+                    if let Some(csar) = player.csar_downed.get_mut(idx) {
+                        csar.pilot_unit_stale = true;
+                    }
+                }
+                warn!(
+                    "csar: respawn failed for {ucid:?} ({}): {e:?}",
+                    csar_snap.life_type
+                );
             }
         }
+    }
+
+    fn find_csar_for_landing(&self, landing_pos: &Position3) -> Option<(Ucid, usize)> {
+        let mut best: Option<(Ucid, usize, f64)> = None;
+        for ucid in self.csar_active_ucids() {
+            let Some(player) = self.persisted.players.get(&ucid) else {
+                continue;
+            };
+            for (idx, csar) in player.csar_downed.iter().enumerate() {
+                if csar.landed {
+                    continue;
+                }
+                let dist = (csar.inst.position.p.0 - landing_pos.p.0).magnitude_squared();
+                if best.as_ref().is_none_or(|(_, _, d)| dist < *d) {
+                    best = Some((ucid, idx, dist));
+                }
+            }
+        }
+        best.map(|(ucid, idx, _)| (ucid, idx))
+    }
+
+    pub fn on_csar_landing_after_ejection(
+        &mut self,
+        lua: MizLua,
+        now: DateTime<Utc>,
+        landing_pos: Position3,
+    ) -> Result<bool> {
+        let Some((ucid, idx)) = self.find_csar_for_landing(&landing_pos) else {
+            return Ok(false);
+        };
+        let side = match self.persisted.players.get(&ucid) {
+            Some(p) => p.side,
+            None => return Ok(false),
+        };
+        let (old_id, mut csar_snap) = {
+            let Some(p) = self.persisted.players.get(&ucid) else {
+                return Ok(false);
+            };
+            let Some(c) = p.csar_downed.get(idx) else {
+                return Ok(false);
+            };
+            (c.pilot_unit.clone(), c.clone())
+        };
+        Self::destroy_csar_pilot_unit(lua, &old_id);
+        self.ephemeral.csar_pilot_unit.remove(&old_id);
+        csar_snap.inst.position = landing_pos;
+        csar_snap.inst.in_air = false;
+        csar_snap.inst.moved = Some(now);
+        let Some(new_id) = self.spawn_csar_pilot_unit(lua, &ucid, side, &csar_snap)? else {
+            warn!(
+                "csar: landing respawn failed for {ucid:?} ({})",
+                csar_snap.life_type
+            );
+            if let Some(player) = self.persisted.players.get_mut_cow(&ucid) {
+                if let Some(c) = player.csar_downed.get_mut(idx) {
+                    c.inst.position = landing_pos;
+                    c.inst.in_air = false;
+                    c.inst.moved = Some(now);
+                    c.pilot_unit_stale = true;
+                    set_csar_pilot_landed(c, now, &ucid);
+                }
+            }
+            self.sync_csar_marks_for_ucid(&ucid);
+            self.ephemeral.dirty();
+            return Ok(true);
+        };
+        if let Some(player) = self.persisted.players.get_mut_cow(&ucid) {
+            if let Some(c) = player.csar_downed.get_mut(idx) {
+                c.pilot_unit = new_id.clone();
+                c.inst = csar_snap.inst;
+                c.pilot_unit_stale = false;
+                set_csar_pilot_landed(c, now, &ucid);
+            }
+        }
+        self.ephemeral
+            .csar_pilot_unit
+            .insert(new_id.clone(), ucid);
+        if let Ok(unit) = Unit::get_instance(lua, &new_id) {
+            prepare_csar_pilot_unit(&unit, true);
+        }
+        self.sync_csar_marks_for_ucid(&ucid);
         self.ephemeral.dirty();
-        self.rebuild_csar_marks();
-        let now = Utc::now();
-        for ucid in self.csar_downed_ucids() {
-            if let Err(e) = self.update_csar_downed_positions(lua, now, &ucid) {
-                warn!("csar refresh position update failed for {ucid:?}: {e:?}");
-            }
-            self.sync_csar_marks_for_ucid(&ucid, true);
-        }
+        Ok(true)
     }
 
     pub fn csar_downed_counts(&self, ucid: &Ucid) -> FxHashMap<LifeType, u32> {
@@ -445,6 +917,10 @@ impl Db {
     }
 
     fn rebind_stale_csar_pilots(&mut self, lua: MizLua, ucid: &Ucid) -> Result<bool> {
+        let side = match self.persisted.players.get(ucid) {
+            Some(p) => p.side,
+            None => return Ok(false),
+        };
         let stale: SmallVec<[(usize, DcsOid<ClassUnit>); 4]> =
             match self.persisted.players.get(ucid) {
                 Some(p) => p
@@ -468,21 +944,16 @@ impl Db {
                 },
                 None => break,
             };
-            let Some(new_id) = rebind_csar_pilot_unit(lua, &csar)? else {
-                continue;
-            };
-            self.ephemeral.csar_pilot_unit.remove(&old_id);
-            self.ephemeral
-                .csar_pilot_unit
-                .insert(new_id.clone(), *ucid);
-            if let Some(player) = self.persisted.players.get_mut_cow(ucid) {
-                if let Some(entry) = player.csar_downed.get_mut(idx) {
-                    entry.pilot_unit = new_id.clone();
-                    entry.pilot_unit_stale = false;
+            if let Some(new_id) = lookup_csar_pilot_unit(lua, ucid, &csar)? {
+                if new_id != old_id && self.apply_csar_pilot_rebind(ucid, &old_id, new_id) {
+                    rebound = true;
                 }
+            } else if self
+                .respawn_csar_pilot_unit(lua, ucid, side, &old_id, &csar)?
+                .is_some()
+            {
+                rebound = true;
             }
-            info!("csar: rebound downed pilot unit for {ucid:?} to {new_id:?}");
-            rebound = true;
         }
         Ok(rebound)
     }
@@ -612,7 +1083,7 @@ impl Db {
         info!("csar: cleared all downed pilots for {ucid:?}");
     }
 
-    fn sync_csar_marks_for_ucid(&mut self, ucid: &Ucid, force_reposition: bool) {
+    fn sync_csar_marks_for_ucid(&mut self, ucid: &Ucid) {
         let Some(player) = self.persisted.players.get(ucid) else {
             return;
         };
@@ -621,12 +1092,31 @@ impl Db {
         }
         let side = player.side;
         let name = player.name.clone();
-        let len = player.csar_downed.len();
-        let life_labels: SmallVec<[std::string::String; 4]> = player
+        let per_type: FxHashMap<LifeType, u32> = player
             .csar_downed
             .iter()
-            .map(|c| self.life_type_panel_label(c.life_type))
-            .collect();
+            .fold(FxHashMap::default(), |mut m, c| {
+                *m.entry(c.life_type).or_default() += 1;
+                m
+            });
+        let len = player.csar_downed.len();
+        let life_labels: SmallVec<[std::string::String; 4]> = {
+            let mut ordinals: FxHashMap<LifeType, u32> = FxHashMap::default();
+            player
+                .csar_downed
+                .iter()
+                .map(|c| {
+                    let base = self.life_type_panel_label(c.life_type);
+                    if per_type.get(&c.life_type).copied().unwrap_or(0) > 1 {
+                        let n = ordinals.entry(c.life_type).or_insert(0);
+                        *n += 1;
+                        format!("{base} #{n}").to_string()
+                    } else {
+                        base.to_string()
+                    }
+                })
+                .collect()
+        };
         let msgs = self.ephemeral.msgs();
         let Some(player) = self.persisted.players.get_mut_cow(ucid) else {
             return;
@@ -641,7 +1131,6 @@ impl Db {
                 &name,
                 life_type_label,
                 csar,
-                force_reposition,
             );
         }
     }
@@ -657,11 +1146,15 @@ impl Db {
         if !self.csar_enabled() {
             return Ok(());
         }
-        let _ = pilot.set_name(String::from(""));
-        prepare_csar_pilot_unit(pilot);
-        let pilot_unit = pilot.object_id()?;
+        let dcs_pilot_id = pilot.object_id()?;
         let aircraft_id = aircraft.object_id()?;
         let slot = aircraft.slot()?;
+        let side = self
+            .persisted
+            .players
+            .get(&ucid)
+            .map(|p| p.side)
+            .context("csar ejection: no such player")?;
         let typ = self
             .ephemeral
             .get_slot_info(&slot)
@@ -705,29 +1198,69 @@ impl Db {
             .remove(&aircraft_id);
 
         self.trim_csar_downed_for_life_type(&ucid, life_type)?;
+        let pilot_type_name = csar_pilot_type_name(pilot).unwrap_or_default();
+        let pilot_category = aircraft
+            .get_group()
+            .and_then(|g| g.get_category())
+            .unwrap_or(GroupCategory::Airplane);
+        let eject_position = inst.position;
+        let mut csar = CsarDowned {
+            pilot_unit: dcs_pilot_id.clone(),
+            life_type,
+            aircraft_type: typ,
+            ejected_at: now,
+            landed: false,
+            inst,
+            eject_position: Some(eject_position),
+            circle_mark_id: None,
+            point_mark_id: None,
+            pilot_unit_stale: false,
+            pilot_type_name,
+            pilot_category,
+        };
+        let tracked_id = match self.spawn_csar_pilot_unit(lua, &ucid, side, &csar)? {
+            Some(spawned_id) => {
+                Self::destroy_csar_pilot_unit(lua, &dcs_pilot_id);
+                csar.pilot_unit = spawned_id.clone();
+                if let Ok(unit) = Unit::get_instance(lua, &spawned_id) {
+                    prepare_csar_pilot_unit(&unit, false);
+                    let _ = refresh_csar_inst_from_unit(&mut csar, &unit, now);
+                }
+                info!(
+                    "csar: spawned coalition pilot on ejection for {ucid:?} at {spawned_id:?}"
+                );
+                spawned_id
+            }
+            None => {
+                warn!(
+                    "csar: spawn on ejection failed for {ucid:?} ({life_type}), keeping DCS pilot"
+                );
+                prepare_csar_pilot_unit(pilot, false);
+                csar.pilot_unit.clone()
+            }
+        };
+        if self.persisted.players.get(&ucid).is_some_and(|p| {
+            p.csar_downed.iter().any(|c| c.pilot_unit == tracked_id)
+        }) {
+            warn!(
+                "csar: pilot unit {tracked_id:?} already tracked for {ucid:?}, skipping duplicate registration"
+            );
+            if tracked_id != csar.pilot_unit {
+                Self::destroy_csar_pilot_unit(lua, &tracked_id);
+            }
+            return Ok(());
+        }
         let player = self
             .persisted
             .players
             .get_mut_cow(&ucid)
             .context("csar ejection: no such player")?;
-        player.csar_downed.push(CsarDowned {
-            pilot_unit: pilot_unit.clone(),
-            life_type,
-            aircraft_type: typ,
-            ejected_at: now,
-            landed: !inst.in_air,
-            inst,
-            circle_mark_id: None,
-            point_mark_id: None,
-            pilot_unit_stale: false,
-        });
+        player.csar_downed.push(csar);
         self.ephemeral
             .csar_pilot_unit
-            .insert(pilot_unit.clone(), ucid);
+            .insert(tracked_id.clone(), ucid);
         self.ephemeral.dirty();
-        self.sync_csar_marks_for_ucid(&ucid, true);
-        info!("csar: registered {life_type} downed pilot {ucid:?} at {pilot_unit:?}");
-        let _ = lua;
+        info!("csar: registered {life_type} downed pilot {ucid:?} at {tracked_id:?}");
         Ok(())
     }
 
@@ -737,39 +1270,51 @@ impl Db {
         now: DateTime<Utc>,
         ucid: &Ucid,
     ) -> Result<()> {
-        let pilot_units: SmallVec<[DcsOid<ClassUnit>; 4]> = match self.persisted.players.get(ucid) {
+        let (side, pilot_units) = match self.persisted.players.get(ucid) {
             Some(p) if !p.csar_downed.is_empty() => {
-                p.csar_downed.iter().map(|c| c.pilot_unit.clone()).collect()
+                (
+                    p.side,
+                    p.csar_downed
+                        .iter()
+                        .map(|c| c.pilot_unit.clone())
+                        .collect::<SmallVec<[DcsOid<ClassUnit>; 4]>>(),
+                )
             }
             _ => return Ok(()),
         };
         let coord = Coord::singleton(lua)?;
-        let mut mark_dirty = false;
-        let mut to_kill: SmallVec<[DcsOid<ClassUnit>; 4]> = smallvec![];
         for pilot_unit in pilot_units {
-            let instance = match Unit::get_instance(lua, &pilot_unit) {
-                Ok(u) if u.is_exist().unwrap_or(false) => u,
-                Ok(_) | Err(_) => {
-                    let csar = match self.persisted.players.get(ucid) {
-                        Some(p) => p
-                            .csar_downed
-                            .iter()
-                            .find(|c| c.pilot_unit == pilot_unit)
-                            .cloned(),
-                        None => None,
-                    };
-                    let Some(csar) = csar else {
-                        continue;
-                    };
-                    match self.handle_csar_pilot_unit_missing(lua, ucid, &pilot_unit, &csar)? {
-                        CsarPilotMissingAction::Rebound => mark_dirty = true,
-                        CsarPilotMissingAction::Killed => to_kill.push(pilot_unit),
-                        CsarPilotMissingAction::AwaitRebind => (),
-                    }
-                    continue;
+            let csar = match self.persisted.players.get(ucid) {
+                Some(p) => p
+                    .csar_downed
+                    .iter()
+                    .find(|c| c.pilot_unit == pilot_unit)
+                    .cloned(),
+                None => None,
+            };
+            let Some(csar) = csar else {
+                continue;
+            };
+            let instance = {
+                let by_name = lookup_csar_pilot_unit(lua, ucid, &csar)?;
+                if let Some(by_name) = by_name {
+                    Unit::get_instance(lua, &by_name).ok()
+                } else {
+                    Unit::get_instance(lua, &pilot_unit).ok()
                 }
             };
-            prepare_csar_pilot_unit(&instance);
+            let Some(instance) = instance.filter(|u| u.is_exist().unwrap_or(false)) else {
+                let _ = self.handle_csar_pilot_unit_missing(
+                    lua,
+                    ucid,
+                    side,
+                    &pilot_unit,
+                    &csar,
+                    now,
+                )?;
+                continue;
+            };
+            prepare_csar_pilot_unit(&instance, csar.landed);
             let pos = instance.get_position()?;
             let velocity = instance.get_velocity()?.0;
             let in_air = instance.in_air()?;
@@ -784,6 +1329,9 @@ impl Db {
                 continue;
             };
             csar.pilot_unit_stale = false;
+            if csar.landed {
+                continue;
+            }
             let inst = &mut csar.inst;
             let moved = (inst.position.p.0 - pos.p.0).magnitude_squared() > 1.0;
             if moved {
@@ -791,7 +1339,6 @@ impl Db {
                 inst.velocity = velocity;
                 inst.in_air = in_air;
                 inst.moved = Some(now);
-                mark_dirty = true;
                 self.ephemeral.stat(bfprotocols::stats::Stat::Position {
                     id: EnId::Player(*ucid),
                     pos: bfprotocols::stats::Pos {
@@ -800,58 +1347,22 @@ impl Db {
                     },
                 });
             }
-            if !in_air && !csar.landed {
-                mark_dirty |= set_csar_pilot_landed(csar, now, ucid);
-            }
         }
-        for pilot_unit in to_kill {
-            self.on_csar_pilot_killed(&pilot_unit, ucid);
-        }
-        if self.rebind_stale_csar_pilots(lua, ucid)? {
-            mark_dirty = true;
-        }
-        if self
-            .persisted
-            .players
-            .get(ucid)
-            .is_some_and(csar_landed_needs_marks)
-        {
-            mark_dirty = true;
-        }
-        if mark_dirty {
-            self.sync_csar_marks_for_ucid(ucid, true);
-        }
+        let _ = self.rebind_stale_csar_pilots(lua, ucid)?;
         self.ephemeral.dirty();
         Ok(())
     }
 
-    pub fn on_csar_landing_after_ejection(
-        &mut self,
-        lua: MizLua,
-        now: DateTime<Utc>,
-        ucid: &Ucid,
-    ) -> Result<()> {
-        let Some(player) = self.persisted.players.get(ucid) else {
-            return Ok(());
-        };
-        if player.csar_downed.is_empty() {
-            return Ok(());
+    pub fn update_all_csar_pilots(&mut self, lua: MizLua, now: DateTime<Utc>) {
+        if !self.csar_enabled() {
+            return;
         }
-        if let Some(player) = self.persisted.players.get_mut_cow(ucid) {
-            for csar in &mut player.csar_downed {
-                set_csar_pilot_landed(csar, now, ucid);
+        self.flush_pending_csar_destroys(lua);
+        for ucid in self.csar_active_ucids() {
+            if let Err(e) = self.update_csar_downed_positions(lua, now, &ucid) {
+                warn!("csar position update failed for {ucid:?}: {e:?}");
             }
         }
-        self.update_csar_downed_positions(lua, now, ucid)?;
-        if self
-            .persisted
-            .players
-            .get(ucid)
-            .is_some_and(|p| p.csar_downed.iter().any(|c| c.landed))
-        {
-            self.sync_csar_marks_for_ucid(ucid, true);
-        }
-        Ok(())
     }
 
     pub fn rebuild_csar_marks(&mut self) {
@@ -859,7 +1370,7 @@ impl Db {
             return;
         }
         for ucid in self.csar_downed_ucids() {
-            self.sync_csar_marks_for_ucid(&ucid, true);
+            self.sync_csar_marks_for_ucid(&ucid);
         }
     }
 }

@@ -946,29 +946,15 @@ impl Db {
         let mut dead: Vec<DcsOid<ClassUnit>> = vec![];
         let mut unit: Option<Unit> = None;
         let coord = Coord::singleton(lua)?;
-        if self.csar_enabled() {
-            self.flush_pending_csar_destroys(lua);
-        }
         for ucid in ids {
             let mut inform_cost = None;
-            if self.csar_enabled() {
-                if let Err(e) = self.update_csar_downed_positions(lua, now, ucid) {
-                    warn!("csar position update failed for {ucid:?}: {e:?}");
-                }
-                let active_in_slot = self
-                    .ephemeral
-                    .players_by_slot
-                    .values()
-                    .any(|u| u == ucid);
-                if !active_in_slot
-                    && self
-                        .persisted
-                        .players
-                        .get(ucid)
-                        .is_some_and(|p| !p.csar_downed.is_empty())
-                {
-                    continue;
-                }
+            if !self
+                .ephemeral
+                .players_by_slot
+                .values()
+                .any(|u| u == ucid)
+            {
+                continue;
             }
             if let Some(player) = self.persisted.players.get_mut_cow(ucid) {
                 if let Some((slot, Some(inst))) = &mut player.current_slot {

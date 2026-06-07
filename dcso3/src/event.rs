@@ -145,6 +145,22 @@ impl<'lua> FromLua<'lua> for EjectionEvent<'lua> {
 }
 
 #[derive(Debug, Clone, Serialize)]
+pub struct LandingAfterEjectionEvent<'lua> {
+    pub time: Time,
+    pub initiator: Object<'lua>,
+}
+
+impl<'lua> FromLua<'lua> for LandingAfterEjectionEvent<'lua> {
+    fn from_lua(value: Value<'lua>, _: &'lua Lua) -> LuaResult<Self> {
+        let tbl = as_tbl("LandingAfterEjectionEvent", None, value).map_err(lua_err)?;
+        Ok(Self {
+            time: tbl.raw_get("time")?,
+            initiator: tbl.raw_get("initiator")?,
+        })
+    }
+}
+
+#[derive(Debug, Clone, Serialize)]
 pub struct Birth<'lua> {
     pub time: Time,
     pub initiator: Object<'lua>,
@@ -236,7 +252,7 @@ pub enum Event<'lua> {
     Kill(WeaponUse<'lua>),
     Score(UnitEvent<'lua>),
     UnitLost(UnitEvent<'lua>),
-    LandingAfterEjection,
+    LandingAfterEjection(LandingAfterEjectionEvent<'lua>),
     ParatrooperLanding,
     DiscardChairAfterEjection,
     WeaponAdd(WeaponAdd<'lua>),
@@ -302,7 +318,7 @@ fn translate<'a, 'lua: 'a>(
         28 => Event::Kill(WeaponUse::from_lua(value, lua)?),
         29 => Event::Score(UnitEvent::from_lua(value, lua)?),
         30 => Event::UnitLost(UnitEvent::from_lua(value, lua)?),
-        31 => Event::LandingAfterEjection,
+        31 => Event::LandingAfterEjection(LandingAfterEjectionEvent::from_lua(value, lua)?),
         32 => Event::ParatrooperLanding,
         33 => Event::DiscardChairAfterEjection,
         34 => Event::WeaponAdd(WeaponAdd::from_lua(value, lua)?),

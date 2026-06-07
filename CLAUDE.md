@@ -207,6 +207,10 @@ This is a Cargo workspace with 5 main crates:
 5. **For dcso3 changes**: May affect all dependent crates
 6. **For bftools changes**: Rebuild standalone in `bftools/` directory
 
+## DCS behavior reference (MOOSE)
+
+When implementing or fixing DCS-facing features (CSAR, cargo, events, spawning, coalition units), **start from [MOOSE DOCS DEVELOP](https://flightcontrol-master.github.io/MOOSE_DOCS_DEVELOP/Documentation/index.html)** — especially `Ops.CSAR` — and port the proven flow to Rust/Fowl rather than inventing new mechanics. See `.cursor/rules/moose-reference.mdc`.
+
 ## Code comments (AI / assistants)
 
 - Add **few** comments in new code: only non-obvious invariants, traps, or cross-module contracts. **Short, headline-style** — no per-line narration.

@@ -116,6 +116,7 @@ pub(super) struct Production {
 pub struct Ephemeral {
     pub(super) dirty: bool,
     pub cfg: Arc<Cfg>,
+    pub(super) miz_idx: MizIndex,
     /// From `<sortie>_fowl_export.json` (FowlTools); weapon `wsType` allowlists for logistics filtering.
     pub(crate) fowl_miz_export: Arc<FowlMizExport>,
     pub(super) to_bg: Option<UnboundedSender<Task>>,
@@ -184,6 +185,7 @@ impl Default for Ephemeral {
         Self {
             dirty: false,
             cfg: Arc::new(Cfg::default()),
+            miz_idx: MizIndex::default(),
             fowl_miz_export: Arc::new(FowlMizExport::default()),
             to_bg: None,
             players_by_slot: IndexMap::default(),
@@ -829,6 +831,7 @@ impl Ephemeral {
         fowl_miz_export: Arc<FowlMizExport>,
     ) -> Result<()> {
         self.to_bg = Some(to_bg);
+        self.miz_idx = mizidx.clone();
         self.fowl_miz_export = fowl_miz_export;
         let check_unit_classification = || -> Result<()> {
             let mut not_classified = FxHashSet::default();

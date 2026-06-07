@@ -14,7 +14,7 @@ FITNESS FOR A PARTICULAR PURPOSE. See the GNU Affero Public License
 for more details.
 */
 
-use super::{ephemeral::SlotInfo, objective::ObjGroupClass, player::SlotAuth, Db, SetS};
+use super::{csar::is_fowl_csar_unit_unit, ephemeral::SlotInfo, objective::ObjGroupClass, player::SlotAuth, Db, SetS};
 use crate::{
     group, group_by_name, group_health, group_mut, objective, objective_mut,
     spawnctx::{Despawn, SpawnCtx, SpawnLoc},
@@ -1007,6 +1007,9 @@ impl Db {
             .flatten()
             .and_then(|n| connected.get_by_name(&n));
         if player_in_unit.is_none() {
+            if is_fowl_csar_unit_unit(unit) {
+                return Ok(BirthRes::None);
+            }
             if let Some(uid) = self.persisted.units_by_name.get(name.as_str()) {
                 let unit = unit!(self, uid)?;
                 self.ephemeral.uid_by_object_id.insert(id.clone(), *uid);
