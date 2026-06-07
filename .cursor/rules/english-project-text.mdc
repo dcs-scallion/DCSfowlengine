@@ -1,8 +1,0 @@
----
-description: 
-alwaysApply: true
----
-
-# Project language (DCSfowlengine)
-
-- **Code, comments, docstrings, user-facing CLI/log strings, and commit messages** in this repo: **English only** (ASCII punctuation in user-visible text unless a proper name requires otherwise).

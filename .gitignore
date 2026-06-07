@@ -130,3 +130,5 @@ miz/Scenarios/80s/Caucasus1985-SARH/Rust_Fowl_Engine_2.0_Caucasus1985-SARH_CFG
 **/_t*
 bftools/analyze_export.ps1
 bftools/analyze_export_detail.ps1
+# Local Cursor IDE rules and settings (not shared via git)
+.cursor/
