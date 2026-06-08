@@ -14,6 +14,9 @@ FITNESS FOR A PARTICULAR PURPOSE. See the GNU Affero Public License
 for more details.
 */
 
+pub(super) mod discord_map;
+mod discord_map_font;
+mod discord_map_http;
 mod logpub;
 mod perf;
 mod rpcs;
@@ -23,6 +26,7 @@ use crate::{admin::AdminCommand, db::persisted::Persisted};
 use anyhow::{Context, Result, anyhow, bail};
 use bfprotocols::{
     cfg::Cfg,
+    discord_map_viewport::MapViewport,
     perf::{Perf, PerfStat},
     stats::Stat,
 };
@@ -237,6 +241,21 @@ fn rotate_log(path: &Path) {
     }
 }
 
+#[derive(Debug, Clone)]
+pub struct DiscordMapPostJob {
+    pub webhook_url: String,
+    pub webhook_message_path: PathBuf,
+    pub base_png_path: PathBuf,
+    pub composited_png_path: PathBuf,
+    pub html_path: PathBuf,
+    pub viewport: MapViewport,
+    pub markers: Vec<discord_map::DiscordMapMarker>,
+    pub icons: discord_map::DiscordMapIconPackJob,
+    pub caption: String,
+    pub mission_name: String,
+    pub status_utc: String,
+}
+
 #[derive(Debug)]
 pub(super) enum Task {
     SaveState(PathBuf, Persisted),
@@ -255,6 +274,20 @@ pub(super) enum Task {
     },
     Shutdown(Arc<(Mutex<bool>, Condvar)>),
     Stat(Stat),
+    FetchDiscordMapBase {
+        url: String,
+        base_png_path: PathBuf,
+        meta_path: PathBuf,
+        meta_json: String,
+        post: Option<DiscordMapPostJob>,
+    },
+    DiscordMapPost(DiscordMapPostJob),
+    StartDiscordMapHttp {
+        port: u16,
+        html_path: PathBuf,
+        composited_png_path: PathBuf,
+        base_png_path: PathBuf,
+    },
 }
 
 enum Logs {
@@ -519,6 +552,78 @@ async fn background_loop(write_dir: PathBuf, mut rx: UnboundedReceiver<Task>) {
                 if let Err(e) = logs.write_stat(&st) {
                     eprintln!("could not write stat {st:?} {e:?}")
                 }
+            }
+            Task::FetchDiscordMapBase {
+                url,
+                base_png_path,
+                meta_path,
+                meta_json,
+                post,
+            } => {
+                match discord_map::fetch_mapbox_base(
+                    &url,
+                    &base_png_path,
+                    &meta_path,
+                    &meta_json,
+                )
+                .await
+                {
+                    Ok(()) => {
+                        if let Some(job) = post {
+                            if let Err(e) = discord_map::publish_and_post(
+                                &job.webhook_url,
+                                &job.webhook_message_path,
+                                &job.base_png_path,
+                                &job.composited_png_path,
+                                &job.html_path,
+                                &job.viewport,
+                                &job.markers,
+                                &job.icons,
+                                &job.caption,
+                                &job.mission_name,
+                                &job.status_utc,
+                            )
+                            .await
+                            {
+                                error!("discord map post after fetch failed: {e:#}");
+                            }
+                        }
+                    }
+                    Err(e) => error!("discord map Mapbox fetch failed: {e:#}"),
+                }
+            }
+            Task::DiscordMapPost(job) => {
+                if let Err(e) = discord_map::publish_and_post(
+                    &job.webhook_url,
+                    &job.webhook_message_path,
+                    &job.base_png_path,
+                    &job.composited_png_path,
+                    &job.html_path,
+                    &job.viewport,
+                    &job.markers,
+                    &job.icons,
+                    &job.caption,
+                    &job.mission_name,
+                    &job.status_utc,
+                )
+                .await
+                {
+                    error!("discord map Discord post failed: {e:#}");
+                }
+            }
+            Task::StartDiscordMapHttp {
+                port,
+                html_path,
+                composited_png_path,
+                base_png_path,
+            } => {
+                discord_map::start_map_http_server(
+                    port,
+                    html_path,
+                    composited_png_path,
+                    base_png_path,
+                )
+                .await;
             }
         }
     }

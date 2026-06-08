@@ -532,6 +532,16 @@ impl Objective {
         matches!(&self.kind, ObjectiveKind::Logistics)
     }
 
+    pub fn discord_map_icon_kind(&self) -> Option<&'static str> {
+        match &self.kind {
+            ObjectiveKind::Airbase => Some("airbase"),
+            ObjectiveKind::Fob => Some("fob"),
+            ObjectiveKind::Logistics => Some("logistics"),
+            ObjectiveKind::Production => Some("production"),
+            ObjectiveKind::Farp { .. } => None,
+        }
+    }
+
     pub fn kind_name(&self) -> &'static str {
         self.kind.name()
     }

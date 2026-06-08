@@ -226,18 +226,14 @@ impl UnpackedMiz {
             .with_context(|| format_compact!("creating {:?}", destination_file))?;
         let zip_file = BufWriter::new(file);
         let mut zip_writer = ZipWriter::new(zip_file);
-        for (_, file_path) in &self.files {
+        for (zip_name, file_path) in &self.files {
             if file_path.is_dir() {
                 continue;
             }
             let mut file = File::open(file_path)
                 .with_context(|| format_compact!("opening file {:?}", file_path))?;
-            let relative_path =
-                file_path.strip_prefix(&self.root).with_context(|| {
-                    format_compact!("stripping {:?} from file {file_path:?}", self.root)
-                })?;
             zip_writer
-                .start_file(relative_path.to_string_lossy(), FileOptions::default())
+                .start_file(zip_name.as_str(), FileOptions::default())
                 .context("starting zip file")?;
             io::copy(&mut file, &mut zip_writer).context("writing to zip file")?;
             info!("added {file_path:?} to archive");
@@ -11266,6 +11262,11 @@ pub fn run(cfg: &MizCmd) -> Result<()> {
     let mut base = LoadedMiz::new(lua, &cfg.base).context("loading base mission")?;
     validate_base_fowl_trigger_zone_names(&base.mission)
         .context("validating Fowl trigger zone names (must match runtime)")?;
+    crate::discord_map_icons::validate_discord_map_zones(
+        &base.mission,
+        cfg.campaign_cfg.as_deref(),
+    )
+    .context("discord map ME corner zones")?;
     audit_objective_display_aliases(&base).context("SETTINGS-aliases zone")?;
     let base_idx = base
         .mission
@@ -11917,6 +11918,8 @@ pub fn run(cfg: &MizCmd) -> Result<()> {
         base.miz.files.insert("options".into(), options_in_base);
         info!("force-added base.miz-options from base folder to the final archive.");
     }
+    crate::discord_map_icons::embed_into_miz(&base.miz.root, &mut base.miz.files, &cfg.base)
+        .context("embedding discord map icons into mission")?;
     info!("saving finalized mission to {:?}", cfg.output);
     base.miz.pack(&cfg.output).context("repacking mission")?;
     let export_path = fowl_from_warehouse

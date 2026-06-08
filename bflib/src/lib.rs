@@ -1433,7 +1433,11 @@ fn advise_captureable(ctx: &mut Context) -> Result<()> {
 }
 
 fn advise_captured(ctx: &mut Context, lua: MizLua, ts: DateTime<Utc>) -> Result<()> {
-    for (side, oid) in ctx.db.check_capture(lua, ts)? {
+    let captures = ctx.db.check_capture(lua, ts)?;
+    if !captures.is_empty() {
+        ctx.db.discord_map_debounce_post(ts);
+    }
+    for (side, oid) in captures {
         let name = ctx.db.objective_f10_map_label(ctx.db.objective(&oid)?);
         let mcap = format_compact!("our forces have captured {}", name);
         let mlost = format_compact!("we have lost {}", name);
@@ -1715,6 +1719,9 @@ fn run_slow_timed_events(
             Ok(AdminResult::Continue) => (),
             Ok(AdminResult::Shutdown) => return Ok(AdminResult::Shutdown),
             Err(e) => error!("failed to check for auto shutdown {e:?}"),
+        }
+        if let Err(e) = ctx.db.discord_map_maybe_post(lua) {
+            error!("discord map post failed: {e:#}");
         }
         for (oid, vh) in ctx.db.ephemeral.warehouses_to_sync() {
             if let Err(e) = ctx.db.sync_vehicle_at_obj(lua, oid, vh.clone()) {
@@ -2047,6 +2054,14 @@ fn delayed_init_miz(lua: MizLua) -> Result<()> {
             .ephemeral
             .load_front_line_water_grid(&path, theatre.as_str());
     }
+    {
+        let miz_path = db::discord_map::resolve_mission_miz_path(lua, &path)?;
+        db::discord_map::init_discord_map(lua, &mut ctx.db, &miz, &miz_path, &path)
+            .context("discord map init")?;
+        ctx.db
+            .bootstrap_discord_map(lua)
+            .context("discord map bootstrap")?;
+    }
     ctx.shutdown = ctx
         .db
         .ephemeral
@@ -2164,7 +2179,7 @@ fn init_miz(lua: MizLua) -> Result<()> {
         let ctx = unsafe { Context::get_mut() };
         if ctx.load_state.init_ok() {
             if let Err(e) = delayed_init_miz(lua) {
-                error!("THE MISSION CANNOT START: {:?}", e);
+                error!("THE MISSION CANNOT START: {e:#}");
                 let timer = Timer::singleton(lua)?;
                 timer.schedule_function(
                     now + 1.,

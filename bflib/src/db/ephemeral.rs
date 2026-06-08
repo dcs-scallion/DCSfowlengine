@@ -16,6 +16,7 @@ for more details.
 
 use super::{
     cargo::Cargo,
+    discord_map::DiscordMapRuntime,
     group::{SpawnedGroup, SpawnedUnit},
     logistics::LogiStage,
     front_line::FrontLine,
@@ -178,6 +179,8 @@ pub struct Ephemeral {
     /// Cached hub→destination virtual resupply efficiency (whole percent).
     pub(super) hub_delivery_efficiency: FxHashMap<(ObjectiveId, ObjectiveId), u8>,
     front_line: FrontLine,
+    pub(super) discord_map: Option<DiscordMapRuntime>,
+    pub(super) discord_map_post_due: Option<DateTime<Utc>>,
 }
 
 impl Default for Ephemeral {
@@ -234,12 +237,14 @@ impl Default for Ephemeral {
             objective_display_aliases: FxHashMap::default(),
             hub_delivery_efficiency: FxHashMap::default(),
             front_line: FrontLine::default(),
+            discord_map: None,
+            discord_map_post_due: None,
         }
     }
 }
 
 impl Ephemeral {
-    fn do_bg(&self, task: Task) {
+    pub(super) fn do_bg(&self, task: Task) {
         if let Some(to_bg) = &self.to_bg {
             match to_bg.send(task) {
                 Ok(()) => (),

@@ -1,6 +1,8 @@
 pub mod stats;
 pub mod db;
 pub mod cfg;
+pub mod discord_map_icon_manifest;
+pub mod discord_map_viewport;
 pub mod fowl_miz_export;
 pub mod shots;
 pub mod perf;

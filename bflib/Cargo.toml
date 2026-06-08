@@ -40,4 +40,12 @@ serde = { workspace = true }
 simplelog = { workspace = true }
 smallvec = { workspace = true }
 tokio = { workspace = true }
+image = "0.25"
+ab_glyph = "0.2"
+base64 = { workspace = true }
+http-body-util = "0.1"
+hyper = { version = "1", features = ["server", "http1"] }
+hyper-util = { version = "0.1", features = ["tokio"] }
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "multipart"] }
+zip = "0.6.6"
 zstd = { workspace = true }

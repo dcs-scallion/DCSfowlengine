@@ -939,6 +939,103 @@ fn default_airborne_deslot_penalty_points() -> u32 {
     0
 }
 
+fn default_discord_map_width() -> u32 {
+    1280
+}
+
+fn default_discord_map_style() -> String {
+    String::from("mapbox/dark-v11")
+}
+
+fn default_discord_map_retina() -> bool {
+    true
+}
+
+fn default_discord_map_http_port() -> u16 {
+    17841
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DiscordMapCfg {
+    #[serde(default)]
+    pub enabled: bool,
+    #[serde(default)]
+    pub webhook_url: Option<String>,
+    #[serde(default)]
+    pub mapbox_access_token: Option<String>,
+    #[serde(default = "default_discord_map_style")]
+    pub style: String,
+    /// Mapbox request width (1–1280); height is computed from ME corner zones.
+    #[serde(default = "default_discord_map_width")]
+    pub width: u32,
+    #[serde(default = "default_discord_map_retina")]
+    pub retina: bool,
+    #[serde(default)]
+    pub padding: u32,
+    /// Read-only interactive map HTTP port (`0.0.0.0`, GET `/map` and `/map.png` only).
+    #[serde(default = "default_discord_map_http_port")]
+    pub http_port: u16,
+    /// Public base URL for Discord link, e.g. `http://203.0.113.50:17841` (no trailing slash).
+    #[serde(default)]
+    pub http_public_base_url: Option<String>,
+}
+
+impl Default for DiscordMapCfg {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            webhook_url: None,
+            mapbox_access_token: None,
+            style: default_discord_map_style(),
+            width: default_discord_map_width(),
+            retina: true,
+            padding: 0,
+            http_port: default_discord_map_http_port(),
+            http_public_base_url: None,
+        }
+    }
+}
+
+impl DiscordMapCfg {
+    pub fn validate_enabled(&self) -> Result<()> {
+        if !self.enabled {
+            return Ok(());
+        }
+        if self
+            .webhook_url
+            .as_ref()
+            .is_none_or(|s| s.trim().is_empty())
+        {
+            bail!("discord_map.enabled requires discord_map.webhook_url in CFG");
+        }
+        if self
+            .mapbox_access_token
+            .as_ref()
+            .is_none_or(|s| s.trim().is_empty())
+        {
+            bail!("discord_map.enabled requires discord_map.mapbox_access_token in CFG");
+        }
+        if self.width == 0 || self.width > crate::discord_map_viewport::MAPBOX_STATIC_MAX_PX
+        {
+            bail!(
+                "discord_map.width must be 1..={}",
+                crate::discord_map_viewport::MAPBOX_STATIC_MAX_PX
+            );
+        }
+        if self.http_port == 0 {
+            bail!("discord_map.http_port must be > 0 when discord_map.enabled");
+        }
+        if self
+            .http_public_base_url
+            .as_ref()
+            .is_none_or(|s| s.trim().is_empty())
+        {
+            bail!("discord_map.enabled requires discord_map.http_public_base_url in CFG");
+        }
+        Ok(())
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct CsarCfg {
     /// Keep ejected pilots in the world and hide them from JTAC (future CSAR missions).
@@ -1158,6 +1255,8 @@ pub struct Cfg {
     /// EWR track update delay in seconds (only used when ewr_mode is Delayed)
     #[serde(default = "default_ewr_delay")]
     pub ewr_delay: u32,
+    #[serde(default)]
+    pub discord_map: DiscordMapCfg,
 }
 
 impl Cfg {

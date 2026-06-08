@@ -4,6 +4,7 @@ use serde_derive::Serialize;
 use std::path::PathBuf;
 
 mod campaign_cfg;
+mod discord_map_icons;
 mod mission_edit;
 mod payload_allowlist;
 mod weapon_bridge;

@@ -22,8 +22,11 @@ wrapped_table!(Dcs, None);
 
 impl<'lua> Dcs<'lua> {
     pub fn singleton(lua: HooksLua<'lua>) -> Result<Self> {
-        let globals = lua.inner().globals();
-        Ok(globals.raw_get("DCS")?)
+        Self::from_lua_env(lua)
+    }
+
+    pub fn from_lua_env<L: LuaEnv<'lua>>(lua: L) -> Result<Self> {
+        Ok(lua.inner().globals().raw_get("DCS")?)
     }
 
     pub fn get_mission_name(&self) -> Result<String> {

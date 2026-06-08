@@ -7,6 +7,8 @@ pub const FOWL_TRIGGER_ZONE_EXPECTED_PREFIXES_DISPLAY: &str = "O, G, T, or SETTI
 /// Trigger zone: property **key** = internal id (e.g. `BForrestal`, `RVladikavkaz`), **value** = map label.
 pub const SETTINGS_OBJECTIVE_ALIASES_ZONE: &str = "SETTINGS-aliases";
 
+pub use crate::discord_map_viewport::{SETTINGS_DISCORD_MAP_NW, SETTINGS_DISCORD_MAP_SE};
+
 /// Same predicate as `bflib` `mizinit::init` after the `G…` branch: allowed `O`, `G`, `T`, or `SETTINGS-`.
 #[inline]
 pub fn fowl_trigger_zone_name_valid(name: &str) -> bool {
