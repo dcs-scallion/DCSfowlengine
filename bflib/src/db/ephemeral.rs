@@ -28,7 +28,8 @@ use crate::{
     bg::Task,
     maybe,
     msgq::MsgQ,
-    spawnctx::{Despawn, SpawnCtx, Spawned},
+    shots::ShotDb,
+    spawnctx::{Despawn, SpawnCtx, Spawned, DESPAWN_COMBAT_RETRY, despawn_defer_combat},
 };
 use anyhow::{Context, Result, anyhow, bail};
 use bfprotocols::{
@@ -157,6 +158,7 @@ pub struct Ephemeral {
     pub(super) warehouse_resource_meta: Option<Arc<FxHashMap<String, WarehouseResourceMeta>>>,
     pub(super) actions_taken: FxHashMap<Side, FxHashMap<String, u32>>,
     pub(super) delayspawnq: BTreeMap<DateTime<Utc>, SmallVec<[GroupId; 8]>>,
+    delaydespawnq: BTreeMap<DateTime<Utc>, SmallVec<[(GroupId, Despawn); 8]>>,
     /// New round only: wall-clock time to run `place_tisp_initial_ships` after full startup.
     pub(super) tisp_initial_after: Option<DateTime<Utc>>,
     /// New round: do not push virtual stock into DCS during initial `setup_warehouses` passes.
@@ -181,6 +183,7 @@ pub struct Ephemeral {
     front_line: FrontLine,
     pub(super) discord_map: Option<DiscordMapRuntime>,
     pub(super) discord_map_post_due: Option<DateTime<Utc>>,
+    pub(super) discord_map_periodic_due: Option<DateTime<Utc>>,
 }
 
 impl Default for Ephemeral {
@@ -222,6 +225,7 @@ impl Default for Ephemeral {
             warehouse_resource_meta: None,
             actions_taken: FxHashMap::default(),
             delayspawnq: BTreeMap::default(),
+            delaydespawnq: BTreeMap::default(),
             tisp_initial_after: None,
             preserve_initial_warehouse_fill: false,
             defer_initial_hub_distribute: false,
@@ -239,6 +243,7 @@ impl Default for Ephemeral {
             front_line: FrontLine::default(),
             discord_map: None,
             discord_map_post_due: None,
+            discord_map_periodic_due: None,
         }
     }
 }
@@ -437,6 +442,7 @@ impl Ephemeral {
         now: DateTime<Utc>,
         idx: &MizIndex,
         spctx: &SpawnCtx,
+        shots: &ShotDb,
     ) -> Result<()> {
         let mut delayed: SmallVec<[GroupId; 16]> = smallvec![];
         while let Some((at, gids)) = self.delayspawnq.first_key_value() {
@@ -453,11 +459,32 @@ impl Ephemeral {
         for gid in delayed {
             self.push_spawn(gid)
         }
+        let mut due_despawns: SmallVec<[(GroupId, Despawn); 16]> = smallvec![];
+        while let Some((at, items)) = self.delaydespawnq.first_key_value() {
+            if now < *at {
+                break;
+            }
+            for item in items {
+                due_despawns.push(item.clone());
+            }
+            let at = *at;
+            self.delaydespawnq.remove(&at);
+        }
+        for item in due_despawns {
+            self.push_despawn(item.0, item.1);
+        }
         let dlen = self.despawnq.len();
         let slen = self.spawnq.len();
         if dlen > 0 {
             for _ in 0..max(1, dlen >> 4) {
                 if let Some((gid, despawn)) = self.despawnq.pop_front() {
+                    if despawn_defer_combat(spctx.lua(), shots, persisted, now, gid, &despawn) {
+                        self.delaydespawnq
+                            .entry(now + DESPAWN_COMBAT_RETRY)
+                            .or_default()
+                            .push((gid, despawn));
+                        continue;
+                    }
                     if let Some(group) = persisted.groups.get(&gid) {
                         if let Some(id) = self.object_id_by_gid.remove(&gid) {
                             self.gid_by_object_id.remove(&id);

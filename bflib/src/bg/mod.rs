@@ -248,6 +248,7 @@ pub struct DiscordMapPostJob {
     pub base_png_path: PathBuf,
     pub composited_png_path: PathBuf,
     pub html_path: PathBuf,
+    pub map_version_path: PathBuf,
     pub viewport: MapViewport,
     pub markers: Vec<discord_map::DiscordMapMarker>,
     pub icons: discord_map::DiscordMapIconPackJob,
@@ -285,6 +286,7 @@ pub(super) enum Task {
     StartDiscordMapHttp {
         port: u16,
         html_path: PathBuf,
+        map_version_path: PathBuf,
         composited_png_path: PathBuf,
         base_png_path: PathBuf,
     },
@@ -576,6 +578,7 @@ async fn background_loop(write_dir: PathBuf, mut rx: UnboundedReceiver<Task>) {
                                 &job.base_png_path,
                                 &job.composited_png_path,
                                 &job.html_path,
+                                &job.map_version_path,
                                 &job.viewport,
                                 &job.markers,
                                 &job.icons,
@@ -599,6 +602,7 @@ async fn background_loop(write_dir: PathBuf, mut rx: UnboundedReceiver<Task>) {
                     &job.base_png_path,
                     &job.composited_png_path,
                     &job.html_path,
+                    &job.map_version_path,
                     &job.viewport,
                     &job.markers,
                     &job.icons,
@@ -614,12 +618,14 @@ async fn background_loop(write_dir: PathBuf, mut rx: UnboundedReceiver<Task>) {
             Task::StartDiscordMapHttp {
                 port,
                 html_path,
+                map_version_path,
                 composited_png_path,
                 base_png_path,
             } => {
                 discord_map::start_map_http_server(
                     port,
                     html_path,
+                    map_version_path,
                     composited_png_path,
                     base_png_path,
                 )

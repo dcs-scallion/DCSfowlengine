@@ -1720,7 +1720,7 @@ fn run_slow_timed_events(
             Ok(AdminResult::Shutdown) => return Ok(AdminResult::Shutdown),
             Err(e) => error!("failed to check for auto shutdown {e:?}"),
         }
-        if let Err(e) = ctx.db.discord_map_maybe_post(lua) {
+        if let Err(e) = ctx.db.discord_map_tick(lua, ts, ctx.connected.len() > 0) {
             error!("discord map post failed: {e:#}");
         }
         for (oid, vh) in ctx.db.ephemeral.warehouses_to_sync() {
@@ -1876,6 +1876,7 @@ fn run_timed_events(
         ts,
         &ctx.idx,
         &spctx,
+        &ctx.shots_out,
     ) {
         error!("error processing spawn queue {:?}", e)
     }
@@ -2061,6 +2062,7 @@ fn delayed_init_miz(lua: MizLua) -> Result<()> {
         ctx.db
             .bootstrap_discord_map(lua)
             .context("discord map bootstrap")?;
+        ctx.db.schedule_discord_map_periodic(Utc::now(), ctx.connected.len() > 0);
     }
     ctx.shutdown = ctx
         .db

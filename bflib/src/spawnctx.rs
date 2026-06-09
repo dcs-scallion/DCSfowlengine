@@ -14,9 +14,10 @@ FITNESS FOR A PARTICULAR PURPOSE. See the GNU Affero Public License
 for more details.
 */
 
+use crate::{db::persisted::Persisted, shots::ShotDb};
 use anyhow::{Context, Result, anyhow, bail};
-use bfprotocols::perf::PerfInner;
-use chrono::Utc;
+use bfprotocols::{db::group::GroupId, perf::PerfInner};
+use chrono::{DateTime, Duration, Utc};
 use compact_str::format_compact;
 use dcso3::{
     DeepClone, LuaEnv, LuaVec2, LuaVec3, MizLua, String, Vector2, Vector3,
@@ -26,12 +27,16 @@ use dcso3::{
     land::Land,
     object::{DcsObject, DcsOid, ObjectCategory},
     perf::record_perf,
+    static_object::StaticObject,
     world::{SearchVolume, World},
 };
 use fxhash::FxHashMap;
 use log::info;
 use mlua::Value;
 use serde_derive::{Deserialize, Serialize};
+
+const DESPAWN_COMBAT_ENGAGE: Duration = Duration::seconds(45);
+pub(super) const DESPAWN_COMBAT_RETRY: Duration = Duration::seconds(30);
 
 fn default_speed() -> f64 {
     220.
@@ -106,6 +111,78 @@ pub enum Despawn {
 pub enum Spawned<'lua> {
     Group(Group<'lua>),
     Static,
+}
+
+fn unit_damaged_in_dcs(unit: &dcso3::unit::Unit) -> bool {
+    match (unit.get_life(), unit.get_life0()) {
+        (Ok(life), Ok(life0)) => life0 > 0 && life < life0,
+        _ => false,
+    }
+}
+
+fn static_damaged_in_dcs(obj: &StaticObject) -> bool {
+    match (obj.get_life(), obj.try_get_life0()) {
+        (Ok(life), Some(life0)) => life < life0,
+        _ => false,
+    }
+}
+
+/// Hold scripted despawn while DCS may still be resolving damage on this group.
+pub(super) fn despawn_defer_combat(
+    lua: MizLua,
+    shots: &ShotDb,
+    persisted: &Persisted,
+    now: DateTime<Utc>,
+    gid: GroupId,
+    despawn: &Despawn,
+) -> bool {
+    if shots.group_recently_engaged(gid, now, DESPAWN_COMBAT_ENGAGE) {
+        return true;
+    }
+    if let Some(group) = persisted.groups.get(&gid) {
+        let mut alive = 0usize;
+        for uid in &group.units {
+            if persisted.units.get(uid).is_some_and(|u| !u.dead) {
+                alive += 1;
+            }
+        }
+        if alive < group.units.len() {
+            return true;
+        }
+    }
+    match despawn {
+        Despawn::Group(oid) => {
+            let Ok(group) = Group::get_instance(lua, oid) else {
+                return false;
+            };
+            let Ok(units) = group.get_units() else {
+                return false;
+            };
+            let mut damaged = false;
+            let _ = units.for_each(|u| {
+                let u = u?;
+                if unit_damaged_in_dcs(&u) {
+                    damaged = true;
+                }
+                if let Ok(id) = u.object_id() {
+                    if shots.unit_recently_engaged(&id, now, DESPAWN_COMBAT_ENGAGE) {
+                        damaged = true;
+                    }
+                }
+                Ok(())
+            });
+            damaged
+        }
+        Despawn::Static(name) => {
+            let Ok(obj) = StaticObject::get_by_name(lua, name) else {
+                return false;
+            };
+            match obj {
+                Static::Airbase(_) => false,
+                Static::Static(st) => static_damaged_in_dcs(&st),
+            }
+        }
+    }
 }
 
 impl<'lua> SpawnCtx<'lua> {
@@ -221,7 +298,7 @@ impl<'lua> SpawnCtx<'lua> {
         let ts = Utc::now();
         match name {
             Despawn::Group(oid) => {
-                match dcso3::group::Group::get_instance(self.lua, &oid) {
+                match Group::get_instance(self.lua, &oid) {
                     Ok(group) => group.destroy()?,
                     Err(e) => info!("attempt to despawn invalid group {e:?}"),
                 }

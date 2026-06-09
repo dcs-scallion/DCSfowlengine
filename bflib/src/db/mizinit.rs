@@ -27,6 +27,7 @@ use crate::{
     group, group_health, group_mut,
     landcache::LandCache,
     objective_mut,
+    shots::ShotDb,
     spawnctx::{SpawnCtx, SpawnLoc},
     unit, unit_mut,
 };
@@ -889,7 +890,14 @@ impl Db {
         spawn_deployed_and_logistics().context("spawning deployed and logistics")?;
         // spawn everything before setting up warehouses, so that ship warehouses will also be set up correctly
         while self.ephemeral.spawnq_len() > 0 {
-            self.ephemeral.process_spawn_queue(perf, &self.persisted, Utc::now(), idx, spctx)?
+            self.ephemeral.process_spawn_queue(
+                perf,
+                &self.persisted,
+                Utc::now(),
+                idx,
+                spctx,
+                &ShotDb::default(),
+            )?
         }
         self.setup_warehouses_after_load(spctx.lua())
             .context("setting up warehouses")?;

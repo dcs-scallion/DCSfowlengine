@@ -34,6 +34,16 @@ use zip::ZipArchive;
 use crate::db::objective::Objective;
 
 pub const POST_DEBOUNCE_SECS: i64 = 45;
+pub const PERIODIC_REFRESH_WITH_PLAYERS_SECS: i64 = 300;
+pub const PERIODIC_REFRESH_EMPTY_SECS: i64 = 3600;
+
+fn periodic_refresh_interval_secs(mission_has_players: bool) -> i64 {
+    if mission_has_players {
+        PERIODIC_REFRESH_WITH_PLAYERS_SECS
+    } else {
+        PERIODIC_REFRESH_EMPTY_SECS
+    }
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DiscordMapMetaFile {
@@ -56,6 +66,7 @@ pub struct DiscordMapRuntime {
     pub base_png_path: PathBuf,
     pub composited_png_path: PathBuf,
     pub html_path: PathBuf,
+    pub map_version_path: PathBuf,
     pub meta_path: PathBuf,
     pub webhook_message_path: PathBuf,
     pub mission_name: String,
@@ -100,6 +111,10 @@ pub fn composited_png_path(sortie_state_path: &Path) -> PathBuf {
 
 pub fn html_path(sortie_state_path: &Path) -> PathBuf {
     sortie_state_path.with_extension("discord_map.html")
+}
+
+pub fn map_version_path(sortie_state_path: &Path) -> PathBuf {
+    sortie_state_path.with_extension("discord_map_version.txt")
 }
 
 pub fn meta_path(sortie_state_path: &Path) -> PathBuf {
@@ -241,8 +256,21 @@ fn coalition_key(side: Side) -> &'static str {
     match side {
         Side::Red => "red",
         Side::Blue => "blue",
-        _ => "neutral",
+        Side::Neutral => "neutral",
     }
+}
+
+/// Abandoned captureable sites use neutral map icons; popup border keeps last owner until recapture.
+fn discord_map_icon_coalition(obj: &Objective) -> &'static str {
+    if obj.owner() == Side::Neutral || obj.captureable() {
+        "neutral"
+    } else {
+        coalition_key(obj.owner())
+    }
+}
+
+fn discord_map_tip_coalition(obj: &Objective) -> &'static str {
+    coalition_key(obj.owner())
 }
 
 pub fn collect_markers(lua: MizLua, db: &Db) -> Result<Vec<bg::discord_map::DiscordMapMarker>> {
@@ -269,7 +297,8 @@ fn marker_from_objective(
         lat: ll.latitude,
         lon: ll.longitude,
         kind: kind.to_string(),
-        coalition: coalition_key(obj.owner()).to_string(),
+        icon_coalition: discord_map_icon_coalition(obj).to_string(),
+        tip_coalition: discord_map_tip_coalition(obj).to_string(),
         label: db.objective_display_name(obj),
         f10_label: db.objective_f10_map_label(obj),
         health: obj.health(),
@@ -304,6 +333,7 @@ fn discord_map_post_job(
         base_png_path: runtime.base_png_path.clone(),
         composited_png_path: runtime.composited_png_path.clone(),
         html_path: runtime.html_path.clone(),
+        map_version_path: runtime.map_version_path.clone(),
         viewport: runtime.viewport,
         markers,
         icons,
@@ -322,14 +352,46 @@ impl Db {
             Some(ts + Duration::seconds(POST_DEBOUNCE_SECS));
     }
 
-    pub fn discord_map_maybe_post(&mut self, lua: MizLua) -> Result<()> {
-        let due = match self.ephemeral.discord_map_post_due {
-            Some(d) if Utc::now() >= d => d,
-            _ => return Ok(()),
-        };
+    pub fn schedule_discord_map_periodic(&mut self, from: DateTime<Utc>, mission_has_players: bool) {
+        if self.ephemeral.discord_map.is_none() {
+            return;
+        }
+        let interval = periodic_refresh_interval_secs(mission_has_players);
+        self.ephemeral.discord_map_periodic_due = Some(from + Duration::seconds(interval));
+    }
+
+    fn adapt_discord_map_periodic_due(&mut self, ts: DateTime<Utc>, mission_has_players: bool) {
+        if self.ephemeral.discord_map.is_none() {
+            return;
+        }
+        let next = ts + Duration::seconds(periodic_refresh_interval_secs(mission_has_players));
+        match self.ephemeral.discord_map_periodic_due {
+            None => self.ephemeral.discord_map_periodic_due = Some(next),
+            Some(due) if mission_has_players && due > next => {
+                self.ephemeral.discord_map_periodic_due = Some(next);
+            }
+            _ => {}
+        }
+    }
+
+    pub fn discord_map_tick(
+        &mut self,
+        lua: MizLua,
+        ts: DateTime<Utc>,
+        mission_has_players: bool,
+    ) -> Result<()> {
+        if self.ephemeral.discord_map.is_none() {
+            return Ok(());
+        }
+        self.adapt_discord_map_periodic_due(ts, mission_has_players);
+        let debounce_due = matches!(self.ephemeral.discord_map_post_due, Some(d) if ts >= d);
+        let periodic_due = matches!(self.ephemeral.discord_map_periodic_due, Some(d) if ts >= d);
+        if !debounce_due && !periodic_due {
+            return Ok(());
+        }
         self.ephemeral.discord_map_post_due = None;
         self.queue_discord_map_post(lua)?;
-        let _ = due;
+        self.schedule_discord_map_periodic(ts, mission_has_players);
         Ok(())
     }
 
@@ -410,6 +472,7 @@ pub fn init_discord_map(
     let base_png_path = base_png_path(sortie_state_path);
     let composited_png_path = composited_png_path(sortie_state_path);
     let html_path = html_path(sortie_state_path);
+    let map_version_path = map_version_path(sortie_state_path);
     let meta_path = meta_path(sortie_state_path);
     let webhook_message_path = webhook_message_path(sortie_state_path);
     let mission_name = mission_name_from_sortie_path(sortie_state_path);
@@ -430,6 +493,7 @@ pub fn init_discord_map(
         base_png_path: base_png_path.clone(),
         composited_png_path: composited_png_path.clone(),
         html_path: html_path.clone(),
+        map_version_path: map_version_path.clone(),
         meta_path,
         webhook_message_path,
         mission_name,
@@ -438,6 +502,7 @@ pub fn init_discord_map(
     db.ephemeral.do_bg(Task::StartDiscordMapHttp {
         port: cfg.http_port,
         html_path,
+        map_version_path,
         composited_png_path,
         base_png_path,
     });

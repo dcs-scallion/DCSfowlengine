@@ -21,7 +21,7 @@
 
 -- ==== CONFIGURATION - absolute path to scenario directory ====
 -- IMPORTANT (Lua): backslash in plain quotes starts escapes; use [[...]] or forward slashes.
-local OUTPUT_DIR = [[C:\GitHub\DCSfowlengine\miz\Scenarios\80s\caucasus1987]]
+local OUTPUT_DIR = [[C:\GitHub\DCSfowlengine\miz\Scenarios\80s\Caucasus1985-SARH]]
 -- =======================================================================
 
 local LOG_NAME = "fowl_engine_export.log"

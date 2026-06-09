@@ -17,7 +17,10 @@ for more details.
 //! Lets not bicker and argue about oo killed oo
 use crate::db::{Db, group::DeployKind};
 use anyhow::Result;
-use bfprotocols::shots::{Dead, Shot, Who};
+use bfprotocols::{
+    db::group::GroupId,
+    shots::{Dead, Shot, Who},
+};
 use chrono::{Duration, prelude::*};
 use dcso3::{
     String,
@@ -99,6 +102,30 @@ pub(crate) fn who_from_initiator(db: &Db, initiator: Option<&Object>) -> Option<
 }
 
 impl ShotDb {
+    pub fn unit_recently_engaged(
+        &self,
+        target: &DcsOid<ClassUnit>,
+        now: DateTime<Utc>,
+        within: Duration,
+    ) -> bool {
+        self.by_target
+            .get(target)
+            .is_some_and(|shots| shots.iter().any(|s| now - s.time <= within))
+    }
+
+    pub fn group_recently_engaged(
+        &self,
+        gid: GroupId,
+        now: DateTime<Utc>,
+        within: Duration,
+    ) -> bool {
+        self.by_target.values().any(|shots| {
+            shots
+                .iter()
+                .any(|s| now - s.time <= within && s.target.gid() == Some(gid))
+        })
+    }
+
     pub fn dead(&mut self, target: DcsOid<ClassUnit>, time: DateTime<Utc>) {
         if let Entry::Vacant(e) = self.dead.entry(target) {
             e.insert(time);

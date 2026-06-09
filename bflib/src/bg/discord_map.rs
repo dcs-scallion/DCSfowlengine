@@ -27,7 +27,8 @@ pub struct DiscordMapMarker {
     pub lat: f64,
     pub lon: f64,
     pub kind: String,
-    pub coalition: String,
+    pub icon_coalition: String,
+    pub tip_coalition: String,
     /// PNG side label (display alias).
     pub label: String,
     /// F10 map mark title (alias + kind suffix).
@@ -52,7 +53,7 @@ struct MarkerLayout {
     sw: u32,
     sh: u32,
     icon_b64: String,
-    coalition: String,
+    tip_coalition: String,
     kind: String,
     f10_label: String,
     health: u8,
@@ -75,10 +76,18 @@ struct DiscordWebhookMessageState {
 pub async fn start_map_http_server(
     port: u16,
     html_path: PathBuf,
+    map_version_path: PathBuf,
     composited_png_path: PathBuf,
     base_png_path: PathBuf,
 ) {
-    discord_map_http::ensure_map_http_server(port, html_path, composited_png_path, base_png_path).await;
+    discord_map_http::ensure_map_http_server(
+        port,
+        html_path,
+        map_version_path,
+        composited_png_path,
+        base_png_path,
+    )
+    .await;
 }
 
 pub async fn fetch_mapbox_base(url: &str, base_path: &Path, meta_path: &Path, meta_json: &str) -> Result<()> {
@@ -129,6 +138,7 @@ pub async fn publish_and_post(
     base_png_path: &Path,
     composited_png_path: &Path,
     html_path: &Path,
+    map_version_path: &Path,
     viewport: &MapViewport,
     markers: &[DiscordMapMarker],
     icons: &DiscordMapIconPackJob,
@@ -147,6 +157,9 @@ pub async fn publish_and_post(
     fs::write(html_path, artifacts.html.as_bytes())
         .await
         .with_context(|| format!("write interactive map HTML {:?}", html_path))?;
+    fs::write(map_version_path, status_utc.as_bytes())
+        .await
+        .with_context(|| format!("write discord map version {:?}", map_version_path))?;
     post_composited_map(
         webhook_url,
         webhook_message_path,
@@ -321,11 +334,11 @@ fn composite_map(
     for marker in markers {
         let Some(stem) = icons
             .manifest
-            .png_stem_for(&marker.kind, &marker.coalition)
+            .png_stem_for(&marker.kind, &marker.icon_coalition)
         else {
             warn!(
                 "discord map: no icon mapping for kind={} coalition={}",
-                marker.kind, marker.coalition
+                marker.kind, marker.icon_coalition
             );
             continue;
         };
@@ -372,7 +385,7 @@ fn composite_map(
             sw,
             sh,
             icon_b64: B64.encode(icon_buf),
-            coalition: marker.coalition.clone(),
+            tip_coalition: marker.tip_coalition.clone(),
             kind: marker.kind.clone(),
             f10_label: marker.f10_label.clone(),
             health: marker.health,
@@ -422,7 +435,7 @@ fn build_interactive_html(
     for m in markers {
         let left_pct = (m.cx / img_w as f32) * 100.;
         let top_pct = (m.cy / img_h as f32) * 100.;
-        let tip_class = coalition_tip_class(&m.coalition);
+        let tip_class = coalition_tip_class(&m.tip_coalition);
         let rows = tooltip_rows_html(&m.kind, m.health, m.logi, m.production);
         let threat_ring = if m.threatened {
             format!(
@@ -446,6 +459,7 @@ fn build_interactive_html(
 <html lang="en"><head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
+<meta name="fowl-map-version" content="{status_utc}">
 <title>{mn} — objective map</title>
 <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Roboto+Condensed:wght@400&display=swap">
 <style>
@@ -460,6 +474,7 @@ body{{margin:0;background:#111;color:#f4f6fa;font-family:"Roboto Condensed",sans
 .m-stack img{{position:relative;z-index:1;display:block;transition:filter .15s}}
 .m:hover img{{filter:brightness(2.7)}}
 .tip{{display:none;position:absolute;left:calc(100% + 6px);top:50%;transform:translateY(-50%);background:rgba(18,20,26,.94);padding:6px 10px;border-radius:4px;border-width:2px;border-style:solid;font-size:10px;line-height:1.55;white-space:nowrap;pointer-events:none;box-shadow:0 2px 8px rgba(0,0,0,.45)}}
+.tip-left{{left:auto;right:calc(100% + 6px)}}
 .m:hover .tip{{display:block}}
 .tip-title{{text-decoration:underline;margin-bottom:5px;line-height:1.45}}
 .tip table{{border-collapse:separate;border-spacing:0 4px}}
@@ -470,6 +485,39 @@ body{{margin:0;background:#111;color:#f4f6fa;font-family:"Roboto Condensed",sans
 </style></head><body>
 <div class="hdr"><div>{mn}</div><div>Objectives status as of {status_utc} UTC</div></div>
 <div id="wrap"><img id="base" src="data:image/png;base64,{base_b64}" width="{img_w}" height="{img_h}" alt="map">{body}</div>
+<script>
+(function(){{
+  var wrap=document.getElementById('wrap');
+  if(!wrap){{return;}}
+  wrap.querySelectorAll('.m').forEach(function(m){{
+    m.addEventListener('mouseenter',function(){{
+      var tip=m.querySelector('.tip');
+      if(!tip){{return;}}
+      requestAnimationFrame(function(){{
+        tip.classList.remove('tip-left');
+        var wr=wrap.getBoundingClientRect();
+        var tr=tip.getBoundingClientRect();
+        if(tr.right>wr.right-1){{tip.classList.add('tip-left');}}
+        tr=tip.getBoundingClientRect();
+        if(tr.left<wr.left+1){{tip.classList.remove('tip-left');}}
+      }});
+    }});
+  }});
+}})();
+(function(){{
+  if(location.protocol==='file:'){{return;}}
+  var meta=document.querySelector('meta[name="fowl-map-version"]');
+  if(!meta){{return;}}
+  var current=meta.getAttribute('content')||'';
+  function poll(){{
+    fetch('/map-version',{{cache:'no-store'}}).then(function(r){{return r.ok?r.text():'';}}).then(function(v){{
+      v=(v||'').trim();
+      if(v&&v!==current){{location.reload();}}
+    }}).catch(function(){{}});
+  }}
+  setInterval(poll,45000);
+}})();
+</script>
 </body></html>"#,
         mn = html_escape(mission_name),
         status_utc = html_escape(status_utc),

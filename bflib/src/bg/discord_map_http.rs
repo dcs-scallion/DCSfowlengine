@@ -1,4 +1,4 @@
-//! Read-only GET server for interactive Discord map (`/map`, `/map.png`, `/map-base.png`).
+//! Read-only GET server for interactive Discord map (`/map`, `/map-version`, `/map.png`, `/map-base.png`).
 
 use http_body_util::Full;
 use hyper::body::Bytes;
@@ -20,6 +20,7 @@ static MAP_HTTP_STARTED: AtomicBool = AtomicBool::new(false);
 #[derive(Clone)]
 struct MapHttpState {
     html_path: PathBuf,
+    map_version_path: PathBuf,
     composited_png_path: PathBuf,
     base_png_path: PathBuf,
 }
@@ -27,6 +28,7 @@ struct MapHttpState {
 pub async fn ensure_map_http_server(
     port: u16,
     html_path: PathBuf,
+    map_version_path: PathBuf,
     composited_png_path: PathBuf,
     base_png_path: PathBuf,
 ) {
@@ -45,6 +47,7 @@ pub async fn ensure_map_http_server(
     info!("discord map HTTP: read-only server on http://0.0.0.0:{port}/map");
     let state = Arc::new(MapHttpState {
         html_path,
+        map_version_path,
         composited_png_path,
         base_png_path,
     });
@@ -81,6 +84,7 @@ async fn handle_map_http(
     let path = req.uri().path();
     match path {
         "/map" | "/map/" => serve_path(&state.html_path, "text/html; charset=utf-8").await,
+        "/map-version" => serve_path(&state.map_version_path, "text/plain; charset=utf-8").await,
         "/map.png" => serve_path(&state.composited_png_path, "image/png").await,
         "/map-base.png" => serve_path(&state.base_png_path, "image/png").await,
         _ => Ok(Response::builder()
