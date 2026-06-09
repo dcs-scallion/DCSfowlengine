@@ -22,6 +22,29 @@ const LABEL_FONT_PX: i32 = 8;
 
 static MAP_LABEL_FONT: Lazy<MapLabelFont> = Lazy::new(MapLabelFont::embedded);
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DiscordMapStatusBar {
+    pub mission_name: String,
+    pub status_utc: String,
+    pub theatre: String,
+    pub mission_date: String,
+    pub mission_tod_secs: u32,
+    pub gen_utc_ms: i64,
+    pub restart_utc_ms: Option<i64>,
+    pub online_red: u32,
+    pub online_blue: u32,
+    pub ground_red: u32,
+    pub ground_blue: u32,
+    pub carrier_red: u32,
+    pub carrier_blue: u32,
+    pub factories_red: u32,
+    pub factories_blue: u32,
+    pub production_red: Option<u8>,
+    pub production_blue: Option<u8>,
+    pub supply_to_bases: String,
+    pub delivery_to_hubs: String,
+}
+
 #[derive(Debug, Clone)]
 pub struct DiscordMapFrontLinePolygon {
     pub coalition: String,
@@ -152,6 +175,7 @@ pub async fn publish_and_post(
     caption: &str,
     mission_name: &str,
     status_utc: &str,
+    status_bar: &DiscordMapStatusBar,
 ) -> Result<()> {
     let artifacts = build_map_artifacts(
         base_png_path,
@@ -161,6 +185,7 @@ pub async fn publish_and_post(
         icons,
         mission_name,
         status_utc,
+        status_bar,
     )
     .context("build discord map artifacts")?;
     if let Some(parent) = composited_png_path.parent() {
@@ -318,6 +343,7 @@ fn build_map_artifacts(
     icons: &DiscordMapIconPackJob,
     mission_name: &str,
     status_utc: &str,
+    status_bar: &DiscordMapStatusBar,
 ) -> Result<MapArtifacts> {
     let base_bytes = std::fs::read(base_png_path)
         .with_context(|| format!("read discord map base PNG {:?}", base_png_path))?;
@@ -331,6 +357,7 @@ fn build_map_artifacts(
         &base_bytes,
         &layouts,
         front_line,
+        status_bar,
     );
     Ok(MapArtifacts { png, html })
 }
@@ -478,6 +505,71 @@ fn front_line_svg(
     )
 }
 
+fn status_vs_html(blue: u32, red: u32) -> String {
+    format!(
+        r#"<span class="stat-blue">{blue}</span> vs <span class="stat-red">{red}</span>"#
+    )
+}
+
+fn status_production_html(blue: Option<u8>, red: Option<u8>) -> String {
+    let blue_s = blue.map(|v| v.to_string()).unwrap_or_else(|| "—".into());
+    let red_s = red.map(|v| v.to_string()).unwrap_or_else(|| "—".into());
+    format!(
+        r#"<span class="stat-blue">{blue_s}</span> vs <span class="stat-red">{red_s}</span>"#
+    )
+}
+
+fn status_bar_html(bar: &DiscordMapStatusBar) -> String {
+    let clock_json = serde_json::to_string(bar).unwrap_or_else(|_| "{}".into());
+    let restart_initial = bar
+        .restart_utc_ms
+        .map(|ms| {
+            let rem = (ms - bar.gen_utc_ms).max(0) / 1000;
+            let h = rem / 3600;
+            let m = (rem % 3600) / 60;
+            let s = rem % 60;
+            format!("{h}:{m:02}:{s:02}")
+        })
+        .unwrap_or_else(|| "—".into());
+    let mission_h = bar.mission_tod_secs / 3600;
+    let mission_m = (bar.mission_tod_secs % 3600) / 60;
+    let mission_time_initial = format!("{mission_h}:{mission_m:02}");
+    format!(
+        r#"<div class="map-hdr">
+<div>{mission_name}</div>
+<div>Objectives status as of {status_utc} UTC</div>
+</div>
+<div class="stats">
+  <div class="stat"><div class="stat-h">Theatre</div><div class="stat-v stat-plain">{theatre}</div></div>
+  <div class="stat"><div class="stat-h">Date in mission</div><div class="stat-v stat-plain" id="mission-date">{mission_date}</div></div>
+  <div class="stat"><div class="stat-h">Time</div><div class="stat-v stat-plain" id="mission-time">{mission_time_initial}</div></div>
+  <div class="stat"><div class="stat-h">Time to restart</div><div class="stat-v stat-accent" id="restart-time">{restart_initial}</div></div>
+  <div class="stat"><div class="stat-h">Online pilots</div><div class="stat-v">{online}</div></div>
+  <div class="stat"><div class="stat-h">Ground objectives</div><div class="stat-v">{ground}</div></div>
+  <div class="stat"><div class="stat-h">Carrier objectives</div><div class="stat-v">{carrier}</div></div>
+  <div class="stat"><div class="stat-h">Factories</div><div class="stat-v">{factories}</div></div>
+  <div class="stat"><div class="stat-h">Production %</div><div class="stat-v">{production}</div></div>
+  <div class="stat"><div class="stat-h">Supply to bases</div><div class="stat-v stat-accent">{supply_to_bases}</div></div>
+  <div class="stat"><div class="stat-h">Delivery to HUBs</div><div class="stat-v stat-accent">{delivery_to_hubs}</div></div>
+</div>
+<script type="application/json" id="fowl-map-clock">{clock_json}</script>"#,
+        mission_name = html_escape(&bar.mission_name),
+        status_utc = html_escape(&bar.status_utc),
+        theatre = html_escape(&bar.theatre),
+        mission_date = html_escape(&bar.mission_date),
+        mission_time_initial = mission_time_initial,
+        online = status_vs_html(bar.online_blue, bar.online_red),
+        ground = status_vs_html(bar.ground_blue, bar.ground_red),
+        carrier = status_vs_html(bar.carrier_blue, bar.carrier_red),
+        factories = status_vs_html(bar.factories_blue, bar.factories_red),
+        production = status_production_html(bar.production_blue, bar.production_red),
+        restart_initial = restart_initial,
+        supply_to_bases = html_escape(&bar.supply_to_bases),
+        delivery_to_hubs = html_escape(&bar.delivery_to_hubs),
+        clock_json = clock_json.replace("</", "<\\/"),
+    )
+}
+
 fn build_interactive_html(
     mission_name: &str,
     status_utc: &str,
@@ -487,6 +579,7 @@ fn build_interactive_html(
     base_png: &[u8],
     markers: &[MarkerLayout],
     front_line: &[DiscordMapFrontLinePolygon],
+    status_bar: &DiscordMapStatusBar,
 ) -> String {
     let front_svg = front_line_svg(viewport, img_w, img_h, front_line);
     let mut body = String::new();
@@ -512,6 +605,7 @@ fn build_interactive_html(
         ));
     }
     let base_b64 = B64.encode(base_png);
+    let stats_html = status_bar_html(status_bar);
     format!(
         r#"<!DOCTYPE html>
 <html lang="en"><head>
@@ -519,20 +613,30 @@ fn build_interactive_html(
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <meta name="fowl-map-version" content="{status_utc}">
 <title>{mn} — objective map</title>
-<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Roboto+Condensed:wght@400&display=swap">
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Roboto:wght@400&display=swap">
 <style>
-body{{margin:0;background:#111;color:#f4f6fa;font-family:"Roboto Condensed",sans-serif}}
-.hdr{{padding:10px 12px;font-size:12px;line-height:1.45}}
-#wrap{{position:relative;display:inline-block;line-height:0;max-width:100%}}
-#base{{display:block;max-width:100%;height:auto;width:{img_w}px}}
+body{{margin:0;background:#000;color:#686a6e;font-family:Roboto,sans-serif;font-size:16px}}
+.map-panel{{display:block;width:min({img_w}px,100%);box-sizing:border-box}}
+.map-hdr{{width:100%;padding:0 0 8px 0;line-height:1.35;color:#686a6e;font-size:clamp(10px,calc(100vw*16/{img_w}),16px)}}
+.stats{{display:flex;flex-wrap:nowrap;gap:4px;width:100%;margin-bottom:4px;box-sizing:border-box;font-size:clamp(8px,calc(100vw*16/{img_w}),16px)}}
+.stat{{flex:1 1 0;min-width:0;border:1px solid #2e3138;box-sizing:border-box;display:flex;flex-direction:column}}
+.stat-h{{background:#15161a;color:#686a6e;line-height:1.2;padding:5px 2px;text-align:center;white-space:normal;word-break:break-word;overflow:hidden;border-bottom:1px solid #2e3138}}
+.stat-v{{background:#000;color:#686a6e;line-height:1.3;padding:6px 4px;text-align:center;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;flex:1}}
+.stat-plain{{color:#686a6e}}
+.stat-red{{color:#C43838}}
+.stat-blue{{color:#6eb5ff}}
+.stat-accent{{color:#e8c547}}
+.map-frame{{border:1px solid #2e3138;box-sizing:border-box;display:block;line-height:0;width:100%}}
+#wrap{{position:relative;display:block;line-height:0;width:100%}}
+#base{{display:block;width:100%;height:auto}}
 .front-line{{position:absolute;left:0;top:0;width:100%;height:100%;pointer-events:none;z-index:0}}
 .m{{position:absolute;transform:translate(-50%,-50%);z-index:1}}
 .m:hover{{z-index:10000}}
 .m-stack{{position:relative;display:inline-block;line-height:0}}
 .threat-ring{{position:absolute;left:50%;top:50%;transform:translate(-50%,-50%);border:2px solid rgba(255,220,0,.75);border-radius:50%;box-sizing:border-box;z-index:0;pointer-events:none}}
 .m-stack img{{position:relative;z-index:1;display:block;transition:filter .15s}}
-.m:hover img{{filter:brightness(2.7)}}
-.tip{{display:none;position:absolute;left:calc(100% + 6px);top:50%;transform:translateY(-50%);background:rgba(18,20,26,.94);padding:6px 10px;border-radius:4px;border-width:2px;border-style:solid;font-size:10px;line-height:1.55;white-space:nowrap;pointer-events:none;box-shadow:0 2px 8px rgba(0,0,0,.45)}}
+.m:hover img{{filter:brightness(1.5)}}
+.tip{{display:none;position:absolute;left:calc(100% + 6px);top:50%;transform:translateY(-50%);background:rgba(9,10,13,.94);color:#686a6e;padding:6px 10px;border-radius:4px;border-width:2px;border-style:solid;font-size:10px;line-height:1.55;white-space:nowrap;pointer-events:none;box-shadow:0 2px 8px rgba(0,0,0,.45)}}
 .tip-left{{left:auto;right:calc(100% + 6px)}}
 .m:hover .tip{{display:block}}
 .tip-title{{text-decoration:underline;margin-bottom:5px;line-height:1.45}}
@@ -540,10 +644,9 @@ body{{margin:0;background:#111;color:#f4f6fa;font-family:"Roboto Condensed",sans
 .tip td{{padding:1px 10px 1px 0;vertical-align:top;line-height:1.55}}
 .tip-red{{border-color:#C43838}}
 .tip-blue{{border-color:#2E5AAC}}
-.tip-neutral{{border-color:#5C6370}}
+.tip-neutral{{border-color:#2e3138}}
 </style></head><body>
-<div class="hdr"><div>{mn}</div><div>Objectives status as of {status_utc} UTC</div></div>
-<div id="wrap"><img id="base" src="data:image/png;base64,{base_b64}" width="{img_w}" height="{img_h}" alt="map">{front_svg}{body}</div>
+<div class="map-panel">{stats_html}<div class="map-frame"><div id="wrap"><img id="base" src="data:image/png;base64,{base_b64}" width="{img_w}" height="{img_h}" alt="map">{front_svg}{body}</div></div></div>
 <script>
 (function(){{
   var wrap=document.getElementById('wrap');
@@ -562,6 +665,44 @@ body{{margin:0;background:#111;color:#f4f6fa;font-family:"Roboto Condensed",sans
       }});
     }});
   }});
+}})();
+(function(){{
+  var el=document.getElementById('fowl-map-clock');
+  if(!el){{return;}}
+  var anchor;
+  try{{anchor=JSON.parse(el.textContent||'{{}}');}}catch(e){{return;}}
+  var timeEl=document.getElementById('mission-time');
+  var dateEl=document.getElementById('mission-date');
+  var restartEl=document.getElementById('restart-time');
+  function pad2(n){{return n<10?'0'+n:''+n;}}
+  function tick(){{
+    var now=Date.now();
+    var elapsed=(now-(anchor.gen_utc_ms||0))/1000;
+    var total=((anchor.mission_tod_secs||0)+elapsed);
+    var days=Math.floor(total/86400);
+    var tod=Math.floor(total%86400);
+    if(timeEl){{
+      var h=Math.floor(tod/3600);
+      var m=Math.floor((tod%3600)/60);
+      timeEl.textContent=h+':'+pad2(m);
+    }}
+    if(dateEl&&anchor.mission_date){{
+      var p=anchor.mission_date.split('-');
+      if(p.length===3){{
+        var d=new Date(Date.UTC(+p[0],+p[1]-1,+p[2]+days));
+        dateEl.textContent=d.getUTCFullYear()+'-'+pad2(d.getUTCMonth()+1)+'-'+pad2(d.getUTCDate());
+      }}
+    }}
+    if(restartEl&&anchor.restart_utc_ms){{
+      var rem=Math.max(0,Math.floor((anchor.restart_utc_ms-now)/1000));
+      var rh=Math.floor(rem/3600);
+      var rm=Math.floor((rem%3600)/60);
+      var rs=rem%60;
+      restartEl.textContent=rh+':'+pad2(rm)+':'+pad2(rs);
+    }}
+  }}
+  tick();
+  setInterval(tick,1000);
 }})();
 (function(){{
   if(location.protocol==='file:'){{return;}}
@@ -584,6 +725,7 @@ body{{margin:0;background:#111;color:#f4f6fa;font-family:"Roboto Condensed",sans
         img_w = img_w,
         img_h = img_h,
         body = body,
+        stats_html = stats_html,
     )
 }
 

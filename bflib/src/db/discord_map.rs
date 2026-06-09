@@ -1,10 +1,12 @@
 //! Discord objective map: ME viewport zones, icon pack from `.miz`, Mapbox cache, Discord posts.
 
 use super::Db;
+use crate::admin::theatre_slug;
 use crate::bg::{self, DiscordMapPostJob, Task};
 use anyhow::{anyhow, bail, Context, Result};
 use bfprotocols::{
-    cfg::DiscordMapCfg,
+    cfg::{DiscordMapCfg, UnitTag},
+    db::objective::ObjectiveKind,
     discord_map_icon_manifest::{
         DiscordMapIconManifest, DiscordMapIconManifestRuntime, MIZ_MANIFEST,
     },
@@ -12,13 +14,15 @@ use bfprotocols::{
         viewport_from_corners, MapViewport, SETTINGS_DISCORD_MAP_NW, SETTINGS_DISCORD_MAP_SE,
     },
 };
-use chrono::{Duration, prelude::*};
+use chrono::{Duration, NaiveDate, prelude::*};
 use dcso3::{
-    coalition::Side,
+    coalition::{Coalition, Side},
     coord::{Coord, LLPos},
     dcs::Dcs,
     env::miz::{Miz, TriggerZone},
+    group::GroupCategory,
     lfs::Lfs,
+    timer::Timer,
     LuaEnv, LuaVec3, MizLua, Vector3,
 };
 use mlua::Value;
@@ -31,7 +35,16 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use zip::ZipArchive;
 
-use crate::db::objective::Objective;
+use crate::db::objective::{Objective, ObjGroupClass};
+
+/// Live session inputs for map HTML clocks and pilot counts (not persisted in Db).
+#[derive(Debug, Clone)]
+pub struct DiscordMapLiveCtx {
+    pub generated_at: DateTime<Utc>,
+    pub shutdown_when: Option<DateTime<Utc>>,
+    pub online_red: u32,
+    pub online_blue: u32,
+}
 
 pub const POST_DEBOUNCE_SECS: i64 = 45;
 pub const PERIODIC_REFRESH_WITH_PLAYERS_SECS: i64 = 300;
@@ -352,6 +365,225 @@ fn collect_front_line_polygons(
     Ok(out)
 }
 
+fn format_theatre_display(slug: &str) -> String {
+    if slug.is_empty() || slug == "unknown" {
+        return "Unknown".into();
+    }
+    let mut chars = slug.chars();
+    let Some(first) = chars.next() else {
+        return slug.to_string();
+    };
+    format!("{}{}", first.to_ascii_uppercase(), chars.as_str())
+}
+
+/// Same set as bftools `count_objectives_by_default_owner`: OAB/FOB/LO only (no OPR).
+fn count_ground_objectives_by_side(db: &Db) -> (u32, u32) {
+    let mut red = 0u32;
+    let mut blue = 0u32;
+    for (_, obj) in db.persisted.objectives.into_iter() {
+        if matches!(obj.kind, ObjectiveKind::Production | ObjectiveKind::Farp { .. }) {
+            continue;
+        }
+        match obj.owner() {
+            Side::Red => red += 1,
+            Side::Blue => blue += 1,
+            _ => {}
+        }
+    }
+    (red, blue)
+}
+
+fn count_spawned_ship_carriers(lua: MizLua, db: &Db) -> Result<(u32, u32)> {
+    let coalition = Coalition::singleton(lua)?;
+    let cfg = &db.ephemeral.cfg;
+    let mut red = 0u32;
+    let mut blue = 0u32;
+    for side in [Side::Blue, Side::Red] {
+        for group in coalition.get_groups(side)? {
+            let group = group?;
+            if !group.is_exist()? || group.get_category()? != GroupCategory::Ship {
+                continue;
+            }
+            let mut carrier = false;
+            for unit in group.get_units()? {
+                let unit = unit?;
+                if !unit.is_exist()? {
+                    continue;
+                }
+                let typ = unit.get_type_name()?;
+                if cfg
+                    .unit_classification
+                    .get(typ.as_str())
+                    .is_some_and(|tags| tags.contains(UnitTag::ShipCarrier))
+                {
+                    carrier = true;
+                    break;
+                }
+            }
+            if !carrier {
+                continue;
+            }
+            match side {
+                Side::Red => red += 1,
+                Side::Blue => blue += 1,
+                _ => {}
+            }
+        }
+    }
+    Ok((red, blue))
+}
+
+struct MissionClock {
+    date: NaiveDate,
+    tod_secs: u32,
+}
+
+fn mission_clock(lua: MizLua) -> Result<MissionClock> {
+    let timer = Timer::singleton(lua)?;
+    let abs = timer.get_abs_time()?;
+    let t0 = timer.get_time0()?;
+    let l = lua.inner();
+    let (year, month, day, start_time): (i32, u32, u32, u32) = l
+        .load(
+            r#"local m = rawget(_G, "mission") or (env and env.mission)
+if type(m) ~= "table" or type(m.date) ~= "table" then
+  return 1970, 1, 1, 0
+end
+local st = m.start_time or 0
+return m.date.Year or 1970, m.date.Month or 1, m.date.Day or 1, st"#,
+        )
+        .eval()
+        .unwrap_or((1970, 1, 1, 0));
+    let elapsed = f64::from(abs - t0);
+    let total = f64::from(start_time) + elapsed;
+    let extra_days = total.div_euclid(86400.) as i64;
+    let tod_secs = total.rem_euclid(86400.) as u32;
+    let start = NaiveDate::from_ymd_opt(year, month, day)
+        .ok_or_else(|| anyhow!("invalid mission date {year}-{month}-{day}"))?;
+    Ok(MissionClock {
+        date: start + Duration::days(extra_days),
+        tod_secs,
+    })
+}
+
+fn live_factory_count(db: &Db, obj: &Objective) -> u32 {
+    let Some(groups) = obj.groups.get(&obj.owner) else {
+        return 0;
+    };
+    let mut n = 0u32;
+    for gid in groups {
+        let Ok(group) = db.group(gid) else {
+            continue;
+        };
+        if group.class != ObjGroupClass::Production {
+            continue;
+        }
+        for uid in &group.units {
+            if let Some(unit) = db.persisted.units.get(uid) {
+                if !unit.dead {
+                    n += 1;
+                }
+            }
+        }
+    }
+    n
+}
+
+fn factory_counts(db: &Db) -> (u32, u32) {
+    let mut red = 0u32;
+    let mut blue = 0u32;
+    for (_, obj) in db.persisted.objectives.into_iter() {
+        if !matches!(obj.kind, ObjectiveKind::Production) {
+            continue;
+        }
+        let n = live_factory_count(db, obj);
+        match obj.owner() {
+            Side::Red => red += n,
+            Side::Blue => blue += n,
+            _ => {}
+        }
+    }
+    (red, blue)
+}
+
+fn avg_logistics_production(db: &Db, side: Side) -> Option<u8> {
+    let mut sum = 0u32;
+    let mut n = 0u32;
+    for (_, obj) in db.persisted.objectives.into_iter() {
+        if obj.owner() != side || !matches!(obj.kind, ObjectiveKind::Logistics) {
+            continue;
+        }
+        sum += obj.production as u32;
+        n += 1;
+    }
+    if n == 0 {
+        None
+    } else {
+        Some((sum / n) as u8)
+    }
+}
+
+fn format_logistics_interval_minutes(minutes: u32) -> String {
+    if minutes == 0 {
+        return "—".into();
+    }
+    let h = minutes / 60;
+    let m = minutes % 60;
+    if h > 0 && m == 0 {
+        format!("{h} h 0 min")
+    } else if h > 0 {
+        format!("{h} h {m} min")
+    } else {
+        format!("{minutes} min")
+    }
+}
+
+fn warehouse_logistics_intervals(db: &Db) -> (String, String) {
+    let Some(wh) = db.ephemeral.cfg.warehouse.as_ref() else {
+        return ("—".into(), "—".into());
+    };
+    (
+        format_logistics_interval_minutes(wh.tick),
+        format_logistics_interval_minutes(wh.tick.saturating_mul(wh.ticks_per_delivery)),
+    )
+}
+
+pub fn collect_map_status_bar(
+    lua: MizLua,
+    db: &Db,
+    live: &DiscordMapLiveCtx,
+    mission_name: &str,
+    status_utc: &str,
+) -> Result<bg::discord_map::DiscordMapStatusBar> {
+    let clock = mission_clock(lua).context("discord map mission clock")?;
+    let (ground_red, ground_blue) = count_ground_objectives_by_side(db);
+    let (carrier_red, carrier_blue) =
+        count_spawned_ship_carriers(lua, db).context("discord map carrier ships")?;
+    let (factories_red, factories_blue) = factory_counts(db);
+    let (supply_to_bases, delivery_to_hubs) = warehouse_logistics_intervals(db);
+    Ok(bg::discord_map::DiscordMapStatusBar {
+        mission_name: mission_name.to_string(),
+        status_utc: status_utc.to_string(),
+        theatre: format_theatre_display(&theatre_slug(lua)),
+        mission_date: clock.date.format("%Y-%m-%d").to_string(),
+        mission_tod_secs: clock.tod_secs,
+        gen_utc_ms: live.generated_at.timestamp_millis(),
+        restart_utc_ms: live.shutdown_when.map(|t| t.timestamp_millis()),
+        online_red: live.online_red,
+        online_blue: live.online_blue,
+        ground_red,
+        ground_blue,
+        carrier_red,
+        carrier_blue,
+        factories_red,
+        factories_blue,
+        production_red: avg_logistics_production(db, Side::Red),
+        production_blue: avg_logistics_production(db, Side::Blue),
+        supply_to_bases,
+        delivery_to_hubs,
+    })
+}
+
 fn discord_map_post_job(
     lua: MizLua,
     db: &Db,
@@ -359,8 +591,10 @@ fn discord_map_post_job(
     cfg: &DiscordMapCfg,
     markers: Vec<bg::discord_map::DiscordMapMarker>,
     icons: bg::discord_map::DiscordMapIconPackJob,
+    live: &DiscordMapLiveCtx,
 ) -> Result<DiscordMapPostJob> {
     let (caption, status_utc) = build_discord_map_caption(&runtime.mission_name, cfg);
+    let status_bar = collect_map_status_bar(lua, db, live, &runtime.mission_name, &status_utc)?;
     Ok(DiscordMapPostJob {
         webhook_url: cfg.webhook_url.clone().unwrap().to_string(),
         webhook_message_path: runtime.webhook_message_path.clone(),
@@ -375,6 +609,7 @@ fn discord_map_post_job(
         caption,
         mission_name: runtime.mission_name.clone(),
         status_utc,
+        status_bar,
     })
 }
 
@@ -414,6 +649,7 @@ impl Db {
         lua: MizLua,
         ts: DateTime<Utc>,
         mission_has_players: bool,
+        live: &DiscordMapLiveCtx,
     ) -> Result<()> {
         if self.ephemeral.discord_map.is_none() {
             return Ok(());
@@ -425,12 +661,12 @@ impl Db {
             return Ok(());
         }
         self.ephemeral.discord_map_post_due = None;
-        self.queue_discord_map_post(lua)?;
+        self.queue_discord_map_post(lua, live)?;
         self.schedule_discord_map_periodic(ts, mission_has_players);
         Ok(())
     }
 
-    pub fn bootstrap_discord_map(&self, lua: MizLua) -> Result<()> {
+    pub fn bootstrap_discord_map(&self, lua: MizLua, live: &DiscordMapLiveCtx) -> Result<()> {
         let Some(runtime) = self.ephemeral.discord_map.as_ref() else {
             return Ok(());
         };
@@ -438,7 +674,7 @@ impl Db {
         let markers = collect_markers(lua, self)?;
         let icons = icons_job(runtime.icons.as_ref());
         let meta_json = build_meta(&runtime.viewport, cfg.style.as_str())?;
-        let post_job = discord_map_post_job(lua, self, runtime, cfg, markers, icons)?;
+        let post_job = discord_map_post_job(lua, self, runtime, cfg, markers, icons, live)?;
         let cache_ok = runtime.base_png_path.is_file()
             && meta_matches(&runtime.viewport, cfg.style.as_str(), &runtime.meta_path);
         if cache_ok {
@@ -463,7 +699,7 @@ impl Db {
         Ok(())
     }
 
-    pub fn queue_discord_map_post(&self, lua: MizLua) -> Result<()> {
+    pub fn queue_discord_map_post(&self, lua: MizLua, live: &DiscordMapLiveCtx) -> Result<()> {
         let Some(runtime) = self.ephemeral.discord_map.as_ref() else {
             return Ok(());
         };
@@ -480,6 +716,7 @@ impl Db {
             cfg,
             markers,
             icons_job(runtime.icons.as_ref()),
+            live,
         )?));
         Ok(())
     }

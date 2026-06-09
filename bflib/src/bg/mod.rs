@@ -256,6 +256,7 @@ pub struct DiscordMapPostJob {
     pub caption: String,
     pub mission_name: String,
     pub status_utc: String,
+    pub status_bar: discord_map::DiscordMapStatusBar,
 }
 
 #[derive(Debug)]
@@ -587,6 +588,7 @@ async fn background_loop(write_dir: PathBuf, mut rx: UnboundedReceiver<Task>) {
                                 &job.caption,
                                 &job.mission_name,
                                 &job.status_utc,
+                                &job.status_bar,
                             )
                             .await
                             {
@@ -612,6 +614,7 @@ async fn background_loop(write_dir: PathBuf, mut rx: UnboundedReceiver<Task>) {
                     &job.caption,
                     &job.mission_name,
                     &job.status_utc,
+                    &job.status_bar,
                 )
                 .await
                 {

@@ -43,6 +43,7 @@ use chrono::{prelude::*, Duration};
 use compact_str::{format_compact, CompactString};
 use crossbeam::queue::SegQueue;
 use db::{
+    discord_map::DiscordMapLiveCtx,
     group::BirthRes,
     player::{RegErr, TakeoffRes},
     Db,
@@ -91,6 +92,27 @@ struct PlayerInfo {
     name: String,
     addr: Option<String>,
     ucid: Ucid,
+}
+
+fn discord_map_live_ctx(ctx: &Context) -> DiscordMapLiveCtx {
+    let mut online_red = 0u32;
+    let mut online_blue = 0u32;
+    for ifo in ctx.connected.info_by_player_id.values() {
+        let Some(player) = ctx.db.player(&ifo.ucid) else {
+            continue;
+        };
+        match player.side {
+            Side::Red => online_red += 1,
+            Side::Blue => online_blue += 1,
+            _ => {}
+        }
+    }
+    DiscordMapLiveCtx {
+        generated_at: Utc::now(),
+        shutdown_when: ctx.shutdown.map(|s| s.when),
+        online_red,
+        online_blue,
+    }
 }
 
 #[derive(Debug, Default)]
@@ -1720,7 +1742,10 @@ fn run_slow_timed_events(
             Ok(AdminResult::Shutdown) => return Ok(AdminResult::Shutdown),
             Err(e) => error!("failed to check for auto shutdown {e:?}"),
         }
-        if let Err(e) = ctx.db.discord_map_tick(lua, ts, ctx.connected.len() > 0) {
+        if let Err(e) =
+            ctx.db
+                .discord_map_tick(lua, ts, ctx.connected.len() > 0, &discord_map_live_ctx(ctx))
+        {
             error!("discord map post failed: {e:#}");
         }
         for (oid, vh) in ctx.db.ephemeral.warehouses_to_sync() {
@@ -2074,7 +2099,7 @@ fn delayed_init_miz(lua: MizLua) -> Result<()> {
     ctx.respawn_groups(lua, &miz).context("setting up the mission after load")?;
     if ctx.db.ephemeral.cfg.discord_map.enabled {
         ctx.db
-            .bootstrap_discord_map(lua)
+            .bootstrap_discord_map(lua, &discord_map_live_ctx(ctx))
             .context("discord map bootstrap")?;
         ctx.db
             .schedule_discord_map_periodic(Utc::now(), ctx.connected.len() > 0);
