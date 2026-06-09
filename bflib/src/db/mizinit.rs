@@ -916,9 +916,15 @@ impl Db {
             for (_, obj) in &self.persisted.objectives {
                 self.ephemeral.create_objective_markup(&self.persisted, obj)
             }
-            self.ephemeral.sync_front_line(&self.persisted);
+            let underlay_dirty = self.ephemeral.sync_front_line(&self.persisted);
             self.ephemeral
                 .refresh_objective_overlay_layer(&self.persisted);
+            if underlay_dirty
+                && self.ephemeral.cfg.discord_map.front_line_map_active(self.ephemeral.cfg.front_line)
+                && self.ephemeral.discord_map.is_some()
+            {
+                self.discord_map_debounce_post(Utc::now());
+            }
             Ok(())
         };
         mark_deployed_and_logistics().context("marking deployed and logistics")?;

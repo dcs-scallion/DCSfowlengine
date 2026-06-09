@@ -23,6 +23,12 @@ const LABEL_FONT_PX: i32 = 8;
 static MAP_LABEL_FONT: Lazy<MapLabelFont> = Lazy::new(MapLabelFont::embedded);
 
 #[derive(Debug, Clone)]
+pub struct DiscordMapFrontLinePolygon {
+    pub coalition: String,
+    pub latlon: [(f64, f64); 4],
+}
+
+#[derive(Debug, Clone)]
 pub struct DiscordMapMarker {
     pub lat: f64,
     pub lon: f64,
@@ -141,13 +147,22 @@ pub async fn publish_and_post(
     map_version_path: &Path,
     viewport: &MapViewport,
     markers: &[DiscordMapMarker],
+    front_line: &[DiscordMapFrontLinePolygon],
     icons: &DiscordMapIconPackJob,
     caption: &str,
     mission_name: &str,
     status_utc: &str,
 ) -> Result<()> {
-    let artifacts = build_map_artifacts(base_png_path, viewport, markers, icons, mission_name, status_utc)
-        .context("build discord map artifacts")?;
+    let artifacts = build_map_artifacts(
+        base_png_path,
+        viewport,
+        markers,
+        front_line,
+        icons,
+        mission_name,
+        status_utc,
+    )
+    .context("build discord map artifacts")?;
     if let Some(parent) = composited_png_path.parent() {
         fs::create_dir_all(parent).await.ok();
     }
@@ -299,6 +314,7 @@ fn build_map_artifacts(
     base_png_path: &Path,
     viewport: &MapViewport,
     markers: &[DiscordMapMarker],
+    front_line: &[DiscordMapFrontLinePolygon],
     icons: &DiscordMapIconPackJob,
     mission_name: &str,
     status_utc: &str,
@@ -311,8 +327,10 @@ fn build_map_artifacts(
         status_utc,
         img_w,
         img_h,
+        viewport,
         &base_bytes,
         &layouts,
+        front_line,
     );
     Ok(MapArtifacts { png, html })
 }
@@ -423,14 +441,54 @@ fn coalition_tip_class(coalition: &str) -> &'static str {
     }
 }
 
+fn front_line_svg(
+    viewport: &MapViewport,
+    img_w: u32,
+    img_h: u32,
+    polys: &[DiscordMapFrontLinePolygon],
+) -> String {
+    if polys.is_empty() {
+        return String::new();
+    }
+    let mut inner = String::new();
+    for poly in polys {
+        let fill = match poly.coalition.as_str() {
+            "red" => "rgba(196,56,56,0.35)",
+            "blue" => "rgba(46,90,172,0.35)",
+            _ => continue,
+        };
+        let mut pts = String::new();
+        for (i, (lat, lon)) in poly.latlon.iter().enumerate() {
+            let (x, y) = viewport.ll_to_pixel_in(*lat, *lon, img_w, img_h);
+            if i > 0 {
+                pts.push(' ');
+            }
+            use std::fmt::Write as _;
+            let _ = write!(pts, "{x:.1},{y:.1}");
+        }
+        inner.push_str(&format!(
+            r#"<polygon points="{pts}" fill="{fill}" stroke="none"/>"#
+        ));
+    }
+    if inner.is_empty() {
+        return String::new();
+    }
+    format!(
+        r#"<svg class="front-line" viewBox="0 0 {img_w} {img_h}" preserveAspectRatio="none" aria-hidden="true">{inner}</svg>"#
+    )
+}
+
 fn build_interactive_html(
     mission_name: &str,
     status_utc: &str,
     img_w: u32,
     img_h: u32,
+    viewport: &MapViewport,
     base_png: &[u8],
     markers: &[MarkerLayout],
+    front_line: &[DiscordMapFrontLinePolygon],
 ) -> String {
+    let front_svg = front_line_svg(viewport, img_w, img_h, front_line);
     let mut body = String::new();
     for m in markers {
         let left_pct = (m.cx / img_w as f32) * 100.;
@@ -467,6 +525,7 @@ body{{margin:0;background:#111;color:#f4f6fa;font-family:"Roboto Condensed",sans
 .hdr{{padding:10px 12px;font-size:12px;line-height:1.45}}
 #wrap{{position:relative;display:inline-block;line-height:0;max-width:100%}}
 #base{{display:block;max-width:100%;height:auto;width:{img_w}px}}
+.front-line{{position:absolute;left:0;top:0;width:100%;height:100%;pointer-events:none;z-index:0}}
 .m{{position:absolute;transform:translate(-50%,-50%);z-index:1}}
 .m:hover{{z-index:10000}}
 .m-stack{{position:relative;display:inline-block;line-height:0}}
@@ -484,7 +543,7 @@ body{{margin:0;background:#111;color:#f4f6fa;font-family:"Roboto Condensed",sans
 .tip-neutral{{border-color:#5C6370}}
 </style></head><body>
 <div class="hdr"><div>{mn}</div><div>Objectives status as of {status_utc} UTC</div></div>
-<div id="wrap"><img id="base" src="data:image/png;base64,{base_b64}" width="{img_w}" height="{img_h}" alt="map">{body}</div>
+<div id="wrap"><img id="base" src="data:image/png;base64,{base_b64}" width="{img_w}" height="{img_h}" alt="map">{front_svg}{body}</div>
 <script>
 (function(){{
   var wrap=document.getElementById('wrap');

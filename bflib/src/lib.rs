@@ -2059,10 +2059,6 @@ fn delayed_init_miz(lua: MizLua) -> Result<()> {
         let miz_path = db::discord_map::resolve_mission_miz_path(lua, &path)?;
         db::discord_map::init_discord_map(lua, &mut ctx.db, &miz, &miz_path, &path)
             .context("discord map init")?;
-        ctx.db
-            .bootstrap_discord_map(lua)
-            .context("discord map bootstrap")?;
-        ctx.db.schedule_discord_map_periodic(Utc::now(), ctx.connected.len() > 0);
     }
     ctx.shutdown = ctx
         .db
@@ -2076,6 +2072,13 @@ fn delayed_init_miz(lua: MizLua) -> Result<()> {
     }));
     info!("spawning units");
     ctx.respawn_groups(lua, &miz).context("setting up the mission after load")?;
+    if ctx.db.ephemeral.cfg.discord_map.enabled {
+        ctx.db
+            .bootstrap_discord_map(lua)
+            .context("discord map bootstrap")?;
+        ctx.db
+            .schedule_discord_map_periodic(Utc::now(), ctx.connected.len() > 0);
+    }
     // Register players who were already connected before the mission loaded
     let net = Net::singleton(lua)?;
     for id in net.get_player_list()? {

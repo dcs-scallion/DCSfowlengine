@@ -320,14 +320,48 @@ fn icons_job(icons: &DiscordMapIconPack) -> bg::discord_map::DiscordMapIconPackJ
     }
 }
 
+fn collect_front_line_polygons(
+    lua: MizLua,
+    db: &Db,
+) -> Result<Vec<bg::discord_map::DiscordMapFrontLinePolygon>> {
+    let cfg = &db.ephemeral.cfg;
+    if !cfg.discord_map.front_line_map_active(cfg.front_line) {
+        return Ok(Vec::new());
+    }
+    let coord = Coord::singleton(lua)?;
+    let mut out = Vec::new();
+    for quad in db.ephemeral.front_line_map_quads() {
+        let coalition = match quad.coalition {
+            Side::Red => "red",
+            Side::Blue => "blue",
+            _ => continue,
+        };
+        let mut latlon = [(0_f64, 0_f64); 4];
+        for (i, corner) in quad.corners.iter().enumerate() {
+            let ll = coord.lo_to_ll(LuaVec3(Vector3::new(corner.x, 0., corner.y)))?;
+            latlon[i] = (ll.latitude, ll.longitude);
+        }
+        out.push(bg::discord_map::DiscordMapFrontLinePolygon {
+            coalition: coalition.to_string(),
+            latlon,
+        });
+    }
+    if !out.is_empty() {
+        info!("discord map: {} front line polygon(s) for HTML", out.len());
+    }
+    Ok(out)
+}
+
 fn discord_map_post_job(
+    lua: MizLua,
+    db: &Db,
     runtime: &DiscordMapRuntime,
     cfg: &DiscordMapCfg,
     markers: Vec<bg::discord_map::DiscordMapMarker>,
     icons: bg::discord_map::DiscordMapIconPackJob,
-) -> DiscordMapPostJob {
+) -> Result<DiscordMapPostJob> {
     let (caption, status_utc) = build_discord_map_caption(&runtime.mission_name, cfg);
-    DiscordMapPostJob {
+    Ok(DiscordMapPostJob {
         webhook_url: cfg.webhook_url.clone().unwrap().to_string(),
         webhook_message_path: runtime.webhook_message_path.clone(),
         base_png_path: runtime.base_png_path.clone(),
@@ -336,11 +370,12 @@ fn discord_map_post_job(
         map_version_path: runtime.map_version_path.clone(),
         viewport: runtime.viewport,
         markers,
+        front_line: collect_front_line_polygons(lua, db)?,
         icons,
         caption,
         mission_name: runtime.mission_name.clone(),
         status_utc,
-    }
+    })
 }
 
 impl Db {
@@ -403,7 +438,7 @@ impl Db {
         let markers = collect_markers(lua, self)?;
         let icons = icons_job(runtime.icons.as_ref());
         let meta_json = build_meta(&runtime.viewport, cfg.style.as_str())?;
-        let post_job = discord_map_post_job(runtime, cfg, markers, icons);
+        let post_job = discord_map_post_job(lua, self, runtime, cfg, markers, icons)?;
         let cache_ok = runtime.base_png_path.is_file()
             && meta_matches(&runtime.viewport, cfg.style.as_str(), &runtime.meta_path);
         if cache_ok {
@@ -439,11 +474,13 @@ impl Db {
         let cfg = &self.ephemeral.cfg.discord_map;
         let markers = collect_markers(lua, self)?;
         self.ephemeral.do_bg(Task::DiscordMapPost(discord_map_post_job(
+            lua,
+            self,
             runtime,
             cfg,
             markers,
             icons_job(runtime.icons.as_ref()),
-        )));
+        )?));
         Ok(())
     }
 }
@@ -456,7 +493,7 @@ pub fn init_discord_map(
     sortie_state_path: &Path,
 ) -> Result<()> {
     let cfg = &db.ephemeral.cfg.discord_map;
-    cfg.validate_enabled()?;
+    cfg.validate_enabled(db.ephemeral.cfg.front_line)?;
     if !cfg.enabled {
         return Ok(());
     }

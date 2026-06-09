@@ -51,6 +51,13 @@ const CORNER_STRAIGHT_DOT: f64 = 0.95;
 /// Corner turn: dot below this => direction reversal (yellow); no diagonal fill.
 const CORNER_REVERSE_DOT: f64 = -0.01;
 
+/// Ribbon quad for Discord map SVG (DCS ground XZ corners).
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct FrontLineMapQuad {
+    pub corners: [Vector2; 4],
+    pub coalition: Side,
+}
+
 #[derive(Debug, Default)]
 pub(super) struct FrontLine {
     marks_by_key: FxHashMap<QuadKey, MarkId>,
@@ -58,6 +65,7 @@ pub(super) struct FrontLine {
     owner_revision: u64,
     segment_count: usize,
     water_grid: Option<WaterGridMask>,
+    map_quads: Vec<FrontLineMapQuad>,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -887,7 +895,26 @@ pub(crate) fn export_water_grid(
     Ok(out)
 }
 
+fn map_quad_from_spec(spec: &QuadSpec) -> Option<FrontLineMapQuad> {
+    let coalition = if spec.fill_color == side_color(Side::Red) {
+        Side::Red
+    } else if spec.fill_color == side_color(Side::Blue) {
+        Side::Blue
+    } else {
+        return None;
+    };
+    let xz = |p: LuaVec3| Vector2::new(p.0.x, p.0.z);
+    Some(FrontLineMapQuad {
+        corners: [xz(spec.p0), xz(spec.p1), xz(spec.p2), xz(spec.p3)],
+        coalition,
+    })
+}
+
 impl FrontLine {
+    pub(crate) fn map_quads(&self) -> &[FrontLineMapQuad] {
+        &self.map_quads
+    }
+
     fn clear(&mut self, msgq: &mut MsgQ) {
         for (_, id) in self.marks_by_key.drain() {
             msgq.delete_underlay_mark(id);
@@ -895,6 +922,7 @@ impl FrontLine {
         self.participant_count = 0;
         self.owner_revision = 0;
         self.segment_count = 0;
+        self.map_quads.clear();
     }
 
     pub fn sync(&mut self, cfg: &Cfg, persisted: &Persisted, msgq: &mut MsgQ) -> bool {
@@ -925,6 +953,7 @@ impl FrontLine {
                 cfg.front_line_grid_size_meters,
                 self.water_grid.as_ref(),
             );
+        self.map_quads = want.iter().filter_map(map_quad_from_spec).collect();
         if revision == self.owner_revision
             && participant_count == self.participant_count
             && seg_count == self.segment_count
@@ -932,7 +961,6 @@ impl FrontLine {
         {
             return false;
         }
-
         let mut want_by_key: FxHashMap<QuadKey, QuadSpec> = FxHashMap::default();
         for spec in want {
             want_by_key.insert(quad_key(&spec), spec);

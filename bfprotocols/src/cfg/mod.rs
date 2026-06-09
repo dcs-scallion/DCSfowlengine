@@ -978,6 +978,10 @@ pub struct DiscordMapCfg {
     /// Public base URL for Discord link, e.g. `http://203.0.113.50:17841` (no trailing slash).
     #[serde(default)]
     pub http_public_base_url: Option<String>,
+    /// Draw campaign front line on interactive `/map` HTML (SVG only, not Discord PNG).
+    /// Requires `front_line: true` in CFG root; validated at mission start.
+    #[serde(default)]
+    pub front_line_in_map: bool,
 }
 
 impl Default for DiscordMapCfg {
@@ -992,12 +996,21 @@ impl Default for DiscordMapCfg {
             padding: 0,
             http_port: default_discord_map_http_port(),
             http_public_base_url: None,
+            front_line_in_map: false,
         }
     }
 }
 
 impl DiscordMapCfg {
-    pub fn validate_enabled(&self) -> Result<()> {
+    /// Interactive map front line requires both discord_map and campaign front_line CFG flags.
+    pub fn front_line_map_active(&self, front_line: bool) -> bool {
+        self.front_line_in_map && front_line
+    }
+
+    pub fn validate_enabled(&self, front_line: bool) -> Result<()> {
+        if self.front_line_in_map && !front_line {
+            bail!("discord_map.front_line_in_map requires front_line: true in CFG");
+        }
         if !self.enabled {
             return Ok(());
         }

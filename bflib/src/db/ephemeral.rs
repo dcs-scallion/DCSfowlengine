@@ -389,6 +389,10 @@ impl Ephemeral {
         self.front_line.sync(&self.cfg, persisted, &mut self.msgs)
     }
 
+    pub(crate) fn front_line_map_quads(&self) -> &[super::front_line::FrontLineMapQuad] {
+        self.front_line.map_quads()
+    }
+
     pub(crate) fn load_front_line_water_grid(
         &mut self,
         state_path: &std::path::Path,

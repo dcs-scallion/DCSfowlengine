@@ -1916,6 +1916,11 @@ impl Db {
         if underlay_dirty {
             self.ephemeral
                 .refresh_objective_overlay_layer(&self.persisted);
+            if self.ephemeral.cfg.discord_map.front_line_map_active(self.ephemeral.cfg.front_line)
+                && self.ephemeral.discord_map.is_some()
+            {
+                self.discord_map_debounce_post(now);
+            }
         }
         let net = dcso3::net::Net::singleton(lua).context("net for markup flush")?;
         let act = dcso3::trigger::Trigger::singleton(lua)
