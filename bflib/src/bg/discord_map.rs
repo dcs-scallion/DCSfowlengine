@@ -152,6 +152,15 @@ pub async fn fetch_mapbox_base(url: &str, base_path: &Path, meta_path: &Path, me
     Ok(())
 }
 
+fn write_tmp_path(path: &Path) -> PathBuf {
+    let parent = path.parent().unwrap_or_else(|| Path::new("."));
+    let name = path
+        .file_name()
+        .and_then(|n| n.to_str())
+        .unwrap_or("file");
+    parent.join(format!("{name}.tmp"))
+}
+
 fn bail_mapbox(status: u16, body: &str) -> Result<()> {
     if status == 422 {
         anyhow::bail!(
@@ -194,12 +203,20 @@ pub async fn publish_and_post(
     fs::write(composited_png_path, &artifacts.png)
         .await
         .with_context(|| format!("write composited map PNG {:?}", composited_png_path))?;
-    fs::write(html_path, artifacts.html.as_bytes())
+    let html_tmp = write_tmp_path(html_path);
+    fs::write(&html_tmp, artifacts.html.as_bytes())
         .await
-        .with_context(|| format!("write interactive map HTML {:?}", html_path))?;
-    fs::write(map_version_path, status_utc.as_bytes())
+        .with_context(|| format!("write interactive map HTML temp {:?}", html_tmp))?;
+    fs::rename(&html_tmp, html_path)
         .await
-        .with_context(|| format!("write discord map version {:?}", map_version_path))?;
+        .with_context(|| format!("publish interactive map HTML {:?}", html_path))?;
+    let version_tmp = write_tmp_path(map_version_path);
+    fs::write(&version_tmp, status_utc.as_bytes())
+        .await
+        .with_context(|| format!("write discord map version temp {:?}", version_tmp))?;
+    fs::rename(&version_tmp, map_version_path)
+        .await
+        .with_context(|| format!("publish discord map version {:?}", map_version_path))?;
     post_composited_map(
         webhook_url,
         webhook_message_path,
@@ -529,7 +546,7 @@ fn front_line_svg(
                 pts.push(' ');
             }
             use std::fmt::Write as _;
-            let _ = write!(pts, "{x:.1},{y:.1}");
+            let _ = write!(pts, "{x:.3},{y:.3}");
         }
         inner.push_str(&format!(
             r#"<polygon points="{pts}" fill="{fill}" stroke="none"/>"#
@@ -539,7 +556,7 @@ fn front_line_svg(
         return String::new();
     }
     format!(
-        r#"<svg class="front-line" viewBox="0 0 {img_w} {img_h}" preserveAspectRatio="none" aria-hidden="true">{inner}</svg>"#
+        r#"<svg class="front-line" viewBox="0 0 {img_w} {img_h}" preserveAspectRatio="none" shape-rendering="geometricPrecision" aria-hidden="true">{inner}</svg>"#
     )
 }
 

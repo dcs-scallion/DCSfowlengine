@@ -377,21 +377,31 @@ fn format_theatre_display(slug: &str) -> String {
     format!("{}{}", first.to_ascii_uppercase(), chars.as_str())
 }
 
-/// Same set as bftools `count_objectives_by_default_owner`: OAB/FOB/LO only (no OPR).
+/// OAB/FOB/LO held by a coalition (matches map icon: not neutral, not captureable).
 fn count_ground_objectives_by_side(db: &Db) -> (u32, u32) {
     let mut red = 0u32;
     let mut blue = 0u32;
     for (_, obj) in db.persisted.objectives.into_iter() {
-        if matches!(obj.kind, ObjectiveKind::Production | ObjectiveKind::Farp { .. }) {
+        let Some(side) = held_ground_objective_side(obj) else {
             continue;
-        }
-        match obj.owner() {
+        };
+        match side {
             Side::Red => red += 1,
             Side::Blue => blue += 1,
             _ => {}
         }
     }
     (red, blue)
+}
+
+fn held_ground_objective_side(obj: &Objective) -> Option<Side> {
+    if matches!(obj.kind, ObjectiveKind::Production | ObjectiveKind::Farp { .. }) {
+        return None;
+    }
+    if obj.owner() == Side::Neutral || obj.captureable() {
+        return None;
+    }
+    Some(obj.owner())
 }
 
 fn group_has_live_ship_carrier(db: &Db, gid: &GroupId) -> bool {
@@ -724,7 +734,19 @@ impl Db {
         Ok(())
     }
 
-    pub fn bootstrap_discord_map(&self, lua: MizLua, live: &DiscordMapLiveCtx) -> Result<()> {
+    fn sync_front_line_for_discord_map(&mut self) {
+        if self
+            .ephemeral
+            .cfg
+            .discord_map
+            .front_line_map_active(self.ephemeral.cfg.front_line)
+        {
+            self.ephemeral.sync_front_line(&self.persisted);
+        }
+    }
+
+    pub fn bootstrap_discord_map(&mut self, lua: MizLua, live: &DiscordMapLiveCtx) -> Result<()> {
+        self.sync_front_line_for_discord_map();
         let Some(runtime) = self.ephemeral.discord_map.as_ref() else {
             return Ok(());
         };
@@ -757,7 +779,8 @@ impl Db {
         Ok(())
     }
 
-    pub fn queue_discord_map_post(&self, lua: MizLua, live: &DiscordMapLiveCtx) -> Result<()> {
+    pub fn queue_discord_map_post(&mut self, lua: MizLua, live: &DiscordMapLiveCtx) -> Result<()> {
+        self.sync_front_line_for_discord_map();
         let Some(runtime) = self.ephemeral.discord_map.as_ref() else {
             return Ok(());
         };

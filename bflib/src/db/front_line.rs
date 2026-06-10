@@ -478,8 +478,8 @@ fn pick_next_edge(
     best.map(|(idx, next_k, _)| (idx, next_k))
 }
 
-fn extend_chain_turn(
-    chain: &mut Vec<Vector2>,
+fn extend_edge_chain_turn(
+    chain: &mut Vec<usize>,
     at: NodeKey,
     prev: Vector2,
     nodes: &FxHashMap<NodeKey, Vector2>,
@@ -494,18 +494,40 @@ fn extend_chain_turn(
             break;
         };
         used[edge_idx] = true;
-        let next_pos = nodes[&next_k];
         if forward {
-            chain.push(next_pos);
+            chain.push(edge_idx);
         } else {
-            chain.insert(0, next_pos);
+            chain.insert(0, edge_idx);
         }
         prev = nodes[&at];
         at = next_k;
     }
 }
 
-fn stitch_polylines(segments: &[(Vector2, Vector2)]) -> Vec<Vec<Vector2>> {
+/// Split long spans so ribbon quads are not dropped by max chord.
+fn densify_polyline(pts: &[Vector2], max_step: f64) -> Vec<Vector2> {
+    if pts.len() < 2 {
+        return pts.to_vec();
+    }
+    let mut out = vec![pts[0]];
+    for w in pts.windows(2) {
+        let a = w[0];
+        let b = w[1];
+        let len = (b - a).norm();
+        if len <= max_step {
+            out.push(b);
+            continue;
+        }
+        let steps = (len / max_step).ceil() as u32;
+        for i in 1..=steps {
+            let t = i as f64 / steps as f64;
+            out.push(a + (b - a) * t);
+        }
+    }
+    out
+}
+
+fn stitch_edge_chains(segments: &[(Vector2, Vector2)]) -> Vec<Vec<usize>> {
     if segments.is_empty() {
         return Vec::new();
     }
@@ -554,10 +576,10 @@ fn stitch_polylines(segments: &[(Vector2, Vector2)]) -> Vec<Vec<Vector2>> {
             let kb = graph_node_key(b);
             let pa = nodes[&ka];
             let pb = nodes[&kb];
-            let mut chain = vec![pa, pb];
-            extend_chain_turn(&mut chain, kb, pa, &nodes, &adj, &mut used, true);
-            extend_chain_turn(&mut chain, ka, pb, &nodes, &adj, &mut used, false);
-            if chain.len() >= 2 {
+            let mut chain = vec![edge_idx];
+            extend_edge_chain_turn(&mut chain, kb, pa, &nodes, &adj, &mut used, true);
+            extend_edge_chain_turn(&mut chain, ka, pb, &nodes, &adj, &mut used, false);
+            if !chain.is_empty() {
                 polylines.push(chain);
             }
         }
@@ -573,24 +595,15 @@ fn stitch_polylines(segments: &[(Vector2, Vector2)]) -> Vec<Vec<Vector2>> {
         let kb = graph_node_key(b);
         let pa = nodes[&ka];
         let pb = nodes[&kb];
-        let mut chain = vec![pa, pb];
-        extend_chain_turn(&mut chain, kb, pa, &nodes, &adj, &mut used, true);
-        extend_chain_turn(&mut chain, ka, pb, &nodes, &adj, &mut used, false);
-        if chain.len() >= 2 {
+        let mut chain = vec![i];
+        extend_edge_chain_turn(&mut chain, kb, pa, &nodes, &adj, &mut used, true);
+        extend_edge_chain_turn(&mut chain, ka, pb, &nodes, &adj, &mut used, false);
+        if !chain.is_empty() {
             polylines.push(chain);
         }
     }
 
     polylines
-}
-
-fn find_wall_edge<'a>(edges: &'a [WallEdge], p0: Vector2, p1: Vector2) -> Option<&'a WallEdge> {
-    let k0 = graph_node_key(p0);
-    let k1 = graph_node_key(p1);
-    edges.iter().find(|e| {
-        (graph_node_key(e.a) == k0 && graph_node_key(e.b) == k1)
-            || (graph_node_key(e.a) == k1 && graph_node_key(e.b) == k0)
-    })
 }
 
 fn unit_dir(a: Vector2, b: Vector2) -> Vector2 {
@@ -681,6 +694,25 @@ fn quad_colored(start: Vector2, end: Vector2, color: Color) -> QuadSpec {
     }
 }
 
+fn segment_has_land(mask: &WaterGridMask, start: Vector2, end: Vector2) -> bool {
+    if mask.is_land_at(start) || mask.is_land_at(end) {
+        return true;
+    }
+    let len = (end - start).norm();
+    if len < 1e-3 {
+        return false;
+    }
+    let step = mask.cell_w.min(mask.cell_h).max(1.);
+    let steps = (len / step).ceil() as usize;
+    for i in 0..=steps {
+        let t = i as f64 / steps.max(1) as f64;
+        if mask.is_land_at(start + (end - start) * t) {
+            return true;
+        }
+    }
+    false
+}
+
 fn push_clipped_segment(
     out: &mut Vec<QuadSpec>,
     start: Vector2,
@@ -714,8 +746,7 @@ fn push_clipped_segment(
             continue;
         }
         if let Some(mask) = water_grid {
-            let mid = (s + e) * 0.5;
-            if !mask.is_land_at(mid) {
+            if !segment_has_land(mask, s, e) {
                 continue;
             }
         }
@@ -726,24 +757,34 @@ fn push_clipped_segment(
     }
 }
 
-fn ribbon_quads_for_chain(
+fn ribbon_quads_for_edge_chain(
     out: &mut Vec<QuadSpec>,
-    chain: &[Vector2],
+    chain: &[usize],
     edges: &[WallEdge],
     sep: f64,
     clip: &Bbox,
     water_grid: Option<&WaterGridMask>,
 ) {
-    if chain.len() < 2 {
+    if chain.is_empty() {
         return;
     }
-    let mut edge_data: Vec<(WallEdge, bool)> = Vec::new();
-    for w in chain.windows(2) {
-        let Some(e) = find_wall_edge(edges, w[0], w[1]) else {
-            return;
+    let mut edge_data: Vec<(WallEdge, bool)> = Vec::with_capacity(chain.len());
+    for (i, &ei) in chain.iter().enumerate() {
+        let e = edges[ei];
+        let forward = if i == 0 {
+            true
+        } else {
+            let (prev_e, prev_fwd) = edge_data[i - 1];
+            let (_, prev_end) = wall_endpoints(&prev_e, prev_fwd);
+            let prev_k = graph_node_key(prev_end);
+            if graph_node_key(e.a) == prev_k {
+                true
+            } else {
+                debug_assert_eq!(graph_node_key(e.b), prev_k);
+                false
+            }
         };
-        let forward = graph_node_key(e.a) == graph_node_key(w[0]);
-        edge_data.push((*e, forward));
+        edge_data.push((e, forward));
     }
 
     for coalition in [Side::Red, Side::Blue] {
@@ -765,7 +806,10 @@ fn ribbon_quads_for_chain(
             merged.push((seg_start, seg_end));
         }
         for (start, end) in merged {
-            push_clipped_segment(out, start, end, color, clip, water_grid);
+            let dense = densify_polyline(&[start, end], MAX_LINE_STEP_M);
+            for w in dense.windows(2) {
+                push_clipped_segment(out, w[0], w[1], color, clip, water_grid);
+            }
         }
     }
 }
@@ -791,14 +835,11 @@ fn build_front_quads(
     let wall_count = wall_edges.len();
 
     let seg_pairs: Vec<(Vector2, Vector2)> = wall_edges.iter().map(|e| (e.a, e.b)).collect();
-    let chains = stitch_polylines(&seg_pairs);
+    let chains = stitch_edge_chains(&seg_pairs);
 
     let mut specs = Vec::new();
-    for chain in &chains {
-        if chain.len() < 2 {
-            continue;
-        }
-        ribbon_quads_for_chain(&mut specs, chain, &wall_edges, sep, &clip, water_grid);
+    for i in 0..wall_edges.len() {
+        ribbon_quads_for_edge_chain(&mut specs, &[i], &wall_edges, sep, &clip, water_grid);
     }
 
     let chain_count = chains.len();
@@ -1018,6 +1059,16 @@ mod tests {
     use std::{fs::File, path::Path};
 
     #[test]
+    fn densify_splits_long_span() {
+        let pts = vec![Vector2::new(0., 0.), Vector2::new(150_000., 0.)];
+        let out = densify_polyline(&pts, MAX_LINE_STEP_M);
+        assert!(out.len() >= 3);
+        for w in out.windows(2) {
+            assert!((w[1] - w[0]).norm() <= MAX_LINE_STEP_M + 1.);
+        }
+    }
+
+    #[test]
     fn corner_kind_reverse_detected() {
         assert_eq!(
             corner_kind(Vector2::new(1., 0.), Vector2::new(-1., 0.)),
@@ -1050,14 +1101,10 @@ mod tests {
             b: Vector2::new(10_000., 8_000.),
             axis: WallAxis::Vertical { left: Side::Red },
         };
-        let chain = vec![
-            Vector2::new(0., 0.),
-            Vector2::new(10_000., 0.),
-            Vector2::new(10_000., 8_000.),
-        ];
         let edges = [e0, e1];
+        let chain = [0usize, 1];
         let mut specs = Vec::new();
-        ribbon_quads_for_chain(&mut specs, &chain, &edges, sep, &clip, None);
+        ribbon_quads_for_edge_chain(&mut specs, &chain, &edges, sep, &clip, None);
         assert_eq!(
             specs.len(),
             4,
