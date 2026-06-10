@@ -16,7 +16,10 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use tokio::fs;
 
-const ICON_SCALE: f32 = 0.5;
+const ICON_ALPHA_THRESHOLD: u8 = 32;
+const ICON_MAP_SCALE: f32 = 0.5;
+const STAT_BARS_GAP_PX: i32 = 3;
+const HEALTH_BAR_MAP_PX: f32 = 30.0;
 const LABEL_GAP_PX: i32 = 4;
 const LABEL_FONT_PX: i32 = 8;
 
@@ -411,31 +414,29 @@ fn composite_map(
         let icon = image::load_from_memory(icon_bytes)
             .with_context(|| format!("decode icon {stem}"))?
             .to_rgba8();
+        let display = scale_icon_nearest(&prepare_map_icon(&icon), ICON_MAP_SCALE);
         let (cx, cy) = viewport.ll_to_pixel_in(marker.lat, marker.lon, bw, bh);
-        let (iw, ih) = icon.dimensions();
-        let sw = ((iw as f32) * ICON_SCALE).round().max(1.) as u32;
-        let sh = ((ih as f32) * ICON_SCALE).round().max(1.) as u32;
-        let scaled = imageops::resize(&icon, sw, sh, imageops::FilterType::Triangle);
-        let threat_diameter_px =
-            ((sw.max(sh) as f32 * 1.7 + 10.).round().max(14.) as u32) | 1;
+        let (iw, ih) = display.dimensions();
+        let threat_raster_px =
+            ((iw.max(ih) as f32 * 1.7 + 10.).round().max(14.) as u32) | 1;
         if marker.threatened {
             draw_threat_ring(
                 &mut base,
                 cx,
                 cy,
-                threat_diameter_px as f32 / 2.,
+                threat_raster_px as f32 / 2.,
             );
         }
-        let ox = (cx - sw as f32 / 2.).round() as i32;
-        let oy = (cy - sh as f32 / 2.).round() as i32;
-        overlay_clipped(&mut base, &scaled, ox, oy);
+        let ox = (cx - iw as f32 / 2.).round() as i32;
+        let oy = (cy - ih as f32 / 2.).round() as i32;
+        overlay_opaque(&mut base, &display, ox, oy);
         if !marker.label.is_empty() {
-            let label_x = ox + sw as i32 + label_gap_px;
-            let label_y = oy + (sh as i32 - label_font_px.round() as i32) / 2;
+            let label_x = ox + iw as i32 + label_gap_px;
+            let label_y = oy + (ih as i32 - label_font_px.round() as i32) / 2;
             MAP_LABEL_FONT.draw_white(&mut base, label_x, label_y, &marker.label, label_font_px);
         }
         let mut icon_buf = Vec::new();
-        image::DynamicImage::ImageRgba8(scaled)
+        image::DynamicImage::ImageRgba8(display.clone())
             .write_to(
                 &mut std::io::Cursor::new(&mut icon_buf),
                 image::ImageFormat::Png,
@@ -444,8 +445,8 @@ fn composite_map(
         layouts.push(MarkerLayout {
             cx,
             cy,
-            sw,
-            sh,
+            sw: iw,
+            sh: ih,
             icon_b64: B64.encode(icon_buf),
             tip_coalition: marker.tip_coalition.clone(),
             kind: marker.kind.clone(),
@@ -454,7 +455,7 @@ fn composite_map(
             logi: marker.logi,
             production: marker.production,
             threatened: marker.threatened,
-            threat_diameter_px,
+            threat_diameter_px: threat_raster_px,
         });
     }
     let mut out = Vec::new();
@@ -639,25 +640,32 @@ fn build_interactive_html(
     let front_svg = front_line_svg(viewport, img_w, img_h, front_line);
     let mut body = String::new();
     for m in markers {
-        let left_pct = (m.cx / img_w as f32) * 100.;
-        let top_pct = (m.cy / img_h as f32) * 100.;
         let tip_class = coalition_tip_class(&m.tip_coalition);
         let rows = tooltip_rows_html(&m.kind, m.health, m.logi, m.production);
         let threat_ring = if m.threatened {
-            format!(
-                r#"<div class="threat-ring" style="width:{}px;height:{}px"></div>"#,
-                m.threat_diameter_px, m.threat_diameter_px
-            )
+            r#"<div class="threat-ring"></div>"#
+        } else {
+            ""
+        };
+        let stat_bars = marker_stat_bars_html(&m.kind, m.health, m.logi, m.production);
+        let threat_attr = if m.threatened {
+            format!(r#" data-threat="{}"#, m.threat_diameter_px)
         } else {
             String::new()
         };
-        let stat_bars = marker_stat_bars_html(&m.kind, m.health, m.logi, m.production);
         body.push_str(&format!(
-            r#"<div class="m" style="left:{left_pct:.4}%;top:{top_pct:.4}%"><div class="m-stack">{threat_ring}<img src="data:image/png;base64,{}" width="{}" height="{}" alt="">{stat_bars}</div><div class="tip {tip_class}"><div class="tip-title">{}</div><div class="tip-body"><table>{rows}</table></div></div></div>"#,
-            m.icon_b64,
-            m.sw,
-            m.sh,
-            html_escape(&m.f10_label),
+            r#"<div class="m" data-cx="{cx:.3}" data-cy="{cy:.3}" data-sw="{sw}" data-sh="{sh}"{threat_attr}><div class="m-stack">{threat_ring}<img class="map-icon" src="data:image/png;base64,{icon_b64}" width="{sw}" height="{sh}" alt="">{stat_bars}</div><div class="tip {tip_class}"><div class="tip-title">{label}</div><div class="tip-body"><table>{rows}</table></div></div></div>"#,
+            cx = m.cx,
+            cy = m.cy,
+            sw = m.sw,
+            sh = m.sh,
+            threat_attr = threat_attr,
+            icon_b64 = m.icon_b64,
+            label = html_escape(&m.f10_label),
+            threat_ring = threat_ring,
+            stat_bars = stat_bars,
+            tip_class = tip_class,
+            rows = rows,
         ));
     }
     let base_b64 = B64.encode(base_png);
@@ -686,14 +694,15 @@ body{{margin:0;background:#000;color:#686a6e;font-family:Roboto,sans-serif;font-
 #wrap{{position:relative;display:block;line-height:0;width:100%}}
 #base{{display:block;width:100%;height:auto}}
 .front-line{{position:absolute;left:0;top:0;width:100%;height:100%;pointer-events:none;z-index:0}}
-.m{{position:absolute;transform:translate(-50%,-50%);z-index:1}}
+#overlay{{position:absolute;left:0;top:0;width:100%;height:100%;pointer-events:none;z-index:1}}
+.m{{position:absolute;pointer-events:auto}}
 .m:hover{{z-index:10000}}
 .m-stack{{position:relative;display:inline-flex;flex-direction:column;align-items:center;line-height:0}}
 .threat-ring{{position:absolute;left:50%;top:50%;transform:translate(-50%,-50%);border:2px solid rgba(255,220,0,.75);border-radius:50%;box-sizing:border-box;z-index:0;pointer-events:none}}
-.m-stack img{{position:relative;z-index:1;display:block;transition:filter .15s}}
-.m:hover img{{filter:brightness(1.5)}}
-.stat-bars{{display:flex;flex-direction:column;gap:3px;margin-top:2px;z-index:1;flex-shrink:0}}
-.health-bar{{width:clamp(15px,calc(100vw*30/{img_w}),30px);height:3px;background:#15161a;flex-shrink:0}}
+.map-icon,.m-stack img{{position:relative;z-index:1;display:block;opacity:1;image-rendering:crisp-edges;image-rendering:pixelated;transition:filter .15s}}
+.m:hover img{{filter:brightness(1.8)}}
+.stat-bars{{display:flex;flex-direction:column;gap:3px;margin-top:{stat_bars_gap}px;z-index:1;flex-shrink:0}}
+.health-bar{{height:3px;background:#15161a;flex-shrink:0}}
 .health-bar-fill{{height:100%;max-width:100%}}
 @keyframes health-blink{{
   0%,100%{{opacity:1}}
@@ -705,7 +714,7 @@ body{{margin:0;background:#000;color:#686a6e;font-family:Roboto,sans-serif;font-
 .tip{{display:none;position:absolute;left:calc(100% + 6px);top:50%;transform:translateY(-50%);color:#686a6e;padding:0;border-radius:4px;border-width:2px;border-style:solid;font-size:clamp(8px,calc(100vw*16/{img_w}),16px);line-height:1.55;white-space:nowrap;pointer-events:none;box-shadow:0 2px 8px rgba(0,0,0,.45);overflow:hidden}}
 .tip-left{{left:auto;right:calc(100% + 6px)}}
 .m:hover .tip{{display:block}}
-.tip-title{{text-decoration:none;margin:0;padding:6px 10px;line-height:1.45;font-weight:700}}
+.tip-title{{color:#fff;text-decoration:none;margin:0;padding:6px 10px;line-height:1.45;font-weight:700}}
 .tip-body{{background:rgba(9,10,13,.9);padding:4px 10px 6px 10px}}
 .tip table{{border-collapse:separate;border-spacing:0 4px}}
 .tip td{{padding:1px 10px 1px 0;vertical-align:top;line-height:1.55}}
@@ -716,11 +725,64 @@ body{{margin:0;background:#000;color:#686a6e;font-family:Roboto,sans-serif;font-
 .tip-neutral{{border-color:#2e3138}}
 .tip-neutral .tip-title{{background:rgba(46,49,56,.9)}}
 </style></head><body>
-<div class="map-panel">{stats_html}<div class="map-frame"><div id="wrap"><img id="base" src="data:image/png;base64,{base_b64}" width="{img_w}" height="{img_h}" alt="map">{front_svg}{body}</div></div></div>
+<div class="map-panel">{stats_html}<div class="map-frame"><div id="wrap" data-rw="{img_w}" data-rh="{img_h}" data-health-bar-px="{health_bar_map_px}"><img id="base" src="data:image/png;base64,{base_b64}" width="{img_w}" height="{img_h}" alt="map">{front_svg}<div id="overlay">{body}</div></div></div></div>
 <script>
 (function(){{
   var wrap=document.getElementById('wrap');
   if(!wrap){{return;}}
+  var rw=+wrap.dataset.rw||1;
+  var rh=+wrap.dataset.rh||1;
+  var healthBarPx=+wrap.dataset.healthBarPx||30;
+  function layoutMarkers(){{
+    var w=wrap.getBoundingClientRect().width;
+    if(!w){{return;}}
+    var scale=w/rw;
+    wrap.querySelectorAll('.m').forEach(function(m){{
+      var cx=+m.dataset.cx;
+      var cy=+m.dataset.cy;
+      var sw=+m.dataset.sw;
+      var sh=+m.dataset.sh;
+      m.style.left=(cx/rw*100)+'%';
+      m.style.top=(cy/rh*100)+'%';
+      var iw=Math.max(1,Math.round(sw*scale));
+      var ih=Math.max(1,Math.round(sh*scale));
+      var stack=m.querySelector('.m-stack');
+      if(stack){{stack.style.transform='translate(-50%,'+(-(ih/2))+'px)';}}
+      var img=m.querySelector('.map-icon');
+      if(img){{
+        img.style.width=iw+'px';
+        img.style.height=ih+'px';
+      }}
+      var ring=m.querySelector('.threat-ring');
+      if(ring&&m.dataset.threat){{
+        var d=+m.dataset.threat*scale;
+        ring.style.width=d+'px';
+        ring.style.height=d+'px';
+      }}
+      var bars=m.querySelector('.stat-bars');
+      var barW=Math.max(2,healthBarPx*scale);
+      if(bars){{
+        bars.style.width=barW+'px';
+      }}
+      m.querySelectorAll('.health-bar').forEach(function(bar){{
+        bar.style.width=barW+'px';
+        bar.style.height=Math.max(2,3*scale)+'px';
+      }});
+    }});
+  }}
+  function scheduleLayout(){{
+    requestAnimationFrame(layoutMarkers);
+  }}
+  scheduleLayout();
+  window.addEventListener('resize',scheduleLayout);
+  if(typeof ResizeObserver!=='undefined'){{
+    new ResizeObserver(scheduleLayout).observe(wrap);
+  }}
+  var baseImg=document.getElementById('base');
+  if(baseImg){{
+    if(baseImg.complete){{scheduleLayout();}}
+    else{{baseImg.addEventListener('load',scheduleLayout);}}
+  }}
   wrap.querySelectorAll('.m').forEach(function(m){{
     m.addEventListener('mouseenter',function(){{
       var tip=m.querySelector('.tip');
@@ -796,6 +858,8 @@ body{{margin:0;background:#000;color:#686a6e;font-family:Roboto,sans-serif;font-
         img_h = img_h,
         body = body,
         stats_html = stats_html,
+        stat_bars_gap = STAT_BARS_GAP_PX,
+        health_bar_map_px = HEALTH_BAR_MAP_PX,
     )
 }
 
@@ -828,7 +892,52 @@ fn put_pixel_clipped(base: &mut RgbaImage, x: i32, y: i32, color: image::Rgba<u8
     base.put_pixel(x as u32, y as u32, color);
 }
 
-fn overlay_clipped(base: &mut RgbaImage, icon: &RgbaImage, ox: i32, oy: i32) {
+fn crop_to_alpha_bbox(icon: &RgbaImage, threshold: u8) -> RgbaImage {
+    let (w, h) = icon.dimensions();
+    let mut min_x = w;
+    let mut min_y = h;
+    let mut max_x = 0u32;
+    let mut max_y = 0u32;
+    for y in 0..h {
+        for x in 0..w {
+            if icon.get_pixel(x, y)[3] >= threshold {
+                min_x = min_x.min(x);
+                min_y = min_y.min(y);
+                max_x = max_x.max(x);
+                max_y = max_y.max(y);
+            }
+        }
+    }
+    if max_x < min_x || max_y < min_y {
+        return icon.clone();
+    }
+    imageops::crop_imm(icon, min_x, min_y, max_x - min_x + 1, max_y - min_y + 1).to_image()
+}
+
+fn scale_icon_nearest(icon: &RgbaImage, scale: f32) -> RgbaImage {
+    if (scale - 1.0).abs() < f32::EPSILON {
+        return icon.clone();
+    }
+    let (w, h) = icon.dimensions();
+    let nw = ((w as f32 * scale).round() as u32).max(1);
+    let nh = ((h as f32 * scale).round() as u32).max(1);
+    imageops::resize(icon, nw, nh, imageops::FilterType::Nearest)
+}
+
+/// Trim transparent padding only; no resize, no color filters.
+fn prepare_map_icon(icon: &RgbaImage) -> RgbaImage {
+    let mut out = crop_to_alpha_bbox(icon, ICON_ALPHA_THRESHOLD);
+    for p in out.pixels_mut() {
+        if p[3] >= ICON_ALPHA_THRESHOLD {
+            p[3] = 255;
+        } else {
+            *p = image::Rgba([0, 0, 0, 0]);
+        }
+    }
+    out
+}
+
+fn overlay_opaque(base: &mut RgbaImage, icon: &RgbaImage, ox: i32, oy: i32) {
     let (bw, bh) = base.dimensions();
     let (iw, ih) = icon.dimensions();
     for y in 0..ih {
@@ -845,7 +954,11 @@ fn overlay_clipped(base: &mut RgbaImage, icon: &RgbaImage, ox: i32, oy: i32) {
             if p[3] == 0 {
                 continue;
             }
-            base.put_pixel(bx as u32, by as u32, *p);
+            base.put_pixel(
+                bx as u32,
+                by as u32,
+                image::Rgba([p[0], p[1], p[2], 255]),
+            );
         }
     }
 }

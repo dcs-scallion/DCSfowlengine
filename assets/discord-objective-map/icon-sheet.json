@@ -1,0 +1,23 @@
+{
+  "canvas_px": 96,
+  "pad_px": 4,
+  "alpha_threshold": 32,
+  "uniform_scale": true,
+  "sources": {
+    "airbase": "sources/OAB.png",
+    "logistics": "sources/OLO.png",
+    "fob": "sources/OFO.png",
+    "production": "sources/OPR.png"
+  },
+  "palette": {
+    "red": "#C43838",
+    "blue": "#2E5AAC",
+    "neutral": "#5C6370"
+  },
+  "manifest_stems": {
+    "airbase": { "red": "airbase_red", "blue": "airbase_blue", "neutral": "airbase_neutral" },
+    "logistics": { "red": "hub_red", "blue": "hub_blue", "neutral": "hub_neutral" },
+    "fob": { "red": "fob_red", "blue": "fob_blue", "neutral": "fob_neutral" },
+    "production": { "red": "production_red", "blue": "production_blue", "neutral": "production_neutral" }
+  }
+}

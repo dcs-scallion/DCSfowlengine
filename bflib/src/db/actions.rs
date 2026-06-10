@@ -1770,6 +1770,7 @@ impl Db {
         let (_, _, obj) = Self::objective_near_point(&self.persisted.objectives, args.pos, |o| {
             o.owner == side
                 && !o.captureable()
+                && !matches!(o.kind, ObjectiveKind::Production)
                 && match args.cfg.kind {
                     AiPlaneKind::Helicopter => true,
                     AiPlaneKind::FixedWing => {

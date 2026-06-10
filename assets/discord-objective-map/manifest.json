@@ -1,10 +1,10 @@
 {
   "schema_version": 1,
-  "description": "Discord objective map markers (repo source; bftools embeds runtime manifest + PNG into l10n/DEFAULT/fowl_discord_map/)",
+  "description": "Discord objective map markers. Source: extract_from_sheet.py (gadget/ICON-export.png or per-kind PNG) into png/96/; bftools embeds into l10n/DEFAULT/fowl_discord_map/",
   "canvas_px": 96,
   "kinds": {
     "airbase": {
-      "shape": "circle with control tower and runway",
+      "shape": "control tower with parallel runways (OAB)",
       "files": {
         "red": "airbase_red",
         "blue": "airbase_blue",
@@ -12,7 +12,7 @@
       }
     },
     "fob": {
-      "shape": "pentagon with tent",
+      "shape": "pitched tent on ground line (OFO)",
       "files": {
         "red": "fob_red",
         "blue": "fob_blue",
@@ -20,7 +20,7 @@
       }
     },
     "logistics": {
-      "shape": "hexagon with crate",
+      "shape": "hangar arch with door on ground line (OLO)",
       "files": {
         "red": "hub_red",
         "blue": "hub_blue",
@@ -28,7 +28,7 @@
       }
     },
     "production": {
-      "shape": "octagon with gear",
+      "shape": "sawtooth factory with chimney on ground line (OPR)",
       "files": {
         "red": "production_red",
         "blue": "production_blue",

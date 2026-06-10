@@ -1,5 +1,8 @@
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 96 96" width="96" height="96">
-  <path d="M48 14 L78 32 L68 78 L28 78 L18 32 Z" fill="#2E5AAC" stroke="#8AB4FF" stroke-width="2.5" stroke-linejoin="round"/>
-  <path d="M48 34 L62 68 L34 68 Z" fill="none" stroke="#F4F6FA" stroke-width="2.5" stroke-linejoin="round"/>
-  <line x1="48" y1="34" x2="48" y2="68" stroke="#F4F6FA" stroke-width="2"/>
+  <g fill="none" stroke="#2E5AAC" stroke-linecap="square" stroke-linejoin="miter">
+    <line x1="26" y1="86" x2="70" y2="86" stroke-width="4.5"/>
+    <polyline points="48,18 70,86 26,86 48,18" stroke-width="4.5"/>
+    <line x1="48" y1="18" x2="48" y2="86" stroke-width="3.6"/>
+    <polyline points="48,44 38,72 58,72 48,44" stroke-width="3.4"/>
+  </g>
 </svg>
