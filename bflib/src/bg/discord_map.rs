@@ -450,12 +450,12 @@ fn composite_map(
 fn tooltip_rows_html(kind: &str, health: u8, logi: u8, production: u8) -> String {
     match kind {
         "airbase" | "fob" => format!(
-            "<tr><td>Health</td><td>{health}%</td></tr><tr><td>Logi</td><td>{logi}%</td></tr>"
+            "<tr><td>Health</td><td>{health} %</td></tr><tr><td>Logi</td><td>{logi} %</td></tr>"
         ),
         "logistics" => format!(
-            "<tr><td>Production</td><td>{production}%</td></tr><tr><td>Health</td><td>{health}%</td></tr><tr><td>Logi</td><td>{logi}%</td></tr>"
+            "<tr><td>Production</td><td>{production} %</td></tr><tr><td>Health</td><td>{health} %</td></tr><tr><td>Logi</td><td>{logi} %</td></tr>"
         ),
-        "production" => format!("<tr><td>Production</td><td>{production}%</td></tr>"),
+        "production" => format!("<tr><td>Production</td><td>{production} %</td></tr>"),
         _ => String::new(),
     }
 }
@@ -465,6 +465,44 @@ fn coalition_tip_class(coalition: &str) -> &'static str {
         "red" => "tip-red",
         "blue" => "tip-blue",
         _ => "tip-neutral",
+    }
+}
+
+fn stat_bar_class(value: u8) -> &'static str {
+    match value {
+        0..=32 => "health-red",
+        33..=66 => "health-orange",
+        _ => "health-green",
+    }
+}
+
+fn stat_bar_html(value: u8) -> String {
+    let fill_class = stat_bar_class(value);
+    format!(
+        r#"<div class="health-bar"><div class="health-bar-fill {fill_class}" style="width:{value}%"></div></div>"#
+    )
+}
+
+fn marker_stat_bars_html(kind: &str, health: u8, logi: u8, production: u8) -> String {
+    let bars: String = match kind {
+        "logistics" => {
+            let mut s = stat_bar_html(production);
+            s.push_str(&stat_bar_html(health));
+            s.push_str(&stat_bar_html(logi));
+            s
+        }
+        "airbase" | "fob" => {
+            let mut s = stat_bar_html(health);
+            s.push_str(&stat_bar_html(logi));
+            s
+        }
+        "production" => stat_bar_html(production),
+        _ => String::new(),
+    };
+    if bars.is_empty() {
+        String::new()
+    } else {
+        format!(r#"<div class="stat-bars">{bars}</div>"#)
     }
 }
 
@@ -596,8 +634,9 @@ fn build_interactive_html(
         } else {
             String::new()
         };
+        let stat_bars = marker_stat_bars_html(&m.kind, m.health, m.logi, m.production);
         body.push_str(&format!(
-            r#"<div class="m" style="left:{left_pct:.4}%;top:{top_pct:.4}%"><div class="m-stack">{threat_ring}<img src="data:image/png;base64,{}" width="{}" height="{}" alt=""></div><div class="tip {tip_class}"><div class="tip-title">{}</div><table>{rows}</table></div></div>"#,
+            r#"<div class="m" style="left:{left_pct:.4}%;top:{top_pct:.4}%"><div class="m-stack">{threat_ring}<img src="data:image/png;base64,{}" width="{}" height="{}" alt="">{stat_bars}</div><div class="tip {tip_class}"><div class="tip-title">{}</div><div class="tip-body"><table>{rows}</table></div></div></div>"#,
             m.icon_b64,
             m.sw,
             m.sh,
@@ -613,7 +652,7 @@ fn build_interactive_html(
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <meta name="fowl-map-version" content="{status_utc}">
 <title>{mn} — objective map</title>
-<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Roboto:wght@400&display=swap">
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Roboto:wght@400;700&display=swap">
 <style>
 body{{margin:0;background:#000;color:#686a6e;font-family:Roboto,sans-serif;font-size:16px}}
 .map-panel{{display:block;width:min({img_w}px,100%);box-sizing:border-box}}
@@ -632,19 +671,33 @@ body{{margin:0;background:#000;color:#686a6e;font-family:Roboto,sans-serif;font-
 .front-line{{position:absolute;left:0;top:0;width:100%;height:100%;pointer-events:none;z-index:0}}
 .m{{position:absolute;transform:translate(-50%,-50%);z-index:1}}
 .m:hover{{z-index:10000}}
-.m-stack{{position:relative;display:inline-block;line-height:0}}
+.m-stack{{position:relative;display:inline-flex;flex-direction:column;align-items:center;line-height:0}}
 .threat-ring{{position:absolute;left:50%;top:50%;transform:translate(-50%,-50%);border:2px solid rgba(255,220,0,.75);border-radius:50%;box-sizing:border-box;z-index:0;pointer-events:none}}
 .m-stack img{{position:relative;z-index:1;display:block;transition:filter .15s}}
 .m:hover img{{filter:brightness(1.5)}}
-.tip{{display:none;position:absolute;left:calc(100% + 6px);top:50%;transform:translateY(-50%);background:rgba(9,10,13,.94);color:#686a6e;padding:6px 10px;border-radius:4px;border-width:2px;border-style:solid;font-size:10px;line-height:1.55;white-space:nowrap;pointer-events:none;box-shadow:0 2px 8px rgba(0,0,0,.45)}}
+.stat-bars{{display:flex;flex-direction:column;gap:3px;margin-top:2px;z-index:1;flex-shrink:0}}
+.health-bar{{width:clamp(15px,calc(100vw*30/{img_w}),30px);height:3px;background:#15161a;flex-shrink:0}}
+.health-bar-fill{{height:100%;max-width:100%}}
+@keyframes health-blink{{
+  0%,100%{{opacity:1}}
+  50%{{opacity:.2}}
+}}
+.health-red{{background:#C43838;animation:health-blink 1s ease-in-out infinite}}
+.health-orange{{background:#e07a2a}}
+.health-green{{background:#3d9e5a}}
+.tip{{display:none;position:absolute;left:calc(100% + 6px);top:50%;transform:translateY(-50%);color:#686a6e;padding:0;border-radius:4px;border-width:2px;border-style:solid;font-size:clamp(8px,calc(100vw*16/{img_w}),16px);line-height:1.55;white-space:nowrap;pointer-events:none;box-shadow:0 2px 8px rgba(0,0,0,.45);overflow:hidden}}
 .tip-left{{left:auto;right:calc(100% + 6px)}}
 .m:hover .tip{{display:block}}
-.tip-title{{text-decoration:underline;margin-bottom:5px;line-height:1.45}}
+.tip-title{{text-decoration:none;margin:0;padding:6px 10px;line-height:1.45;font-weight:700}}
+.tip-body{{background:rgba(9,10,13,.9);padding:4px 10px 6px 10px}}
 .tip table{{border-collapse:separate;border-spacing:0 4px}}
 .tip td{{padding:1px 10px 1px 0;vertical-align:top;line-height:1.55}}
 .tip-red{{border-color:#C43838}}
+.tip-red .tip-title{{background:rgba(196,56,56,.9)}}
 .tip-blue{{border-color:#2E5AAC}}
+.tip-blue .tip-title{{background:rgba(46,90,172,.9)}}
 .tip-neutral{{border-color:#2e3138}}
+.tip-neutral .tip-title{{background:rgba(46,49,56,.9)}}
 </style></head><body>
 <div class="map-panel">{stats_html}<div class="map-frame"><div id="wrap"><img id="base" src="data:image/png;base64,{base_b64}" width="{img_w}" height="{img_h}" alt="map">{front_svg}{body}</div></div></div>
 <script>

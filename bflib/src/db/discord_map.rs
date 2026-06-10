@@ -26,7 +26,8 @@ use dcso3::{
     LuaEnv, LuaVec3, MizLua, Vector3,
 };
 use mlua::Value;
-use fxhash::FxHashMap;
+use bfprotocols::db::group::GroupId;
+use fxhash::{FxHashMap, FxHashSet};
 use log::{info, warn};
 use serde::{Deserialize, Serialize};
 use std::fs::File;
@@ -393,15 +394,72 @@ fn count_ground_objectives_by_side(db: &Db) -> (u32, u32) {
     (red, blue)
 }
 
+fn group_has_live_ship_carrier(db: &Db, gid: &GroupId) -> bool {
+    let Ok(group) = db.group(gid) else {
+        return false;
+    };
+    for uid in &group.units {
+        let Some(unit) = db.persisted.units.get(uid) else {
+            continue;
+        };
+        if unit.dead {
+            continue;
+        }
+        if db
+            .ephemeral
+            .cfg
+            .unit_classification
+            .get(unit.typ.as_str())
+            .is_some_and(|tags| tags.contains(UnitTag::ShipCarrier))
+        {
+            return true;
+        }
+    }
+    false
+}
+
+/// ME pad group names (e.g. `BTarawa`) with a live carrier hull in campaign persistence.
+fn alive_carrier_pad_names(db: &Db) -> FxHashSet<(Side, String)> {
+    let mut out = FxHashSet::default();
+    for (_, obj) in db.persisted.objectives.into_iter() {
+        let ObjectiveKind::Farp { pad_template, .. } = &obj.kind else {
+            continue;
+        };
+        let Some(groups) = obj.groups.get(&obj.owner) else {
+            continue;
+        };
+        let pad_live = groups.into_iter().any(|gid| {
+            db.group(gid)
+                .ok()
+                .is_some_and(|g| {
+                    g.template_name.as_str() == pad_template.as_str()
+                        && group_has_live_ship_carrier(db, gid)
+                })
+        });
+        if pad_live {
+            out.insert((
+                obj.owner(),
+                std::string::String::from(pad_template.as_str()),
+            ));
+        }
+    }
+    out
+}
+
 fn count_spawned_ship_carriers(lua: MizLua, db: &Db) -> Result<(u32, u32)> {
     let coalition = Coalition::singleton(lua)?;
     let cfg = &db.ephemeral.cfg;
+    let alive_pads = alive_carrier_pad_names(db);
     let mut red = 0u32;
     let mut blue = 0u32;
     for side in [Side::Blue, Side::Red] {
         for group in coalition.get_groups(side)? {
             let group = group?;
             if !group.is_exist()? || group.get_category()? != GroupCategory::Ship {
+                continue;
+            }
+            let gname = std::string::String::from(group.get_name()?.as_str());
+            if !alive_pads.contains(&(side, gname)) {
                 continue;
             }
             let mut carrier = false;
