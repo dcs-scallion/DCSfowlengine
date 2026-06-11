@@ -26,7 +26,5 @@ walkdir = "2.4.0"
 dcso3 = { version = "0.2", path = "../dcso3" }
 bfprotocols = { version = "2.0", path = "../bfprotocols" }
 compact_str = { version = "0.8", features = ["serde"] }
-resvg = "0.44"
-tiny-skia = "0.11"
 nalgebra = { version = "0.33", features = ["serde-serialize"] }
 rand = "0.8"

@@ -1,4 +1,4 @@
-//! Discord objective map: ME viewport zones, icon pack from `.miz`, Mapbox cache, Discord posts.
+//! Discord objective map: ME viewport zones, icon pack from the mission `.miz` in `Missions/`, Mapbox cache, Discord posts.
 
 use super::Db;
 use crate::admin::theatre_slug;
@@ -147,19 +147,23 @@ pub fn mission_name_from_sortie_path(sortie_state_path: &Path) -> String {
         .to_string()
 }
 
-pub fn build_discord_map_caption(mission_name: &str, cfg: &DiscordMapCfg) -> (String, String) {
-    let ts = Utc::now().format("%Y-%m-%d %H:%M:%S").to_string();
+pub fn discord_map_interactive_url(cfg: &DiscordMapCfg) -> String {
     let public_base = cfg
         .http_public_base_url
         .as_ref()
         .map(|s| s.as_str().trim())
         .unwrap_or("")
         .trim_end_matches('/');
-    let map_url = format!("{public_base}/map");
+    format!("{public_base}/map")
+}
+
+pub fn build_discord_map_caption(mission_name: &str, cfg: &DiscordMapCfg) -> (String, String, String) {
+    let ts = Utc::now().format("%Y-%m-%d %H:%M:%S").to_string();
+    let map_url = discord_map_interactive_url(cfg);
     let caption = format!(
-        "Campaign objective map : {mission_name}\nObjectives status as of {ts} UTC\nInteractive HTML map : {map_url}"
+        "Campaign objective map : {mission_name}\nObjectives status as of {ts} UTC\nInteractive HTML map:\n{map_url}"
     );
-    (caption, ts)
+    (caption, ts, map_url)
 }
 
 fn zone_center_ll(lua: MizLua, zone: TriggerZone) -> Result<LLPos> {
@@ -188,6 +192,7 @@ pub fn read_corner_zones(lua: MizLua, miz: &Miz) -> Result<(LLPos, LLPos)> {
     Ok((nw, se))
 }
 
+/// Icons embedded by bftools from `assets/discord-objective-map/png/<canvas_px>/` into `l10n/DEFAULT/fowl_discord_map/`.
 pub fn load_icon_pack_from_miz(miz_path: &Path) -> Result<DiscordMapIconPack> {
     let file = File::open(miz_path)
         .with_context(|| format!("open mission archive {:?}", miz_path))?;
@@ -661,7 +666,7 @@ fn discord_map_post_job(
     icons: bg::discord_map::DiscordMapIconPackJob,
     live: &DiscordMapLiveCtx,
 ) -> Result<DiscordMapPostJob> {
-    let (caption, status_utc) = build_discord_map_caption(&runtime.mission_name, cfg);
+    let (caption, status_utc, _) = build_discord_map_caption(&runtime.mission_name, cfg);
     let status_bar = collect_map_status_bar(lua, db, live, &runtime.mission_name, &status_utc)?;
     Ok(DiscordMapPostJob {
         webhook_url: cfg.webhook_url.clone().unwrap().to_string(),

@@ -1,11 +1,19 @@
-//! Discord objective map icon pack (`l10n/DEFAULT/fowl_discord_map/` inside the assembled `.miz`).
+//! Discord objective map icon pack.
+//!
+//! **Build (bftools):** read PNGs from `assets/discord-objective-map/png/<canvas_px>/` (e.g. `png/96/`),
+//! embed into `l10n/DEFAULT/fowl_discord_map/` inside the assembled `.miz`.
+//!
+//! **Runtime (bflib):** read the same paths from the mission `.miz` under `Saved Games/.../Missions/`.
 
 use anyhow::{bail, Context, Result};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::fs::File;
 use std::io::Read;
-use std::path::Path;
+use std::path::{Path, PathBuf};
+
+/// Repo-relative root for icon assets (walk up from bftools anchor to find `manifest.json`).
+pub const ASSETS_REL: &str = "assets/discord-objective-map";
 
 /// Zip path prefix inside the mission archive (forward slashes).
 pub const MIZ_DIR: &str = "l10n/DEFAULT/fowl_discord_map";
@@ -153,6 +161,11 @@ impl DiscordMapIconManifest {
 
     pub fn miz_png_path(stem: &str) -> String {
         format!("{MIZ_DIR}/{stem}.png")
+    }
+
+    /// Canonical PNG source directory for mission assembly (`.../png/96/` when `canvas_px` is 96).
+    pub fn assets_png_dir(&self, assets_dir: &Path) -> PathBuf {
+        assets_dir.join("png").join(self.canvas_px.to_string())
     }
 }
 

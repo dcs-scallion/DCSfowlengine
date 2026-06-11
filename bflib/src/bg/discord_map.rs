@@ -6,7 +6,7 @@ use anyhow::{bail, Context, Result};
 use base64::{engine::general_purpose::STANDARD as B64, Engine as _};
 use bfprotocols::discord_map_icon_manifest::DiscordMapIconManifestRuntime;
 use bfprotocols::discord_map_viewport::MapViewport;
-use image::{imageops, RgbaImage};
+use image::RgbaImage;
 use log::{info, warn};
 use once_cell::sync::Lazy;
 use reqwest::multipart;
@@ -16,13 +16,6 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use tokio::fs;
 
-const ICON_ALPHA_THRESHOLD: u8 = 32;
-const ICON_MAP_SCALE: f32 = 0.75;
-const ICON_PALETTE: [[u8; 3]; 3] = [
-    [196, 56, 56],
-    [46, 90, 172],
-    [92, 99, 112],
-];
 const STAT_BARS_GAP_PX: i32 = 3;
 const HEALTH_BAR_MAP_PX: f32 = 30.0;
 const THREAT_RING_SCALE: f32 = 1.35;
@@ -92,15 +85,12 @@ struct MarkerLayout {
     cy: f32,
     sw: u32,
     sh: u32,
-    icon_b64: String,
     tip_coalition: String,
     kind: String,
     f10_label: String,
     health: u8,
     logi: u8,
     production: u8,
-    threatened: bool,
-    threat_diameter_px: u32,
 }
 
 struct MapArtifacts {
@@ -228,13 +218,7 @@ pub async fn publish_and_post(
     fs::rename(&version_tmp, map_version_path)
         .await
         .with_context(|| format!("publish discord map version {:?}", map_version_path))?;
-    post_composited_map(
-        webhook_url,
-        webhook_message_path,
-        artifacts.png,
-        caption,
-    )
-    .await
+    post_composited_map(webhook_url, webhook_message_path, artifacts.png, caption).await
 }
 
 async fn post_composited_map(
@@ -315,16 +299,25 @@ fn webhook_url_with_wait(url: &str) -> String {
 }
 
 fn discord_multipart_form(caption: &str, png: Vec<u8>, edit: bool) -> Result<multipart::Form> {
+    let embed = serde_json::json!({
+        "image": {
+            "url": "attachment://objective_map.png"
+        }
+    });
     let payload = if edit {
         serde_json::json!({
             "content": caption,
+            "embeds": [embed],
             "attachments": [{
                 "id": 0,
                 "filename": "objective_map.png"
             }]
         })
     } else {
-        serde_json::json!({ "content": caption })
+        serde_json::json!({
+            "content": caption,
+            "embeds": [embed]
+        })
     };
     Ok(multipart::Form::new()
         .part(
@@ -382,7 +375,7 @@ fn build_map_artifacts(
         img_w,
         img_h,
         viewport,
-        &base_bytes,
+        &png,
         &layouts,
         front_line,
         status_bar,
@@ -422,9 +415,8 @@ fn composite_map(
         let icon = image::load_from_memory(icon_bytes)
             .with_context(|| format!("decode icon {stem}"))?
             .to_rgba8();
-        let display = scale_icon_nearest(&prepare_map_icon(&icon), ICON_MAP_SCALE);
         let (cx, cy) = viewport.ll_to_pixel_in(marker.lat, marker.lon, bw, bh);
-        let (iw, ih) = display.dimensions();
+        let (iw, ih) = icon.dimensions();
         let threat_raster_px = threat_ring_diameter_px(iw, ih);
         if marker.threatened {
             draw_threat_ring(
@@ -436,33 +428,23 @@ fn composite_map(
         }
         let ox = (cx - iw as f32 / 2.).round() as i32;
         let oy = (cy - ih as f32 / 2.).round() as i32;
-        overlay_opaque(&mut base, &display, ox, oy);
+        overlay_icon_alpha(&mut base, &icon, ox, oy);
         if !marker.label.is_empty() {
             let label_x = ox + iw as i32 + label_gap_px;
             let label_y = oy + (ih as i32 - label_font_px.round() as i32) / 2;
             MAP_LABEL_FONT.draw_white(&mut base, label_x, label_y, &marker.label, label_font_px);
         }
-        let mut icon_buf = Vec::new();
-        image::DynamicImage::ImageRgba8(display.clone())
-            .write_to(
-                &mut std::io::Cursor::new(&mut icon_buf),
-                image::ImageFormat::Png,
-            )
-            .context("encode marker icon png")?;
         layouts.push(MarkerLayout {
             cx,
             cy,
             sw: iw,
             sh: ih,
-            icon_b64: B64.encode(icon_buf),
             tip_coalition: marker.tip_coalition.clone(),
             kind: marker.kind.clone(),
             f10_label: marker.f10_label.clone(),
             health: marker.health,
             logi: marker.logi,
             production: marker.production,
-            threatened: marker.threatened,
-            threat_diameter_px: threat_raster_px,
         });
     }
     let mut out = Vec::new();
@@ -639,7 +621,7 @@ fn build_interactive_html(
     img_w: u32,
     img_h: u32,
     viewport: &MapViewport,
-    base_png: &[u8],
+    display_png: &[u8],
     markers: &[MarkerLayout],
     front_line: &[DiscordMapFrontLinePolygon],
     status_bar: &DiscordMapStatusBar,
@@ -649,34 +631,20 @@ fn build_interactive_html(
     for m in markers {
         let tip_class = coalition_tip_class(&m.tip_coalition);
         let rows = tooltip_rows_html(&m.kind, m.health, m.logi, m.production);
-        let threat_ring = if m.threatened {
-            r#"<div class="threat-ring"></div>"#
-        } else {
-            ""
-        };
         let stat_bars = marker_stat_bars_html(&m.kind, m.health, m.logi, m.production);
-        let threatened_class = if m.threatened { " threatened" } else { "" };
-        let threat_ring = if m.threatened {
-            r#"<div class="threat-ring"></div>"#
-        } else {
-            ""
-        };
         body.push_str(&format!(
-            r#"<div class="m{threatened_class}" data-cx="{cx:.3}" data-cy="{cy:.3}" data-sw="{sw}" data-sh="{sh}"><div class="m-stack"><div class="icon-wrap">{threat_ring}<canvas class="map-icon" data-b64="{icon_b64}" aria-hidden="true"></canvas></div>{stat_bars}</div><div class="tip {tip_class}"><div class="tip-title">{label}</div><div class="tip-body"><table>{rows}</table></div></div></div>"#,
+            r#"<div class="m" data-cx="{cx:.3}" data-cy="{cy:.3}" data-sw="{sw}" data-sh="{sh}"><div class="m-stack"><div class="icon-hit" style="width:{sw}px;height:{sh}px" aria-hidden="true"></div>{stat_bars}</div><div class="tip {tip_class}"><div class="tip-title">{label}</div><div class="tip-body"><table>{rows}</table></div></div></div>"#,
             cx = m.cx,
             cy = m.cy,
             sw = m.sw,
             sh = m.sh,
-            threatened_class = threatened_class,
-            icon_b64 = m.icon_b64,
             label = html_escape(&m.f10_label),
-            threat_ring = threat_ring,
             stat_bars = stat_bars,
             tip_class = tip_class,
             rows = rows,
         ));
     }
-    let base_b64 = B64.encode(base_png);
+    let base_b64 = B64.encode(display_png);
     let stats_html = status_bar_html(status_bar);
     format!(
         r#"<!DOCTYPE html>
@@ -706,10 +674,7 @@ body{{margin:0;background:#000;color:#686a6e;font-family:Roboto,sans-serif;font-
 .m{{position:absolute;pointer-events:auto}}
 .m:hover{{z-index:10000}}
 .m-stack{{position:relative;display:inline-flex;flex-direction:column;align-items:center;line-height:0}}
-.icon-wrap{{position:relative;display:block;line-height:0;flex-shrink:0}}
-.threat-ring{{position:absolute;left:50%;top:50%;transform:translate(-50%,-50%);border:2px solid rgba(255,220,0,.75);border-radius:50%;box-sizing:border-box;z-index:0;pointer-events:none}}
-.map-icon{{position:relative;z-index:1;display:block;opacity:1;image-rendering:crisp-edges;image-rendering:pixelated;transition:filter .15s}}
-.m:hover .map-icon{{filter:brightness(1.8)}}
+.icon-hit{{display:block;line-height:0;flex-shrink:0;pointer-events:none}}
 .stat-bars{{display:flex;flex-direction:column;gap:3px;margin-top:{stat_bars_gap}px;z-index:1;flex-shrink:0}}
 .health-bar{{height:3px;background:#15161a;flex-shrink:0}}
 .health-bar-fill{{height:100%;max-width:100%}}
@@ -742,34 +707,13 @@ body{{margin:0;background:#000;color:#686a6e;font-family:Roboto,sans-serif;font-
   var rw=+wrap.dataset.rw||1;
   var rh=+wrap.dataset.rh||1;
   var healthBarPx=+wrap.dataset.healthBarPx||30;
-  var iconRawCache=new WeakMap();
-  function iconRaw(canvas){{
-    if(iconRawCache.has(canvas)){{return iconRawCache.get(canvas);}}
-    var raw=new Image();
-    raw.src='data:image/png;base64,'+(canvas.dataset.b64||'');
-    iconRawCache.set(canvas,raw);
-    return raw;
-  }}
-  function drawIcon(canvas,iw,ih){{
-    var raw=iconRaw(canvas);
-    var paint=function(){{
-      canvas.width=iw;
-      canvas.height=ih;
-      canvas.style.width=iw+'px';
-      canvas.style.height=ih+'px';
-      var ctx=canvas.getContext('2d');
-      if(!ctx){{return;}}
-      ctx.imageSmoothingEnabled=false;
-      ctx.clearRect(0,0,iw,ih);
-      ctx.drawImage(raw,0,0,raw.naturalWidth,raw.naturalHeight,0,0,iw,ih);
-    }};
-    if(raw.complete&&raw.naturalWidth){{paint();}}
-    else{{raw.onload=paint;}}
+  function mapDisplayScale(){{
+    var w=wrap.getBoundingClientRect().width;
+    return w?w/rw:0;
   }}
   function layoutMarkers(){{
-    var w=wrap.getBoundingClientRect().width;
-    if(!w){{return;}}
-    var scale=w/rw;
+    var scale=mapDisplayScale();
+    if(!scale){{return;}}
     wrap.querySelectorAll('.m').forEach(function(m){{
       var cx=+m.dataset.cx;
       var cy=+m.dataset.cy;
@@ -777,20 +721,8 @@ body{{margin:0;background:#000;color:#686a6e;font-family:Roboto,sans-serif;font-
       var sh=+m.dataset.sh;
       m.style.left=(cx/rw*100)+'%';
       m.style.top=(cy/rh*100)+'%';
-      var iw=Math.max(1,Math.round(sw*scale));
-      var ih=Math.max(1,Math.round(sh*scale));
       var stack=m.querySelector('.m-stack');
-      if(stack){{stack.style.transform='translate(-50%,'+(-(ih/2))+'px)';}}
-      var icon=m.querySelector('.map-icon');
-      if(icon){{drawIcon(icon,iw,ih);}}
-      var ring=m.querySelector('.threat-ring');
-      if(ring){{
-        var ringD=Math.max(1,Math.round(Math.max(iw,ih)*1.35+4));
-        if(ringD%2===0){{ringD+=1;}}
-        ring.style.width=ringD+'px';
-        ring.style.height=ringD+'px';
-        ring.style.borderWidth=Math.max(1,Math.round(2*scale))+'px';
-      }}
+      if(stack){{stack.style.transform='translate(-50%,'+(-(sh/2))+'px)';}}
       var bars=m.querySelector('.stat-bars');
       var barW=Math.max(2,healthBarPx*scale);
       if(bars){{
@@ -807,6 +739,10 @@ body{{margin:0;background:#000;color:#686a6e;font-family:Roboto,sans-serif;font-
   }}
   scheduleLayout();
   window.addEventListener('resize',scheduleLayout);
+  if(window.visualViewport){{
+    window.visualViewport.addEventListener('resize',scheduleLayout);
+    window.visualViewport.addEventListener('scroll',scheduleLayout);
+  }}
   if(typeof ResizeObserver!=='undefined'){{
     new ResizeObserver(scheduleLayout).observe(wrap);
   }}
@@ -932,68 +868,7 @@ fn put_pixel_clipped(base: &mut RgbaImage, x: i32, y: i32, color: image::Rgba<u8
     base.put_pixel(x as u32, y as u32, color);
 }
 
-fn crop_to_alpha_bbox(icon: &RgbaImage, threshold: u8) -> RgbaImage {
-    let (w, h) = icon.dimensions();
-    let mut min_x = w;
-    let mut min_y = h;
-    let mut max_x = 0u32;
-    let mut max_y = 0u32;
-    for y in 0..h {
-        for x in 0..w {
-            if icon.get_pixel(x, y)[3] >= threshold {
-                min_x = min_x.min(x);
-                min_y = min_y.min(y);
-                max_x = max_x.max(x);
-                max_y = max_y.max(y);
-            }
-        }
-    }
-    if max_x < min_x || max_y < min_y {
-        return icon.clone();
-    }
-    imageops::crop_imm(icon, min_x, min_y, max_x - min_x + 1, max_y - min_y + 1).to_image()
-}
-
-fn scale_icon_nearest(icon: &RgbaImage, scale: f32) -> RgbaImage {
-    if (scale - 1.0).abs() < f32::EPSILON {
-        return icon.clone();
-    }
-    let (w, h) = icon.dimensions();
-    let nw = ((w as f32 * scale).round() as u32).max(1);
-    let nh = ((h as f32 * scale).round() as u32).max(1);
-    imageops::resize(icon, nw, nh, imageops::FilterType::Nearest)
-}
-
-fn snap_icon_pixel(p: &mut image::Rgba<u8>) {
-    if p[3] < ICON_ALPHA_THRESHOLD {
-        *p = image::Rgba([0, 0, 0, 0]);
-        return;
-    }
-    let (r, g, b) = (p[0], p[1], p[2]);
-    let mut best = ICON_PALETTE[0];
-    let mut best_d = u32::MAX;
-    for c in ICON_PALETTE {
-        let d = ((r as i32 - c[0] as i32).pow(2)
-            + (g as i32 - c[1] as i32).pow(2)
-            + (b as i32 - c[2] as i32).pow(2)) as u32;
-        if d < best_d {
-            best_d = d;
-            best = c;
-        }
-    }
-    *p = image::Rgba([best[0], best[1], best[2], 255]);
-}
-
-/// Trim transparent padding; snap opaque pixels to coalition palette.
-fn prepare_map_icon(icon: &RgbaImage) -> RgbaImage {
-    let mut out = crop_to_alpha_bbox(icon, ICON_ALPHA_THRESHOLD);
-    for p in out.pixels_mut() {
-        snap_icon_pixel(p);
-    }
-    out
-}
-
-fn overlay_opaque(base: &mut RgbaImage, icon: &RgbaImage, ox: i32, oy: i32) {
+fn overlay_icon_alpha(base: &mut RgbaImage, icon: &RgbaImage, ox: i32, oy: i32) {
     let (bw, bh) = base.dimensions();
     let (iw, ih) = icon.dimensions();
     for y in 0..ih {
@@ -1006,15 +881,17 @@ fn overlay_opaque(base: &mut RgbaImage, icon: &RgbaImage, ox: i32, oy: i32) {
             if bx < 0 || bx >= bw as i32 {
                 continue;
             }
-            let p = icon.get_pixel(x, y);
-            if p[3] == 0 {
+            let src = icon.get_pixel(x, y);
+            if src[3] == 0 {
                 continue;
             }
-            base.put_pixel(
-                bx as u32,
-                by as u32,
-                image::Rgba([p[0], p[1], p[2], 255]),
-            );
+            let dst = *base.get_pixel(bx as u32, by as u32);
+            let sa = src[3] as f32 / 255.0;
+            let inv = 1.0 - sa;
+            let r = (src[0] as f32 * sa + dst[0] as f32 * inv).round() as u8;
+            let g = (src[1] as f32 * sa + dst[1] as f32 * inv).round() as u8;
+            let b = (src[2] as f32 * sa + dst[2] as f32 * inv).round() as u8;
+            base.put_pixel(bx as u32, by as u32, image::Rgba([r, g, b, 255]));
         }
     }
 }

@@ -1,17 +1,14 @@
-//! Embed Discord objective map icons + runtime manifest into the assembled `.miz`.
+//! Embed Discord map icons from `assets/discord-objective-map/png/<canvas_px>/` into the assembled `.miz`.
 
 use anyhow::{bail, Context, Result};
 use bfprotocols::discord_map_icon_manifest::{
-    DiscordMapIconManifest, MIZ_DIR, MIZ_MANIFEST, SUPPORTED_SCHEMA_VERSION,
+    DiscordMapIconManifest, MIZ_DIR, MIZ_MANIFEST, SUPPORTED_SCHEMA_VERSION, ASSETS_REL,
 };
 use dcso3::String as MizString;
 use log::{info, warn};
-use resvg::usvg::{Options, Tree};
 use std::collections::HashMap;
 use std::fs;
 use std::path::{Path, PathBuf};
-
-const ASSETS_REL: &str = "assets/discord-objective-map";
 
 /// When campaign CFG enables discord map, require ME corner zones in the base mission.
 pub fn validate_discord_map_zones(mission: &dcso3::env::miz::Miz<'_>, campaign_cfg: Option<&Path>) -> Result<()> {
@@ -71,6 +68,7 @@ pub fn embed_into_miz(
     };
     let manifest_path = assets_dir.join("manifest.json");
     let manifest = DiscordMapIconManifest::load(&manifest_path)?;
+    let png_dir = manifest.assets_png_dir(&assets_dir);
     let runtime = manifest.to_runtime();
     let runtime_json = serde_json::to_string_pretty(&runtime).context("serialize runtime manifest")?;
 
@@ -83,8 +81,6 @@ pub fn embed_into_miz(
         .with_context(|| format!("write runtime manifest {:?}", manifest_dest))?;
     files.insert(MizString::from(MIZ_MANIFEST), manifest_dest);
 
-    let png_dir = assets_dir.join("png").join(manifest.canvas_px.to_string());
-    let svg_dir = assets_dir.join("svg");
     let mut embedded = 0usize;
     for stem in manifest.png_stems() {
         let zip_path = DiscordMapIconManifest::miz_png_path(&stem);
@@ -93,7 +89,7 @@ pub fn embed_into_miz(
             fs::create_dir_all(parent)
                 .with_context(|| format!("create discord map png dir {:?}", parent))?;
         }
-        let png_bytes = load_or_render_png(&png_dir, &svg_dir, &stem, manifest.canvas_px)
+        let png_bytes = load_png(&png_dir, &stem)
             .with_context(|| format!("discord map icon {stem}"))?;
         fs::write(&dest, &png_bytes)
             .with_context(|| format!("write discord map png {:?}", dest))?;
@@ -102,50 +98,21 @@ pub fn embed_into_miz(
     }
 
     info!(
-        "discord map icons: embedded {embedded} PNG(s) + manifest (schema_version {}) under {MIZ_DIR}/",
+        "discord map icons: embedded {embedded} PNG(s) from {:?} + manifest (schema_version {}) under {MIZ_DIR}/",
+        png_dir,
         SUPPORTED_SCHEMA_VERSION
     );
     Ok(())
 }
 
-fn load_or_render_png(
-    png_dir: &Path,
-    svg_dir: &Path,
-    stem: &str,
-    canvas_px: u32,
-) -> Result<Vec<u8>> {
-    let prebuilt = png_dir.join(format!("{stem}.png"));
-    if prebuilt.is_file() {
-        return fs::read(&prebuilt)
-            .with_context(|| format!("read prebuilt png {:?}", prebuilt));
-    }
-    let svg_path = svg_dir.join(format!("{stem}.svg"));
-    if !svg_path.is_file() {
+fn load_png(png_dir: &Path, stem: &str) -> Result<Vec<u8>> {
+    let path = png_dir.join(format!("{stem}.png"));
+    if !path.is_file() {
         bail!(
-            "missing icon sources for {stem}: no {:?} and no {:?}",
-            prebuilt,
-            svg_path
+            "missing discord map icon {:?}; edit PNGs in {}png/<canvas_px>/ and rebuild the mission",
+            path,
+            ASSETS_REL
         );
     }
-    render_svg_png(&svg_path, canvas_px)
-}
-
-fn render_svg_png(svg_path: &Path, size: u32) -> Result<Vec<u8>> {
-    let svg_data = fs::read(svg_path).with_context(|| format!("read svg {:?}", svg_path))?;
-    let tree = Tree::from_data(&svg_data, &Options::default())
-        .with_context(|| format!("parse svg {:?}", svg_path))?;
-    let mut pixmap = tiny_skia::Pixmap::new(size, size)
-        .with_context(|| format!("alloc {size}x{size} pixmap for {:?}", svg_path))?;
-    let ts = tree.size();
-    if ts.width() <= 0.0 || ts.height() <= 0.0 {
-        bail!("invalid svg viewBox size for {:?}", svg_path);
-    }
-    let transform = tiny_skia::Transform::from_scale(
-        size as f32 / ts.width(),
-        size as f32 / ts.height(),
-    );
-    resvg::render(&tree, transform, &mut pixmap.as_mut());
-    pixmap
-        .encode_png()
-        .context("encode discord map icon png")
+    fs::read(&path).with_context(|| format!("read discord map icon {:?}", path))
 }

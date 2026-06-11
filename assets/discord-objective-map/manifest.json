@@ -1,6 +1,6 @@
 {
   "schema_version": 1,
-  "description": "Discord objective map markers. Source: extract_from_sheet.py (gadget/ICON-export.png or per-kind PNG) into png/96/; bftools embeds into l10n/DEFAULT/fowl_discord_map/",
+  "description": "Discord objective map markers. Edit PNGs in png/96/; rebuild mission with bftools to embed into l10n/DEFAULT/fowl_discord_map/.",
   "canvas_px": 96,
   "kinds": {
     "airbase": {
