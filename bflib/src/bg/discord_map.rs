@@ -85,6 +85,7 @@ struct MarkerLayout {
     cy: f32,
     sw: u32,
     sh: u32,
+    icon_b64: String,
     tip_coalition: String,
     kind: String,
     f10_label: String,
@@ -218,13 +219,12 @@ pub async fn publish_and_post(
     fs::rename(&version_tmp, map_version_path)
         .await
         .with_context(|| format!("publish discord map version {:?}", map_version_path))?;
-    post_composited_map(webhook_url, webhook_message_path, artifacts.png, caption).await
+    post_discord_map(webhook_url, webhook_message_path, caption).await
 }
 
-async fn post_composited_map(
+async fn post_discord_map(
     webhook_url: &str,
     webhook_message_path: &Path,
-    png: Vec<u8>,
     caption: &str,
 ) -> Result<()> {
     let client = reqwest::Client::builder()
@@ -235,7 +235,7 @@ async fn post_composited_map(
 
     if let Some(message_id) = load_webhook_message_id(webhook_message_path).await? {
         let patch_url = format!("{webhook_base}/messages/{message_id}");
-        let form = discord_multipart_form(caption, png.clone(), true)?;
+        let form = discord_webhook_form(caption, true)?;
         let resp = client
             .patch(&patch_url)
             .multipart(form)
@@ -256,7 +256,7 @@ async fn post_composited_map(
     }
 
     let post_url = webhook_url_with_wait(webhook_url);
-    let form = discord_multipart_form(caption, png, false)?;
+    let form = discord_webhook_form(caption, false)?;
     let resp = client
         .post(&post_url)
         .multipart(form)
@@ -276,7 +276,7 @@ async fn post_composited_map(
         .and_then(|v| v.as_str())
         .context("Discord webhook response missing message id")?;
     save_webhook_message_id(webhook_message_path, message_id).await?;
-    info!("discord map: posted composited map to Discord (message {message_id})");
+    info!("discord map: posted map link to Discord (message {message_id})");
     Ok(())
 }
 
@@ -298,36 +298,19 @@ fn webhook_url_with_wait(url: &str) -> String {
     }
 }
 
-fn discord_multipart_form(caption: &str, png: Vec<u8>, edit: bool) -> Result<multipart::Form> {
-    let embed = serde_json::json!({
-        "image": {
-            "url": "attachment://objective_map.png"
-        }
-    });
+fn discord_webhook_form(caption: &str, edit: bool) -> Result<multipart::Form> {
     let payload = if edit {
         serde_json::json!({
             "content": caption,
-            "embeds": [embed],
-            "attachments": [{
-                "id": 0,
-                "filename": "objective_map.png"
-            }]
+            "embeds": [],
+            "attachments": []
         })
     } else {
         serde_json::json!({
-            "content": caption,
-            "embeds": [embed]
+            "content": caption
         })
     };
-    Ok(multipart::Form::new()
-        .part(
-            "files[0]",
-            multipart::Part::bytes(png)
-                .file_name("objective_map.png")
-                .mime_str("image/png")
-                .context("discord map png mime")?,
-        )
-        .text("payload_json", payload.to_string()))
+    Ok(multipart::Form::new().text("payload_json", payload.to_string()))
 }
 
 async fn load_webhook_message_id(path: &Path) -> Result<Option<String>> {
@@ -439,6 +422,7 @@ fn composite_map(
             cy,
             sw: iw,
             sh: ih,
+            icon_b64: B64.encode(icon_bytes),
             tip_coalition: marker.tip_coalition.clone(),
             kind: marker.kind.clone(),
             f10_label: marker.f10_label.clone(),
@@ -633,11 +617,12 @@ fn build_interactive_html(
         let rows = tooltip_rows_html(&m.kind, m.health, m.logi, m.production);
         let stat_bars = marker_stat_bars_html(&m.kind, m.health, m.logi, m.production);
         body.push_str(&format!(
-            r#"<div class="m" data-cx="{cx:.3}" data-cy="{cy:.3}" data-sw="{sw}" data-sh="{sh}"><div class="m-stack"><div class="icon-hit" style="width:{sw}px;height:{sh}px" aria-hidden="true"></div>{stat_bars}</div><div class="tip {tip_class}"><div class="tip-title">{label}</div><div class="tip-body"><table>{rows}</table></div></div></div>"#,
+            r#"<div class="m" data-cx="{cx:.3}" data-cy="{cy:.3}" data-sw="{sw}" data-sh="{sh}"><div class="m-stack"><div class="icon-hit"><img class="map-icon-hover" src="data:image/png;base64,{icon_b64}" alt="" aria-hidden="true"></div>{stat_bars}</div><div class="tip {tip_class}"><div class="tip-title">{label}</div><div class="tip-body"><table>{rows}</table></div></div></div>"#,
             cx = m.cx,
             cy = m.cy,
             sw = m.sw,
             sh = m.sh,
+            icon_b64 = m.icon_b64,
             label = html_escape(&m.f10_label),
             stat_bars = stat_bars,
             tip_class = tip_class,
@@ -674,7 +659,9 @@ body{{margin:0;background:#000;color:#686a6e;font-family:Roboto,sans-serif;font-
 .m{{position:absolute;pointer-events:auto}}
 .m:hover{{z-index:10000}}
 .m-stack{{position:relative;display:inline-flex;flex-direction:column;align-items:center;line-height:0}}
-.icon-hit{{display:block;line-height:0;flex-shrink:0;pointer-events:none}}
+.icon-hit{{position:relative;display:block;line-height:0;flex-shrink:0;overflow:hidden}}
+.map-icon-hover{{display:block;opacity:0;box-sizing:border-box;pointer-events:none;transition:opacity .15s,filter .15s}}
+.m:hover .map-icon-hover{{opacity:1;filter:brightness(1.1)}}
 .stat-bars{{display:flex;flex-direction:column;gap:3px;margin-top:{stat_bars_gap}px;z-index:1;flex-shrink:0}}
 .health-bar{{height:3px;background:#15161a;flex-shrink:0}}
 .health-bar-fill{{height:100%;max-width:100%}}
@@ -708,6 +695,10 @@ body{{margin:0;background:#000;color:#686a6e;font-family:Roboto,sans-serif;font-
   var rh=+wrap.dataset.rh||1;
   var healthBarPx=+wrap.dataset.healthBarPx||30;
   function mapDisplayScale(){{
+    var baseImg=document.getElementById('base');
+    if(baseImg&&baseImg.naturalWidth){{
+      return baseImg.getBoundingClientRect().width/baseImg.naturalWidth;
+    }}
     var w=wrap.getBoundingClientRect().width;
     return w?w/rw:0;
   }}
@@ -719,10 +710,22 @@ body{{margin:0;background:#000;color:#686a6e;font-family:Roboto,sans-serif;font-
       var cy=+m.dataset.cy;
       var sw=+m.dataset.sw;
       var sh=+m.dataset.sh;
+      var iconW=Math.max(1,Math.round(sw*scale));
+      var iconH=Math.max(1,Math.round(sh*scale));
       m.style.left=(cx/rw*100)+'%';
       m.style.top=(cy/rh*100)+'%';
       var stack=m.querySelector('.m-stack');
-      if(stack){{stack.style.transform='translate(-50%,'+(-(sh/2))+'px)';}}
+      if(stack){{stack.style.transform='translate(-50%,'+(-(iconH/2))+'px)';}}
+      var iconHit=m.querySelector('.icon-hit');
+      if(iconHit){{
+        iconHit.style.width=iconW+'px';
+        iconHit.style.height=iconH+'px';
+      }}
+      var hoverImg=m.querySelector('.map-icon-hover');
+      if(hoverImg){{
+        hoverImg.style.width=iconW+'px';
+        hoverImg.style.height=iconH+'px';
+      }}
       var bars=m.querySelector('.stat-bars');
       var barW=Math.max(2,healthBarPx*scale);
       if(bars){{

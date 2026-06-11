@@ -161,7 +161,7 @@ pub fn build_discord_map_caption(mission_name: &str, cfg: &DiscordMapCfg) -> (St
     let ts = Utc::now().format("%Y-%m-%d %H:%M:%S").to_string();
     let map_url = discord_map_interactive_url(cfg);
     let caption = format!(
-        "Campaign objective map : {mission_name}\nObjectives status as of {ts} UTC\nInteractive HTML map:\n{map_url}"
+        "Campaign objective map : {mission_name}\nObjectives status as of {ts} UTC\nInteractive HTML map: {map_url}"
     );
     (caption, ts, map_url)
 }
