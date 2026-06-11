@@ -17,9 +17,17 @@ use std::path::{Path, PathBuf};
 use tokio::fs;
 
 const ICON_ALPHA_THRESHOLD: u8 = 32;
-const ICON_MAP_SCALE: f32 = 0.5;
+const ICON_MAP_SCALE: f32 = 0.75;
+const ICON_PALETTE: [[u8; 3]; 3] = [
+    [196, 56, 56],
+    [46, 90, 172],
+    [92, 99, 112],
+];
 const STAT_BARS_GAP_PX: i32 = 3;
 const HEALTH_BAR_MAP_PX: f32 = 30.0;
+const THREAT_RING_SCALE: f32 = 1.35;
+const THREAT_RING_PAD_PX: f32 = 4.0;
+const THREAT_RING_MIN_PX: u32 = 8;
 const LABEL_GAP_PX: i32 = 4;
 const LABEL_FONT_PX: i32 = 8;
 
@@ -417,8 +425,7 @@ fn composite_map(
         let display = scale_icon_nearest(&prepare_map_icon(&icon), ICON_MAP_SCALE);
         let (cx, cy) = viewport.ll_to_pixel_in(marker.lat, marker.lon, bw, bh);
         let (iw, ih) = display.dimensions();
-        let threat_raster_px =
-            ((iw.max(ih) as f32 * 1.7 + 10.).round().max(14.) as u32) | 1;
+        let threat_raster_px = threat_ring_diameter_px(iw, ih);
         if marker.threatened {
             draw_threat_ring(
                 &mut base,
@@ -648,18 +655,19 @@ fn build_interactive_html(
             ""
         };
         let stat_bars = marker_stat_bars_html(&m.kind, m.health, m.logi, m.production);
-        let threat_attr = if m.threatened {
-            format!(r#" data-threat="{}"#, m.threat_diameter_px)
+        let threatened_class = if m.threatened { " threatened" } else { "" };
+        let threat_ring = if m.threatened {
+            r#"<div class="threat-ring"></div>"#
         } else {
-            String::new()
+            ""
         };
         body.push_str(&format!(
-            r#"<div class="m" data-cx="{cx:.3}" data-cy="{cy:.3}" data-sw="{sw}" data-sh="{sh}"{threat_attr}><div class="m-stack">{threat_ring}<img class="map-icon" src="data:image/png;base64,{icon_b64}" width="{sw}" height="{sh}" alt="">{stat_bars}</div><div class="tip {tip_class}"><div class="tip-title">{label}</div><div class="tip-body"><table>{rows}</table></div></div></div>"#,
+            r#"<div class="m{threatened_class}" data-cx="{cx:.3}" data-cy="{cy:.3}" data-sw="{sw}" data-sh="{sh}"><div class="m-stack"><div class="icon-wrap">{threat_ring}<canvas class="map-icon" data-b64="{icon_b64}" aria-hidden="true"></canvas></div>{stat_bars}</div><div class="tip {tip_class}"><div class="tip-title">{label}</div><div class="tip-body"><table>{rows}</table></div></div></div>"#,
             cx = m.cx,
             cy = m.cy,
             sw = m.sw,
             sh = m.sh,
-            threat_attr = threat_attr,
+            threatened_class = threatened_class,
             icon_b64 = m.icon_b64,
             label = html_escape(&m.f10_label),
             threat_ring = threat_ring,
@@ -698,9 +706,10 @@ body{{margin:0;background:#000;color:#686a6e;font-family:Roboto,sans-serif;font-
 .m{{position:absolute;pointer-events:auto}}
 .m:hover{{z-index:10000}}
 .m-stack{{position:relative;display:inline-flex;flex-direction:column;align-items:center;line-height:0}}
+.icon-wrap{{position:relative;display:block;line-height:0;flex-shrink:0}}
 .threat-ring{{position:absolute;left:50%;top:50%;transform:translate(-50%,-50%);border:2px solid rgba(255,220,0,.75);border-radius:50%;box-sizing:border-box;z-index:0;pointer-events:none}}
-.map-icon,.m-stack img{{position:relative;z-index:1;display:block;opacity:1;image-rendering:crisp-edges;image-rendering:pixelated;transition:filter .15s}}
-.m:hover img{{filter:brightness(1.8)}}
+.map-icon{{position:relative;z-index:1;display:block;opacity:1;image-rendering:crisp-edges;image-rendering:pixelated;transition:filter .15s}}
+.m:hover .map-icon{{filter:brightness(1.8)}}
 .stat-bars{{display:flex;flex-direction:column;gap:3px;margin-top:{stat_bars_gap}px;z-index:1;flex-shrink:0}}
 .health-bar{{height:3px;background:#15161a;flex-shrink:0}}
 .health-bar-fill{{height:100%;max-width:100%}}
@@ -733,6 +742,30 @@ body{{margin:0;background:#000;color:#686a6e;font-family:Roboto,sans-serif;font-
   var rw=+wrap.dataset.rw||1;
   var rh=+wrap.dataset.rh||1;
   var healthBarPx=+wrap.dataset.healthBarPx||30;
+  var iconRawCache=new WeakMap();
+  function iconRaw(canvas){{
+    if(iconRawCache.has(canvas)){{return iconRawCache.get(canvas);}}
+    var raw=new Image();
+    raw.src='data:image/png;base64,'+(canvas.dataset.b64||'');
+    iconRawCache.set(canvas,raw);
+    return raw;
+  }}
+  function drawIcon(canvas,iw,ih){{
+    var raw=iconRaw(canvas);
+    var paint=function(){{
+      canvas.width=iw;
+      canvas.height=ih;
+      canvas.style.width=iw+'px';
+      canvas.style.height=ih+'px';
+      var ctx=canvas.getContext('2d');
+      if(!ctx){{return;}}
+      ctx.imageSmoothingEnabled=false;
+      ctx.clearRect(0,0,iw,ih);
+      ctx.drawImage(raw,0,0,raw.naturalWidth,raw.naturalHeight,0,0,iw,ih);
+    }};
+    if(raw.complete&&raw.naturalWidth){{paint();}}
+    else{{raw.onload=paint;}}
+  }}
   function layoutMarkers(){{
     var w=wrap.getBoundingClientRect().width;
     if(!w){{return;}}
@@ -748,16 +781,15 @@ body{{margin:0;background:#000;color:#686a6e;font-family:Roboto,sans-serif;font-
       var ih=Math.max(1,Math.round(sh*scale));
       var stack=m.querySelector('.m-stack');
       if(stack){{stack.style.transform='translate(-50%,'+(-(ih/2))+'px)';}}
-      var img=m.querySelector('.map-icon');
-      if(img){{
-        img.style.width=iw+'px';
-        img.style.height=ih+'px';
-      }}
+      var icon=m.querySelector('.map-icon');
+      if(icon){{drawIcon(icon,iw,ih);}}
       var ring=m.querySelector('.threat-ring');
-      if(ring&&m.dataset.threat){{
-        var d=+m.dataset.threat*scale;
-        ring.style.width=d+'px';
-        ring.style.height=d+'px';
+      if(ring){{
+        var ringD=Math.max(1,Math.round(Math.max(iw,ih)*1.35+4));
+        if(ringD%2===0){{ringD+=1;}}
+        ring.style.width=ringD+'px';
+        ring.style.height=ringD+'px';
+        ring.style.borderWidth=Math.max(1,Math.round(2*scale))+'px';
       }}
       var bars=m.querySelector('.stat-bars');
       var barW=Math.max(2,healthBarPx*scale);
@@ -870,6 +902,14 @@ fn html_escape(s: &str) -> String {
         .replace('"', "&quot;")
 }
 
+fn threat_ring_diameter_px(iw: u32, ih: u32) -> u32 {
+    let max_side = iw.max(ih) as f32;
+    (max_side * THREAT_RING_SCALE + THREAT_RING_PAD_PX)
+        .round()
+        .max(THREAT_RING_MIN_PX as f32) as u32
+        | 1
+}
+
 fn draw_threat_ring(base: &mut RgbaImage, cx: f32, cy: f32, radius: f32) {
     const YELLOW: image::Rgba<u8> = image::Rgba([255, 220, 0, 191]);
     let steps = (radius * 14.).max(56.) as u32;
@@ -924,15 +964,31 @@ fn scale_icon_nearest(icon: &RgbaImage, scale: f32) -> RgbaImage {
     imageops::resize(icon, nw, nh, imageops::FilterType::Nearest)
 }
 
-/// Trim transparent padding only; no resize, no color filters.
+fn snap_icon_pixel(p: &mut image::Rgba<u8>) {
+    if p[3] < ICON_ALPHA_THRESHOLD {
+        *p = image::Rgba([0, 0, 0, 0]);
+        return;
+    }
+    let (r, g, b) = (p[0], p[1], p[2]);
+    let mut best = ICON_PALETTE[0];
+    let mut best_d = u32::MAX;
+    for c in ICON_PALETTE {
+        let d = ((r as i32 - c[0] as i32).pow(2)
+            + (g as i32 - c[1] as i32).pow(2)
+            + (b as i32 - c[2] as i32).pow(2)) as u32;
+        if d < best_d {
+            best_d = d;
+            best = c;
+        }
+    }
+    *p = image::Rgba([best[0], best[1], best[2], 255]);
+}
+
+/// Trim transparent padding; snap opaque pixels to coalition palette.
 fn prepare_map_icon(icon: &RgbaImage) -> RgbaImage {
     let mut out = crop_to_alpha_bbox(icon, ICON_ALPHA_THRESHOLD);
     for p in out.pixels_mut() {
-        if p[3] >= ICON_ALPHA_THRESHOLD {
-            p[3] = 255;
-        } else {
-            *p = image::Rgba([0, 0, 0, 0]);
-        }
+        snap_icon_pixel(p);
     }
     out
 }
