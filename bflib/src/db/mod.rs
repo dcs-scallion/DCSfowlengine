@@ -383,6 +383,8 @@ impl Db {
     }
 
     pub fn flush_markup_messages(&mut self, lua: MizLua) -> Result<()> {
+        self.ephemeral
+            .prepare_objective_overlay_layer(&self.persisted);
         if self.ephemeral.msgs().len() == 0 {
             return Ok(());
         }

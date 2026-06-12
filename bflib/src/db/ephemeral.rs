@@ -184,6 +184,8 @@ pub struct Ephemeral {
     pub(super) discord_map: Option<DiscordMapRuntime>,
     pub(super) discord_map_post_due: Option<DateTime<Utc>>,
     pub(super) discord_map_periodic_due: Option<DateTime<Utc>>,
+    /// PRI_LINE redraw pending; re-queue PRI_OVERLAY before the next markup flush.
+    overlay_underlay_dirty: bool,
 }
 
 impl Default for Ephemeral {
@@ -244,6 +246,7 @@ impl Default for Ephemeral {
             discord_map: None,
             discord_map_post_due: None,
             discord_map_periodic_due: None,
+            overlay_underlay_dirty: false,
         }
     }
 }
@@ -299,8 +302,20 @@ impl Ephemeral {
                 obj,
                 persisted,
                 &self.objective_display_aliases,
+                self.fowl_miz_export.as_ref(),
             ),
         );
+    }
+
+    pub(super) fn request_objective_overlay_refresh(&mut self) {
+        self.overlay_underlay_dirty = true;
+    }
+
+    pub(super) fn prepare_objective_overlay_layer(&mut self, persisted: &Persisted) {
+        if self.overlay_underlay_dirty {
+            self.refresh_objective_overlay_layer(persisted);
+            self.overlay_underlay_dirty = false;
+        }
     }
 
     pub fn update_objective_markup(
@@ -319,15 +334,19 @@ impl Ephemeral {
                 *oid,
             );
         }
+        let mut underlay_dirty = false;
         match self.objective_markup.entry(obj.id) {
-            Entry::Occupied(mut e) => e.get_mut().update(
-                &self.cfg,
-                &mut self.hub_delivery_efficiency,
-                persisted,
-                &mut self.msgs,
-                obj,
-                moved,
-            ),
+            Entry::Occupied(mut e) => {
+                underlay_dirty |= e.get_mut().update(
+                    &self.cfg,
+                    &mut self.hub_delivery_efficiency,
+                    persisted,
+                    &mut self.msgs,
+                    obj,
+                    moved,
+                    self.fowl_miz_export.as_ref(),
+                );
+            }
             Entry::Vacant(e) => {
                 e.insert(ObjectiveMarkup::new(
                     &self.cfg,
@@ -336,8 +355,12 @@ impl Ephemeral {
                     obj,
                     persisted,
                     &self.objective_display_aliases,
+                    self.fowl_miz_export.as_ref(),
                 ));
             }
+        }
+        if underlay_dirty {
+            self.request_objective_overlay_refresh();
         }
         if !moved.is_empty() {
             use super::logistics::nearest_normal_logistics_hub;
@@ -357,14 +380,17 @@ impl Ephemeral {
                     continue;
                 }
                 if let Entry::Occupied(mut e) = self.objective_markup.entry(*occ_id) {
-                    e.get_mut().update(
+                    if e.get_mut().update(
                         &self.cfg,
                         &mut self.hub_delivery_efficiency,
                         persisted,
                         &mut self.msgs,
                         occ,
                         moved,
-                    );
+                        self.fowl_miz_export.as_ref(),
+                    ) {
+                        self.request_objective_overlay_refresh();
+                    }
                 }
             }
         }
@@ -380,7 +406,7 @@ impl Ephemeral {
     pub(super) fn refresh_objective_overlay_layer(&mut self, persisted: &Persisted) {
         for (_, obj) in persisted.objectives.into_iter() {
             if let Some(mk) = self.objective_markup.get_mut(&obj.id) {
-                mk.raise_overlay(&mut self.msgs, obj);
+                mk.raise_overlay(&mut self.msgs, obj, self.fowl_miz_export.as_ref());
             }
         }
     }

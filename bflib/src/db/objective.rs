@@ -1844,9 +1844,11 @@ impl Db {
             }
         }
         if actually_captured.len() > 0 {
-            self.ephemeral.sync_front_line(&self.persisted);
+            if self.ephemeral.sync_front_line(&self.persisted) {
+                self.ephemeral.request_objective_overlay_refresh();
+            }
             self.ephemeral
-                .refresh_objective_overlay_layer(&self.persisted);
+                .prepare_objective_overlay_layer(&self.persisted);
             self.ephemeral.logistics_stage = LogiStage::SyncToWarehouses {
                 objectives: self.warehouse_sync_objective_ids().into(),
             };
@@ -1914,14 +1916,15 @@ impl Db {
         }
         let underlay_dirty = self.ephemeral.sync_front_line(&self.persisted);
         if underlay_dirty {
-            self.ephemeral
-                .refresh_objective_overlay_layer(&self.persisted);
+            self.ephemeral.request_objective_overlay_refresh();
             if self.ephemeral.cfg.discord_map.front_line_map_active(self.ephemeral.cfg.front_line)
                 && self.ephemeral.discord_map.is_some()
             {
                 self.discord_map_debounce_post(now);
             }
         }
+        self.ephemeral
+            .prepare_objective_overlay_layer(&self.persisted);
         let net = dcso3::net::Net::singleton(lua).context("net for markup flush")?;
         let act = dcso3::trigger::Trigger::singleton(lua)
             .context("trigger for markup flush")?

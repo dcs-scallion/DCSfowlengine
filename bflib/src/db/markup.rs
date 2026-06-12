@@ -16,7 +16,10 @@ for more details.
 
 use super::{
     aliases::resolve_objective_f10_map_label,
-    logistics::{nearest_normal_logistics_hub, virtual_resupply_delivery_efficiency_cached},
+    logistics::{
+        nearest_normal_logistics_hub, objective_warehouse_fuel_infobar_amounts,
+        virtual_resupply_delivery_efficiency_cached,
+    },
     objective::{Objective, Zone},
     persisted::Persisted,
 };
@@ -25,6 +28,7 @@ use crate::msgq::MsgQ;
 use bfprotocols::{
     cfg::Cfg,
     db::objective::{ObjectiveId, ObjectiveKind},
+    fowl_miz_export::FowlMizExport,
 };
 use compact_str::{CompactString, format_compact};
 use dcso3::{
@@ -85,6 +89,8 @@ pub(super) struct ObjectiveMarkup {
     logi: u8,
     supply: u8,
     fuel: u8,
+    fuel_amounts: CompactString,
+    fuel_kind_count: u8,
     production: u8,
     production_hp_sum: u32,
     production_repair_need: u16,
@@ -171,7 +177,16 @@ fn stat_infobar_row(bar: &str, value: u8, label: &'static str) -> CompactString 
     stat_row(bar, &format_compact!("{}", value.min(100)), label)
 }
 
-fn objective_stats_text(obj: &Objective, limited: bool) -> CompactString {
+fn stat_fuel_infobar_row(bar: &str, amounts: &str, kind_count: u8) -> CompactString {
+    let label = if kind_count == 1 { "Fuel" } else { "Fuels" };
+    format_compact!("{}{}{label} {amounts} t", bar, STAT_BAR_GAP)
+}
+
+fn objective_stats_text(
+    obj: &Objective,
+    limited: bool,
+    export: &FowlMizExport,
+) -> CompactString {
     let get_idx = |val: u8| -> usize { (val as usize * 12 / 100).min(12) };
     match (&obj.kind, limited) {
         (ObjectiveKind::Production, true) => {
@@ -197,7 +212,14 @@ fn objective_stats_text(obj: &Objective, limited: bool) -> CompactString {
             stat_infobar_row(BAR_LOOKUP[get_idx(obj.health)], obj.health, "Health"),
             stat_infobar_row(BAR_LOOKUP[get_idx(obj.logi)], obj.logi, "Logi"),
             stat_infobar_row(BAR_LOOKUP[get_idx(obj.supply)], obj.supply, "Supply"),
-            stat_infobar_row(BAR_LOOKUP[get_idx(obj.fuel)], obj.fuel, "Fuel"),
+            {
+                let (amounts, kinds) = objective_warehouse_fuel_infobar_amounts(export, obj);
+                stat_fuel_infobar_row(
+                    BAR_LOOKUP[get_idx(obj.fuel)],
+                    amounts.as_str(),
+                    kinds,
+                )
+            },
             stat_plain_row("Points", &format_compact!("{}", obj.points)),
         ),
         (_, true) => format_compact!(
@@ -210,7 +232,14 @@ fn objective_stats_text(obj: &Objective, limited: bool) -> CompactString {
             stat_infobar_row(BAR_LOOKUP[get_idx(obj.health)], obj.health, "Health"),
             stat_infobar_row(BAR_LOOKUP[get_idx(obj.logi)], obj.logi, "Logi"),
             stat_infobar_row(BAR_LOOKUP[get_idx(obj.supply)], obj.supply, "Supply"),
-            stat_infobar_row(BAR_LOOKUP[get_idx(obj.fuel)], obj.fuel, "Fuel"),
+            {
+                let (amounts, kinds) = objective_warehouse_fuel_infobar_amounts(export, obj);
+                stat_fuel_infobar_row(
+                    BAR_LOOKUP[get_idx(obj.fuel)],
+                    amounts.as_str(),
+                    kinds,
+                )
+            },
             stat_plain_row("Points", &format_compact!("{}", obj.points)),
         ),
     }
@@ -442,7 +471,12 @@ fn remove_objective_overlay_marks(msgq: &mut MsgQ, t: &mut ObjectiveMarkup) {
 }
 
 /// Name + infobar stats; recreate after supply/front-line shapes so DCS draws text on top.
-fn install_objective_overlay_marks(msgq: &mut MsgQ, t: &mut ObjectiveMarkup, obj: &Objective) {
+fn install_objective_overlay_marks(
+    msgq: &mut MsgQ,
+    t: &mut ObjectiveMarkup,
+    obj: &Objective,
+    export: &FowlMizExport,
+) {
     let color_func = |a| text_color(obj.owner, a);
     let all_spec = overlay_side_filter(obj);
     let pos3 = Vector3::new(t.pos.x, 0., t.pos.y);
@@ -478,6 +512,7 @@ fn install_objective_overlay_marks(msgq: &mut MsgQ, t: &mut ObjectiveMarkup, obj
             make_stats_spec(objective_stats_text(
                 obj,
                 enemy_objective_view(obj.owner, Side::Red),
+                export,
             )),
         );
         msgq.text_to_overlay(
@@ -486,6 +521,7 @@ fn install_objective_overlay_marks(msgq: &mut MsgQ, t: &mut ObjectiveMarkup, obj
             make_stats_spec(objective_stats_text(
                 obj,
                 enemy_objective_view(obj.owner, Side::Blue),
+                export,
             )),
         );
         t.stats_label_red = Some(id_r);
@@ -493,18 +529,29 @@ fn install_objective_overlay_marks(msgq: &mut MsgQ, t: &mut ObjectiveMarkup, obj
         t.stats_label = None;
     } else {
         let id = MarkId::new();
-        msgq.text_to_overlay(all_spec, id, make_stats_spec(objective_stats_text(obj, false)));
+        msgq.text_to_overlay(
+            all_spec,
+            id,
+            make_stats_spec(objective_stats_text(obj, false, export)),
+        );
         t.stats_label = Some(id);
         t.stats_label_red = None;
         t.stats_label_blue = None;
     }
 }
 
-fn sync_overlay_cache_from_objective(t: &mut ObjectiveMarkup, obj: &Objective) {
+fn sync_overlay_cache_from_objective(
+    t: &mut ObjectiveMarkup,
+    obj: &Objective,
+    export: &FowlMizExport,
+) {
     t.health = obj.health;
     t.logi = obj.logi;
     t.supply = obj.supply;
     t.fuel = obj.fuel;
+    let (amounts, kinds) = objective_warehouse_fuel_infobar_amounts(export, obj);
+    t.fuel_amounts = amounts;
+    t.fuel_kind_count = kinds;
     t.production = obj.production;
     t.production_hp_sum = obj.production_hp_sum;
     t.production_repair_need = obj.production_repair_need;
@@ -579,7 +626,9 @@ impl ObjectiveMarkup {
         msgq: &mut MsgQ,
         obj: &Objective,
         moved: &[ObjectiveId],
-    ) {
+        export: &FowlMizExport,
+    ) -> bool {
+        let mut underlay_dirty = false;
         let old_production = self.production;
         if obj.owner != self.side {
             let color_func = |a| text_color(obj.owner, a);
@@ -595,12 +644,16 @@ impl ObjectiveMarkup {
             }
             msgq.set_markup_color(self.owner_ring, color_func(1.));
             
+            if !self.supply_connections.is_empty() {
+                underlay_dirty = true;
+            }
             for (_, mark) in self.supply_connections.drain() {
                 msgq.delete_underlay_mark(mark.shaft);
                 msgq.delete_underlay_mark(mark.head);
             }
             if let Some(id) = self.production_feed_line.take() {
                 msgq.delete_underlay_mark(id);
+                underlay_dirty = true;
             }
             self.production_feed_hub = None;
         }
@@ -611,10 +664,13 @@ impl ObjectiveMarkup {
                 Color::yellow(if self.threatened { 0.75 } else { 0. }),
             );
         }
+        let (fuel_amounts, fuel_kind_count) = objective_warehouse_fuel_infobar_amounts(export, obj);
         if self.health != obj.health
             || self.logi != obj.logi
             || self.supply != obj.supply
             || self.fuel != obj.fuel
+            || self.fuel_amounts != fuel_amounts
+            || self.fuel_kind_count != fuel_kind_count
             || self.production != obj.production
             || self.production_hp_sum != obj.production_hp_sum
             || self.production_repair_need != obj.production_repair_need
@@ -631,21 +687,28 @@ impl ObjectiveMarkup {
             self.logi = obj.logi;
             self.supply = obj.supply;
             self.fuel = obj.fuel;
+            self.fuel_amounts = fuel_amounts;
+            self.fuel_kind_count = fuel_kind_count;
             self.production = obj.production;
             self.production_hp_sum = obj.production_hp_sum;
             self.production_repair_need = obj.production_repair_need;
             self.production_repair = obj.production_repair;
             self.points = obj.points;
             if let Some(id) = self.stats_label {
-                msgq.set_overlay_markup_text(id, objective_stats_text(obj, false).into());
+                msgq.set_overlay_markup_text(
+                    id,
+                    objective_stats_text(obj, false, export).into(),
+                );
             } else if let (Some(id_r), Some(id_b)) = (self.stats_label_red, self.stats_label_blue) {
                 msgq.set_overlay_markup_text(
                     id_r,
-                    objective_stats_text(obj, enemy_objective_view(obj.owner, Side::Red)).into(),
+                    objective_stats_text(obj, enemy_objective_view(obj.owner, Side::Red), export)
+                        .into(),
                 );
                 msgq.set_overlay_markup_text(
                     id_b,
-                    objective_stats_text(obj, enemy_objective_view(obj.owner, Side::Blue)).into(),
+                    objective_stats_text(obj, enemy_objective_view(obj.owner, Side::Blue), export)
+                        .into(),
                 );
             }
         }
@@ -670,11 +733,15 @@ impl ObjectiveMarkup {
             }
         }
         if old_production != obj.production || self.production_feed_hub != obj.feed_hub {
+            if matches!(obj.kind, ObjectiveKind::Production) {
+                underlay_dirty = true;
+            }
             sync_production_feed_line(self, msgq, obj, persisted);
         }
         for oid in moved {
             if obj.warehouse.destination.contains(oid) {
                 if let Some(mark) = self.supply_connections.get_mut(oid) {
+                    underlay_dirty = true;
                     let dst = &persisted.objectives[oid];
                     let to = if dst.is_farp() {
                         dst.owner.into()
@@ -695,11 +762,17 @@ impl ObjectiveMarkup {
                 }
             }
             if obj.feed_hub == Some(*oid) {
+                if matches!(obj.kind, ObjectiveKind::Production) {
+                    underlay_dirty = true;
+                }
                 sync_production_feed_line(self, msgq, obj, persisted);
             }
         }
         if let Zone::Circle { pos, .. } = obj.zone {
             if self.pos != pos {
+                if matches!(obj.kind, ObjectiveKind::Production) {
+                    underlay_dirty = true;
+                }
                 sync_production_feed_line(self, msgq, obj, persisted);
             }
         }
@@ -710,16 +783,23 @@ impl ObjectiveMarkup {
                 None
             };
             if want_anchor != self.occupied_supply_anchor || self.pos != obj.zone.pos() {
+                underlay_dirty = true;
                 sync_occupied_hub_supply_line(self, msgq, obj, persisted);
             }
         }
         refresh_objective_overlay_text(msgq, self, obj);
+        underlay_dirty
     }
 
-    pub(super) fn raise_overlay(&mut self, msgq: &mut MsgQ, obj: &Objective) {
+    pub(super) fn raise_overlay(
+        &mut self,
+        msgq: &mut MsgQ,
+        obj: &Objective,
+        export: &FowlMizExport,
+    ) {
         remove_objective_overlay_marks(msgq, self);
-        install_objective_overlay_marks(msgq, self, obj);
-        sync_overlay_cache_from_objective(self, obj);
+        install_objective_overlay_marks(msgq, self, obj, export);
+        sync_overlay_cache_from_objective(self, obj, export);
     }
 
     pub(super) fn new(
@@ -729,6 +809,7 @@ impl ObjectiveMarkup {
         obj: &Objective,
         persisted: &Persisted,
         display_aliases: &FxHashMap<String, std::string::String>,
+        export: &FowlMizExport,
     ) -> Self {
         let color_func = |a| text_color(obj.owner, a);
         let all_spec = match obj.kind {
@@ -745,6 +826,9 @@ impl ObjectiveMarkup {
         t.logi = obj.logi;
         t.supply = obj.supply;
         t.fuel = obj.fuel;
+        let (amounts, kinds) = objective_warehouse_fuel_infobar_amounts(export, obj);
+        t.fuel_amounts = amounts;
+        t.fuel_kind_count = kinds;
         t.production = obj.production;
         t.production_hp_sum = obj.production_hp_sum;
         t.production_repair_need = obj.production_repair_need;
@@ -855,7 +939,7 @@ impl ObjectiveMarkup {
             sync_occupied_hub_supply_line(&mut t, msgq, obj, persisted);
         }
 
-        install_objective_overlay_marks(msgq, &mut t, obj);
+        install_objective_overlay_marks(msgq, &mut t, obj, export);
 
         t
     }

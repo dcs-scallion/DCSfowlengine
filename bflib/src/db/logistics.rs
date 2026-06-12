@@ -724,6 +724,70 @@ fn dcs_liquid_kg_to_fowl_tons(kg: u32) -> u32 {
     kg / FOWL_LIQUID_TONS_TO_DCS_KG
 }
 
+/// DCS ME / warehouse liquid list order; unknown `LiquidType` variants follow sorted by discriminant.
+const FUELS_INFOBAR_ORDER: [LiquidType; 4] = [
+    LiquidType::JetFuel,
+    LiquidType::Avgas,
+    LiquidType::MW50,
+    LiquidType::Diesel,
+];
+
+fn objective_liquid_stored_tons(stored_in_tons: bool, stored: u32) -> u32 {
+    if stored_in_tons {
+        stored
+    } else {
+        dcs_liquid_kg_to_fowl_tons(stored)
+    }
+}
+
+/// Non-zero liquid stocks for F10 fuel infobar (`50+20`), metric tons; `0` when empty.
+pub(super) fn objective_warehouse_fuel_infobar_amounts(
+    export: &FowlMizExport,
+    obj: &Objective,
+) -> (CompactString, u8) {
+    let stored_in_tons = objective_is_ground_dep_farp_export(export, obj);
+    let mut out = CompactString::new("");
+    let mut first = true;
+    let mut kinds = 0u8;
+    let mut push = |tons: u32| {
+        if tons == 0 {
+            return;
+        }
+        kinds = kinds.saturating_add(1);
+        if !first {
+            out.push('+');
+        }
+        out.push_str(format_compact!("{tons}").as_str());
+        first = false;
+    };
+    for typ in FUELS_INFOBAR_ORDER {
+        let Some(inv) = obj.warehouse.liquids.get(&typ) else {
+            continue;
+        };
+        push(objective_liquid_stored_tons(stored_in_tons, inv.stored));
+    }
+    let mut extra: SmallVec<[(LiquidType, u32); 4]> = smallvec![];
+    for (typ, inv) in obj.warehouse.liquids.into_iter() {
+        if FUELS_INFOBAR_ORDER.contains(&typ) {
+            continue;
+        }
+        let tons = objective_liquid_stored_tons(stored_in_tons, inv.stored);
+        if tons > 0 {
+            extra.push((*typ, tons));
+        }
+    }
+    extra.sort_by_key(|(typ, _)| *typ as u8);
+    for (_, tons) in extra {
+        push(tons);
+    }
+    let amounts = if first {
+        CompactString::from("0")
+    } else {
+        out
+    };
+    (amounts, kinds)
+}
+
 fn parse_export_ws_type_key(key: &str) -> Option<[i32; 4]> {
     let inner = key.strip_prefix("wsType [")?.strip_suffix(']')?;
     let parts: Vec<i32> = inner
@@ -2644,15 +2708,20 @@ impl Db {
                 }
             }
             obj.supply = if n == 0 { 0 } else { (sum / n) as u8 };
-            n = 0;
-            sum = 0;
+            let mut fuel_stored: u64 = 0;
+            let mut fuel_capacity: u64 = 0;
             for (_, inv) in &obj.warehouse.liquids {
-                if let Some(pct) = inv.percent() {
-                    sum += pct as u32;
-                    n += 1;
+                if inv.capacity == 0 {
+                    continue;
                 }
+                fuel_stored += u64::from(inv.stored);
+                fuel_capacity += u64::from(inv.capacity);
             }
-            obj.fuel = if n == 0 { 0 } else { (sum / n) as u8 };
+            obj.fuel = if fuel_capacity == 0 {
+                0
+            } else {
+                min(100, (fuel_stored * 100 / fuel_capacity) as u32) as u8
+            };
             if current_supply != obj.supply || current_fuel != obj.fuel {
                 self.ephemeral.stat(Stat::ObjectiveSupply {
                     id: obj.id,
