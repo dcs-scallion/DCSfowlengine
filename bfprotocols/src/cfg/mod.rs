@@ -719,6 +719,18 @@ pub struct PointsCfg {
     /// interval must be positive. The default is (0, 0)
     #[serde(default)]
     pub periodic_point_gain: (i32, u32),
+    /// Scale periodic awards by opposing-team player count so smaller
+    /// teams gain more per player. Requires positive `periodic_point_gain.0`;
+    /// when enabled, periodic awards are never negative (other point
+    /// deductions — team kills, airborne deslot, deploy costs, etc. — are
+    /// unchanged).
+    #[serde(default)]
+    pub balancing_point_gain: bool,
+    /// When true, periodic awards are paid only to players airborne in an
+    /// aircraft or helicopter (`unit.in_air()` at payout). Applies whenever
+    /// `periodic_point_gain` pays out (with or without `balancing_point_gain`).
+    #[serde(default)]
+    pub periodic_award_airborne: bool,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize)]
@@ -1270,6 +1282,12 @@ pub struct Cfg {
     pub ewr_delay: u32,
     #[serde(default)]
     pub discord_map: DiscordMapCfg,
+    /// Test-only: extra Red headcount for `balancing_point_gain` (not Discord map).
+    #[serde(default)]
+    pub debugging_online_red_players: u32,
+    /// Test-only: extra Blue headcount for `balancing_point_gain` (not Discord map).
+    #[serde(default)]
+    pub debugging_online_blue_players: u32,
 }
 
 impl Cfg {

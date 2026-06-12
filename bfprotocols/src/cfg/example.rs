@@ -1933,6 +1933,8 @@ impl Default for Cfg {
                 weapon_cost: FxHashMap::default(),
                 strict: false,
                 periodic_point_gain: (0, 0),
+                balancing_point_gain: false,
+                periodic_award_airborne: false,
             }),
             warehouse: Some(WarehouseConfig {
                 hub_max: 25,
@@ -2034,6 +2036,8 @@ impl Default for Cfg {
             ewr_mode: EwrMode::Original,
             ewr_delay: 60,
             discord_map: DiscordMapCfg::default(),
+            debugging_online_red_players: 0,
+            debugging_online_blue_players: 0,
         }
     }
 }

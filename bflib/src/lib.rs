@@ -31,7 +31,7 @@ use crate::db::player::SlotAuth;
 use admin::{AdminCommand, AdminResult, run_admin_commands, theatre_slug};
 use anyhow::{anyhow, bail, Context as AnyhowContext, Result};
 use bfprotocols::{
-    cfg::{Cfg, LifeType, UnitTag},
+    cfg::{Cfg, LifeType, UnitTag, Vehicle},
     db::objective::ObjectiveId,
     fowl_miz_export::FowlMizExport,
     perf::{Perf, PerfInner},
@@ -94,7 +94,7 @@ struct PlayerInfo {
     ucid: Ucid,
 }
 
-fn discord_map_live_ctx(ctx: &Context) -> DiscordMapLiveCtx {
+fn online_side_counts(ctx: &Context) -> (u32, u32) {
     let mut online_red = 0u32;
     let mut online_blue = 0u32;
     for ifo in ctx.connected.info_by_player_id.values() {
@@ -107,11 +107,62 @@ fn discord_map_live_ctx(ctx: &Context) -> DiscordMapLiveCtx {
             _ => {}
         }
     }
+    (online_red, online_blue)
+}
+
+fn balancing_side_counts(ctx: &Context) -> (u32, u32) {
+    let (mut online_red, mut online_blue) = online_side_counts(ctx);
+    let cfg = &ctx.db.ephemeral.cfg;
+    online_red = online_red.saturating_add(cfg.debugging_online_red_players);
+    online_blue = online_blue.saturating_add(cfg.debugging_online_blue_players);
+    if cfg.debugging_online_red_players > 0 || cfg.debugging_online_blue_players > 0 {
+        debug!(
+            "balancing_point_gain debug headcount: red={online_red} blue={online_blue} \
+             (includes red+{} blue+{} fake)",
+            cfg.debugging_online_red_players, cfg.debugging_online_blue_players
+        );
+    }
+    (online_red, online_blue)
+}
+
+fn discord_map_live_ctx(ctx: &Context) -> DiscordMapLiveCtx {
+    let (online_red, online_blue) = online_side_counts(ctx);
     DiscordMapLiveCtx {
         generated_at: Utc::now(),
         shutdown_when: ctx.shutdown.map(|s| s.when),
         online_red,
         online_blue,
+    }
+}
+
+struct PeriodicSideAward {
+    amount: i32,
+    balancing: bool,
+}
+
+fn balanced_side_gain(own: u32, opp: u32, gain: i32) -> PeriodicSideAward {
+    if own == 0 || opp == 0 {
+        return PeriodicSideAward {
+            amount: 0,
+            balancing: false,
+        };
+    }
+    let scaled = (opp as i64 * gain as i64) / own as i64;
+    if scaled == 0 {
+        PeriodicSideAward {
+            amount: 0,
+            balancing: false,
+        }
+    } else if scaled < gain as i64 {
+        PeriodicSideAward {
+            amount: gain,
+            balancing: false,
+        }
+    } else {
+        PeriodicSideAward {
+            amount: scaled as i32,
+            balancing: true,
+        }
     }
 }
 
@@ -760,6 +811,36 @@ fn sync_airborne_voluntary_eject_fuel(ctx: &mut Context, lua: MizLua) {
             ctx.airborne_voluntary_eject.remove(&ucid);
         }
     }
+}
+
+fn is_aircraft_or_helicopter(db: &Db, typ: &Vehicle) -> bool {
+    match db.ephemeral.cfg.unit_classification.get(typ) {
+        Some(tags) => tags.contains(UnitTag::Aircraft) || tags.contains(UnitTag::Helicopter),
+        None => false,
+    }
+}
+
+fn eligible_for_airborne_periodic_award(ctx: &Context, lua: MizLua, ucid: &Ucid) -> bool {
+    let Some(player) = ctx.db.persisted.players.get(ucid) else {
+        return false;
+    };
+    let typ = player
+        .current_slot
+        .as_ref()
+        .and_then(|(_, inst)| inst.as_ref().map(|i| &i.typ))
+        .or_else(|| {
+            player
+                .current_slot
+                .as_ref()
+                .and_then(|(slot, _)| ctx.db.ephemeral.get_slot_info(slot).map(|s| &s.typ))
+        });
+    let Some(typ) = typ else {
+        return false;
+    };
+    if !is_aircraft_or_helicopter(&ctx.db, typ) {
+        return false;
+    }
+    player_unit_in_air(ctx, lua, ucid, None)
 }
 
 fn is_aircraft_slot(db: &Db, slot: &SlotId) -> bool {
@@ -1711,17 +1792,57 @@ fn update_jtac_contacts(ctx: &mut Context, lua: MizLua) {
     }
 }
 
-fn award_periodic_points(ctx: &mut Context, ts: DateTime<Utc>) {
-    if let Some(points) = ctx.db.ephemeral.cfg.points.as_ref() {
-        let (award, period) = points.periodic_point_gain;
-        if award != 0 && period > 0 {
-            let elapsed = (ts - ctx.last_periodic_points).num_seconds();
-            if elapsed >= period as i64 {
-                ctx.last_periodic_points = ts;
-                for ifo in ctx.connected.info_by_player_id.values() {
-                    ctx.db.adjust_points(&ifo.ucid, award, "periodic award")
-                }
+fn award_periodic_points(ctx: &mut Context, lua: MizLua, ts: DateTime<Utc>) {
+    let Some(points) = ctx.db.ephemeral.cfg.points.as_ref() else {
+        return;
+    };
+    let (gain, period) = points.periodic_point_gain;
+    if period == 0 {
+        return;
+    }
+    let elapsed = (ts - ctx.last_periodic_points).num_seconds();
+    if elapsed < period as i64 {
+        return;
+    }
+    ctx.last_periodic_points = ts;
+    let airborne_only = points.periodic_award_airborne;
+
+    if points.balancing_point_gain {
+        // Balanced periodic gain only; penalties and other debits are unchanged.
+        if gain <= 0 {
+            return;
+        }
+        let (online_red, online_blue) = balancing_side_counts(ctx);
+        let red_award = balanced_side_gain(online_red, online_blue, gain);
+        let blue_award = balanced_side_gain(online_blue, online_red, gain);
+        for ifo in ctx.connected.info_by_player_id.values() {
+            if airborne_only && !eligible_for_airborne_periodic_award(ctx, lua, &ifo.ucid) {
+                continue;
             }
+            let Some(player) = ctx.db.player(&ifo.ucid) else {
+                continue;
+            };
+            let award = match player.side {
+                Side::Red => &red_award,
+                Side::Blue => &blue_award,
+                _ => continue,
+            };
+            if award.amount == 0 {
+                continue;
+            }
+            let why = if award.balancing {
+                "periodic award (balancing)"
+            } else {
+                "periodic award"
+            };
+            ctx.db.adjust_points(&ifo.ucid, award.amount, why);
+        }
+    } else if gain != 0 {
+        for ifo in ctx.connected.info_by_player_id.values() {
+            if airborne_only && !eligible_for_airborne_periodic_award(ctx, lua, &ifo.ucid) {
+                continue;
+            }
+            ctx.db.adjust_points(&ifo.ucid, gain, "periodic award");
         }
     }
 }
@@ -1835,7 +1956,7 @@ fn run_slow_timed_events(
             ctx.do_bg_task(bg::Task::SaveState(path.clone(), snap));
         }
         record_perf(&mut perf.snapshot, now);
-        award_periodic_points(ctx, start_ts);
+        award_periodic_points(ctx, lua, start_ts);
         record_perf(&mut perf.slow_timed, start_ts);
     }
     Ok(AdminResult::Continue)
