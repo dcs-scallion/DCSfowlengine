@@ -13,6 +13,9 @@ pub const SETTINGS_DISCORD_MAP_SE: &str = "SETTINGS-discord-map-se";
 /// Mapbox Static Images API max `width` / `height` request parameter.
 pub const MAPBOX_STATIC_MAX_PX: u32 = 1280;
 
+/// Logical viewport pixels: suppress compositing near ME corner anchor zones.
+pub const DISCORD_MAP_ANCHOR_EXCLUDE_RADIUS_PX: f32 = 24.0;
+
 #[derive(Debug, Clone, Copy, PartialEq, Serialize)]
 pub struct MapViewport {
     /// `[lon_min, lat_min, lon_max, lat_max]`
@@ -132,6 +135,39 @@ impl MapViewport {
         (x * sx, y * sy)
     }
 
+    pub fn contains_ll(&self, lat: f64, lon: f64) -> bool {
+        lat <= self.lat_max() && lat >= self.lat_min()
+            && lon >= self.lon_min() && lon <= self.lon_max()
+    }
+
+    /// Skip ME viewport corner anchors and objectives outside the crop bbox (clip as corner artifacts).
+    pub fn excludes_discord_map_corner_anchor(
+        &self,
+        lat: f64,
+        lon: f64,
+        nw: LLPos,
+        se: LLPos,
+    ) -> bool {
+        if !self.contains_ll(lat, lon) {
+            return true;
+        }
+        let (mx, my) = self.ll_to_pixel(lat, lon);
+        let r = DISCORD_MAP_ANCHOR_EXCLUDE_RADIUS_PX;
+        if mx < r && my < r {
+            return true;
+        }
+        let w = self.width as f32;
+        let h = self.height as f32;
+        if mx > w - r && my > h - r {
+            return true;
+        }
+        let (nx, ny) = self.ll_to_pixel(nw.latitude, nw.longitude);
+        let (sx, sy) = self.ll_to_pixel(se.latitude, se.longitude);
+        let r2 = DISCORD_MAP_ANCHOR_EXCLUDE_RADIUS_PX * DISCORD_MAP_ANCHOR_EXCLUDE_RADIUS_PX;
+        (mx - nx).powi(2) + (my - ny).powi(2) < r2
+            || (mx - sx).powi(2) + (my - sy).powi(2) < r2
+    }
+
     pub fn mapbox_static_url(
         &self,
         style: &str,
@@ -207,6 +243,25 @@ mod test {
         let (x2, y2) = vp.ll_to_pixel_in(mid_lat, mid_lon, vp.width * 2, vp.height * 2);
         assert!((x2 - x * 2.0).abs() < 0.01);
         assert!((y2 - y * 2.0).abs() < 0.01);
+    }
+
+    #[test]
+    fn corner_anchor_and_outside_bbox_excluded() {
+        let nw = LLPos {
+            latitude: 45.5,
+            longitude: 37.8,
+            altitude: 0.,
+        };
+        let se = LLPos {
+            latitude: 41.4,
+            longitude: 45.1,
+            altitude: 0.,
+        };
+        let vp = viewport_from_corners(nw, se, 100).unwrap();
+        assert!(vp.excludes_discord_map_corner_anchor(nw.latitude, nw.longitude, nw, se));
+        assert!(vp.excludes_discord_map_corner_anchor(se.latitude, se.longitude, nw, se));
+        assert!(vp.excludes_discord_map_corner_anchor(46.0, 37.0, nw, se));
+        assert!(!vp.excludes_discord_map_corner_anchor(43.0, 41.0, nw, se));
     }
 
     #[test]

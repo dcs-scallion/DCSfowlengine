@@ -41,6 +41,35 @@ impl MapLabelFont {
         self.draw_color(base, x, y, text, font_px, [255, 255, 255, 255]);
     }
 
+    /// Width in pixels at `font_px` (same advances as [`Self::draw_color`]).
+    pub fn text_width(&self, text: &str, font_px: f32) -> f32 {
+        if text.is_empty() || font_px < 4.0 {
+            return 0.0;
+        }
+        let scale = PxScale::from(font_px);
+        let mut pen_x = 0.0f32;
+        for ch in text.chars() {
+            let font = self.font_for(ch);
+            let scaled = font.as_scaled(scale);
+            let advance = scaled.h_advance(font.glyph_id(ch)).max(font_px * 0.25);
+            pen_x += advance;
+        }
+        pen_x
+    }
+
+    /// Flat label (no halo), e.g. map corner brand.
+    pub fn draw_flat(
+        &self,
+        base: &mut RgbaImage,
+        x: i32,
+        y: i32,
+        text: &str,
+        font_px: f32,
+        color: [u8; 4],
+    ) {
+        self.draw_color(base, x, y, text, font_px, color);
+    }
+
     fn draw_color(
         &self,
         base: &mut RgbaImage,

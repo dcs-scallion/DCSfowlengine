@@ -6,6 +6,7 @@ use anyhow::{bail, Context, Result};
 use base64::{engine::general_purpose::STANDARD as B64, Engine as _};
 use bfprotocols::discord_map_icon_manifest::DiscordMapIconManifestRuntime;
 use bfprotocols::discord_map_viewport::MapViewport;
+use dcso3::coord::LLPos;
 use image::RgbaImage;
 use log::{info, warn};
 use once_cell::sync::Lazy;
@@ -16,6 +17,9 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use tokio::fs;
 
+const SIDEBAR_WIDTH_PX: u32 = 240;
+const SIDEBAR_RANK_COL_PX: u32 = 25;
+const LAYOUT_GAP_PX: u32 = 4;
 const STAT_BARS_GAP_PX: i32 = 3;
 const HEALTH_BAR_MAP_PX: f32 = 30.0;
 const THREAT_RING_SCALE: f32 = 1.35;
@@ -23,20 +27,49 @@ const THREAT_RING_PAD_PX: f32 = 4.0;
 const THREAT_RING_MIN_PX: u32 = 8;
 const LABEL_GAP_PX: i32 = 4;
 const LABEL_FONT_PX: i32 = 8;
+const MAP_CORNER_GUARD_LOGICAL: f32 = 40.0;
+const MAP_BRAND_ENGINE_VERSION: &str = env!("CARGO_PKG_VERSION");
+
+fn map_brand_version_major_minor() -> String {
+    let mut parts = MAP_BRAND_ENGINE_VERSION.split('.');
+    let major = parts.next().unwrap_or("0");
+    let minor = parts.next().unwrap_or("0");
+    format!("{major}.{minor}")
+}
+
+fn fowl_engine_brand_label() -> String {
+    format!("( Fowl engine {} )", map_brand_version_major_minor())
+}
 
 static MAP_LABEL_FONT: Lazy<MapLabelFont> = Lazy::new(MapLabelFont::embedded);
+static FOWL_HDR_ICON_B64: Lazy<String> = Lazy::new(|| {
+    B64.encode(include_bytes!(
+        "../../../assets/discord-objective-map/png/Fowl-icon-bw.png"
+    ))
+});
+const FOWL_HDR_ICON_W: u32 = 117;
+const FOWL_HDR_ICON_H: u32 = 93;
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DiscordMapPilotEntry {
+    pub name: String,
+    pub ping: u32,
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DiscordMapStatusBar {
     pub mission_name: String,
     pub status_utc: String,
-    pub theatre: String,
     pub mission_date: String,
     pub mission_tod_secs: u32,
+    pub mission_elapsed_days: u32,
     pub gen_utc_ms: i64,
     pub restart_utc_ms: Option<i64>,
     pub online_red: u32,
     pub online_blue: u32,
+    pub blue_pilots: Vec<DiscordMapPilotEntry>,
+    pub red_pilots: Vec<DiscordMapPilotEntry>,
+    pub spectators: Vec<DiscordMapPilotEntry>,
     pub ground_red: u32,
     pub ground_blue: u32,
     pub carrier_red: u32,
@@ -45,8 +78,20 @@ pub struct DiscordMapStatusBar {
     pub factories_blue: u32,
     pub production_red: Option<u8>,
     pub production_blue: Option<u8>,
+    pub balancing_blue: i32,
+    pub balancing_red: i32,
+    pub lives: String,
+    pub lives_reset: String,
+    pub deslot_penalty: String,
+    pub player_crates: String,
+    pub threatened: String,
+    pub bases_repair: String,
+    pub factory_repair: String,
     pub supply_to_bases: String,
     pub delivery_to_hubs: String,
+    pub dcs_bind_address: String,
+    pub dcs_port: String,
+    pub dcs_name: String,
 }
 
 #[derive(Debug, Clone)]
@@ -180,6 +225,8 @@ pub async fn publish_and_post(
     html_path: &Path,
     map_version_path: &Path,
     viewport: &MapViewport,
+    corner_nw: LLPos,
+    corner_se: LLPos,
     markers: &[DiscordMapMarker],
     front_line: &[DiscordMapFrontLinePolygon],
     icons: &DiscordMapIconPackJob,
@@ -191,6 +238,8 @@ pub async fn publish_and_post(
     let artifacts = build_map_artifacts(
         base_png_path,
         viewport,
+        corner_nw,
+        corner_se,
         markers,
         front_line,
         icons,
@@ -342,6 +391,8 @@ async fn save_webhook_message_id(path: &Path, message_id: &str) -> Result<()> {
 fn build_map_artifacts(
     base_png_path: &Path,
     viewport: &MapViewport,
+    corner_nw: LLPos,
+    corner_se: LLPos,
     markers: &[DiscordMapMarker],
     front_line: &[DiscordMapFrontLinePolygon],
     icons: &DiscordMapIconPackJob,
@@ -351,7 +402,8 @@ fn build_map_artifacts(
 ) -> Result<MapArtifacts> {
     let base_bytes = std::fs::read(base_png_path)
         .with_context(|| format!("read discord map base PNG {:?}", base_png_path))?;
-    let (png, layouts, img_w, img_h) = composite_map(&base_bytes, viewport, markers, icons)?;
+    let (png, layouts, img_w, img_h) =
+        composite_map(&base_bytes, viewport, corner_nw, corner_se, markers, icons)?;
     let html = build_interactive_html(
         mission_name,
         status_utc,
@@ -369,18 +421,29 @@ fn build_map_artifacts(
 fn composite_map(
     base_png: &[u8],
     viewport: &MapViewport,
+    corner_nw: LLPos,
+    corner_se: LLPos,
     markers: &[DiscordMapMarker],
     icons: &DiscordMapIconPackJob,
 ) -> Result<(Vec<u8>, Vec<MarkerLayout>, u32, u32)> {
     let mut base = image::load_from_memory(base_png)
         .context("decode base map PNG")?
         .to_rgba8();
+    let pristine = base.clone();
     let (bw, bh) = base.dimensions();
     let px_scale = bw as f32 / viewport.width as f32;
     let label_font_px = LABEL_FONT_PX as f32 * px_scale;
     let label_gap_px = (LABEL_GAP_PX as f32 * px_scale).round() as i32;
     let mut layouts = Vec::new();
     for marker in markers {
+        if viewport.excludes_discord_map_corner_anchor(
+            marker.lat,
+            marker.lon,
+            corner_nw,
+            corner_se,
+        ) {
+            continue;
+        }
         let Some(stem) = icons
             .manifest
             .png_stem_for(&marker.kind, &marker.icon_coalition)
@@ -400,6 +463,11 @@ fn composite_map(
             .to_rgba8();
         let (cx, cy) = viewport.ll_to_pixel_in(marker.lat, marker.lon, bw, bh);
         let (iw, ih) = icon.dimensions();
+        let ox = (cx - iw as f32 / 2.).round() as i32;
+        let oy = (cy - ih as f32 / 2.).round() as i32;
+        if composite_skip_corner_draw(cx, cy, ox, oy, iw, ih, marker.threatened, px_scale) {
+            continue;
+        }
         let threat_raster_px = threat_ring_diameter_px(iw, ih);
         if marker.threatened {
             draw_threat_ring(
@@ -409,8 +477,6 @@ fn composite_map(
                 threat_raster_px as f32 / 2.,
             );
         }
-        let ox = (cx - iw as f32 / 2.).round() as i32;
-        let oy = (cy - ih as f32 / 2.).round() as i32;
         overlay_icon_alpha(&mut base, &icon, ox, oy);
         if !marker.label.is_empty() {
             let label_x = ox + iw as i32 + label_gap_px;
@@ -431,11 +497,50 @@ fn composite_map(
             production: marker.production,
         });
     }
+    restore_map_nw_corner(&mut base, &pristine, px_scale);
     let mut out = Vec::new();
     image::DynamicImage::ImageRgba8(base)
         .write_to(&mut std::io::Cursor::new(&mut out), image::ImageFormat::Png)
         .context("encode composited PNG")?;
     Ok((out, layouts, bw, bh))
+}
+
+/// Skip marker raster when drawable bbox overlaps NW corner guard.
+fn composite_skip_corner_draw(
+    cx: f32,
+    cy: f32,
+    ox: i32,
+    oy: i32,
+    iw: u32,
+    ih: u32,
+    threatened: bool,
+    px_scale: f32,
+) -> bool {
+    let guard = MAP_CORNER_GUARD_LOGICAL * px_scale;
+    let mut left = ox as f32;
+    let mut top = oy as f32;
+    if threatened {
+        let r = threat_ring_diameter_px(iw, ih) as f32 / 2.;
+        left = left.min(cx - r);
+        top = top.min(cy - r);
+    }
+    // Label halo can extend 1px up/left from the label box; icon is left of label.
+    left -= 1.0;
+    top -= 1.0;
+    left < guard && top < guard
+}
+
+/// Restore NW corner from pristine Mapbox base (removes any compositing artifact).
+fn restore_map_nw_corner(base: &mut RgbaImage, pristine: &RgbaImage, px_scale: f32) {
+    let guard = (MAP_CORNER_GUARD_LOGICAL * px_scale).ceil() as u32;
+    let (bw, bh) = base.dimensions();
+    let w = guard.min(bw);
+    let h = guard.min(bh);
+    for y in 0..h {
+        for x in 0..w {
+            base.put_pixel(x, y, *pristine.get_pixel(x, y));
+        }
+    }
 }
 
 fn tooltip_rows_html(kind: &str, health: u8, logi: u8, production: u8) -> String {
@@ -548,8 +653,103 @@ fn status_production_html(blue: Option<u8>, red: Option<u8>) -> String {
     )
 }
 
-fn status_bar_html(bar: &DiscordMapStatusBar) -> String {
-    let clock_json = serde_json::to_string(bar).unwrap_or_else(|_| "{}".into());
+fn status_balancing_html(blue: i32, red: i32) -> String {
+    format!(
+        r#"<span class="stat-blue">{blue}</span> vs <span class="stat-red">{red}</span>"#
+    )
+}
+
+fn ping_class(ping: u32) -> &'static str {
+    match ping {
+        0..=70 => "ping-green",
+        71..=130 => "ping-yellow",
+        131..=200 => "ping-orange",
+        _ => "ping-red",
+    }
+}
+
+fn pilot_list_rows(pilots: &[DiscordMapPilotEntry]) -> String {
+    let mut rows = String::new();
+    for p in pilots {
+        let cls = ping_class(p.ping);
+        rows.push_str(&format!(
+            r#"<div class="pilot-row"><span class="rank-col" aria-hidden="true"></span><span class="pilot-name">{name}</span><span class="pilot-ping {cls}">{ping}</span></div>"#,
+            name = html_escape(&p.name),
+            cls = cls,
+            ping = p.ping,
+        ));
+    }
+    rows
+}
+
+fn pilot_section(
+    title: &str,
+    header_class: &str,
+    block_class: &str,
+    pilots: &[DiscordMapPilotEntry],
+    title_bold: bool,
+) -> String {
+    let title_class = if title_bold {
+        "pilot-hdr-title pilot-hdr-title-bold"
+    } else {
+        "pilot-hdr-title"
+    };
+    format!(
+        r#"<div class="pilot-block {block_class}"><div class="pilot-hdr-row {header_class}"><span class="rank-col" aria-hidden="true"></span><span class="{title_class}">{title}</span><span class="pilot-hdr-ping">ping</span></div><div class="pilot-list">{rows}</div></div>"#,
+        title = title,
+        header_class = header_class,
+        block_class = block_class,
+        title_class = title_class,
+        rows = pilot_list_rows(pilots),
+    )
+}
+
+fn sidebar_online_stat_html(bar: &DiscordMapStatusBar) -> String {
+    format!(
+        r#"<div class="stat sidebar-online-stat"><div class="stat-h">Online pilots</div><div class="stat-v">{online}</div></div>"#,
+        online = status_vs_html(bar.online_blue, bar.online_red),
+    )
+}
+
+fn sidebar_pilots_html(bar: &DiscordMapStatusBar) -> String {
+    format!(
+        r#"<div class="sidebar-pilots">
+{pilots_blue}
+{pilots_red}
+{pilots_spec}
+</div>"#,
+        pilots_blue = pilot_section(
+            "BLUE pilots",
+            "pilot-hdr-blue",
+            "pilot-block-blue",
+            &bar.blue_pilots,
+            true,
+        ),
+        pilots_red = pilot_section(
+            "RED pilots",
+            "pilot-hdr-red",
+            "pilot-block-red",
+            &bar.red_pilots,
+            true,
+        ),
+        pilots_spec = pilot_section(
+            "SPECTATORS",
+            "pilot-hdr-neutral",
+            "pilot-block-neutral",
+            &bar.spectators,
+            false,
+        ),
+    )
+}
+
+fn sidebar_pilots_col_html(bar: &DiscordMapStatusBar) -> String {
+    format!(
+        r#"<div class="left-col">{pilots}</div>"#,
+        pilots = sidebar_pilots_html(bar),
+    )
+}
+
+fn stats_row_html(bar: &DiscordMapStatusBar, top: bool) -> String {
     let restart_initial = bar
         .restart_utc_ms
         .map(|ms| {
@@ -562,39 +762,96 @@ fn status_bar_html(bar: &DiscordMapStatusBar) -> String {
         .unwrap_or_else(|| "—".into());
     let mission_h = bar.mission_tod_secs / 3600;
     let mission_m = (bar.mission_tod_secs % 3600) / 60;
-    let mission_time_initial = format!("{mission_h}:{mission_m:02}");
-    format!(
-        r#"<div class="map-hdr">
-<div>{mission_name}</div>
-<div>Objectives status as of {status_utc} UTC</div>
-</div>
-<div class="stats">
-  <div class="stat"><div class="stat-h">Theatre</div><div class="stat-v stat-plain">{theatre}</div></div>
-  <div class="stat"><div class="stat-h">Date in mission</div><div class="stat-v stat-plain" id="mission-date">{mission_date}</div></div>
-  <div class="stat"><div class="stat-h">Time</div><div class="stat-v stat-plain" id="mission-time">{mission_time_initial}</div></div>
+    let mission_datetime_initial = format!(
+        "{date} {h}:{m:02}",
+        date = bar.mission_date,
+        h = mission_h,
+        m = mission_m,
+    );
+    let mission_day_initial = bar.mission_elapsed_days + 1;
+    if top {
+        format!(
+            r#"<div class="stats stats-top">
+  <div class="stat"><div class="stat-h">Date and time in mission</div><div class="stat-v stat-plain" id="mission-datetime">{mission_datetime_initial}</div></div>
+  <div class="stat"><div class="stat-h">Duration</div><div class="stat-v stat-accent" id="mission-duration">Day {mission_day_initial}</div></div>
   <div class="stat"><div class="stat-h">Time to restart</div><div class="stat-v stat-accent" id="restart-time">{restart_initial}</div></div>
-  <div class="stat"><div class="stat-h">Online pilots</div><div class="stat-v">{online}</div></div>
   <div class="stat"><div class="stat-h">Ground objectives</div><div class="stat-v">{ground}</div></div>
   <div class="stat"><div class="stat-h">Carrier objectives</div><div class="stat-v">{carrier}</div></div>
   <div class="stat"><div class="stat-h">Factories</div><div class="stat-v">{factories}</div></div>
   <div class="stat"><div class="stat-h">Production %</div><div class="stat-v">{production}</div></div>
-  <div class="stat"><div class="stat-h">Supply to bases</div><div class="stat-v stat-accent">{supply_to_bases}</div></div>
-  <div class="stat"><div class="stat-h">Delivery to HUBs</div><div class="stat-v stat-accent">{delivery_to_hubs}</div></div>
-</div>
-<script type="application/json" id="fowl-map-clock">{clock_json}</script>"#,
-        mission_name = html_escape(&bar.mission_name),
+  <div class="stat"><div class="stat-h">Balancing points</div><div class="stat-v">{balancing}</div></div>
+  <div class="stat"><div class="stat-h">Online hours</div><div class="stat-v stat-plain">{online_hours}</div></div>
+</div>"#,
+            mission_datetime_initial = mission_datetime_initial,
+            mission_day_initial = mission_day_initial,
+            restart_initial = restart_initial,
+            ground = status_vs_html(bar.ground_blue, bar.ground_red),
+            carrier = status_vs_html(bar.carrier_blue, bar.carrier_red),
+            factories = status_vs_html(bar.factories_blue, bar.factories_red),
+            production = status_production_html(bar.production_blue, bar.production_red),
+            balancing = status_balancing_html(bar.balancing_blue, bar.balancing_red),
+            online_hours = r#"<span class="stat-blue">?</span> vs <span class="stat-red">?</span>"#,
+        )
+    } else {
+        format!(
+            r#"<div class="stats stats-bottom">
+  <div class="stat"><div class="stat-h">Lives</div><div class="stat-v stat-accent">{lives}</div></div>
+  <div class="stat"><div class="stat-h">Lives reset</div><div class="stat-v stat-accent">{lives_reset}</div></div>
+  <div class="stat"><div class="stat-h">Air-deslot penalty</div><div class="stat-v stat-accent">{deslot}</div></div>
+  <div class="stat"><div class="stat-h">Player crates</div><div class="stat-v stat-accent">{crates}</div></div>
+  <div class="stat"><div class="stat-h">Threatened</div><div class="stat-v stat-accent">{threatened}</div></div>
+  <div class="stat"><div class="stat-h">Bases repair</div><div class="stat-v stat-accent">{bases_repair}</div></div>
+  <div class="stat"><div class="stat-h">Factory repair</div><div class="stat-v stat-accent">{factory_repair}</div></div>
+  <div class="stat"><div class="stat-h">Supply to bases</div><div class="stat-v stat-accent">{supply}</div></div>
+  <div class="stat"><div class="stat-h">Delivery to HUBs</div><div class="stat-v stat-accent">{delivery}</div></div>
+</div>"#,
+            lives = html_escape(&bar.lives),
+            lives_reset = html_escape(&bar.lives_reset),
+            deslot = html_escape(&bar.deslot_penalty),
+            crates = html_escape(&bar.player_crates),
+            threatened = html_escape(&bar.threatened),
+            bases_repair = html_escape(&bar.bases_repair),
+            factory_repair = html_escape(&bar.factory_repair),
+            supply = html_escape(&bar.supply_to_bases),
+            delivery = html_escape(&bar.delivery_to_hubs),
+        )
+    }
+}
+
+fn map_header_html(bar: &DiscordMapStatusBar) -> String {
+    format!(
+        r#"<div class="map-hdr"><div class="map-hdr-left">{left}</div><div class="map-hdr-right">Campaign status as of {status_utc} UTC</div></div>"#,
+        left = map_header_left_html(bar),
         status_utc = html_escape(&bar.status_utc),
-        theatre = html_escape(&bar.theatre),
-        mission_date = html_escape(&bar.mission_date),
-        mission_time_initial = mission_time_initial,
-        online = status_vs_html(bar.online_blue, bar.online_red),
-        ground = status_vs_html(bar.ground_blue, bar.ground_red),
-        carrier = status_vs_html(bar.carrier_blue, bar.carrier_red),
-        factories = status_vs_html(bar.factories_blue, bar.factories_red),
-        production = status_production_html(bar.production_blue, bar.production_red),
-        restart_initial = restart_initial,
-        supply_to_bases = html_escape(&bar.supply_to_bases),
-        delivery_to_hubs = html_escape(&bar.delivery_to_hubs),
+    )
+}
+
+fn dcs_bind_display(bind: &str) -> &str {
+    if bind.is_empty() {
+        "    .    .    .    .    "
+    } else {
+        bind
+    }
+}
+
+fn map_header_left_html(bar: &DiscordMapStatusBar) -> String {
+    format!(
+        r#"<img class="map-hdr-icon" src="data:image/png;base64,{icon}" width="{icon_w}" height="{icon_h}" alt="" aria-hidden="true"><span class="map-hdr-text"><span class="map-hdr-part">DCS server IP {bind}:{port}</span><span class="map-hdr-part map-hdr-name">{name}</span><span class="map-hdr-part">{mission}</span><span class="map-hdr-part">{engine}</span></span>"#,
+        icon = FOWL_HDR_ICON_B64.as_str(),
+        icon_w = FOWL_HDR_ICON_W,
+        icon_h = FOWL_HDR_ICON_H,
+        bind = html_escape(dcs_bind_display(&bar.dcs_bind_address)),
+        port = html_escape(&bar.dcs_port),
+        name = html_escape(&bar.dcs_name),
+        mission = html_escape(&bar.mission_name),
+        engine = html_escape(&fowl_engine_brand_label()),
+    )
+}
+
+fn map_clock_script_html(bar: &DiscordMapStatusBar) -> String {
+    let clock_json = serde_json::to_string(bar).unwrap_or_else(|_| "{}".into());
+    format!(
+        r#"<script type="application/json" id="fowl-map-clock">{clock_json}</script>"#,
         clock_json = clock_json.replace("</", "<\\/"),
     )
 }
@@ -630,7 +887,13 @@ fn build_interactive_html(
         ));
     }
     let base_b64 = B64.encode(display_png);
-    let stats_html = status_bar_html(status_bar);
+    let panel_w = SIDEBAR_WIDTH_PX + LAYOUT_GAP_PX + img_w;
+    let map_header = map_header_html(status_bar);
+    let online_stat = sidebar_online_stat_html(status_bar);
+    let stats_top = stats_row_html(status_bar, true);
+    let sidebar_pilots_col = sidebar_pilots_col_html(status_bar);
+    let map_clock = map_clock_script_html(status_bar);
+    let stats_bottom = stats_row_html(status_bar, false);
     format!(
         r#"<!DOCTYPE html>
 <html lang="en"><head>
@@ -638,22 +901,55 @@ fn build_interactive_html(
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <meta name="fowl-map-version" content="{status_utc}">
 <title>{mn} — objective map</title>
-<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Roboto:wght@400;700&display=swap">
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Roboto+Condensed:wght@400;700&display=swap">
 <style>
-body{{margin:0;background:#000;color:#686a6e;font-family:Roboto,sans-serif;font-size:16px}}
-.map-panel{{display:block;width:min({img_w}px,100%);box-sizing:border-box}}
-.map-hdr{{width:100%;padding:0 0 8px 0;line-height:1.35;color:#686a6e;font-size:clamp(10px,calc(100vw*16/{img_w}),16px)}}
-.stats{{display:flex;flex-wrap:nowrap;gap:4px;width:100%;margin-bottom:4px;box-sizing:border-box;font-size:clamp(8px,calc(100vw*16/{img_w}),16px)}}
-.stat{{flex:1 1 0;min-width:0;border:1px solid #2e3138;box-sizing:border-box;display:flex;flex-direction:column}}
-.stat-h{{background:#15161a;color:#686a6e;line-height:1.2;padding:5px 2px;text-align:center;white-space:normal;word-break:break-word;overflow:hidden;border-bottom:1px solid #2e3138}}
-.stat-v{{background:#000;color:#686a6e;line-height:1.3;padding:6px 4px;text-align:center;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;flex:1}}
+body{{margin:0;background:#000;color:#686a6e;font-family:"Roboto Condensed",Roboto,sans-serif;font-size:16px;overflow-x:auto}}
+.map-panel{{display:flex;flex-direction:column;gap:{layout_gap}px;width:{panel_w}px;min-width:{panel_w}px;box-sizing:border-box}}
+.map-hdr{{display:flex;justify-content:space-between;align-items:center;gap:8px;width:100%;min-height:{icon_h}px;padding:0;line-height:1;color:#686a6e;font-size:clamp(15px,calc(100vw*24/{panel_w}),24px)}}
+.map-hdr-left{{display:flex;flex-direction:row;align-items:center;gap:0;text-align:left;flex:1 1 auto;min-width:0;overflow:hidden;align-self:stretch}}
+.map-hdr-icon{{flex:0 0 auto;display:block;width:{icon_w}px;height:{icon_h}px;image-rendering:pixelated;align-self:center}}
+.map-hdr-text{{display:flex;flex-direction:row;flex-wrap:nowrap;align-items:center;align-self:stretch;gap:1.5em;margin-left:1.5em;overflow:hidden;min-width:0;padding-top:15px}}
+.map-hdr-part{{white-space:nowrap;overflow:hidden;text-overflow:ellipsis;min-width:0;flex:0 1 auto}}
+.map-hdr-name{{font-weight:700}}
+.map-hdr-right{{display:flex;align-items:center;align-self:stretch;text-align:right;flex:0 1 auto;white-space:nowrap;padding-top:15px}}
+.map-body{{display:flex;flex-direction:column;gap:{layout_gap}px;width:100%}}
+.map-body-top{{display:flex;flex-direction:row;align-items:stretch;gap:{layout_gap}px;width:100%;box-sizing:border-box}}
+.map-body-bottom{{display:flex;flex-direction:row;align-items:flex-start;gap:{layout_gap}px;width:100%;box-sizing:border-box}}
+.left-col{{flex:0 0 {sidebar_w}px;width:{sidebar_w}px;min-width:{sidebar_w}px;box-sizing:border-box}}
+.main-col{{display:flex;flex-direction:column;gap:{layout_gap}px;flex:0 0 {img_w}px;width:{img_w}px;min-width:{img_w}px;box-sizing:border-box}}
+.stats{{display:flex;flex-wrap:nowrap;gap:4px;width:100%;box-sizing:border-box;font-size:clamp(8px,calc(100vw*16/{img_w}),16px)}}
+.stats-top{{flex:1 1 0;min-width:0}}
+.stat{{flex:1 1 0;min-width:0;border:1px solid #2e3138;box-sizing:border-box;display:flex;flex-direction:column;min-height:0}}
+.sidebar-online-stat{{flex:0 0 {sidebar_w}px;width:{sidebar_w}px;min-width:{sidebar_w}px;min-height:0;font-size:clamp(8px,calc(100vw*16/{img_w}),16px)}}
+.stat-h{{background:#15161a;color:#686a6e;line-height:1.2;padding:5px 2px;text-align:center;white-space:normal;word-break:break-word;overflow:hidden;border-bottom:1px solid #2e3138;font-weight:400;flex:0 0 auto}}
+.stat-v{{background:#000;color:#686a6e;line-height:1.3;padding:6px 4px;text-align:center;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;flex:1 1 auto;min-height:0;font-weight:700}}
 .stat-plain{{color:#686a6e}}
 .stat-red{{color:#C43838}}
-.stat-blue{{color:#6eb5ff}}
+.stat-blue{{color:#2E5AAC}}
 .stat-accent{{color:#e8c547}}
+.sidebar-pilots{{display:flex;flex-direction:column;gap:{layout_gap}px;box-sizing:border-box;font-size:clamp(8px,calc(100vw*14/{img_w}),14px)}}
+.pilot-block{{box-sizing:border-box;border:1px solid #2e3138}}
+.pilot-block-blue{{border-color:#2E5AAC}}
+.pilot-block-red{{border-color:#C43838}}
+.pilot-block-neutral{{border-color:#2e3138}}
+.pilot-hdr-row{{display:flex;flex-direction:row;flex-wrap:nowrap;align-items:center;width:100%;box-sizing:border-box;color:#fff;line-height:1.2;white-space:nowrap}}
+.pilot-hdr-blue{{background:rgba(46,90,172,.9)}}
+.pilot-hdr-red{{background:rgba(196,56,56,.9)}}
+.pilot-hdr-neutral{{background:rgba(46,49,56,.9)}}
+.pilot-hdr-row .rank-col,.pilot-row .rank-col{{flex:0 0 {rank_col}px;width:{rank_col}px;min-width:{rank_col}px}}
+.pilot-hdr-title{{flex:1 1 auto;min-width:0;text-align:left;padding:5px 4px;font-weight:400;overflow:hidden;text-overflow:ellipsis}}
+.pilot-hdr-title-bold{{font-weight:700}}
+.pilot-hdr-ping{{flex:0 0 36px;width:36px;text-align:right;padding:5px 4px;font-weight:400}}
+.pilot-row{{display:flex;flex-direction:row;flex-wrap:nowrap;align-items:center;width:100%;box-sizing:border-box;line-height:1.3}}
+.pilot-row .pilot-name{{flex:1 1 auto;min-width:0;padding:3px 4px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}}
+.pilot-row .pilot-ping{{flex:0 0 36px;width:36px;padding:3px 4px;text-align:right}}
+.ping-green{{color:#3d9e5a}}
+.ping-yellow{{color:#e8c547}}
+.ping-orange{{color:#e07a2a}}
+.ping-red{{color:#C43838}}
 .map-frame{{border:1px solid #2e3138;box-sizing:border-box;display:block;line-height:0;width:100%}}
 #wrap{{position:relative;display:block;line-height:0;width:100%}}
-#base{{display:block;width:100%;height:auto}}
+#base{{display:block;width:{img_w}px;height:auto}}
 .front-line{{position:absolute;left:0;top:0;width:100%;height:100%;pointer-events:none;z-index:0}}
 #overlay{{position:absolute;left:0;top:0;width:100%;height:100%;pointer-events:none;z-index:1}}
 .m{{position:absolute;pointer-events:auto}}
@@ -686,7 +982,7 @@ body{{margin:0;background:#000;color:#686a6e;font-family:Roboto,sans-serif;font-
 .tip-neutral{{border-color:#2e3138}}
 .tip-neutral .tip-title{{background:rgba(46,49,56,.9)}}
 </style></head><body>
-<div class="map-panel">{stats_html}<div class="map-frame"><div id="wrap" data-rw="{img_w}" data-rh="{img_h}" data-health-bar-px="{health_bar_map_px}"><img id="base" src="data:image/png;base64,{base_b64}" width="{img_w}" height="{img_h}" alt="map">{front_svg}<div id="overlay">{body}</div></div></div></div>
+<div class="map-panel">{map_header}<div class="map-body"><div class="map-body-top">{online_stat}{stats_top}</div><div class="map-body-bottom">{sidebar_pilots_col}<div class="main-col">{map_clock}<div class="map-frame"><div id="wrap" data-rw="{img_w}" data-rh="{img_h}" data-health-bar-px="{health_bar_map_px}"><img id="base" src="data:image/png;base64,{base_b64}" width="{img_w}" height="{img_h}" alt="map">{front_svg}<div id="overlay">{body}</div></div></div>{stats_bottom}</div></div></div></div>
 <script>
 (function(){{
   var wrap=document.getElementById('wrap');
@@ -774,8 +1070,8 @@ body{{margin:0;background:#000;color:#686a6e;font-family:Roboto,sans-serif;font-
   if(!el){{return;}}
   var anchor;
   try{{anchor=JSON.parse(el.textContent||'{{}}');}}catch(e){{return;}}
-  var timeEl=document.getElementById('mission-time');
-  var dateEl=document.getElementById('mission-date');
+  var datetimeEl=document.getElementById('mission-datetime');
+  var durationEl=document.getElementById('mission-duration');
   var restartEl=document.getElementById('restart-time');
   function pad2(n){{return n<10?'0'+n:''+n;}}
   function tick(){{
@@ -784,17 +1080,22 @@ body{{margin:0;background:#000;color:#686a6e;font-family:Roboto,sans-serif;font-
     var total=((anchor.mission_tod_secs||0)+elapsed);
     var days=Math.floor(total/86400);
     var tod=Math.floor(total%86400);
-    if(timeEl){{
-      var h=Math.floor(tod/3600);
-      var m=Math.floor((tod%3600)/60);
-      timeEl.textContent=h+':'+pad2(m);
-    }}
-    if(dateEl&&anchor.mission_date){{
+    var h=Math.floor(tod/3600);
+    var m=Math.floor((tod%3600)/60);
+    var dateStr='';
+    if(anchor.mission_date){{
       var p=anchor.mission_date.split('-');
       if(p.length===3){{
         var d=new Date(Date.UTC(+p[0],+p[1]-1,+p[2]+days));
-        dateEl.textContent=d.getUTCFullYear()+'-'+pad2(d.getUTCMonth()+1)+'-'+pad2(d.getUTCDate());
+        dateStr=d.getUTCFullYear()+'-'+pad2(d.getUTCMonth()+1)+'-'+pad2(d.getUTCDate());
       }}
+    }}
+    if(datetimeEl){{
+      datetimeEl.textContent=(dateStr?dateStr+' ':'')+h+':'+pad2(m);
+    }}
+    if(durationEl){{
+      var dayNum=(anchor.mission_elapsed_days||0)+days+1;
+      durationEl.textContent='Day '+dayNum;
     }}
     if(restartEl&&anchor.restart_utc_ms){{
       var rem=Math.max(0,Math.floor((anchor.restart_utc_ms-now)/1000));
@@ -825,10 +1126,21 @@ body{{margin:0;background:#000;color:#686a6e;font-family:Roboto,sans-serif;font-
         mn = html_escape(mission_name),
         status_utc = html_escape(status_utc),
         base_b64 = base_b64,
+        panel_w = panel_w,
+        icon_w = FOWL_HDR_ICON_W,
+        icon_h = FOWL_HDR_ICON_H,
         img_w = img_w,
         img_h = img_h,
         body = body,
-        stats_html = stats_html,
+        online_stat = online_stat,
+        stats_top = stats_top,
+        sidebar_pilots_col = sidebar_pilots_col,
+        map_clock = map_clock,
+        map_header = map_header,
+        stats_bottom = stats_bottom,
+        layout_gap = LAYOUT_GAP_PX,
+        sidebar_w = SIDEBAR_WIDTH_PX,
+        rank_col = SIDEBAR_RANK_COL_PX,
         stat_bars_gap = STAT_BARS_GAP_PX,
         health_bar_map_px = HEALTH_BAR_MAP_PX,
     )

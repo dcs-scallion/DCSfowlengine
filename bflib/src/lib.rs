@@ -43,7 +43,7 @@ use chrono::{prelude::*, Duration};
 use compact_str::{format_compact, CompactString};
 use crossbeam::queue::SegQueue;
 use db::{
-    discord_map::DiscordMapLiveCtx,
+    discord_map::{DiscordMapLiveCtx, DiscordMapPilot},
     group::BirthRes,
     player::{RegErr, TakeoffRes},
     Db,
@@ -94,53 +94,14 @@ struct PlayerInfo {
     ucid: Ucid,
 }
 
-fn online_side_counts(ctx: &Context) -> (u32, u32) {
-    let mut online_red = 0u32;
-    let mut online_blue = 0u32;
-    for ifo in ctx.connected.info_by_player_id.values() {
-        let Some(player) = ctx.db.player(&ifo.ucid) else {
-            continue;
-        };
-        match player.side {
-            Side::Red => online_red += 1,
-            Side::Blue => online_blue += 1,
-            _ => {}
-        }
-    }
-    (online_red, online_blue)
+/// Periodic award per player on one coalition (mirrors payout logic).
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct PeriodicSideAward {
+    pub amount: i32,
+    pub balancing: bool,
 }
 
-fn balancing_side_counts(ctx: &Context) -> (u32, u32) {
-    let (mut online_red, mut online_blue) = online_side_counts(ctx);
-    let cfg = &ctx.db.ephemeral.cfg;
-    online_red = online_red.saturating_add(cfg.debugging_online_red_players);
-    online_blue = online_blue.saturating_add(cfg.debugging_online_blue_players);
-    if cfg.debugging_online_red_players > 0 || cfg.debugging_online_blue_players > 0 {
-        debug!(
-            "balancing_point_gain debug headcount: red={online_red} blue={online_blue} \
-             (includes red+{} blue+{} fake)",
-            cfg.debugging_online_red_players, cfg.debugging_online_blue_players
-        );
-    }
-    (online_red, online_blue)
-}
-
-fn discord_map_live_ctx(ctx: &Context) -> DiscordMapLiveCtx {
-    let (online_red, online_blue) = online_side_counts(ctx);
-    DiscordMapLiveCtx {
-        generated_at: Utc::now(),
-        shutdown_when: ctx.shutdown.map(|s| s.when),
-        online_red,
-        online_blue,
-    }
-}
-
-struct PeriodicSideAward {
-    amount: i32,
-    balancing: bool,
-}
-
-fn balanced_side_gain(own: u32, opp: u32, gain: i32) -> PeriodicSideAward {
+pub(crate) fn balanced_side_gain(own: u32, opp: u32, gain: i32) -> PeriodicSideAward {
     if own == 0 || opp == 0 {
         return PeriodicSideAward {
             amount: 0,
@@ -148,12 +109,7 @@ fn balanced_side_gain(own: u32, opp: u32, gain: i32) -> PeriodicSideAward {
         };
     }
     let scaled = (opp as i64 * gain as i64) / own as i64;
-    if scaled == 0 {
-        PeriodicSideAward {
-            amount: 0,
-            balancing: false,
-        }
-    } else if scaled < gain as i64 {
+    if scaled < gain as i64 {
         PeriodicSideAward {
             amount: gain,
             balancing: false,
@@ -164,6 +120,97 @@ fn balanced_side_gain(own: u32, opp: u32, gain: i32) -> PeriodicSideAward {
             balancing: true,
         }
     }
+}
+
+fn dcs_coalition_side_counts(lua: MizLua, ctx: &Context) -> Result<(u32, u32)> {
+    let net = Net::singleton(lua)?;
+    let mut online_red = 0u32;
+    let mut online_blue = 0u32;
+    for (&id, _) in &ctx.connected.info_by_player_id {
+        let Ok(ifo) = net.get_player_info(id) else {
+            continue;
+        };
+        let Ok(side) = ifo.side() else {
+            continue;
+        };
+        match side {
+            Side::Red => online_red += 1,
+            Side::Blue => online_blue += 1,
+            _ => {}
+        }
+    }
+    let cfg = &ctx.db.ephemeral.cfg;
+    online_red = online_red.saturating_add(cfg.debugging_online_red_players);
+    online_blue = online_blue.saturating_add(cfg.debugging_online_blue_players);
+    if cfg.debugging_online_red_players > 0 || cfg.debugging_online_blue_players > 0 {
+        debug!(
+            "balancing_point_gain debug headcount: red={online_red} blue={online_blue} \
+             (includes red+{} blue+{} fake)",
+            cfg.debugging_online_red_players, cfg.debugging_online_blue_players
+        );
+    }
+    Ok((online_red, online_blue))
+}
+
+fn balancing_side_counts(lua: MizLua, ctx: &Context) -> Result<(u32, u32)> {
+    dcs_coalition_side_counts(lua, ctx)
+}
+
+fn discord_map_live_ctx(lua: MizLua, ctx: &Context) -> Result<DiscordMapLiveCtx> {
+    let (online_red, online_blue) = dcs_coalition_side_counts(lua, ctx)?;
+    let pilots = collect_discord_map_pilots(lua, ctx)?;
+    Ok(DiscordMapLiveCtx {
+        generated_at: Utc::now(),
+        shutdown_when: ctx.shutdown.map(|s| s.when),
+        online_red,
+        online_blue,
+        blue_pilots: pilots.blue,
+        red_pilots: pilots.red,
+        spectators: pilots.spectators,
+    })
+}
+
+#[derive(Debug, Default)]
+struct DiscordMapPilotLists {
+    blue: Vec<DiscordMapPilot>,
+    red: Vec<DiscordMapPilot>,
+    spectators: Vec<DiscordMapPilot>,
+}
+
+fn collect_discord_map_pilots(lua: MizLua, ctx: &Context) -> Result<DiscordMapPilotLists> {
+    let net = Net::singleton(lua)?;
+    let mut blue = Vec::new();
+    let mut red = Vec::new();
+    let mut spectators = Vec::new();
+    for (&id, connected) in &ctx.connected.info_by_player_id {
+        let Ok(ifo) = net.get_player_info(id) else {
+            continue;
+        };
+        let ping = ifo.ping().unwrap_or(0.).round().max(0.) as u32;
+        let side = ifo.side().unwrap_or(Side::Neutral);
+        let entry = DiscordMapPilot {
+            name: connected.name.to_string(),
+            ping,
+        };
+        match side {
+            Side::Blue => blue.push(entry),
+            Side::Red => red.push(entry),
+            _ => spectators.push(entry),
+        }
+    }
+    let by_name = |a: &DiscordMapPilot, b: &DiscordMapPilot| {
+        a.name
+            .to_ascii_lowercase()
+            .cmp(&b.name.to_ascii_lowercase())
+    };
+    blue.sort_by(by_name);
+    red.sort_by(by_name);
+    spectators.sort_by(by_name);
+    Ok(DiscordMapPilotLists {
+        blue,
+        red,
+        spectators,
+    })
 }
 
 #[derive(Debug, Default)]
@@ -1812,7 +1859,7 @@ fn award_periodic_points(ctx: &mut Context, lua: MizLua, ts: DateTime<Utc>) {
         if gain <= 0 {
             return;
         }
-        let (online_red, online_blue) = balancing_side_counts(ctx);
+        let (online_red, online_blue) = balancing_side_counts(lua, ctx).unwrap_or((0, 0));
         let red_award = balanced_side_gain(online_red, online_blue, gain);
         let blue_award = balanced_side_gain(online_blue, online_red, gain);
         for ifo in ctx.connected.info_by_player_id.values() {
@@ -1863,11 +1910,16 @@ fn run_slow_timed_events(
             Ok(AdminResult::Shutdown) => return Ok(AdminResult::Shutdown),
             Err(e) => error!("failed to check for auto shutdown {e:?}"),
         }
-        if let Err(e) =
-            ctx.db
-                .discord_map_tick(lua, ts, ctx.connected.len() > 0, &discord_map_live_ctx(ctx))
-        {
-            error!("discord map post failed: {e:#}");
+        match discord_map_live_ctx(lua, ctx) {
+            Ok(live) => {
+                if let Err(e) =
+                    ctx.db
+                        .discord_map_tick(lua, ts, ctx.connected.len() > 0, &live)
+                {
+                    error!("discord map post failed: {e:#}");
+                }
+            }
+            Err(e) => error!("discord map live ctx failed: {e:#}"),
         }
         for (oid, vh) in ctx.db.ephemeral.warehouses_to_sync() {
             if let Err(e) = ctx.db.sync_vehicle_at_obj(lua, oid, vh.clone()) {
@@ -2220,7 +2272,7 @@ fn delayed_init_miz(lua: MizLua) -> Result<()> {
     ctx.respawn_groups(lua, &miz).context("setting up the mission after load")?;
     if ctx.db.ephemeral.cfg.discord_map.enabled {
         ctx.db
-            .bootstrap_discord_map(lua, &discord_map_live_ctx(ctx))
+            .bootstrap_discord_map(lua, &discord_map_live_ctx(lua, ctx)?)
             .context("discord map bootstrap")?;
         ctx.db
             .schedule_discord_map_periodic(Utc::now(), ctx.connected.len() > 0);

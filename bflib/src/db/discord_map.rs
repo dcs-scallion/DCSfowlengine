@@ -1,11 +1,12 @@
 //! Discord objective map: ME viewport zones, icon pack from the mission `.miz` in `Missions/`, Mapbox cache, Discord posts.
 
 use super::Db;
-use crate::admin::theatre_slug;
+use crate::balanced_side_gain;
 use crate::bg::{self, DiscordMapPostJob, Task};
+use crate::db::csar::{life_type_map_abbrev, LIFE_TYPE_DISPLAY_ORDER};
 use anyhow::{anyhow, bail, Context, Result};
 use bfprotocols::{
-    cfg::{DiscordMapCfg, UnitTag},
+    cfg::{Cfg, DiscordMapCfg, UnitTag},
     db::objective::ObjectiveKind,
     discord_map_icon_manifest::{
         DiscordMapIconManifest, DiscordMapIconManifestRuntime, MIZ_MANIFEST,
@@ -38,13 +39,23 @@ use zip::ZipArchive;
 
 use crate::db::objective::{Objective, ObjGroupClass};
 
-/// Live session inputs for map HTML clocks and pilot counts (not persisted in Db).
+/// Live session inputs for map HTML clocks and pilot lists (not persisted in Db).
+#[derive(Debug, Clone)]
+pub struct DiscordMapPilot {
+    pub name: String,
+    pub ping: u32,
+}
+
+/// Live session inputs for map HTML clocks and pilot lists (not persisted in Db).
 #[derive(Debug, Clone)]
 pub struct DiscordMapLiveCtx {
     pub generated_at: DateTime<Utc>,
     pub shutdown_when: Option<DateTime<Utc>>,
     pub online_red: u32,
     pub online_blue: u32,
+    pub blue_pilots: Vec<DiscordMapPilot>,
+    pub red_pilots: Vec<DiscordMapPilot>,
+    pub spectators: Vec<DiscordMapPilot>,
 }
 
 pub const POST_DEBOUNCE_SECS: i64 = 45;
@@ -76,6 +87,9 @@ pub struct DiscordMapIconPack {
 #[derive(Debug, Clone)]
 pub struct DiscordMapRuntime {
     pub viewport: MapViewport,
+    /// ME zone centers; excluded from composited markers (viewport anchors only).
+    pub corner_nw: LLPos,
+    pub corner_se: LLPos,
     pub icons: Arc<DiscordMapIconPack>,
     pub base_png_path: PathBuf,
     pub composited_png_path: PathBuf,
@@ -161,7 +175,7 @@ pub fn build_discord_map_caption(mission_name: &str, cfg: &DiscordMapCfg) -> (St
     let ts = Utc::now().format("%Y-%m-%d %H:%M:%S").to_string();
     let map_url = discord_map_interactive_url(cfg);
     let caption = format!(
-        "Campaign objective map : {mission_name}\nObjectives status as of {ts} UTC\nInteractive HTML map: {map_url}"
+        "Campaign objective map : {mission_name}\nObjectives status as of {ts} UTC\nInteractive HTML campaign map: {map_url}"
     );
     (caption, ts, map_url)
 }
@@ -292,14 +306,36 @@ fn discord_map_tip_coalition(obj: &Objective) -> &'static str {
     coalition_key(obj.owner())
 }
 
+fn skip_discord_map_corner_marker(
+    obj: &Objective,
+    lat: f64,
+    lon: f64,
+    runtime: Option<&DiscordMapRuntime>,
+) -> bool {
+    if obj.name.as_str() == SETTINGS_DISCORD_MAP_NW || obj.name.as_str() == SETTINGS_DISCORD_MAP_SE {
+        return true;
+    }
+    let Some(rt) = runtime else {
+        return false;
+    };
+    rt.viewport
+        .excludes_discord_map_corner_anchor(lat, lon, rt.corner_nw, rt.corner_se)
+}
+
 pub fn collect_markers(lua: MizLua, db: &Db) -> Result<Vec<bg::discord_map::DiscordMapMarker>> {
     let coord = Coord::singleton(lua)?;
+    let runtime = db.ephemeral.discord_map.as_ref();
     let mut markers = Vec::new();
     for (_, obj) in db.persisted.objectives.into_iter() {
         let Some(kind) = obj.discord_map_icon_kind() else {
             continue;
         };
-        markers.push(marker_from_objective(db, &obj, kind, &coord)?);
+        let pos = obj.zone().pos();
+        let ll = coord.lo_to_ll(LuaVec3(Vector3::new(pos.x, 0., pos.y)))?;
+        if skip_discord_map_corner_marker(&obj, ll.latitude, ll.longitude, runtime) {
+            continue;
+        }
+        markers.push(marker_from_objective(db, &obj, kind, ll)?);
     }
     Ok(markers)
 }
@@ -308,10 +344,8 @@ fn marker_from_objective(
     db: &Db,
     obj: &Objective,
     kind: &str,
-    coord: &Coord,
+    ll: LLPos,
 ) -> Result<bg::discord_map::DiscordMapMarker> {
-    let pos = obj.zone().pos();
-    let ll = coord.lo_to_ll(LuaVec3(Vector3::new(pos.x, 0., pos.y)))?;
     Ok(bg::discord_map::DiscordMapMarker {
         lat: ll.latitude,
         lon: ll.longitude,
@@ -509,6 +543,7 @@ fn count_spawned_ship_carriers(lua: MizLua, db: &Db) -> Result<(u32, u32)> {
 struct MissionClock {
     date: NaiveDate,
     tod_secs: u32,
+    elapsed_days: u32,
 }
 
 fn mission_clock(lua: MizLua) -> Result<MissionClock> {
@@ -536,6 +571,7 @@ return m.date.Year or 1970, m.date.Month or 1, m.date.Day or 1, st"#,
     Ok(MissionClock {
         date: start + Duration::days(extra_days),
         tod_secs,
+        elapsed_days: extra_days as u32,
     })
 }
 
@@ -596,6 +632,98 @@ fn avg_logistics_production(db: &Db, side: Side) -> Option<u8> {
     }
 }
 
+fn format_duration_seconds(secs: u32) -> String {
+    if secs == 0 {
+        return "—".into();
+    }
+    let h = secs / 3600;
+    let m = (secs % 3600) / 60;
+    if h > 0 && m == 0 {
+        format!("{h} h")
+    } else if h > 0 {
+        format!("{h} h {m} min")
+    } else {
+        format!("{m} min")
+    }
+}
+
+fn format_lives_display(cfg: &Cfg) -> String {
+    if !cfg.limited_lives {
+        return "unlimited lives".into();
+    }
+    let mut parts = String::new();
+    for lt in LIFE_TYPE_DISPLAY_ORDER {
+        let Some((count, _)) = cfg.default_lives.get(&lt) else {
+            continue;
+        };
+        if !parts.is_empty() {
+            parts.push(' ');
+        }
+        parts.push_str(&format!("[{} {count}]", life_type_map_abbrev(lt)));
+    }
+    if parts.is_empty() {
+        "—".into()
+    } else {
+        parts
+    }
+}
+
+fn format_lives_reset(cfg: &Cfg) -> String {
+    if !cfg.limited_lives {
+        return "no".into();
+    }
+    let secs: Vec<u32> = LIFE_TYPE_DISPLAY_ORDER
+        .iter()
+        .filter_map(|lt| cfg.default_lives.get(lt).map(|(_, s)| *s))
+        .collect();
+    if secs.is_empty() {
+        return "—".into();
+    }
+    let min = *secs.iter().min().unwrap();
+    let max = *secs.iter().max().unwrap();
+    if min == max {
+        format_duration_seconds(min)
+    } else {
+        format!(
+            "{} - {}",
+            format_duration_seconds(min),
+            format_duration_seconds(max)
+        )
+    }
+}
+
+fn format_deslot_penalty(cfg: &Cfg) -> String {
+    let secs = cfg.airborne_deslot_penalty_secs;
+    let points = cfg.airborne_deslot_penalty_points;
+    let time = if secs == 0 {
+        "0 min".into()
+    } else {
+        format_duration_seconds(secs)
+    };
+    format!("{time} / -{points} p.")
+}
+
+fn format_max_crates(cfg: &Cfg) -> String {
+    cfg.max_crates.map(|n| n.to_string()).unwrap_or_else(|| "—".into())
+}
+
+fn balancing_points_display(cfg: &Cfg, online_red: u32, online_blue: u32) -> (i32, i32) {
+    let Some(points) = cfg.points.as_ref() else {
+        return (0, 0);
+    };
+    let (gain, period) = points.periodic_point_gain;
+    if period == 0 || gain <= 0 {
+        return (0, 0);
+    }
+    if points.balancing_point_gain {
+        let red_award = balanced_side_gain(online_red, online_blue, gain);
+        let blue_award = balanced_side_gain(online_blue, online_red, gain);
+        (blue_award.amount, red_award.amount)
+    } else {
+        (gain, gain)
+    }
+}
+
 fn format_logistics_interval_minutes(minutes: u32) -> String {
     if minutes == 0 {
         return "—".into();
@@ -634,16 +762,27 @@ pub fn collect_map_status_bar(
         count_spawned_ship_carriers(lua, db).context("discord map carrier ships")?;
     let (factories_red, factories_blue) = factory_counts(db);
     let (supply_to_bases, delivery_to_hubs) = warehouse_logistics_intervals(db);
+    let cfg = &db.ephemeral.cfg;
+    let server = super::server_settings::load_server_settings(lua);
+    let (balancing_blue, balancing_red) =
+        balancing_points_display(cfg, live.online_red, live.online_blue);
+    let map_pilot = |p: &DiscordMapPilot| bg::discord_map::DiscordMapPilotEntry {
+        name: p.name.clone(),
+        ping: p.ping,
+    };
     Ok(bg::discord_map::DiscordMapStatusBar {
         mission_name: mission_name.to_string(),
         status_utc: status_utc.to_string(),
-        theatre: format_theatre_display(&theatre_slug(lua)),
         mission_date: clock.date.format("%Y-%m-%d").to_string(),
         mission_tod_secs: clock.tod_secs,
+        mission_elapsed_days: clock.elapsed_days,
         gen_utc_ms: live.generated_at.timestamp_millis(),
         restart_utc_ms: live.shutdown_when.map(|t| t.timestamp_millis()),
         online_red: live.online_red,
         online_blue: live.online_blue,
+        blue_pilots: live.blue_pilots.iter().map(map_pilot).collect(),
+        red_pilots: live.red_pilots.iter().map(map_pilot).collect(),
+        spectators: live.spectators.iter().map(map_pilot).collect(),
         ground_red,
         ground_blue,
         carrier_red,
@@ -652,8 +791,20 @@ pub fn collect_map_status_bar(
         factories_blue,
         production_red: avg_logistics_production(db, Side::Red),
         production_blue: avg_logistics_production(db, Side::Blue),
+        balancing_blue,
+        balancing_red,
+        lives: format_lives_display(cfg),
+        lives_reset: format_lives_reset(cfg),
+        deslot_penalty: format_deslot_penalty(cfg),
+        player_crates: format_max_crates(cfg),
+        threatened: format_duration_seconds(cfg.threatened_cooldown),
+        bases_repair: format_duration_seconds(cfg.repair_time),
+        factory_repair: format_duration_seconds(cfg.production_repair_rate_seconds),
         supply_to_bases,
         delivery_to_hubs,
+        dcs_bind_address: server.bind_address,
+        dcs_port: server.port,
+        dcs_name: server.name,
     })
 }
 
@@ -676,6 +827,8 @@ fn discord_map_post_job(
         html_path: runtime.html_path.clone(),
         map_version_path: runtime.map_version_path.clone(),
         viewport: runtime.viewport,
+        corner_nw: runtime.corner_nw,
+        corner_se: runtime.corner_se,
         markers,
         front_line: collect_front_line_polygons(lua, db)?,
         icons,
@@ -849,6 +1002,8 @@ pub fn init_discord_map(
     );
     db.ephemeral.discord_map = Some(DiscordMapRuntime {
         viewport,
+        corner_nw: nw,
+        corner_se: se,
         icons,
         base_png_path: base_png_path.clone(),
         composited_png_path: composited_png_path.clone(),

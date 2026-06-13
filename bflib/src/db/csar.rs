@@ -63,6 +63,16 @@ pub fn life_type_display_label(lt: LifeType) -> &'static str {
     }
 }
 
+pub fn life_type_map_abbrev(lt: LifeType) -> char {
+    match lt {
+        LifeType::Standard => 'S',
+        LifeType::Attack => 'A',
+        LifeType::Intercept => 'I',
+        LifeType::Recon => 'R',
+        LifeType::Logistics => 'L',
+    }
+}
+
 const CSAR_LANDED_CIRCLE_RADIUS_M: f64 = 500.;
 
 /// Downed pilot awaiting CSAR (persisted; future pickup/rescue hooks).
