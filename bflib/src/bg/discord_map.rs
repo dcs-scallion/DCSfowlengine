@@ -17,7 +17,7 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use tokio::fs;
 
-const SIDEBAR_WIDTH_PX: u32 = 240;
+const SIDEBAR_WIDTH_PX: u32 = 300;
 const SIDEBAR_RANK_COL_PX: u32 = 25;
 const LAYOUT_GAP_PX: u32 = 4;
 const STAT_BARS_GAP_PX: i32 = 3;
@@ -903,7 +903,7 @@ fn build_interactive_html(
 <title>{mn} — objective map</title>
 <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Roboto+Condensed:wght@400;700&display=swap">
 <style>
-body{{margin:0;background:#000;color:#686a6e;font-family:"Roboto Condensed",Roboto,sans-serif;font-size:16px;overflow-x:auto}}
+body{{margin:0;background:#000;color:#686a6e;font-family:"Roboto Condensed",Roboto,sans-serif;font-size:24px;overflow-x:auto}}
 .map-panel{{display:flex;flex-direction:column;gap:{layout_gap}px;width:{panel_w}px;min-width:{panel_w}px;box-sizing:border-box}}
 .map-hdr{{display:flex;justify-content:space-between;align-items:center;gap:8px;width:100%;min-height:{icon_h}px;padding:0;line-height:1;color:#686a6e;font-size:clamp(15px,calc(100vw*24/{panel_w}),24px)}}
 .map-hdr-left{{display:flex;flex-direction:row;align-items:center;gap:0;text-align:left;flex:1 1 auto;min-width:0;overflow:hidden;align-self:stretch}}
@@ -917,17 +917,17 @@ body{{margin:0;background:#000;color:#686a6e;font-family:"Roboto Condensed",Robo
 .map-body-bottom{{display:flex;flex-direction:row;align-items:flex-start;gap:{layout_gap}px;width:100%;box-sizing:border-box}}
 .left-col{{flex:0 0 {sidebar_w}px;width:{sidebar_w}px;min-width:{sidebar_w}px;box-sizing:border-box}}
 .main-col{{display:flex;flex-direction:column;gap:{layout_gap}px;flex:0 0 {img_w}px;width:{img_w}px;min-width:{img_w}px;box-sizing:border-box}}
-.stats{{display:flex;flex-wrap:nowrap;gap:4px;width:100%;box-sizing:border-box;font-size:clamp(8px,calc(100vw*16/{img_w}),16px)}}
+.stats{{display:flex;flex-wrap:nowrap;gap:4px;width:100%;box-sizing:border-box;font-size:clamp(12px,calc(100vw*24/{img_w}),24px)}}
 .stats-top{{flex:1 1 0;min-width:0}}
 .stat{{flex:1 1 0;min-width:0;border:1px solid #2e3138;box-sizing:border-box;display:flex;flex-direction:column;min-height:0}}
-.sidebar-online-stat{{flex:0 0 {sidebar_w}px;width:{sidebar_w}px;min-width:{sidebar_w}px;min-height:0;font-size:clamp(8px,calc(100vw*16/{img_w}),16px)}}
+.sidebar-online-stat{{flex:0 0 {sidebar_w}px;width:{sidebar_w}px;min-width:{sidebar_w}px;min-height:0;font-size:clamp(12px,calc(100vw*24/{img_w}),24px)}}
 .stat-h{{background:#15161a;color:#686a6e;line-height:1.2;padding:5px 2px;text-align:center;white-space:normal;word-break:break-word;overflow:hidden;border-bottom:1px solid #2e3138;font-weight:400;flex:0 0 auto}}
 .stat-v{{background:#000;color:#686a6e;line-height:1.3;padding:6px 4px;text-align:center;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;flex:1 1 auto;min-height:0;font-weight:700}}
 .stat-plain{{color:#686a6e}}
 .stat-red{{color:#C43838}}
 .stat-blue{{color:#2E5AAC}}
 .stat-accent{{color:#e8c547}}
-.sidebar-pilots{{display:flex;flex-direction:column;gap:{layout_gap}px;box-sizing:border-box;font-size:clamp(8px,calc(100vw*14/{img_w}),14px)}}
+.sidebar-pilots{{display:flex;flex-direction:column;gap:{layout_gap}px;box-sizing:border-box;font-size:clamp(12px,calc(100vw*21/{img_w}),21px)}}
 .pilot-block{{box-sizing:border-box;border:1px solid #2e3138}}
 .pilot-block-blue{{border-color:#2E5AAC}}
 .pilot-block-red{{border-color:#C43838}}
@@ -968,7 +968,7 @@ body{{margin:0;background:#000;color:#686a6e;font-family:"Roboto Condensed",Robo
 .health-red{{background:#C43838;animation:health-blink 1s ease-in-out infinite}}
 .health-orange{{background:#e07a2a}}
 .health-green{{background:#3d9e5a}}
-.tip{{display:none;position:absolute;left:calc(100% + 6px);top:50%;transform:translateY(-50%);color:#686a6e;padding:0;border-radius:4px;border-width:2px;border-style:solid;font-size:clamp(8px,calc(100vw*16/{img_w}),16px);line-height:1.55;white-space:nowrap;pointer-events:none;box-shadow:0 2px 8px rgba(0,0,0,.45);overflow:hidden}}
+.tip{{display:none;position:absolute;left:calc(100% + 6px);top:50%;transform:translateY(-50%);color:#686a6e;padding:0;border-radius:4px;border-width:2px;border-style:solid;font-size:clamp(12px,calc(100vw*24/{img_w}),24px);line-height:1.55;white-space:nowrap;pointer-events:none;box-shadow:0 2px 8px rgba(0,0,0,.45);overflow:hidden}}
 .tip-left{{left:auto;right:calc(100% + 6px)}}
 .m:hover .tip{{display:block}}
 .tip-title{{color:#fff;text-decoration:none;margin:0;padding:6px 10px;line-height:1.45;font-weight:700}}
