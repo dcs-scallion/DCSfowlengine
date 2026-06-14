@@ -1151,7 +1151,20 @@ fn on_event(lua: MizLua, ev: Event) -> Result<()> {
                     }
                 }
                 let dead = target.get_life()? < 1;
-                if let Some(shooter) = e.initiator.and_then(|u| u.as_unit().ok()) {
+                if let Some(shooter) =
+                    crate::shots::who_from_initiator(&ctx.db, e.initiator.as_ref())
+                {
+                    if let Err(e) = ctx.shots_out.hit_by_who(
+                        &ctx.db,
+                        start_ts,
+                        dead,
+                        &target,
+                        shooter,
+                        e.weapon_name.clone(),
+                    ) {
+                        error!("error processing hit event {:?}", e)
+                    }
+                } else if let Some(shooter) = e.initiator.and_then(|u| u.as_unit().ok()) {
                     if let Err(e) = ctx.shots_out.hit(
                         &ctx.db,
                         start_ts,

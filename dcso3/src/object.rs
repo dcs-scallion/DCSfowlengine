@@ -18,6 +18,7 @@ use crate::{
 };
 use anyhow::{anyhow, bail, Result};
 use core::fmt;
+use log::debug;
 use mlua::{prelude::*, Value};
 use serde_derive::{Deserialize, Serialize};
 use std::{hash::Hash, marker::PhantomData, ops::Deref};
@@ -116,6 +117,73 @@ simple_enum!(ObjectCategory, u8, [
 ]);
 
 wrapped_table!(Object, Some("Object"));
+
+struct EventObjectDescriptor {
+    id: u64,
+    unit_type: Option<String>,
+    coalition: Option<i64>,
+}
+
+fn event_object_class_candidates(desc: &EventObjectDescriptor) -> &'static [&'static str] {
+    match desc.unit_type.as_deref() {
+        Some(ut) if ut.starts_with("weapons.") => &["Weapon"],
+        Some(ut) if ut.is_empty() && desc.coalition == Some(-1) => &["Weapon"],
+        Some(ut) if ut.is_empty() => &["Unit", "Static", "Weapon"],
+        Some(_) => &["Static", "Unit", "Weapon", "Scenery"],
+        None if desc.coalition == Some(-1) => &["Weapon"],
+        None => &["Static", "Unit", "Weapon", "Scenery"],
+    }
+}
+
+fn resolve_event_object_descriptor<'lua>(
+    lua: &'lua Lua,
+    desc: &EventObjectDescriptor,
+) -> Result<Object<'lua>> {
+    let miz = MizLua(lua);
+    for class in event_object_class_candidates(desc) {
+        let oid = DcsOid {
+            id: desc.id,
+            class: (*class).into(),
+            t: PhantomData,
+        };
+        if let Ok(obj) = Object::get_instance(miz, &oid) {
+            debug!(
+                "event object descriptor id={} unit_type={:?} resolved as {class}",
+                desc.id, desc.unit_type
+            );
+            return Ok(obj);
+        }
+    }
+    bail!("could not resolve event object descriptor id={}", desc.id)
+}
+
+/// DCS 2.9.27+ may send initiator/target as plain tables without Object metatable.
+pub(crate) fn optional_event_object<'lua>(
+    lua: &'lua Lua,
+    value: Value<'lua>,
+) -> LuaResult<Option<Object<'lua>>> {
+    match value {
+        Value::Nil => Ok(None),
+        Value::Table(tbl) => {
+            if let Some(meta) = tbl.get_metatable() {
+                if check_implements(&meta, "Object") {
+                    return Ok(Some(Object::from_lua(Value::Table(tbl), lua)?));
+                }
+            }
+            let id: u64 = match tbl.raw_get("id_") {
+                Ok(id) => id,
+                Err(_) => return Ok(None),
+            };
+            let desc = EventObjectDescriptor {
+                id,
+                unit_type: tbl.raw_get("unit_type").ok(),
+                coalition: tbl.raw_get("coalition").ok(),
+            };
+            Ok(resolve_event_object_descriptor(lua, &desc).ok())
+        }
+        _ => Ok(None),
+    }
+}
 
 impl<'lua> Object<'lua> {
     pub fn destroy(self) -> Result<()> {

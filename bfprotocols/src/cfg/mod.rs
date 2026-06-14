@@ -985,11 +985,9 @@ pub struct DiscordMapCfg {
     #[serde(default)]
     pub padding: u32,
     /// Read-only interactive map HTTP port (`0.0.0.0`, GET `/map` and `/map.png` only).
+    /// Discord link uses `serverSettings.lua` `bind_address` with this port.
     #[serde(default = "default_discord_map_http_port")]
     pub http_port: u16,
-    /// Public base URL for Discord link, e.g. `http://203.0.113.50:17841` (no trailing slash).
-    #[serde(default)]
-    pub http_public_base_url: Option<String>,
     /// Draw campaign front line on interactive `/map` HTML (SVG only, not Discord PNG).
     /// Requires `front_line: true` in CFG root; validated at mission start.
     #[serde(default)]
@@ -1007,7 +1005,6 @@ impl Default for DiscordMapCfg {
             retina: true,
             padding: 0,
             http_port: default_discord_map_http_port(),
-            http_public_base_url: None,
             front_line_in_map: false,
         }
     }
@@ -1049,13 +1046,6 @@ impl DiscordMapCfg {
         }
         if self.http_port == 0 {
             bail!("discord_map.http_port must be > 0 when discord_map.enabled");
-        }
-        if self
-            .http_public_base_url
-            .as_ref()
-            .is_none_or(|s| s.trim().is_empty())
-        {
-            bail!("discord_map.enabled requires discord_map.http_public_base_url in CFG");
         }
         Ok(())
     }

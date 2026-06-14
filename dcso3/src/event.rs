@@ -16,8 +16,8 @@ use std::marker::PhantomData;
 use crate::{object::DcsOid, unit::ClassUnit};
 
 use super::{
-    as_tbl, as_tbl_ref, lua_err, object::Object, unit::Unit, value_to_json,
-    weapon::Weapon, world::MarkPanel, String, Time,
+    as_tbl, as_tbl_ref, lua_err, object::{optional_event_object, Object}, unit::Unit,
+    value_to_json, weapon::Weapon, world::MarkPanel, String, Time,
 };
 use anyhow::{bail, Result};
 use log::{error, info};
@@ -80,12 +80,12 @@ pub struct WeaponUse<'lua> {
 }
 
 impl<'lua> FromLua<'lua> for WeaponUse<'lua> {
-    fn from_lua(value: Value<'lua>, _: &'lua Lua) -> LuaResult<Self> {
+    fn from_lua(value: Value<'lua>, lua: &'lua Lua) -> LuaResult<Self> {
         let tbl = as_tbl("WeaponUse", None, value).map_err(lua_err)?;
         Ok(Self {
             time: tbl.raw_get("time")?,
-            initiator: tbl.raw_get("initiator")?,
-            target: tbl.raw_get("target")?,
+            initiator: optional_event_object(lua, tbl.raw_get("initiator")?)?,
+            target: optional_event_object(lua, tbl.raw_get("target")?)?,
             weapon_name: tbl.raw_get("weapon_name")?,
         })
     }
@@ -120,9 +120,12 @@ pub struct UnitEvent<'lua> {
 }
 
 impl<'lua> FromLua<'lua> for UnitEvent<'lua> {
-    fn from_lua(value: Value<'lua>, _: &'lua Lua) -> LuaResult<Self> {
+    fn from_lua(value: Value<'lua>, lua: &'lua Lua) -> LuaResult<Self> {
         let tbl = as_tbl("UnitEvent", None, value).map_err(lua_err)?;
-        Ok(Self { time: tbl.raw_get("time")?, initiator: tbl.raw_get("initiator")? })
+        Ok(Self {
+            time: tbl.raw_get("time")?,
+            initiator: optional_event_object(lua, tbl.raw_get("initiator")?)?,
+        })
     }
 }
 

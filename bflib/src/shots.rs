@@ -165,12 +165,36 @@ impl ShotDb {
         shooter: &Unit,
         weapon_name: String,
     ) -> Result<()> {
+        let shooter = some!(who(db, shooter.object_id()?));
+        self.record_hit(db, now, dead, target, shooter, weapon_name)
+    }
+
+    pub fn hit_by_who(
+        &mut self,
+        db: &Db,
+        now: DateTime<Utc>,
+        dead: bool,
+        target: &Unit,
+        shooter: Who,
+        weapon_name: String,
+    ) -> Result<()> {
+        self.record_hit(db, now, dead, target, shooter, weapon_name)
+    }
+
+    fn record_hit(
+        &mut self,
+        db: &Db,
+        now: DateTime<Utc>,
+        dead: bool,
+        target: &Unit,
+        shooter: Who,
+        weapon_name: String,
+    ) -> Result<()> {
         let target_oid = target.object_id()?;
         if self.dead.contains_key(&target_oid) || self.recently_dead.contains_key(&target_oid) {
             return Ok(());
         }
         let target_typ = target.get_type_name()?;
-        let shooter = some!(who(db, shooter.object_id()?));
         let target = some!(who(db, target_oid.clone()));
         self.by_target
             .entry(target_oid.clone())
