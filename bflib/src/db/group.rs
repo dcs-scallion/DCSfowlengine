@@ -14,7 +14,15 @@ FITNESS FOR A PARTICULAR PURPOSE. See the GNU Affero Public License
 for more details.
 */
 
-use super::{csar::is_fowl_csar_unit_unit, ephemeral::SlotInfo, objective::ObjGroupClass, player::SlotAuth, Db, SetS};
+use super::{
+    ai_air::AiAirState,
+    csar::is_fowl_csar_unit_unit,
+    ephemeral::SlotInfo,
+    objective::ObjGroupClass,
+    player::SlotAuth,
+    Db,
+    SetS,
+};
 use crate::{
     group, group_by_name, group_health, group_mut, objective, objective_mut,
     spawnctx::{Despawn, SpawnCtx, SpawnLoc},
@@ -120,6 +128,8 @@ pub enum DeployKind {
         origin: Option<ObjectiveId>,
         #[serde(skip)]
         ammo: i32,
+        #[serde(default)]
+        ai_air: AiAirState,
     },
 }
 
@@ -502,8 +512,13 @@ impl Db {
                 }
             }
             Some(_) => {
-                // it's a normal group
-                if let Some(oid) = self.ephemeral.object_id_by_gid.get(gid) {
+                if let Some(oids) = self.ephemeral.ai_air_dcs_oids.remove(gid) {
+                    for oid in &oids {
+                        self.ephemeral.gid_by_object_id.remove(oid);
+                        self.ephemeral.push_despawn(*gid, Despawn::Group(oid.clone()));
+                    }
+                    self.ephemeral.object_id_by_gid.remove(gid);
+                } else if let Some(oid) = self.ephemeral.object_id_by_gid.get(gid) {
                     self.ephemeral.push_despawn(*gid, Despawn::Group(oid.clone()));
                 }
             }

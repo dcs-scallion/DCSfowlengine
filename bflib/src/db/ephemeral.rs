@@ -132,6 +132,8 @@ pub struct Ephemeral {
     pub(super) object_id_by_slot: FxHashMap<SlotId, DcsOid<ClassUnit>>,
     pub(super) slot_by_object_id: FxHashMap<DcsOid<ClassUnit>, SlotId>,
     pub(super) object_id_by_gid: FxHashMap<GroupId, DcsOid<ClassGroup>>,
+    /// AI air flight: one DCS `Group` oid per parking spawn.
+    pub(super) ai_air_dcs_oids: FxHashMap<GroupId, SmallVec<[DcsOid<ClassGroup>; 4]>>,
     pub(super) gid_by_object_id: FxHashMap<DcsOid<ClassGroup>, GroupId>,
     pub(super) uid_by_static: FxHashMap<DcsOid<ClassStatic>, UnitId>,
     pub(super) static_last_hit: FxHashMap<DcsOid<ClassStatic>, bfprotocols::shots::Who>,
@@ -207,6 +209,7 @@ impl Default for Ephemeral {
             slot_by_object_id: FxHashMap::default(),
             slot_by_miz_gid: FxHashMap::default(),
             object_id_by_gid: FxHashMap::default(),
+            ai_air_dcs_oids: FxHashMap::default(),
             gid_by_object_id: FxHashMap::default(),
             uid_by_static: FxHashMap::default(),
             static_last_hit: FxHashMap::default(),
@@ -1048,6 +1051,7 @@ impl Ephemeral {
                     | ActionKind::SeadWaypoint
                     | ActionKind::Move(_)
                     | ActionKind::Rtb
+                    | ActionKind::Start
                     | ActionKind::Nuke(_) => (),
                 }
             }

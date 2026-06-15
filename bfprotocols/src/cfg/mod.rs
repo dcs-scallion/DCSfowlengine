@@ -822,6 +822,8 @@ pub enum ActionKind {
     LogisticsTransfer(AiPlaneCfg),
     Move(MoveCfg),
     Rtb,
+    /// Resume AI air unit from `AwaitingLaunch` to last waypoint (`-action start <gid>`).
+    Start,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

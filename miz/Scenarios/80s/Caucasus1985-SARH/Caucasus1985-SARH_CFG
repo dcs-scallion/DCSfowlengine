@@ -596,6 +596,18 @@
         "penalty": 1,
         "limit": null
       },
+      "rtb": {
+        "kind": "Rtb",
+        "cost": 0,
+        "penalty": null,
+        "limit": null
+      },
+      "start": {
+        "kind": "Start",
+        "cost": 0,
+        "penalty": null,
+        "limit": null
+      },
       "paratroops": {
         "kind": {
           "Paratrooper": {
@@ -971,6 +983,18 @@
         },
         "cost": 10,
         "penalty": 1,
+        "limit": null
+      },
+      "rtb": {
+        "kind": "Rtb",
+        "cost": 0,
+        "penalty": null,
+        "limit": null
+      },
+      "start": {
+        "kind": "Start",
+        "cost": 0,
+        "penalty": null,
         "limit": null
       },
       "paratroops": {

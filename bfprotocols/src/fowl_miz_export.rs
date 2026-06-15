@@ -90,6 +90,9 @@ pub struct FowlMizExport {
     /// Per-objective warehouse baselines for blue and red owners (`O*` name without prefix).
     #[serde(default)]
     pub objective_stock: HashMap<String, ObjectiveStockByCoalition>,
+    /// AI action template name → DCS warehouse airframe type (`SETTINGS-Ai-*` zones in base.miz).
+    #[serde(default)]
+    pub ai_template_airframes: HashMap<String, String>,
 }
 
 fn default_schema_version() -> u32 {
@@ -107,6 +110,7 @@ impl Default for FowlMizExport {
             blue_inventory_zone_module_ws: HashMap::new(),
             red_inventory_zone_module_ws: HashMap::new(),
             objective_stock: HashMap::new(),
+            ai_template_airframes: HashMap::new(),
         }
     }
 }

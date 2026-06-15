@@ -3825,6 +3825,346 @@ fn merge_dep_farp_objective_stock_export(
     Ok(())
 }
 
+const SETTINGS_AI_ZONE_PREFIX: &str = "SETTINGS-Ai-";
+
+#[derive(Debug, Clone)]
+struct AiTemplateStockSpec {
+    template_name: StdString,
+    airframe: StdString,
+    objectives: HashMap<StdString, u32>,
+}
+
+fn objective_export_name_from_zone(zone_name: &str) -> Option<&str> {
+    zone_name.get(4..)
+}
+
+fn resolve_ai_stock_objective<'a>(
+    key: &str,
+    obj_dyn_allow: &'a [ObjectiveDynAllow],
+) -> Option<(&'a ObjectiveDynAllow, StdString)> {
+    if let Some(o) = obj_dyn_allow
+        .iter()
+        .find(|o| o.zone_name.as_str().eq_ignore_ascii_case(key))
+    {
+        let name = objective_export_name_from_zone(o.zone_name.as_str())?;
+        return Some((o, StdString::from(name)));
+    }
+    for o in obj_dyn_allow {
+        if objective_export_name_from_zone(o.zone_name.as_str())
+            .is_some_and(|n| n.eq_ignore_ascii_case(key))
+        {
+            return Some((
+                o,
+                StdString::from(objective_export_name_from_zone(o.zone_name.as_str())?),
+            ));
+        }
+    }
+    if key.len() >= 2 {
+        let side = match key.chars().next()? {
+            'R' | 'r' => Side::Red,
+            'B' | 'b' => Side::Blue,
+            _ => return None,
+        };
+        let rest = &key[1..];
+        for o in obj_dyn_allow {
+            if o.side != side {
+                continue;
+            }
+            if objective_export_name_from_zone(o.zone_name.as_str())
+                .is_some_and(|n| n.eq_ignore_ascii_case(rest))
+            {
+                return Some((
+                    o,
+                    StdString::from(objective_export_name_from_zone(o.zone_name.as_str())?),
+                ));
+            }
+        }
+    }
+    None
+}
+
+fn load_ai_template_stock_settings(base: &LoadedMiz) -> Result<Vec<AiTemplateStockSpec>> {
+    let mut out = Vec::new();
+    for zone in base.mission.triggers()? {
+        let zone = zone?;
+        let name = zone.name()?;
+        let Some(template_name) = name.as_str().strip_prefix(SETTINGS_AI_ZONE_PREFIX) else {
+            continue;
+        };
+        if template_name.is_empty() {
+            warn!("SETTINGS-Ai zone with empty template suffix, skipping");
+            continue;
+        }
+        let mut airframe: Option<StdString> = None;
+        let mut objectives = HashMap::new();
+        for prop in zone.properties()? {
+            let prop = prop?;
+            let key = prop.key.as_str();
+            if key.eq_ignore_ascii_case("airframe") || key.eq_ignore_ascii_case("aiframe") {
+                airframe = Some(StdString::from(prop.value.as_str()));
+            } else {
+                match prop.value.trim().parse::<u32>() {
+                    Ok(n) => {
+                        objectives.insert(StdString::from(key), n);
+                    }
+                    Err(_) => warn!(
+                        "SETTINGS-Ai-{template_name}: ignoring non-integer property {key}={}",
+                        prop.value.as_ref()
+                    ),
+                }
+            }
+        }
+        let Some(airframe) = airframe else {
+            warn!("SETTINGS-Ai-{template_name}: missing airframe/aiframe property, skipping");
+            continue;
+        };
+        out.push(AiTemplateStockSpec {
+            template_name: StdString::from(template_name),
+            airframe,
+            objectives,
+        });
+    }
+    if !out.is_empty() {
+        info!("SETTINGS-Ai: loaded {} AI template stock zone(s)", out.len());
+    }
+    Ok(out)
+}
+
+fn warehouse_aircraft_category(wh: &Table<'_>, airframe: &str) -> &'static str {
+    if let Ok(aircrafts) = wh.raw_get::<_, Table>("aircrafts") {
+        if let Ok(helicopters) = aircrafts.raw_get::<_, Table>("helicopters") {
+            if helicopters.raw_get::<_, Table>(airframe).is_ok() {
+                return "helicopters";
+            }
+        }
+    }
+    "planes"
+}
+
+fn resolve_ai_stock_naval_warehouse<'a>(
+    base: &'a LoadedMiz,
+    ship_wh_map: &HashMap<i64, (Side, String)>,
+    key: &str,
+) -> Result<Option<(Table<'a>, Side, i64, StdString)>> {
+    let Some((side, export_name)) = resolve_ai_stock_naval_target(ship_wh_map, key) else {
+        return Ok(None);
+    };
+    let warehouses = base
+        .warehouses
+        .raw_get::<_, Table>("warehouses")
+        .context("warehouses for SETTINGS-Ai naval stock")?;
+    for (&wid, (wh_side, group_name)) in ship_wh_map {
+        if *wh_side != side {
+            continue;
+        }
+        if StdString::from(ship_pad_display_name(group_name.as_str()).as_str()) == export_name {
+            let row = warehouses
+                .raw_get(wid)
+                .with_context(|| format_compact!("naval warehouse {wid} ({group_name})"))?;
+            return Ok(Some((row, side, wid, export_name)));
+        }
+    }
+    Ok(None)
+}
+
+fn ensure_ai_airframe_stock(
+    lua: &Lua,
+    wh: &Table<'_>,
+    airframe: &str,
+    side: Side,
+    amount: u32,
+    wid: Option<i64>,
+    emit: &DynamicSpawnEmit,
+) -> Result<()> {
+    if amount == 0 {
+        return Ok(());
+    }
+    let aircrafts: Table = match wh.raw_get("aircrafts") {
+        Ok(t) => t,
+        Err(_) => {
+            let t = lua.create_table()?;
+            wh.raw_set("aircrafts", t.clone())?;
+            t
+        }
+    };
+    let cat = warehouse_aircraft_category(wh, airframe);
+    let cat_tbl: Table = match aircrafts.raw_get(cat) {
+        Ok(t) => t,
+        Err(_) => {
+            let t = lua.create_table()?;
+            aircrafts.raw_set(cat, t.clone())?;
+            t
+        }
+    };
+    let row: Table = match cat_tbl.raw_get(airframe) {
+        Ok(t) => t,
+        Err(_) => {
+            let t = lua.create_table()?;
+            t.raw_set("initialAmount", 0u32)?;
+            cat_tbl.raw_set(airframe, t.clone())?;
+            t
+        }
+    };
+    let cur: u32 = row.raw_get("initialAmount").unwrap_or(0);
+    row.raw_set("initialAmount", cur.saturating_add(amount))?;
+    let mut link = emit
+        .link_by_side_type
+        .get(&(side, String::from(airframe)))
+        .map(|g| g.inner())
+        .unwrap_or(0);
+    if link == 0 {
+        if let Some(wid) = wid {
+            if let Some(hull) = emit.ship_hull_by_wid.get(&wid) {
+                link = emit
+                    .link_by_ship
+                    .get(&(side, String::from(airframe), hull.clone()))
+                    .map(|g| g.inner())
+                    .unwrap_or(0);
+            }
+        }
+    }
+    if link != 0 {
+        row.raw_set("linkDynTempl", link)?;
+    }
+    Ok(())
+}
+
+fn apply_settings_ai_template_stock(
+    lua: &Lua,
+    base: &LoadedMiz,
+    specs: &[AiTemplateStockSpec],
+    obj_dyn_allow: &[ObjectiveDynAllow],
+    ship_wh_map: &HashMap<i64, (Side, String)>,
+    emit: &DynamicSpawnEmit,
+) -> Result<()> {
+    for spec in specs {
+        for (obj_key, amount) in &spec.objectives {
+            if let Some((allow, export_name)) =
+                resolve_ai_stock_objective(obj_key.as_str(), obj_dyn_allow)
+            {
+                let Some(resolved) = resolve_objective_warehouse(base, allow)? else {
+                    warn!(
+                        "SETTINGS-Ai-{}: no warehouse for objective {:?}",
+                        spec.template_name.as_str(),
+                        obj_key.as_str()
+                    );
+                    continue;
+                };
+                ensure_ai_airframe_stock(
+                    lua,
+                    &resolved.row,
+                    spec.airframe.as_str(),
+                    allow.side,
+                    *amount,
+                    Some(resolved.wh_id),
+                    emit,
+                )?;
+                info!(
+                    "SETTINGS-Ai-{}: {} +{} {} at warehouse {}",
+                    spec.template_name.as_str(),
+                    export_name.as_str(),
+                    amount,
+                    spec.airframe.as_str(),
+                    resolved.wh_id
+                );
+                continue;
+            }
+            if let Some((row, side, wid, export_name)) =
+                resolve_ai_stock_naval_warehouse(base, ship_wh_map, obj_key.as_str())?
+            {
+                ensure_ai_airframe_stock(
+                    lua,
+                    &row,
+                    spec.airframe.as_str(),
+                    side,
+                    *amount,
+                    Some(wid),
+                    emit,
+                )?;
+                info!(
+                    "SETTINGS-Ai-{}: {} +{} {} at naval warehouse {}",
+                    spec.template_name.as_str(),
+                    export_name.as_str(),
+                    amount,
+                    spec.airframe.as_str(),
+                    wid
+                );
+                continue;
+            }
+            warn!(
+                "SETTINGS-Ai-{}: unknown objective or ship key {:?}",
+                spec.template_name.as_str(),
+                obj_key.as_str()
+            );
+        }
+    }
+    Ok(())
+}
+
+fn resolve_ai_stock_naval_target(
+    ship_wh_map: &HashMap<i64, (Side, String)>,
+    key: &str,
+) -> Option<(Side, StdString)> {
+    for (_, (side, group_name)) in ship_wh_map {
+        let display = ship_pad_display_name(group_name.as_str());
+        if group_name.eq_ignore_ascii_case(key)
+            || display.eq_ignore_ascii_case(key)
+            || (key.len() >= 2
+                && matches!(key.chars().next(), Some('B') | Some('b') | Some('R') | Some('r'))
+                && group_name.eq_ignore_ascii_case(&key[1..]))
+        {
+            return Some((*side, StdString::from(display.as_str())));
+        }
+    }
+    None
+}
+
+fn merge_ai_template_stock_export(
+    out: &mut HashMap<StdString, ObjectiveStockByCoalition>,
+    ai_template_airframes: &mut HashMap<std::string::String, std::string::String>,
+    specs: &[AiTemplateStockSpec],
+    obj_dyn_allow: &[ObjectiveDynAllow],
+    ship_wh_map: &HashMap<i64, (Side, String)>,
+) {
+    for spec in specs {
+        ai_template_airframes.insert(
+            spec.template_name.as_str().into(),
+            spec.airframe.as_str().into(),
+        );
+        for (obj_key, amount) in &spec.objectives {
+            if *amount == 0 {
+                continue;
+            }
+            let Some((side, export_name)) = resolve_ai_stock_objective(obj_key.as_str(), obj_dyn_allow)
+                .map(|(allow, name)| (allow.side, name))
+                .or_else(|| resolve_ai_stock_naval_target(ship_wh_map, obj_key.as_str()))
+            else {
+                warn!(
+                    "SETTINGS-Ai-{}: export skip unknown objective {:?}",
+                    spec.template_name.as_str(),
+                    obj_key.as_str()
+                );
+                continue;
+            };
+            let entry = out.entry(export_name).or_default();
+            let stock = match side {
+                Side::Blue => &mut entry.blue,
+                Side::Red => &mut entry.red,
+                Side::Neutral => continue,
+            };
+            stock
+                .equipment
+                .entry(spec.airframe.as_str().into())
+                .and_modify(|i| i.baseline = i.baseline.saturating_add(*amount))
+                .or_insert(ObjectiveStockItem {
+                    baseline: *amount,
+                    ws_type: None,
+                    production: 0,
+                });
+        }
+    }
+}
+
 struct WarehouseTemplate {
     blue_inventory: Table<'static>,
     red_inventory: Table<'static>,
@@ -7621,6 +7961,7 @@ impl WarehouseTemplate {
                 blue_inventory_zone_module_ws,
                 red_inventory_zone_module_ws,
                 objective_stock: HashMap::new(),
+                ai_template_airframes: HashMap::new(),
             },
             inventory_aircraft_orphans_cleared,
             built_production_blue,
@@ -11783,6 +12124,19 @@ pub fn run(cfg: &MizCmd) -> Result<()> {
             &dynamic_emit.ship_hull_by_wid,
         )
         .context("applying SETTINGS-dynamic-spawn-TTDN naval dynamicSpawn flags")?;
+        let ai_template_stock = load_ai_template_stock_settings(&base)
+            .context("loading SETTINGS-Ai template stock zones")?;
+        if !ai_template_stock.is_empty() {
+            apply_settings_ai_template_stock(
+                lua,
+                &base,
+                &ai_template_stock,
+                &obj_dyn_allow,
+                &ship_wh_map,
+                &dynamic_emit,
+            )
+            .context("applying SETTINGS-Ai warehouse stock")?;
+        }
         if let Some(caps) = warehouse_defaults {
             if caps.has_any_nonzero_cap() {
                 let mut skip = HashSet::default();
@@ -11872,6 +12226,13 @@ pub fn run(cfg: &MizCmd) -> Result<()> {
                 &fowl_from_warehouse.objective_defaults,
             )
             .context("merging DEP FARP pad objective_stock export")?;
+            merge_ai_template_stock_export(
+                &mut objective_stock,
+                &mut fowl_from_warehouse.ai_template_airframes,
+                &ai_template_stock,
+                &obj_dyn_allow,
+                &ship_wh_map,
+            );
             fowl_from_warehouse.objective_stock = objective_stock;
             info!(
                 "fowl export objective_stock: written after warehouse patch ({} objectives)",

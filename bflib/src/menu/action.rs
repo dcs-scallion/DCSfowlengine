@@ -2,7 +2,7 @@ use super::{ArgPent, ArgQuad, ArgTriple};
 use crate::{
     Context,
     db::{
-        actions::{ActionArgs, ActionCmd, WithObj, WithPos, WithPosAndGroup},
+        actions::{ActionArgs, ActionCmd, AiRtbArgs, WithObj, WithPos, WithPosAndGroup},
         group::DeployKind,
     },
     spawnctx::SpawnCtx,
@@ -113,6 +113,7 @@ fn do_pos_action(
         | ActionKind::LogisticsRepair(_)
         | ActionKind::Move(_)
         | ActionKind::Rtb
+        | ActionKind::Start
         | ActionKind::TankerWaypoint
         | ActionKind::CruiseMissileWaypoint
         | ActionKind::AwacsWaypoint
@@ -236,10 +237,10 @@ fn do_pos_group_action(
             pos,
             group,
         }),
-        ActionKind::Rtb => ActionArgs::Rtb(WithPosAndGroup {
-            cfg: (),
-            pos,
+        ActionKind::Rtb => ActionArgs::Rtb(AiRtbArgs {
             group,
+            hub: None,
+            hold: false,
         }),
         ActionKind::Attackers(_)
         | ActionKind::Sead(_)
@@ -253,7 +254,8 @@ fn do_pos_group_action(
         | ActionKind::Nuke(_)
         | ActionKind::Bomber(_)
         | ActionKind::LogisticsTransfer(_)
-        | ActionKind::LogisticsRepair(_) => bail!("invalid action type for this menu item"),
+        | ActionKind::LogisticsRepair(_)
+        | ActionKind::Start => bail!("invalid action type for this menu item"),
     };
     let cmd = ActionCmd { name, action, args };
     run_action(ctx, perf, lua, side, slot, ucid, Some(mark), cmd)
@@ -330,6 +332,7 @@ fn do_objective_action(
         | ActionKind::Bomber(_)
         | ActionKind::LogisticsTransfer(_)
         | ActionKind::Rtb
+        | ActionKind::Start
         | ActionKind::Move(_)
         | ActionKind::SeadWaypoint => bail!("invalid action type for this menu item"),
     };
@@ -570,6 +573,7 @@ fn add_action_menu(lua: MizLua, arg: ArgTriple<Ucid, GroupId, SlotId>) -> Result
                 let root = mc.add_submenu_for_group(arg.snd, title, Some(root.clone()))?;
                 add_objective(root.clone(), name.clone())?
             }
+            ActionKind::Start | ActionKind::Rtb => (),
         }
         n += 1;
     }

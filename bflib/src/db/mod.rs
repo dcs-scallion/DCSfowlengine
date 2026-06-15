@@ -39,6 +39,7 @@ use std::{cmp::max, fs::File, path::Path, sync::Arc};
 use tokio::sync::mpsc::UnboundedSender;
 
 pub mod actions;
+pub mod ai_air;
 pub mod aliases;
 pub mod cargo;
 pub mod csar;

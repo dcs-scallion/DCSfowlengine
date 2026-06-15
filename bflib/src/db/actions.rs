@@ -1,4 +1,4 @@
-use super::{Db, MapM, objective::Objective};
+use super::{Db, MapM, ai_air, objective::Objective};
 use crate::{
     admin,
     db::{cargo::Oldest, group::DeployKind},
@@ -81,6 +81,18 @@ pub struct WithJtac<T> {
 }
 
 #[derive(Debug, Clone)]
+pub struct WithGroup {
+    pub group: GroupId,
+}
+
+#[derive(Debug, Clone)]
+pub struct AiRtbArgs {
+    pub group: GroupId,
+    pub hub: Option<ObjectiveId>,
+    pub hold: bool,
+}
+
+#[derive(Debug, Clone)]
 pub enum ActionArgs {
     Tanker(WithPos<AiPlaneCfg>),
     Awacs(WithPos<AwacsCfg>),
@@ -103,7 +115,8 @@ pub enum ActionArgs {
     LogisticsRepair(WithObj<AiPlaneCfg>),
     LogisticsTransfer(WithFromTo<AiPlaneCfg>),
     Move(WithPosAndGroup<MoveCfg>),
-    Rtb(WithPosAndGroup<()>),
+    Rtb(AiRtbArgs),
+    Start(WithGroup),
 }
 
 impl ActionArgs {
@@ -263,7 +276,26 @@ impl ActionArgs {
             ActionKind::CruiseMissileSpawn(c) => {
                 Ok(Self::CruiseMissileSpawn(pos(db, lua, side, c, s)?))
             }
-            ActionKind::Rtb => Ok(Self::Rtb(pos_closest_base(db, lua, side, (), s)?)),
+            ActionKind::Rtb => {
+                let parts: Vec<&str> = s.split_whitespace().collect();
+                let gid: GroupId = parts
+                    .first()
+                    .ok_or_else(|| anyhow!("expected <gid> [base] [hold]"))?
+                    .parse()?;
+                let mut hold = false;
+                let mut hub = None;
+                for p in parts.iter().skip(1) {
+                    if p.eq_ignore_ascii_case("hold") {
+                        hold = true;
+                    } else {
+                        hub = Some(crate::admin::get_airbase(db, p)?);
+                    }
+                }
+                Ok(Self::Rtb(AiRtbArgs { group: gid, hub, hold }))
+            }
+            ActionKind::Start => Ok(Self::Start(WithGroup {
+                group: s.trim().parse()?,
+            })),
             ActionKind::CruiseMissileWaypoint => Ok(Self::CruiseMissileWaypoint(pos_group(
                 db,
                 lua,
@@ -285,7 +317,8 @@ impl ActionArgs {
             Self::CruiseMissileSpawn(c) => Some(c.pos),
             Self::CruiseMissileWaypoint(c) => Some(c.pos),
             Self::Bomber(_) => None,
-            Self::Rtb(c) => Some(c.pos),
+            Self::Rtb(_) => None,
+            Self::Start(_) => None,
             Self::Deployable(c) => Some(c.pos),
             Self::Drone(c) => Some(c.pos),
             Self::DroneWaypoint(c) => Some(c.pos),
@@ -524,7 +557,12 @@ impl Db {
             ActionArgs::SeadWaypoint(args) => {
                 self.move_ai_sead(spctx, side, ucid.clone(), args)?
             }
-            ActionArgs::Rtb(args) => self.rtb(spctx, args).context("rtbing unit")?,
+            ActionArgs::Rtb(args) => self
+                .ai_rtb(lua, spctx, idx, side, args)
+                .context("rtbing unit")?,
+            ActionArgs::Start(args) => self
+                .ai_start(spctx, side, args)
+                .context("starting ai air unit")?,
             ActionArgs::Drone(args) => self
                 .drone(perf, spctx, idx, side, ucid.clone(), name, cmd.action, args)
                 .context("calling drone")?,
@@ -585,6 +623,86 @@ impl Db {
     ) -> Result<()> {
         let now = Utc::now();
         let spawn_pos = self.group_center(&gid)?;
+        let lua = spctx.lua();
+        let ai_resume = {
+            let group = group!(self, gid)?;
+            match &group.origin {
+                DeployKind::Action { ai_air, .. }
+                    if ai_air.phase != ai_air::AiAirPhase::Legacy =>
+                {
+                    Some((
+                        group.side,
+                        ai_air.phase,
+                        ai_air.hub,
+                        ai_air.hub_slots.clone(),
+                        ai_air.active_mission.clone(),
+                    ))
+                }
+                _ => None,
+            }
+        };
+        if let Some((_side, phase, hub_opt, hub_slots, active_snap)) = ai_resume {
+            let hub_oid = hub_opt.ok_or_else(|| anyhow!("ai air missing hub on respawn"))?;
+            let hub_pick = ai_air::finish_hub_pick(
+                lua,
+                self,
+                hub_oid,
+                hub_slots,
+                ai_air::hub_airbase_id(self, lua, hub_oid)?,
+            )?;
+            let mission = match phase {
+                ai_air::AiAirPhase::Bootstrap | ai_air::AiAirPhase::Departing => vec![],
+                ai_air::AiAirPhase::RtbInbound => {
+                    let slot = hub_pick
+                        .slots
+                        .first()
+                        .ok_or_else(|| anyhow!("hub has no landing slot"))?;
+                    ai_air::land_at_hub_route(
+                        &hub_pick,
+                        slot,
+                        active_snap.alt,
+                        active_snap.alt_typ.clone(),
+                        active_snap.speed,
+                    )
+                }
+                ai_air::AiAirPhase::OnMission => {
+                    self.regenerate_ai_air_mission(lua, spctx, idx, gid)?
+                }
+                ai_air::AiAirPhase::AwaitingLaunch
+                | ai_air::AiAirPhase::Servicing
+                | ai_air::AiAirPhase::TaxiToParking => vec![],
+                ai_air::AiAirPhase::Legacy => vec![],
+            };
+            ai_air::spawn_ai_air_group(perf, self, spctx, idx, gid, &hub_pick)?;
+            if let DeployKind::Action { ai_air, .. } = &mut group_mut!(self, gid)?.origin {
+                if matches!(phase, ai_air::AiAirPhase::Bootstrap | ai_air::AiAirPhase::Departing) {
+                    ai_air.bootstrap_grounded = false;
+                    ai_air.bootstrap_mission_pushed = false;
+                }
+            }
+            if !mission.is_empty() {
+                let airborne = !matches!(
+                    phase,
+                    ai_air::AiAirPhase::Bootstrap | ai_air::AiAirPhase::Departing
+                );
+                self.ai_air_push_mission(spctx, gid, mission, airborne)?;
+            } else if matches!(phase, ai_air::AiAirPhase::Bootstrap | ai_air::AiAirPhase::Departing) {
+                let dcs_names = ai_air::dcs_spawn_names_for(self, gid)?;
+                for (i, dcs_name) in dcs_names.iter().enumerate() {
+                    let slot = hub_pick
+                        .slots
+                        .get(i)
+                        .or(hub_pick.slots.first())
+                        .ok_or_else(|| anyhow!("no hub slot"))?;
+                    let route = ai_air::bootstrap_route(&hub_pick, slot)?;
+                    self.ai_air_push_mission_to_name(spctx, dcs_name, route, false)?;
+                }
+                if let DeployKind::Action { ai_air, .. } = &mut group_mut!(self, gid)?.origin {
+                    ai_air.bootstrap_mission_pushed = true;
+                }
+            }
+            return Ok(());
+        }
         let group = group!(self, gid)?;
         let side = group.side;
         if let DeployKind::Action {
@@ -770,7 +888,7 @@ impl Db {
         let mission = self
             .drone_mission(side, ucid, pos, args)
             .context("generate drone mission")?;
-        self.set_ai_mission(spctx, gid, mission)
+        self.set_ai_mission(spctx, gid, mission, true)
             .context("setting ai mission")?;
         Ok(None)
     }
@@ -835,10 +953,7 @@ impl Db {
             max_dist: Some(30_000.),
             priority: None,
         };
-        let init_task = Task::ComboTask(vec![
-            Task::WrappedCommand(Command::SetUnlimitedFuel(true)),
-            main_task.clone(),
-        ]);
+        let init_task = Task::ComboTask(vec![main_task.clone()]);
         self.ai_loiter_point_mission(
             side,
             ucid,
@@ -867,7 +982,7 @@ impl Db {
         let mission = self
             .ai_fighters_mission(side, ucid, pos, args)
             .context("generate fighters mission")?;
-        self.set_ai_mission(spctx, gid, mission)
+        self.set_ai_mission(spctx, gid, mission, true)
             .context("setting fighters mission")?;
         Ok(None)
     }
@@ -932,10 +1047,7 @@ impl Db {
             max_dist: Some(15_000.),
             priority: None,
         };
-        let init_task = Task::ComboTask(vec![
-            Task::WrappedCommand(Command::SetUnlimitedFuel(true)),
-            main_task.clone(),
-        ]);
+        let init_task = Task::ComboTask(vec![main_task.clone()]);
         self.ai_loiter_point_mission(
             side,
             ucid,
@@ -983,10 +1095,7 @@ impl Db {
             max_dist: Some(15_000.), // Same range as Attackers
             priority: None,
         };
-        let init_task = Task::ComboTask(vec![
-            Task::WrappedCommand(Command::SetUnlimitedFuel(true)),
-            main_task.clone(),
-        ]);
+        let init_task = Task::ComboTask(vec![main_task.clone()]);
         self.ai_loiter_point_mission(
             side,
             ucid,
@@ -1015,7 +1124,7 @@ impl Db {
         let mission = self
             .ai_attackers_mission(side, ucid, pos, args)
             .context("generate attackers mission")?;
-        self.set_ai_mission(spctx, gid, mission)
+        self.set_ai_mission(spctx, gid, mission, true)
             .context("setting ai mission")?;
         Ok(None)
     }
@@ -1033,7 +1142,7 @@ impl Db {
         let mission = self
             .ai_sead_mission(side, ucid, pos, args)
             .context("generate sead mission")?;
-        self.set_ai_mission(spctx, gid, mission)
+        self.set_ai_mission(spctx, gid, mission, true)
             .context("setting ai mission")?;
         Ok(None)
     }
@@ -1187,6 +1296,7 @@ impl Db {
                     speed: 20.,
                     speed_locked: Some(true),
                     name: None,
+                    parking: None,
                     task: Box::new(Task::ComboTask(vec![
                         Task::WrappedOption(AiOption::Ground(GroundOption::AlarmState(
                             AlarmState::Green,
@@ -1212,6 +1322,7 @@ impl Db {
                     eta: None,
                     eta_locked: None,
                     name: Some(String::from("move")),
+                    parking: None,
                     task: Box::new(Task::ComboTask(vec![
                         Task::WrappedOption(AiOption::Ground(GroundOption::AlarmState(
                             AlarmState::Red,
@@ -1229,7 +1340,7 @@ impl Db {
         let mission = self
             .ai_rtb_mission(&mut args, || Task::ComboTask(vec![]))
             .context("generate rtb mission")?;
-        self.set_ai_mission(spctx, gid, mission)?;
+        self.set_ai_mission(spctx, gid, mission, true)?;
         Ok(Some(gid))
     }
 
@@ -1260,7 +1371,6 @@ impl Db {
             move || {
                 Task::ComboTask(vec![
                     Task::Tanker,
-                    Task::WrappedCommand(Command::SetUnlimitedFuel(true)),
                     Task::WrappedCommand(Command::SetFrequency {
                         frequency: freq.unwrap_or(264000000),
                         modulation: Modulation::AM,
@@ -1285,7 +1395,7 @@ impl Db {
         let mission = self
             .tanker_mission(side, ucid, pos, args)
             .context("generate tanker mission")?;
-        self.set_ai_mission(spctx, gid, mission)?;
+        self.set_ai_mission(spctx, gid, mission, true)?;
         Ok(None)
     }
 
@@ -1340,7 +1450,7 @@ impl Db {
         let mission = self
             .cruise_missile_mission(side, ucid, pos, args)
             .context("generating CruiseMissile mission")?;
-        self.set_ai_mission(spctx, gid, mission)
+        self.set_ai_mission(spctx, gid, mission, true)
             .context("setting ai mission")?;
         Ok(Some(gid))
     }
@@ -1590,6 +1700,7 @@ impl Db {
                     speed_locked: None,
                     eta_locked: None,
                     name: Some($name.into()),
+                    parking: None,
                     task: Box::new(task()),
                 }
             };
@@ -1635,6 +1746,7 @@ impl Db {
                 rtb: _,
                 origin: _,
                 ammo: _,
+                ai_air: _,
             } => match &spec.kind {
                 ActionKind::Tanker(ai_plane_cfg) => (
                     ai_plane_cfg.altitude,
@@ -1711,6 +1823,7 @@ impl Db {
             speed_locked: None,
             eta_locked: None,
             name: Some("rtb".to_owned().into()),
+            parking: None,
             task: Box::new(task()),
         }])
     }
@@ -1767,31 +1880,40 @@ impl Db {
         tags: BitFlags<UnitTag>,
         gen_mission: impl FnOnce(&mut Db, GroupId, Vector2) -> Result<Vec<MissionPoint<'lua>>> + 'static,
     ) -> Result<GroupId> {
-        let (_, _, obj) = Self::objective_near_point(&self.persisted.objectives, args.pos, |o| {
-            o.owner == side
-                && !o.captureable()
-                && !matches!(o.kind, ObjectiveKind::Production)
-                && match args.cfg.kind {
-                    AiPlaneKind::Helicopter => true,
-                    AiPlaneKind::FixedWing => {
-                        o.is_airbase()
-                            || self
-                                .ephemeral
-                                .cfg
-                                .extra_fixed_wing_objectives
-                                .contains(&o.name)
-                    }
-                }
-                && na::distance_squared(&args.pos.into(), &o.zone.pos().into()) > 100_000_000.
-        })
-        .ok_or_else(|| anyhow!("no objectives available for the ai mission"))?;
-        let pos = obj.zone.pos();
-        let sloc = SpawnLoc::InAir {
-            pos,
-            heading,
-            altitude: args.cfg.altitude,
-            speed: args.cfg.speed,
+        let lua = spctx.lua();
+        let unit_count = {
+            let tpl = spctx.get_template_ref(idx, GroupKind::Any, side, &args.cfg.template)?;
+            tpl.group.units()?.len()
         };
+        let hub = ai_air::select_hub_for_ai(
+            lua,
+            self,
+            spctx,
+            idx,
+            side,
+            args.pos,
+            &args.cfg,
+            unit_count,
+            ai_air::HubSelectMode::Spawn,
+        )?;
+        let hub_pos = ai_air::hub_zone_pos(self, hub.oid)?;
+        let slot0 = hub
+            .slots
+            .first()
+            .ok_or_else(|| anyhow!("hub has no slots"))?;
+        let sloc = SpawnLoc::AtPos {
+            pos: slot0.pos,
+            offset_direction: Vector2::new(1., 0.),
+            group_heading: slot0.heading,
+        };
+        let snap = ai_air::snapshot_from_loiter(
+            args.pos,
+            args.cfg.altitude,
+            args.cfg.altitude_typ.clone(),
+            args.cfg.speed,
+            false,
+        );
+        let mission_kind = ai_air::mission_kind_from_action(&action.kind);
         let origin = DeployKind::Action {
             marks: FxHashSet::default(),
             loc: sloc.clone(),
@@ -1800,9 +1922,23 @@ impl Db {
             spec: action,
             time: Utc::now(),
             destination,
-            rtb: Some(pos),
-            origin: Some(obj.id),
+            rtb: Some(hub_pos),
+            origin: Some(hub.oid),
             ammo: 0,
+            ai_air: ai_air::AiAirState {
+                phase: ai_air::AiAirPhase::Bootstrap,
+                hub: Some(hub.oid),
+                hub_slots: hub.slots.clone(),
+                active_mission: snap,
+                rtb_hold: false,
+                bootstrap_retries: 0,
+                bootstrap_grounded: false,
+                bootstrap_mission_pushed: false,
+                dcs_spawn_names: vec![],
+                plane_cfg: Some(args.cfg.clone()),
+                mission_kind,
+                phase_since: Utc::now(),
+            },
         };
         let gid = self
             .add_group(
@@ -1817,17 +1953,20 @@ impl Db {
                 None,
             )
             .context("creating group")?;
-        let mission = gen_mission(self, gid, pos).context("generating mission for new unit")?;
-        self.ephemeral
-            .spawn_group(
-                perf,
-                &self.persisted,
-                idx,
-                spctx,
-                group!(self, gid)?,
-                mission,
-            )
-            .context("spawning group")?;
+        let _ = gen_mission(self, gid, hub_pos).context("generating mission for new unit")?;
+        if let Err(e) = ai_air::spawn_ai_air_group(perf, self, spctx, idx, gid, &hub)
+            .context("spawning ai air group")
+        {
+            if self.ephemeral.airbase_by_oid.get(&hub.oid).is_some() {
+                let _ = self.sync_warehouse_to_objective(lua, hub.oid);
+            }
+            let _ = self.delete_group(&gid);
+            return Err(e);
+        }
+        if self.ephemeral.airbase_by_oid.get(&hub.oid).is_some() {
+            self.sync_warehouse_to_objective(lua, hub.oid)
+                .context("syncing warehouse after ai air spawn")?;
+        }
         Ok(gid)
     }
 
@@ -1849,7 +1988,6 @@ impl Db {
         let init_task = if group.tags.contains(UnitTag::Link16) {
             Task::ComboTask(vec![
                 Task::AWACS,
-                Task::WrappedCommand(Command::SetUnlimitedFuel(true)),
                 Task::WrappedCommand(Command::SetFrequency {
                     frequency: freq.unwrap_or(264000000),
                     modulation: Modulation::AM,
@@ -1868,7 +2006,6 @@ impl Db {
                     modulation: Modulation::AM,
                     power: 25,
                 }),
-                Task::WrappedCommand(Command::SetUnlimitedFuel(true)),
             ])
         };
         let main_task = vec![Task::AWACS];
@@ -1900,7 +2037,7 @@ impl Db {
         let mission = self
             .awacs_mission(side, ucid, pos, args)
             .context("generating awacs mission")?;
-        self.set_ai_mission(spctx, gid, mission)
+        self.set_ai_mission(spctx, gid, mission, true)
             .context("setting ai mission")?;
         Ok(None)
     }
@@ -1975,6 +2112,7 @@ impl Db {
                 spec,
                 loc,
                 player,
+                ai_air,
                 ..
             } => {
                 if !validator(&spec.kind) {
@@ -2017,9 +2155,16 @@ impl Db {
                             SpawnLoc::AtPos { .. }
                             | SpawnLoc::AtPosWithCenter { .. }
                             | SpawnLoc::AtPosWithComponents { .. }
-                            | SpawnLoc::AtTrigger { .. } => {
-                                bail!("race tracker not spawning in air")
-                            }
+                            | SpawnLoc::AtTrigger { .. } => (),
+                        }
+                        if ai_air.phase != ai_air::AiAirPhase::Legacy {
+                            ai_air.active_mission = ai_air::snapshot_from_loiter(
+                                args.pos,
+                                a.altitude,
+                                a.altitude_typ.clone(),
+                                a.speed,
+                                matches!(pattern, OrbitPattern::RaceTrack),
+                            );
                         }
                         (a.altitude, a.altitude_typ.clone(), a.speed, marks, player)
                     }
@@ -2032,6 +2177,7 @@ impl Db {
                     | ActionKind::FighersWaypoint
                     | ActionKind::Move(_)
                     | ActionKind::Rtb
+                    | ActionKind::Start
                     | ActionKind::Deployable(_)
                     | ActionKind::Paratrooper(_)
                     | ActionKind::Bomber(_)
@@ -2111,6 +2257,7 @@ impl Db {
                     speed_locked: None,
                     eta_locked: None,
                     name: Some($name.into()),
+                    parking: None,
                     task: Box::new($task),
                 }
             };
@@ -2163,9 +2310,9 @@ impl Db {
         let group = group!(self, args.group)?;
         let init_task = Task::ComboTask(vec![]);
         let main_task = if group.tags.contains(UnitTag::Link16) {
-            vec![Task::WrappedCommand(Command::SetUnlimitedFuel(true))]
+            vec![]
         } else {
-            vec![Task::WrappedCommand(Command::SetUnlimitedFuel(true))]
+            vec![]
         };
         self.ai_loiter_point_mission(
             side,
@@ -2182,24 +2329,159 @@ impl Db {
         )
     }
 
+    fn push_mission_to_dcs_group<'lua>(
+        spctx: &SpawnCtx<'lua>,
+        dcs_name: &str,
+        mission: Vec<MissionPoint<'lua>>,
+        airborne: bool,
+    ) -> Result<()> {
+        let group = Group::get_by_name(spctx.lua(), dcs_name)?;
+        let unit = group.get_unit(1).context("getting unit 1")?;
+        if !unit.is_exist()? {
+            return Ok(());
+        }
+        let con = group.get_controller().context("getting controller")?;
+        con.set_task(Task::Mission {
+            airborne: Some(airborne),
+            route: mission.clone(),
+        })?;
+        con.set_task(Task::Mission {
+            airborne: Some(airborne),
+            route: mission,
+        })
+        .context("setting mission")
+    }
+
     fn set_ai_mission<'lua>(
         &mut self,
         spctx: &SpawnCtx<'lua>,
         gid: GroupId,
         mission: Vec<MissionPoint<'lua>>,
+        airborne: bool,
     ) -> Result<()> {
+        let names = ai_air::dcs_spawn_names_for(self, gid)?;
+        for dcs_name in &names {
+            Self::push_mission_to_dcs_group(spctx, dcs_name, mission.clone(), airborne)?;
+        }
+        Ok(())
+    }
+
+    pub(super) fn ai_air_push_mission_to_name<'lua>(
+        &mut self,
+        spctx: &SpawnCtx<'lua>,
+        dcs_name: &str,
+        mission: Vec<MissionPoint<'lua>>,
+        airborne: bool,
+    ) -> Result<()> {
+        Self::push_mission_to_dcs_group(spctx, dcs_name, mission, airborne)
+    }
+
+    pub(super) fn ai_air_push_mission<'lua>(
+        &mut self,
+        spctx: &SpawnCtx<'lua>,
+        gid: GroupId,
+        mission: Vec<MissionPoint<'lua>>,
+        airborne: bool,
+    ) -> Result<()> {
+        self.set_ai_mission(spctx, gid, mission, airborne)
+    }
+
+    pub(super) fn regenerate_ai_air_mission<'lua>(
+        &mut self,
+        lua: MizLua,
+        spctx: &SpawnCtx<'lua>,
+        idx: &MizIndex,
+        gid: GroupId,
+    ) -> Result<Vec<MissionPoint<'lua>>> {
         let group = group!(self, gid)?;
-        let group = Group::get_by_name(spctx.lua(), &group.name)?;
-        let con = group.get_controller().context("getting controller")?;
-        con.set_task(Task::Mission {
-            airborne: Some(true),
-            route: mission.clone(),
-        })?;
-        con.set_task(Task::Mission {
-            airborne: Some(true),
-            route: mission,
-        })
-        .context("setting mission")
+        let side = group.side;
+        let spawn_pos = ai_air::flight_center_pos(lua, &ai_air::dcs_spawn_names_for(self, gid)?)?;
+        let mission_pos = match &group.origin {
+            DeployKind::Action { ai_air, .. } => ai_air.active_mission.pos,
+            _ => bail!("not action"),
+        };
+        let args = WithPosAndGroup {
+            cfg: (),
+            pos: mission_pos,
+            group: gid,
+        };
+        let DeployKind::Action { spec, player, .. } = &group.origin else {
+            bail!("not action");
+        };
+        let ucid = player.clone();
+        match &spec.kind {
+            ActionKind::Fighters(_) => self.ai_fighters_mission(side, ucid, spawn_pos, args),
+            ActionKind::Attackers(_) => self.ai_attackers_mission(side, ucid, spawn_pos, args),
+            ActionKind::Sead(_) => self.ai_sead_mission(side, ucid, spawn_pos, args),
+            ActionKind::Tanker(_) => self.tanker_mission(side, ucid, spawn_pos, args),
+            ActionKind::Awacs(_) => self.awacs_mission(side, ucid, spawn_pos, args),
+            ActionKind::Drone(_) => self.drone_mission(side, ucid, spawn_pos, args),
+            ActionKind::CruiseMissileSpawn(_) => {
+                self.cruise_missile_mission(side, ucid, spawn_pos, args)
+            }
+            ActionKind::Rtb | ActionKind::Start => {
+                let args = WithPosAndGroup {
+                    cfg: (),
+                    pos: mission_pos,
+                    group: gid,
+                };
+                match ai_air::ai_air_mission_kind(self, gid) {
+                    ai_air::AiAirMissionKind::Fighters => {
+                        self.ai_fighters_mission(side, ucid, spawn_pos, args)
+                    }
+                    ai_air::AiAirMissionKind::Attackers => {
+                        self.ai_attackers_mission(side, ucid, spawn_pos, args)
+                    }
+                    ai_air::AiAirMissionKind::Sead => self.ai_sead_mission(side, ucid, spawn_pos, args),
+                    ai_air::AiAirMissionKind::Tanker => self.tanker_mission(side, ucid, spawn_pos, args),
+                    ai_air::AiAirMissionKind::Awacs => self.awacs_mission(side, ucid, spawn_pos, args),
+                    ai_air::AiAirMissionKind::Drone => self.drone_mission(side, ucid, spawn_pos, args),
+                    ai_air::AiAirMissionKind::CruiseMissileSpawn => {
+                        self.cruise_missile_mission(side, ucid, spawn_pos, args)
+                    }
+                    ai_air::AiAirMissionKind::Unknown => {
+                        let DeployKind::Action { ai_air, .. } = &group.origin else {
+                            bail!("not action");
+                        };
+                        Ok(ai_air::mission_from_snapshot(
+                            &ai_air.active_mission,
+                            Task::ComboTask(vec![]),
+                        ))
+                    }
+                }
+            }
+            _ => bail!("no mission regen for this action kind"),
+        }
+    }
+
+    fn ai_rtb(
+        &mut self,
+        lua: MizLua,
+        spctx: &SpawnCtx,
+        idx: &MizIndex,
+        side: Side,
+        args: AiRtbArgs,
+    ) -> Result<Option<GroupId>> {
+        ai_air::issue_rtb(
+            self,
+            lua,
+            spctx,
+            idx,
+            side,
+            ai_air::RtbRequest {
+                group: args.group,
+                hub: args.hub,
+                hold: args.hold,
+                preserve_mission_kind: true,
+            },
+        )?;
+        Ok(Some(args.group))
+    }
+
+    fn ai_start(&mut self, spctx: &SpawnCtx, side: Side, args: WithGroup) -> Result<Option<GroupId>> {
+        let lua = spctx.lua();
+        ai_air::issue_start(self, lua, spctx, args.group, side)?;
+        Ok(Some(args.group))
     }
 
     fn bomb_targets(
@@ -2480,6 +2762,14 @@ impl Db {
         jtacs: &Jtacs,
         now: DateTime<Utc>,
     ) -> Result<()> {
+        let spctx = SpawnCtx::new(lua)?;
+        let ai_gids: Vec<GroupId> = self.persisted.actions.into_iter().copied().collect();
+        for gid in ai_gids {
+            if let Err(e) = ai_air::advance_ai_air(lua, self, &spctx, idx, gid, now) {
+                error!("ai air tick {gid}: {e:?}");
+            }
+        }
+
         let mut to_delete: SmallVec<[GroupId; 4]> = smallvec![];
         let mut to_bomb: SmallVec<[(BomberCfg, Vector2, Side); 2]> = smallvec![];
         let mut to_repair: SmallVec<[(Vector2, Option<Ucid>, Side); 2]> = smallvec![];
@@ -2557,33 +2847,7 @@ impl Db {
                             }
                         }
                     }
-                    ActionKind::Rtb => {
-                        if let Some(target) = *rtb {
-                            if at_dest!(group, target, 10_000.) {
-                                to_delete.push(*gid);
-                                match player {
-                                    Some(u) => match self.persisted.players.get_mut_cow(u) {
-                                        Some(p) => {
-                                            p.points += (spec.cost as f64 * 0.25).ceil() as i32;
-                                            self.ephemeral.msgs().panel_to_side(
-                                                5,
-                                                false,
-                                                p.side,
-                                                format_compact!(
-                                                    "{}'s {} has RTB'd. points refunded: {}",
-                                                    p.name,
-                                                    group.name,
-                                                    (spec.cost as f64 * 0.25).ceil() as i32,
-                                                ),
-                                            );
-                                        }
-                                        None => (),
-                                    },
-                                    None => (),
-                                }
-                            }
-                        }
-                    }
+                    ActionKind::Rtb | ActionKind::Start => (),
                     ActionKind::LogisticsRepair(_) => {
                         if let Some(target) = *destination {
                             if at_dest!(group, target, 800.) {

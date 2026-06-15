@@ -371,7 +371,11 @@ fn action_help(ctx: &mut Context, actions: &IndexMap<String, Action, FxBuildHash
                 action.cost
             )),
             ActionKind::Rtb => Some(format_compact!(
-                "{name}: <group> <key> | RTB an air asset manually. cost {}",
+                "{name}: <group> [base] [hold] | RTB ai air to base. cost {}",
+                action.cost
+            )),
+            ActionKind::Start => Some(format_compact!(
+                "{name}: <group> | Launch ai air from hold to last waypoint. cost {}",
                 action.cost
             )),
             ActionKind::Awacs(_) => Some(format_compact!(

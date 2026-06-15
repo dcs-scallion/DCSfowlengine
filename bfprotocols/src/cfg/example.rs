@@ -1565,6 +1565,26 @@ fn default_red_actions() -> IndexMap<String, Action, FxBuildHasher> {
                 }),
             },
         ),
+        (
+            "rtb".into(),
+            Action {
+                cost: 0,
+                penalty: None,
+                limit: None,
+                geo_limit: ActionGeoLimit::Unlimited,
+                kind: ActionKind::Rtb,
+            },
+        ),
+        (
+            "start".into(),
+            Action {
+                cost: 0,
+                penalty: None,
+                limit: None,
+                geo_limit: ActionGeoLimit::Unlimited,
+                kind: ActionKind::Start,
+            },
+        ),
     ])
 }
 
@@ -1862,6 +1882,26 @@ fn default_blue_actions() -> IndexMap<String, Action, FxBuildHasher> {
                     troop: 1000,
                     deployable: 1000,
                 }),
+            },
+        ),
+        (
+            "rtb".into(),
+            Action {
+                cost: 0,
+                penalty: None,
+                limit: None,
+                geo_limit: ActionGeoLimit::Unlimited,
+                kind: ActionKind::Rtb,
+            },
+        ),
+        (
+            "start".into(),
+            Action {
+                cost: 0,
+                penalty: None,
+                limit: None,
+                geo_limit: ActionGeoLimit::Unlimited,
+                kind: ActionKind::Start,
             },
         ),
     ])

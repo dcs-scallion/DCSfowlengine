@@ -700,6 +700,7 @@ impl Jtac {
                         eta: None,
                         eta_locked: None,
                         name: None,
+                        parking: None,
                         task: Box::new(task),
                     }],
                 };
@@ -802,6 +803,7 @@ impl Jtac {
                         eta: None,
                         eta_locked: None,
                         name: None,
+                        parking: None,
                         task: Box::new(Task::ComboTask(fire_task_vec)),
                     }],
                 };
@@ -930,6 +932,7 @@ impl Jtac {
                     eta: None,
                     eta_locked: None,
                     name: None,
+                    parking: None,
                     task: Box::new(Task::ComboTask(fire_task_vec)),
                 });
 
@@ -1030,6 +1033,7 @@ impl Jtac {
                         eta: None,
                         eta_locked: None,
                         name: None,
+                        parking: None,
                         task: Box::new(task),
                     }],
                 };

@@ -57,7 +57,9 @@ string_enum!(OrbitPattern, u8, [
 
 string_enum!(TurnMethod, u8, [
     FlyOverPoint => "Fly Over Point",
-    OffRoad => "Off Road"
+    OffRoad => "Off Road",
+    FromParkingArea => "From Parking Area",
+    FromRunway => "From Runway"
 ]);
 
 string_enum!(Designation, u8, [
@@ -327,6 +329,7 @@ pub struct MissionPoint<'lua> {
     pub eta: Option<Time>,
     pub eta_locked: Option<bool>,
     pub name: Option<String>,
+    pub parking: Option<String>,
     pub task: Box<Task<'lua>>,
 }
 
@@ -348,6 +351,7 @@ impl<'lua> FromLua<'lua> for MissionPoint<'lua> {
             eta: tbl.raw_get("ETA")?,
             eta_locked: tbl.raw_get("ETA_locked")?,
             name: tbl.raw_get("name")?,
+            parking: tbl.raw_get("parking").ok(),
             task: Box::new(tbl.raw_get("task")?),
         })
     }
@@ -371,6 +375,7 @@ impl<'lua> IntoLua<'lua> for MissionPoint<'lua> {
             ("ETA", self.eta.into_lua(lua)?),
             ("ETA_locked", self.eta_locked.into_lua(lua)?),
             ("name", self.name.into_lua(lua)?),
+            ("parking", self.parking.into_lua(lua)?),
             ("task", self.task.into_lua(lua)?),
         ]
         .into_iter()
