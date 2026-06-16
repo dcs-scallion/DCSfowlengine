@@ -824,6 +824,10 @@ pub enum ActionKind {
     Rtb,
     /// Resume AI air unit from `AwaitingLaunch` to last waypoint (`-action start <gid>`).
     Start,
+    /// Live fuel and pylon store report for an action group (`-action status <gid>`).
+    Status,
+    /// Rearm from hub warehouse (`-action rearm <gid>`).
+    Rearm,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

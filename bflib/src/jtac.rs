@@ -965,16 +965,13 @@ impl Jtac {
                     route: bombing_task_vec,
                 };
 
-                let group = Group::get_by_name(lua, &name)
-                    .with_context(|| format_compact!("getting group {}", name))?;
-                for unit in group.get_units()? {
-                    let unit = unit?;
-                    let _id = unit.object_id()?;
+                let dcs_names = db.action_dcs_group_names(*gid)?;
+                for dcs_name in &dcs_names {
+                    let group = Group::get_by_name(lua, dcs_name)
+                        .with_context(|| format_compact!("getting group {}", dcs_name))?;
+                    let con = group.get_controller().context("getting controller")?;
+                    con.push_task(task.clone())?;
                 }
-                let con = group.get_controller().context("getting controller")?;
-                //con.set_task(task.clone())?;
-                //con.set_task(task)?;
-                con.push_task(task)?;
             }
         }
         Ok(())

@@ -1585,6 +1585,26 @@ fn default_red_actions() -> IndexMap<String, Action, FxBuildHasher> {
                 kind: ActionKind::Start,
             },
         ),
+        (
+            "status".into(),
+            Action {
+                cost: 0,
+                penalty: None,
+                limit: None,
+                geo_limit: ActionGeoLimit::Unlimited,
+                kind: ActionKind::Status,
+            },
+        ),
+        (
+            "rearm".into(),
+            Action {
+                cost: 0,
+                penalty: None,
+                limit: None,
+                geo_limit: ActionGeoLimit::Unlimited,
+                kind: ActionKind::Rearm,
+            },
+        ),
     ])
 }
 
@@ -1902,6 +1922,26 @@ fn default_blue_actions() -> IndexMap<String, Action, FxBuildHasher> {
                 limit: None,
                 geo_limit: ActionGeoLimit::Unlimited,
                 kind: ActionKind::Start,
+            },
+        ),
+        (
+            "status".into(),
+            Action {
+                cost: 0,
+                penalty: None,
+                limit: None,
+                geo_limit: ActionGeoLimit::Unlimited,
+                kind: ActionKind::Status,
+            },
+        ),
+        (
+            "rearm".into(),
+            Action {
+                cost: 0,
+                penalty: None,
+                limit: None,
+                geo_limit: ActionGeoLimit::Unlimited,
+                kind: ActionKind::Rearm,
             },
         ),
     ])

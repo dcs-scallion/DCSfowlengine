@@ -211,6 +211,13 @@ impl Db {
         aliases::resolve_settings_alias(&self.ephemeral.objective_display_aliases, key)
     }
 
+    pub fn action_dcs_group_names(
+        &self,
+        gid: bfprotocols::db::group::GroupId,
+    ) -> Result<Vec<dcso3::String>> {
+        ai_air::dcs_spawn_names_for(self, gid)
+    }
+
     pub fn life_type_panel_label(&self, typ: bfprotocols::cfg::LifeType) -> String {
         aliases::resolve_life_type_panel_label(
             &self.ephemeral.objective_display_aliases,

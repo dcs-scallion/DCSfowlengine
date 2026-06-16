@@ -18,7 +18,7 @@ use crate::weapon_bridge;
 use crate::MizCmd;
 use anyhow::{bail, Context, Result};
 use bfprotocols::{
-    cfg::{Cfg, Deployable, DeployableKind},
+    cfg::{ActionKind, Cfg, Deployable, DeployableKind},
     fowl_miz_export::{
         ObjectiveCoalitionStock, ObjectiveStockByCoalition, ObjectiveStockItem,
         ObjectiveStockLiquid, ObjectiveWarehouseDefaults,
@@ -182,6 +182,50 @@ fn zero_dynamic_spawn_template_unit_fuel(unit: &Table) -> Result<()> {
         let _ = pl.raw_set("fuel", Value::Number(0.0));
     }
     Ok(())
+}
+
+fn collect_drone_action_template_names(cfg: &Cfg) -> HashSet<String> {
+    let mut out = HashSet::default();
+    for side in Side::ALL {
+        let Some(actions) = cfg.actions.get(&side) else {
+            continue;
+        };
+        for action in actions.values() {
+            if let ActionKind::Drone(d) = &action.kind {
+                out.insert(d.plane.template.clone());
+            }
+        }
+    }
+    out
+}
+
+fn zero_drone_template_fuel_in_base(base: &LoadedMiz, templates: &HashSet<String>) -> Result<usize> {
+    let mut units = 0usize;
+    for side in Side::ALL {
+        let coa = base.mission.coalition(side)?;
+        for country in coa.raw_get::<_, Table>("country")?.pairs::<Value, Table>() {
+            let country = country?.1;
+            for group in vehicle(&country, "plane")
+                .context("getting planes")?
+                .chain(vehicle(&country, "helicopter").context("getting helicopters")?)
+            {
+                let group = group?;
+                let gname: String = group.raw_get("name")?;
+                if !templates.contains(&gname) {
+                    continue;
+                }
+                for unit in group
+                    .raw_get::<_, Table>("units")?
+                    .pairs::<Value, Table>()
+                {
+                    let unit = unit?.1;
+                    zero_dynamic_spawn_template_unit_fuel(&unit)?;
+                    units += 1;
+                }
+            }
+        }
+    }
+    Ok(units)
 }
 
 struct UnpackedMiz {
@@ -2997,6 +3041,9 @@ fn mirror_assembled_production_inventory(
 }
 
 const LIQUID_STOCK_KEYS: [&str; 4] = ["jet_fuel", "gasoline", "diesel", "methanol_mixture"];
+/// Selective extra fill via `BEXTRAFUEL-*` / `REXTRAFUEL-*` warehouse trigger zones (`jet_fuel` uses inventory only).
+const EXTRA_FUEL_LIQUID_KEYS: [&str; 3] = ["gasoline", "methanol_mixture", "diesel"];
+const EXTRA_FUEL_OBJECTIVE_KINDS: [&str; 3] = ["OLO", "OAB", "OFO"];
 
 fn ordnance_ws_type(quad: [i32; 4]) -> bool {
     quad[0] == 4 && (4..=8).contains(&quad[1])
@@ -4189,6 +4236,7 @@ struct WarehouseTemplate {
     red_all_fueltanks: Table<'static>,
     blue_default_fueltanks: Table<'static>,
     red_default_fueltanks: Table<'static>,
+    extra_fuel: ExtraFuelDirectives,
 }
 
 /// Keeps `LoadedMiz` alive so template warehouse tables stay valid until repacking `warehouse<campaign_decade>.miz`.
@@ -4766,6 +4814,96 @@ fn apply_inventory_liquids_scaled(dst: &Table, src: &Table, lua: &Lua, mult: u32
         }
     }
     Ok(())
+}
+
+fn read_liquid_init_fuel_f64(tbl: &Table) -> f64 {
+    if let Ok(v) = tbl.raw_get::<_, f64>("InitFuel") {
+        return v;
+    }
+    if let Ok(v) = tbl.raw_get::<_, i64>("InitFuel") {
+        return v as f64;
+    }
+    0.0
+}
+
+fn add_liquid_init_fuel_tons(
+    lua: &Lua,
+    wh: &Table,
+    liquid_key: &str,
+    add_tons: f64,
+    inv_tpl: Option<&Table<'_>>,
+) -> Result<()> {
+    if add_tons <= 0.0 {
+        return Ok(());
+    }
+    let dst = if let Ok(t) = wh.raw_get::<_, Table>(liquid_key) {
+        t
+    } else if let Some(inv) = inv_tpl {
+        let Ok(src) = inv.raw_get::<_, Table>(liquid_key) else {
+            return Ok(());
+        };
+        let new = src.deep_clone(lua)?;
+        wh.raw_set(liquid_key, new.clone())?;
+        new
+    } else {
+        return Ok(());
+    };
+    let cur = read_liquid_init_fuel_f64(&dst);
+    let next = (cur + add_tons).clamp(0.0, 1e18);
+    if dst.raw_get::<_, i64>("InitFuel").is_ok() && dst.raw_get::<_, f64>("InitFuel").is_err() {
+        dst.raw_set("InitFuel", next as i64)?;
+    } else {
+        dst.raw_set("InitFuel", next)?;
+    }
+    Ok(())
+}
+
+fn objective_kind_from_zone_name(zone_name: &str) -> Option<&'static str> {
+    if zone_name.starts_with("OLO") {
+        Some("OLO")
+    } else if zone_name.starts_with("OAB") {
+        Some("OAB")
+    } else if zone_name.starts_with("OFO") {
+        Some("OFO")
+    } else {
+        None
+    }
+}
+
+fn parse_extra_fuel_zone_name(name: &str) -> Option<(Side, &str)> {
+    if let Some(liquid) = name.strip_prefix("BEXTRAFUEL-") {
+        if EXTRA_FUEL_LIQUID_KEYS.contains(&liquid) {
+            return Some((Side::Blue, liquid));
+        }
+    }
+    if let Some(liquid) = name.strip_prefix("REXTRAFUEL-") {
+        if EXTRA_FUEL_LIQUID_KEYS.contains(&liquid) {
+            return Some((Side::Red, liquid));
+        }
+    }
+    None
+}
+
+fn warehouse_stock_mult_for_objective_zone(
+    mult_cfg: &WarehouseStockMultConfig,
+    obj_zone: Option<&ObjectiveDynAllow>,
+    wid: i64,
+    is_airports_table: bool,
+) -> u32 {
+    if let Some(allow) = obj_zone {
+        if allow.is_logistics_hub {
+            return mult_cfg.hub_max.max(1);
+        }
+        if is_airports_table {
+            return mult_cfg.mult_airport(wid);
+        }
+        return mult_cfg.mult_dynamic_row(wid, false);
+    }
+    if is_airports_table {
+        mult_cfg.mult_airport(wid)
+    } else {
+        mult_cfg.mult_dynamic_row(wid, false)
+    }
 }
 
 fn preserve_dynamic_flags(
@@ -5517,6 +5655,69 @@ fn compile_warehouse_zone_plus_directives(mission: &Miz) -> Result<WarehouseZone
     Ok(out)
 }
 
+type ExtraFuelByKindLiquid = HashMap<(StdString, StdString), f64>;
+
+#[derive(Default)]
+struct ExtraFuelDirectives {
+    blue: ExtraFuelByKindLiquid,
+    red: ExtraFuelByKindLiquid,
+}
+
+fn compile_extra_fuel_directives(mission: &Miz) -> Result<ExtraFuelDirectives> {
+    let mut out = ExtraFuelDirectives::default();
+    for zone_r in mission.triggers()? {
+        let zone = zone_r?;
+        let zname = zone.name()?;
+        let zname_ref = zname.as_ref();
+        let Some((side, liquid)) = parse_extra_fuel_zone_name(zname_ref) else {
+            continue;
+        };
+        let target = match side {
+            Side::Blue => &mut out.blue,
+            Side::Red => &mut out.red,
+            Side::Neutral => continue,
+        };
+        let liquid_key = StdString::from(liquid);
+        let mut props_seen = 0usize;
+        for prop_r in zone.properties()? {
+            let prop = prop_r?;
+            let kind = prop.key.as_ref().trim();
+            if !EXTRA_FUEL_OBJECTIVE_KINDS.contains(&kind) {
+                continue;
+            }
+            let val = prop.value.as_ref().trim();
+            if val.is_empty() || zone_property_is_editor_comment(val) {
+                continue;
+            }
+            let Ok(base_tons) = val.parse::<f64>() else {
+                warn!(
+                    "{zname_ref}: skip `{kind}` = `{val}` (expected base tons as number)"
+                );
+                continue;
+            };
+            if base_tons < 0.0 {
+                warn!("{zname_ref}: skip `{kind}` = `{val}` (negative base tons)");
+                continue;
+            }
+            target.insert((StdString::from(kind), liquid_key.clone()), base_tons);
+            props_seen += 1;
+        }
+        if props_seen == 0 {
+            warn!(
+                "{zname_ref}: no OLO/OAB/OFO properties with base tons; extra fuel ignored"
+            );
+        }
+    }
+    if !out.blue.is_empty() || !out.red.is_empty() {
+        info!(
+            "B/REXTRAFUEL trigger zones: blue {} row(s), red {} row(s) (kind × liquid base tons)",
+            out.blue.len(),
+            out.red.len()
+        );
+    }
+    Ok(out)
+}
+
 fn collect_inventory_weapon_ws_set(inv_row: &Table) -> Result<HashSet<[i32; 4]>> {
     let mut out = HashSet::new();
     let Ok(weapons) = inv_row.raw_get::<_, Table>("weapons") else {
@@ -6072,6 +6273,7 @@ impl WarehouseTemplate {
             None
         };
         let zone_directives = compile_warehouse_zone_plus_directives(&wht.mission)?;
+        let extra_fuel = compile_extra_fuel_directives(&wht.mission)?;
         Ok(Self {
             blue_inventory: warehouses
                 .raw_get(blue_inventory_id)
@@ -6113,6 +6315,7 @@ impl WarehouseTemplate {
             red_default_fueltanks: warehouses
                 .raw_get(red_default_fueltanks_id)
                 .context("getting RDEFAULTFUELTANKS inventory")?,
+            extra_fuel,
         })
     }
 
@@ -9472,6 +9675,133 @@ fn build_inventory_plus_resolution_maps(
     Ok((nm, ws))
 }
 
+fn apply_extra_fuel_directives(
+    lua: &Lua,
+    warehouses_root: &Table<'static>,
+    directives: &ExtraFuelDirectives,
+    mult_cfg: &WarehouseStockMultConfig,
+    obj_dyn_allow: &[ObjectiveDynAllow],
+    warehouse_positions: &HashMap<i64, Vector2>,
+    skip_ids: &HashSet<i64>,
+    blue_inventory: &Table<'static>,
+    red_inventory: &Table<'static>,
+) -> Result<()> {
+    if directives.blue.is_empty() && directives.red.is_empty() {
+        return Ok(());
+    }
+    let mut applied = 0usize;
+
+    fn patch_table(
+        lua: &Lua,
+        tbl: &Table<'static>,
+        directives: &ExtraFuelDirectives,
+        mult_cfg: &WarehouseStockMultConfig,
+        obj_dyn_allow: &[ObjectiveDynAllow],
+        warehouse_positions: &HashMap<i64, Vector2>,
+        skip_ids: &HashSet<i64>,
+        blue_inventory: &Table<'static>,
+        red_inventory: &Table<'static>,
+        is_airports_table: bool,
+        applied: &mut usize,
+    ) -> Result<()> {
+        for pair in tbl.clone().pairs::<Value, Table>() {
+            let (k, wh) = pair?;
+            let Some(wid) = warehouse_lua_key_i64(k) else {
+                continue;
+            };
+            if skip_ids.contains(&wid) {
+                continue;
+            }
+            let obj_zone: Option<&ObjectiveDynAllow> = if is_airports_table {
+                obj_dyn_allow
+                    .iter()
+                    .find(|o| o.airbase_id == Some(wid))
+                    .or_else(|| {
+                        warehouse_positions
+                            .get(&wid)
+                            .and_then(|&pos| objective_dyn_allow_geom_pick(obj_dyn_allow, pos))
+                    })
+            } else {
+                warehouse_positions
+                    .get(&wid)
+                    .and_then(|&pos| objective_dyn_allow_geom_pick(obj_dyn_allow, pos))
+            };
+            let Some(obj) = obj_zone else {
+                continue;
+            };
+            let Some(kind) = objective_kind_from_zone_name(obj.zone_name.as_str()) else {
+                continue;
+            };
+            let (directives_for_side, inv_tpl) = match obj.side {
+                Side::Blue => (&directives.blue, blue_inventory),
+                Side::Red => (&directives.red, red_inventory),
+                Side::Neutral => continue,
+            };
+            let mult = warehouse_stock_mult_for_objective_zone(
+                mult_cfg,
+                Some(obj),
+                wid,
+                is_airports_table,
+            );
+            let kind_key = StdString::from(kind);
+            for liquid in EXTRA_FUEL_LIQUID_KEYS {
+                let lookup = (kind_key.clone(), StdString::from(liquid));
+                let Some(base_tons) = directives_for_side.get(&lookup) else {
+                    continue;
+                };
+                if *base_tons <= 0.0 {
+                    continue;
+                }
+                let add_tons = base_tons * mult as f64;
+                add_liquid_init_fuel_tons(lua, &wh, liquid, add_tons, Some(inv_tpl))?;
+                info!(
+                    "warehouse {wid} {:?} ({kind}): +{add_tons:.1} t {liquid} (base {base_tons} × mult {mult})",
+                    obj.zone_name.as_str()
+                );
+                *applied += 1;
+            }
+        }
+        Ok(())
+    }
+
+    let airports = warehouses_root
+        .raw_get::<_, Table>("airports")
+        .context("getting airports for extra fuel")?;
+    patch_table(
+        lua,
+        &airports,
+        directives,
+        mult_cfg,
+        obj_dyn_allow,
+        warehouse_positions,
+        skip_ids,
+        blue_inventory,
+        red_inventory,
+        true,
+        &mut applied,
+    )?;
+    let warehouses = warehouses_root
+        .raw_get::<_, Table>("warehouses")
+        .context("getting warehouses for extra fuel")?;
+    patch_table(
+        lua,
+        &warehouses,
+        directives,
+        mult_cfg,
+        obj_dyn_allow,
+        warehouse_positions,
+        skip_ids,
+        blue_inventory,
+        red_inventory,
+        false,
+        &mut applied,
+    )?;
+    if applied > 0 {
+        info!("B/REXTRAFUEL: applied {applied} extra liquid fill(s) on objective warehouses");
+    }
+    Ok(())
+}
+
 fn patch_warehouse_dynamic_spawn_links(
     lua: &Lua,
     warehouses_root: &Table<'static>,
@@ -11601,6 +11931,21 @@ pub fn run(cfg: &MizCmd) -> Result<()> {
         &*LUA
     };
     let mut base = LoadedMiz::new(lua, &cfg.base).context("loading base mission")?;
+    if let Some(ref cfg_path) = cfg.campaign_cfg {
+        let fowl_cfg: Cfg = serde_json::from_reader(
+            File::open(cfg_path)
+                .with_context(|| format_compact!("opening campaign cfg {:?}", cfg_path))?,
+        )
+        .with_context(|| format_compact!("decoding campaign cfg {:?}", cfg_path))?;
+        let drone_tpls = collect_drone_action_template_names(&fowl_cfg);
+        if !drone_tpls.is_empty() {
+            let n = zero_drone_template_fuel_in_base(&base, &drone_tpls)?;
+            info!(
+                "Drone (ActionKind::Drone): zeroed internal fuel on {n} unit(s) in {} ME template group(s)",
+                drone_tpls.len()
+            );
+        }
+    }
     validate_base_fowl_trigger_zone_names(&base.mission)
         .context("validating Fowl trigger zone names (must match runtime)")?;
     crate::discord_map_icons::validate_discord_map_zones(
@@ -12110,6 +12455,21 @@ pub fn run(cfg: &MizCmd) -> Result<()> {
             &vehicle_templates,
         )
         .context("patching warehouse linkDynTempl")?;
+        let mut extra_fuel_skip = HashSet::default();
+        extra_fuel_skip.insert(blue_inv_id);
+        extra_fuel_skip.insert(red_inv_id);
+        apply_extra_fuel_directives(
+            lua,
+            &base.warehouses,
+            &wb.template.extra_fuel,
+            &mult_cfg,
+            &obj_dyn_allow,
+            &warehouse_positions,
+            &extra_fuel_skip,
+            &wb.template.blue_inventory,
+            &wb.template.red_inventory,
+        )
+        .context("applying B/REXTRAFUEL objective extra liquid fill")?;
         apply_settings_dynamic_spawn_ground_flags(
             &base,
             &base.warehouses,

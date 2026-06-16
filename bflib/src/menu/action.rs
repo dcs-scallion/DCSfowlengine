@@ -114,6 +114,8 @@ fn do_pos_action(
         | ActionKind::Move(_)
         | ActionKind::Rtb
         | ActionKind::Start
+        | ActionKind::Status
+        | ActionKind::Rearm
         | ActionKind::TankerWaypoint
         | ActionKind::CruiseMissileWaypoint
         | ActionKind::AwacsWaypoint
@@ -255,7 +257,9 @@ fn do_pos_group_action(
         | ActionKind::Bomber(_)
         | ActionKind::LogisticsTransfer(_)
         | ActionKind::LogisticsRepair(_)
-        | ActionKind::Start => bail!("invalid action type for this menu item"),
+        | ActionKind::Start
+        | ActionKind::Status
+        | ActionKind::Rearm => bail!("invalid action type for this menu item"),
     };
     let cmd = ActionCmd { name, action, args };
     run_action(ctx, perf, lua, side, slot, ucid, Some(mark), cmd)
@@ -333,6 +337,8 @@ fn do_objective_action(
         | ActionKind::LogisticsTransfer(_)
         | ActionKind::Rtb
         | ActionKind::Start
+        | ActionKind::Status
+        | ActionKind::Rearm
         | ActionKind::Move(_)
         | ActionKind::SeadWaypoint => bail!("invalid action type for this menu item"),
     };
@@ -573,7 +579,7 @@ fn add_action_menu(lua: MizLua, arg: ArgTriple<Ucid, GroupId, SlotId>) -> Result
                 let root = mc.add_submenu_for_group(arg.snd, title, Some(root.clone()))?;
                 add_objective(root.clone(), name.clone())?
             }
-            ActionKind::Start | ActionKind::Rtb => (),
+            ActionKind::Start | ActionKind::Rtb | ActionKind::Status | ActionKind::Rearm => (),
         }
         n += 1;
     }

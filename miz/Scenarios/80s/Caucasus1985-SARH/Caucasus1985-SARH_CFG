@@ -33,19 +33,19 @@
   "max_msgs_per_second": 5,
   "shutdown": 5,
   "points": {
-    "new_player_join": 1900000,
-    "air_kill": 25,
-    "ground_kill": 2,
-    "production_kill": 10,
-    "shipsNoHeliport_kill": 20,
-    "shipsWithHeliport_kill": 40,
-    "carrier_kill": 100,
-    "lr_sam_bonus": 5,
-    "logistics_repair": 50,
+    "new_player_join": 3000000,
+    "carrier_kill": 280,
+    "shipsWithHeliport_kill": 140,
+    "shipsNoHeliport_kill": 70,
+    "capture": 60,
+    "logistics_repair": 40,
+    "air_kill": 30,
+    "production_kill": 20,
     "logistics_transfer": 10,
-    "capture": 50,
+    "lr_sam_bonus": 10,
+    "ground_kill": 5,
     "tk_window": 24,
-    "provisional": false,
+    "provisional": true,
     "strict": false,
     "airframe_cost": {},
     "weapon_cost": {},
@@ -78,8 +78,8 @@
       "max_drop_speed": 50
     }
   },
-  "production_repair_crate_cost": 50,
-  "production_repair_rate_seconds": 3600,
+  "production_repair_crate_cost": 40,
+  "production_repair_rate_seconds": 18000,
   "production_factory_units": [
     "Building01_PBR",
     "Building02_PBR",
@@ -178,7 +178,6 @@
     "Yak-52": 0,
     "Mi-24P": 14400,
     "UH-60A": 9000,
-    "Tu-160": 36000,
     "Su-25": 21600,
     "MB-339A": 9000,
     "E-2C": 0,
@@ -190,7 +189,6 @@
     "F-14A-135-GR-Early": 36000,
     "F-14A-135-GR": 36000,
     "MiG-21Bis": 14400,
-    "CH-47D": 9000,
     "C-130J-30": 9000,
     "F-16C_50": 36000,
     "Mi-8MT": 9000,
@@ -320,7 +318,7 @@
         "kind": {
           "Attackers": {
             "kind": "Helicopter",
-            "duration": 2,
+            "duration": null,
             "template": "RATTACKHELI",
             "altitude": 357.0,
             "altitude_typ": "RADIO",
@@ -328,9 +326,31 @@
             "freq": 142000000
           }
         },
-        "cost": 200,
-        "penalty": 50,
+        "cost": 150,
+        "penalty": 30,
         "limit": null
+      },
+      "attack-waypoint": {
+        "kind": "AttackersWaypoint",
+        "cost": 5,
+        "penalty": null,
+        "limit": 3
+      },
+      "attack-planes": {
+        "kind": {
+          "Attackers": {
+            "kind": "FixedWing",
+            "duration": null,
+            "template": "RCAS",
+            "altitude": 1357.0,
+            "altitude_typ": "BARO",
+            "speed": 185.0,
+            "freq": 142000000
+          }
+        },
+        "cost": 200,
+        "penalty": 40,
+        "limit": 4
       },
       "attack-waypoint": {
         "kind": "AttackersWaypoint",
@@ -346,9 +366,9 @@
             },
             "plane": {
               "kind": "FixedWing",
-              "duration": 8,
+              "duration": null,
               "template": "RAWACS",
-              "altitude": 11270.0,
+              "altitude": 10370.0,
               "altitude_typ": "BARO",
               "speed": 207.0,
               "freq": 145000000
@@ -375,7 +395,7 @@
               "kind": "FixedWing",
               "duration": null,
               "template": "RBOMBER",
-              "altitude": 13186.0,
+              "altitude": 9186.0,
               "altitude_typ": "BARO",
               "speed": 527.0,
               "freq": 120000000
@@ -384,13 +404,13 @@
         },
         "cost": 300,
         "penalty": 60,
-        "limit": null
+        "limit": 2
       },
       "alcm Tu-95MS": {
         "kind": {
           "CruiseMissileSpawn": {
             "kind": "FixedWing",
-            "duration": 8,
+            "duration": null,
             "template": "RBOMBERALCM",
             "altitude": 8892,
             "altitude_typ": "BARO",
@@ -398,9 +418,9 @@
             "freq": 120000000
           }
         },
-        "cost": 300,
-        "penalty": 60,
-        "limit": null
+        "cost": 400,
+        "penalty": 80,
+        "limit": 2
       },
       "alcm-waypoint": {
         "kind": "CruiseMissileWaypoint",
@@ -497,7 +517,7 @@
         "penalty": null,
         "limit": null
       },
-      "drone-small-1": {
+      "drone-small-Uzi": {
         "kind": {
           "Drone": {
             "jtac": {
@@ -506,8 +526,8 @@
             },
             "plane": {
               "kind": "FixedWing",
-              "duration": 12,
-              "template": "RDRONE-S-1",
+              "duration": null,
+              "template": "RDRONE-S-Uzi",
               "altitude": 5324.0,
               "altitude_typ": "BARO",
               "speed": 68.0,
@@ -519,7 +539,7 @@
         "penalty": 25,
         "limit": 1
       },
-      "drone-small-2": {
+      "drone-small-Chevy": {
         "kind": {
           "Drone": {
             "jtac": {
@@ -528,8 +548,8 @@
             },
             "plane": {
               "kind": "FixedWing",
-              "duration": 12,
-              "template": "RDRONE-S-2",
+              "duration": null,
+              "template": "RDRONE-S-Chevy",
               "altitude": 5105.0,
               "altitude_typ": "BARO",
               "speed": 68.0,
@@ -541,7 +561,7 @@
         "penalty": 25,
         "limit": 1
       },
-      "drone-small-3": {
+      "drone-small-Springfield": {
         "kind": {
           "Drone": {
             "jtac": {
@@ -550,8 +570,8 @@
             },
             "plane": {
               "kind": "FixedWing",
-              "duration": 12,
-              "template": "RDRONE-S-3",
+              "duration": null,
+              "template": "RDRONE-S-Springfield",
               "altitude": 5284.0,
               "altitude_typ": "BARO",
               "speed": 68.0,
@@ -563,13 +583,29 @@
         "penalty": 25,
         "limit": 1
       },
+      "interceptors": {
+        "kind": {
+          "Fighters": {
+            "kind": "FixedWing",
+            "duration": null,
+            "template": "RINTERCEPTOR",
+            "altitude": 6217.0,
+            "altitude_typ": "BARO",
+            "speed": 254.0,
+            "freq": 120000000
+          }
+        },
+        "cost": 60,
+        "penalty": 30,
+        "limit": 2
+      },
       "fighters": {
         "kind": {
           "Fighters": {
             "kind": "FixedWing",
-            "duration": 5,
+            "duration": null,
             "template": "RFIGHTERS",
-            "altitude": 10214.0,
+            "altitude": 9217.0,
             "altitude_typ": "BARO",
             "speed": 254.0,
             "freq": 120000000
@@ -577,7 +613,7 @@
         },
         "cost": 200,
         "penalty": 50,
-        "limit": null
+        "limit": 5
       },
       "fighters-waypoint": {
         "kind": "FighersWaypoint",
@@ -604,6 +640,18 @@
       },
       "start": {
         "kind": "Start",
+        "cost": 0,
+        "penalty": null,
+        "limit": null
+      },
+      "status": {
+        "kind": "Status",
+        "cost": 0,
+        "penalty": null,
+        "limit": null
+      },
+      "rearm": {
+        "kind": "Rearm",
         "cost": 0,
         "penalty": null,
         "limit": null
@@ -647,9 +695,9 @@
         "kind": {
           "Tanker": {
             "kind": "FixedWing",
-            "duration": 8,
+            "duration": null,
             "template": "RTANKER",
-            "altitude": 6178.0,
+            "altitude": 8178.0,
             "altitude_typ": "BARO",
             "speed": 224.0,
             "freq": 230000000,
@@ -688,7 +736,7 @@
         "kind": {
           "Attackers": {
             "kind": "Helicopter",
-            "duration": 2,
+            "duration": null,
             "template": "BATTACKHELI",
             "altitude": 334.0,
             "altitude_typ": "RADIO",
@@ -696,9 +744,25 @@
             "freq": 241000000
           }
         },
+        "cost": 150,
+        "penalty": 30,
+        "limit": 3
+      },
+      "attack-planes": {
+        "kind": {
+          "Attackers": {
+            "kind": "FixedWing",
+            "duration": null,
+            "template": "BCAS",
+            "altitude": 1427.0,
+            "altitude_typ": "BARO",
+            "speed": 130.0,
+            "freq": 240000000
+          }
+        },
         "cost": 200,
-        "penalty": 50,
-        "limit": null
+        "penalty": 40,
+        "limit": 4
       },
       "attack-waypoint": {
         "kind": "AttackersWaypoint",
@@ -714,9 +778,9 @@
             },
             "plane": {
               "kind": "FixedWing",
-              "duration": 8,
+              "duration": null,
               "template": "BAWACS_E2D",
-              "altitude": 8835.0,
+              "altitude": 6835.0,
               "altitude_typ": "BARO",
               "speed": 132.0,
               "freq": 246000000
@@ -735,9 +799,9 @@
             },
             "plane": {
               "kind": "FixedWing",
-              "duration": 8,
+              "duration": null,
               "template": "BAWACS_E3A",
-              "altitude": 11472.0,
+              "altitude": 10472.0,
               "altitude_typ": "BARO",
               "speed": 205.0,
               "freq": 275000000
@@ -764,7 +828,7 @@
               "kind": "FixedWing",
               "duration": null,
               "template": "BBOMBER",
-              "altitude": 12975.0,
+              "altitude": 8975.0,
               "altitude_typ": "BARO",
               "speed": 365.0,
               "freq": 240000000
@@ -773,13 +837,13 @@
         },
         "cost": 300,
         "penalty": 60,
-        "limit": null
+        "limit": 2
       },
       "alcm B-52H": {
         "kind": {
           "CruiseMissileSpawn": {
             "kind": "FixedWing",
-            "duration": 8,
+            "duration": null,
             "template": "BBOMBERALCM",
             "altitude": 8833,
             "altitude_typ": "BARO",
@@ -789,7 +853,7 @@
         },
         "cost": 400,
         "penalty": 80,
-        "limit": null
+        "limit": 2
       },
       "alcm-waypoint": {
         "kind": "CruiseMissileWaypoint",
@@ -886,7 +950,7 @@
         "penalty": null,
         "limit": null
       },
-      "drone-small-1": {
+      "drone-small-Enfield": {
         "kind": {
           "Drone": {
             "jtac": {
@@ -895,8 +959,8 @@
             },
             "plane": {
               "kind": "FixedWing",
-              "duration": 12,
-              "template": "BDRONE-S-1",
+              "duration": null,
+              "template": "BDRONE-S-Enfield",
               "altitude": 5476.0,
               "altitude_typ": "BARO",
               "speed": 68.0,
@@ -908,7 +972,7 @@
         "penalty": 25,
         "limit": 1
       },
-      "drone-small-2": {
+      "drone-small-Pontiac": {
         "kind": {
           "Drone": {
             "jtac": {
@@ -917,8 +981,8 @@
             },
             "plane": {
               "kind": "FixedWing",
-              "duration": 12,
-              "template": "BDRONE-S-2",
+              "duration": null,
+              "template": "BDRONE-S-Pontiac",
               "altitude": 5476.0,
               "altitude_typ": "BARO",
               "speed": 68.0,
@@ -930,7 +994,7 @@
         "penalty": 25,
         "limit": 1
       },
-      "drone-small-3": {
+      "drone-small-Ford": {
         "kind": {
           "Drone": {
             "jtac": {
@@ -939,8 +1003,8 @@
             },
             "plane": {
               "kind": "FixedWing",
-              "duration": 12,
-              "template": "BDRONE-S-3",
+              "duration": null,
+              "template": "BDRONE-S-Ford",
               "altitude": 5476.0,
               "altitude_typ": "BARO",
               "speed": 68.0,
@@ -952,13 +1016,29 @@
         "penalty": 25,
         "limit": 1
       },
+      "interceptors": {
+        "kind": {
+          "Fighters": {
+            "kind": "FixedWing",
+            "duration": null,
+            "template": "BINTERCEPTOR",
+            "altitude": 6517.0,
+            "altitude_typ": "BARO",
+            "speed": 251.0,
+            "freq": 240000000
+          }
+        },
+        "cost": 60,
+        "penalty": 30,
+        "limit": 2
+      },
       "fighters": {
         "kind": {
           "Fighters": {
             "kind": "FixedWing",
-            "duration": 5,
+            "duration": null,
             "template": "BFIGHTERS",
-            "altitude": 10146.0,
+            "altitude": 9146.0,
             "altitude_typ": "BARO",
             "speed": 254.0,
             "freq": 240000000
@@ -966,7 +1046,7 @@
         },
         "cost": 200,
         "penalty": 50,
-        "limit": null
+        "limit": 5
       },
       "fighters-waypoint": {
         "kind": "FighersWaypoint",
@@ -993,6 +1073,18 @@
       },
       "start": {
         "kind": "Start",
+        "cost": 0,
+        "penalty": null,
+        "limit": null
+      },
+      "status": {
+        "kind": "Status",
+        "cost": 0,
+        "penalty": null,
+        "limit": null
+      },
+      "rearm": {
+        "kind": "Rearm",
         "cost": 0,
         "penalty": null,
         "limit": null
@@ -1036,9 +1128,9 @@
         "kind": {
           "Tanker": {
             "kind": "FixedWing",
-            "duration": 8,
+            "duration": null,
             "template": "BBOOMTANKER",
-            "altitude": 6215.0,
+            "altitude": 8215.0,
             "altitude_typ": "BARO",
             "speed": 227.0,
             "freq": 276000000,
@@ -1053,9 +1145,9 @@
         "kind": {
           "Tanker": {
             "kind": "FixedWing",
-            "duration": 8,
+            "duration": null,
             "template": "BBASKETTANKER",
-            "altitude": 6145.0,
+            "altitude": 8145.0,
             "altitude_typ": "BARO",
             "speed": 226.0,
             "freq": 277000000,
@@ -1084,8 +1176,8 @@
             "freq": null
           }
         },
-        "cost": 100,
-        "penalty": 50,
+        "cost": 10000000,
+        "penalty": 0,
         "limit": null
       }
     }
@@ -3266,15 +3358,6 @@
     "E-2C": [
       "Unarmed"
     ],
-    "S-3B": [
-      "Unarmed"
-    ],
-    "A6E": [
-      "Unarmed"
-    ],
-    "S-3B Tanker": [
-      "Unarmed"
-    ],
     "Ka-27": [
       "Unarmed"
     ],
@@ -3297,9 +3380,6 @@
       "Unarmed"
     ],
     "AM32a-60_01": [
-      "Unarmed"
-    ],
-    "us carrier shooter": [
       "Unarmed"
     ],
     "Silkworm_SR": [
@@ -3512,10 +3592,6 @@
       "Infantry",
       "ControlUnit",
       "Unarmed"
-    ],
-    "CH-47D": [
-      "Aircraft",
-      "Helicopter"
     ],
     "Ural-4320-31": [
       "Logistics",

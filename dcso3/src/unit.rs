@@ -52,7 +52,19 @@ impl<'lua> Ammo<'lua> {
     }
 
     pub fn weapon_flags(&self) -> Result<u64> {
-        Ok(self.t.raw_get::<_, LuaTable>("desc")?.raw_get("flags")?)
+        Ok(self
+            .t
+            .raw_get::<_, mlua::Table>("desc")?
+            .raw_get("flags")?)
+    }
+
+    pub fn try_weapon_flags(&self) -> Option<u64> {
+        let desc: mlua::Table = self.t.raw_get("desc").ok()?;
+        match desc.raw_get("flags").ok()? {
+            mlua::Value::Integer(i) => Some(i as u64),
+            mlua::Value::Number(n) => Some(n as u64),
+            _ => None,
+        }
     }
 }
 

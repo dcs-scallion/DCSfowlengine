@@ -875,15 +875,20 @@ impl Ephemeral {
         ucid: &Ucid,
         msg: S,
     ) {
-        if let Some(player) = persisted.players.get(ucid) {
-            if let Some(ifo) = player
-                .current_slot
-                .as_ref()
-                .and_then(|(s, _)| self.slot_info.get(s))
-            {
-                let miz_id = ifo.miz_gid;
-                self.msgs().panel_to_group(duration, false, miz_id, msg);
-            }
+        let msg = msg.into();
+        let Some(player) = persisted.players.get(ucid) else {
+            return;
+        };
+        let side = player.side;
+        let miz_gid = player
+            .current_slot
+            .as_ref()
+            .and_then(|(s, _)| self.slot_info.get(s).map(|ifo| ifo.miz_gid));
+        if let Some(miz_gid) = miz_gid {
+            self.msgs()
+                .panel_to_group(duration, false, miz_gid, msg);
+        } else {
+            self.msgs().panel_to_side(duration, false, side, msg);
         }
     }
 
@@ -1052,6 +1057,8 @@ impl Ephemeral {
                     | ActionKind::Move(_)
                     | ActionKind::Rtb
                     | ActionKind::Start
+                    | ActionKind::Status
+                    | ActionKind::Rearm
                     | ActionKind::Nuke(_) => (),
                 }
             }

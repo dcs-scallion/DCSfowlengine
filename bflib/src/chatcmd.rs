@@ -378,6 +378,14 @@ fn action_help(ctx: &mut Context, actions: &IndexMap<String, Action, FxBuildHash
                 "{name}: <group> | Launch ai air from hold to last waypoint. cost {}",
                 action.cost
             )),
+            ActionKind::Status => Some(format_compact!(
+                "{name}: <group> | Fuel and pylon stores for action group. cost {}",
+                action.cost
+            )),
+            ActionKind::Rearm => Some(format_compact!(
+                "{name}: <group> | Rearm from hub warehouse. cost {}",
+                action.cost
+            )),
             ActionKind::Awacs(_) => Some(format_compact!(
                 "{name}: <key> | Spawn an awacs at key, a mark point. cost {}",
                 action.cost
