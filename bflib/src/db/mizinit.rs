@@ -16,7 +16,7 @@ for more details.
 
 use std::sync::Arc;
 
-use super::{Db, ephemeral::SlotInfo, group::DeployKind, objective::ObjGroup};
+use super::{ai_air, Db, ephemeral::SlotInfo, group::DeployKind, objective::ObjGroup};
 use crate::{
     bg::Task,
     db::{
@@ -608,6 +608,7 @@ impl Db {
                         ground_start = true
                     }
                     PointType::Land
+                    | PointType::LandingReFuAr
                     | PointType::TakeOff
                     | PointType::Custom(_)
                     | PointType::Nil
@@ -810,6 +811,7 @@ impl Db {
                 bail!("extra_fixed_wing_objectives {name} does not match any objective")
             }
         }
+        let mut deferred_hub_ai_air: SmallVec<[GroupId; 16]> = smallvec![];
         let mut spawn_deployed_and_logistics = || -> Result<()> {
             debug!("queue respawn deployables");
             let land = Land::singleton(spctx.lua())?;
@@ -826,6 +828,10 @@ impl Db {
                 SmallVec::from_iter(self.persisted.actions.into_iter().map(|g| *g));
             debug!("respawn actions");
             for gid in actions {
+                if ai_air::is_hub_ai_air_action(self, gid) {
+                    deferred_hub_ai_air.push(gid);
+                    continue;
+                }
                 if let Err(e) = self.respawn_action(perf, spctx, idx, gid) {
                     error!("failed to respawn action {e:?}");
                 }
@@ -901,6 +907,12 @@ impl Db {
         }
         self.setup_warehouses_after_load(spctx.lua())
             .context("setting up warehouses")?;
+        debug!("respawn hub ai air actions");
+        for gid in deferred_hub_ai_air {
+            if let Err(e) = self.respawn_action(perf, spctx, idx, gid) {
+                error!("failed to respawn hub ai air action {e:?}");
+            }
+        }
         self.refresh_hub_production_from_opr()
             .context("OPR feed hubs before objective markup")?;
         let mut mark_deployed_and_logistics = || -> Result<()> {

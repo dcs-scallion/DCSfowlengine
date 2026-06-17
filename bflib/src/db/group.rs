@@ -160,6 +160,9 @@ pub struct SpawnedUnit {
     pub moved: Option<DateTime<Utc>>,
     #[serde(skip)]
     pub airborne_velocity: Option<Vector3>,
+    /// Last DCS `getFuel()` fraction (0..1) for ai air persist resume.
+    #[serde(default)]
+    pub fuel_fraction: Option<f32>,
 }
 
 impl Default for SpawnedUnit {
@@ -182,6 +185,7 @@ impl Default for SpawnedUnit {
             hp_percent: default_factory_hp(),
             moved: None,
             airborne_velocity: None,
+            fuel_fraction: None,
         }
     }
 }
@@ -929,6 +933,7 @@ impl Db {
                 hp_percent: 100,
                 moved: None,
                 airborne_velocity: None,
+                fuel_fraction: None,
             };
             spawned.units.insert_cow(uid);
             self.persisted.units.insert_cow(uid, spawned_unit);
@@ -1223,6 +1228,7 @@ impl Db {
             hp_percent: 100,
             moved: None,
             airborne_velocity: None,
+            fuel_fraction: None,
         };
         let spawned = SpawnedGroup {
             id: gid,
@@ -1766,9 +1772,17 @@ impl Db {
                 let v = if spunit.tags.contains(UnitTag::Aircraft) && instance.in_air()? {
                     let v = instance.get_velocity()?.0;
                     spunit.airborne_velocity = Some(v);
+                    if let Ok(f) = instance.get_fuel() {
+                        spunit.fuel_fraction = Some(f);
+                    }
                     Some(v)
                 } else {
                     spunit.airborne_velocity = None;
+                    if spunit.tags.contains(UnitTag::Aircraft) {
+                        if let Ok(f) = instance.get_fuel() {
+                            spunit.fuel_fraction = Some(f);
+                        }
+                    }
                     None
                 };
                 self.ephemeral.stat(Stat::Position {

@@ -38,6 +38,7 @@ string_enum!(PointType, u8, [
     TakeOffParking => "TakeOffParking",
     TakeOff => "TakeOff",
     Land => "Land",
+    LandingReFuAr => "LandingReFuAr",
     Nil => ""
 ]);
 

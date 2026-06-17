@@ -648,15 +648,9 @@ impl Db {
                 DeployKind::Action { ai_air, .. }
                     if ai_air.hub.is_some() && !ai_air.hub_slots.is_empty() =>
                 {
-                    let phase = match ai_air.phase {
-                        ai_air::AiAirPhase::Legacy | ai_air::AiAirPhase::OnMission => {
-                            ai_air::AiAirPhase::Bootstrap
-                        }
-                        p => p,
-                    };
                     Some((
                         group.side,
-                        phase,
+                        ai_air.phase,
                         ai_air.hub,
                         ai_air.hub_slots.clone(),
                         ai_air.active_mission.clone(),
@@ -665,7 +659,7 @@ impl Db {
                 _ => None,
             }
         };
-        if let Some((_side, phase, hub_opt, hub_slots, _active_snap)) = ai_resume {
+        if let Some((_side, raw_phase, hub_opt, hub_slots, active_snap)) = ai_resume {
             let hub_oid = hub_opt.ok_or_else(|| anyhow!("ai air missing hub on respawn"))?;
             let hub_pick = ai_air::finish_hub_pick(
                 lua,
@@ -674,6 +668,26 @@ impl Db {
                 hub_slots,
                 ai_air::hub_airbase_id(self, lua, hub_oid)?,
             )?;
+            let resume_air =
+                ai_air::should_resume_airborne(lua, self, gid, raw_phase).unwrap_or(false);
+            let phase = if resume_air {
+                match raw_phase {
+                    ai_air::AiAirPhase::Departing => ai_air::AiAirPhase::OnMission,
+                    p => p,
+                }
+            } else {
+                match raw_phase {
+                    ai_air::AiAirPhase::Legacy
+                    | ai_air::AiAirPhase::OnMission
+                    | ai_air::AiAirPhase::Departing => ai_air::AiAirPhase::Bootstrap,
+                    p => p,
+                }
+            };
+            let spawn_mode = if resume_air {
+                ai_air::AiAirPersistSpawn::PersistInAir
+            } else {
+                ai_air::AiAirPersistSpawn::PersistGround
+            };
             let mission = match phase {
                 ai_air::AiAirPhase::Bootstrap | ai_air::AiAirPhase::Departing => vec![],
                 ai_air::AiAirPhase::RtbInbound => {
@@ -681,34 +695,72 @@ impl Db {
                         .slots
                         .first()
                         .ok_or_else(|| anyhow!("hub has no landing slot"))?;
-                    ai_air::land_at_hub_route(&hub_pick, slot)
+                    let duration_shutdown = {
+                        let group = group!(self, gid)?;
+                        match &group.origin {
+                            DeployKind::Action { ai_air, .. } => ai_air.duration_shutdown,
+                            _ => false,
+                        }
+                    };
+                    let mode = if duration_shutdown {
+                        ai_air::HubLandMode::DurationShutdown
+                    } else {
+                        ai_air::HubLandMode::CycleRtb
+                    };
+                    ai_air::rtb_inbound_route(
+                        lua,
+                        &hub_pick,
+                        slot,
+                        active_snap.alt,
+                        active_snap.alt_typ,
+                        mode,
+                    )?
                 }
                 ai_air::AiAirPhase::OnMission => {
-                    self.regenerate_ai_air_mission(lua, spctx, idx, gid)?
+                    self.regenerate_ai_air_mission(lua, spctx, idx, gid, resume_air)?
                 }
                 ai_air::AiAirPhase::AwaitingLaunch
                 | ai_air::AiAirPhase::Servicing
                 | ai_air::AiAirPhase::Refueling
-                | ai_air::AiAirPhase::TaxiToParking => vec![],
+                | ai_air::AiAirPhase::TaxiToParking
+                | ai_air::AiAirPhase::ShutdownParked => vec![],
                 ai_air::AiAirPhase::Legacy => vec![],
             };
-            ai_air::spawn_ai_air_group(perf, self, spctx, idx, gid, &hub_pick)?;
+            ai_air::spawn_ai_air_group(
+                perf,
+                self,
+                spctx,
+                idx,
+                gid,
+                &hub_pick,
+                spawn_mode,
+            )?;
             if let DeployKind::Action { ai_air, .. } = &mut group_mut!(self, gid)?.origin {
-                if matches!(
+                ai_air::set_phase(ai_air, phase);
+                if resume_air {
+                    ai_air.bootstrap_grounded = false;
+                    ai_air.bootstrap_mission_pushed = true;
+                } else if matches!(
                     phase,
                     ai_air::AiAirPhase::Bootstrap | ai_air::AiAirPhase::Departing
                 ) {
-                    ai_air.bootstrap_grounded = false;
+                    ai_air.bootstrap_grounded = true;
                     ai_air.bootstrap_mission_pushed = false;
                 }
             }
             if !mission.is_empty() {
-                let airborne = !matches!(
+                let airborne = resume_air
+                    || !matches!(
+                        phase,
+                        ai_air::AiAirPhase::Bootstrap | ai_air::AiAirPhase::Departing
+                    );
+                self.ai_air_push_mission(spctx, gid, mission, airborne)?;
+            } else if !resume_air
+                && matches!(
                     phase,
                     ai_air::AiAirPhase::Bootstrap | ai_air::AiAirPhase::Departing
-                );
-                self.ai_air_push_mission(spctx, gid, mission, airborne)?;
-            } else if matches!(phase, ai_air::AiAirPhase::Bootstrap | ai_air::AiAirPhase::Departing) {
+                )
+            {
                 let dcs_names = ai_air::dcs_spawn_names_for(self, gid)?;
                 for (i, dcs_name) in dcs_names.iter().enumerate() {
                     let slot = hub_pick
@@ -721,6 +773,7 @@ impl Db {
                 }
                 if let DeployKind::Action { ai_air, .. } = &mut group_mut!(self, gid)?.origin {
                     ai_air.bootstrap_mission_pushed = true;
+                    ai_air.bootstrap_grounded = true;
                 }
             }
             return Ok(());
@@ -741,18 +794,7 @@ impl Db {
                     group: gid,
                     cfg: (),
                 };
-                macro_rules! delete_expired {
-                    ($ai:expr) => {
-                        if let Some(d) = $ai.duration {
-                            if now - *time > Duration::hours(d as i64) {
-                                self.delete_group(&gid)?;
-                                return Ok(());
-                            }
-                        }
-                    };
-                }
                 if let ActionKind::Awacs(ai) = &spec.kind {
-                    delete_expired!(ai.plane);
                     let player = *player;
                     let mission = self
                         .awacs_mission(side, player, spawn_pos, args)
@@ -769,7 +811,6 @@ impl Db {
                     return Ok(());
                 }
                 if let ActionKind::Tanker(ai) = &spec.kind {
-                    delete_expired!(ai);
                     let player = *player;
                     let mission = self
                         .tanker_mission(side, player, spawn_pos, args)
@@ -786,7 +827,6 @@ impl Db {
                     return Ok(());
                 }
                 if let ActionKind::CruiseMissileSpawn(ai) = &spec.kind {
-                    delete_expired!(ai);
                     let player = *player;
                     let mission = self
                         .cruise_missile_mission(side, player, spawn_pos, args)
@@ -803,7 +843,6 @@ impl Db {
                     return Ok(());
                 }
                 if let ActionKind::Drone(ai) = &spec.kind {
-                    delete_expired!(ai.plane);
                     let player = *player;
                     let mission = self
                         .drone_mission(side, player, spawn_pos, args)
@@ -820,7 +859,6 @@ impl Db {
                     return Ok(());
                 }
                 if let ActionKind::Fighters(ai) = &spec.kind {
-                    delete_expired!(ai);
                     let player = *player;
                     let mission = self
                         .ai_fighters_mission(side, player, spawn_pos, args)
@@ -837,7 +875,6 @@ impl Db {
                     return Ok(());
                 }
                 if let ActionKind::Attackers(ai) = &spec.kind {
-                    delete_expired!(ai);
                     let player = *player;
                     let mission = self
                         .ai_attackers_mission(side, player, spawn_pos, args)
@@ -854,7 +891,6 @@ impl Db {
                     return Ok(());
                 }
                 if let ActionKind::Sead(ai) = &spec.kind {
-                    delete_expired!(ai);
                     let player = *player;
                     let mission = self
                         .ai_sead_mission(side, player, spawn_pos, args)
@@ -1935,11 +1971,8 @@ impl Db {
             false,
         );
         let mission_kind = ai_air::mission_kind_from_action(&action.kind);
-        let spawn_phase = if mission_kind == ai_air::AiAirMissionKind::Drone {
-            ai_air::AiAirPhase::Refueling
-        } else {
-            ai_air::AiAirPhase::Bootstrap
-        };
+        // Always bootstrap so units fly immediately; DCS `timeReFuAr` handles refuel/rearm.
+        let spawn_phase = ai_air::AiAirPhase::Bootstrap;
         let origin = DeployKind::Action {
             marks: FxHashSet::default(),
             loc: sloc.clone(),
@@ -1965,6 +1998,7 @@ impl Db {
                 plane_cfg: Some(args.cfg.clone()),
                 mission_kind,
                 phase_since: Utc::now(),
+                duration_shutdown: false,
             },
         };
         let gid = self
@@ -1981,7 +2015,15 @@ impl Db {
             )
             .context("creating group")?;
         let _ = gen_mission(self, gid, hub_pos).context("generating mission for new unit")?;
-        if let Err(e) = ai_air::spawn_ai_air_group(perf, self, spctx, idx, gid, &hub)
+        if let Err(e) = ai_air::spawn_ai_air_group(
+            perf,
+            self,
+            spctx,
+            idx,
+            gid,
+            &hub,
+            ai_air::AiAirPersistSpawn::NewDeploy,
+        )
             .context("spawning ai air group")
         {
             if self.ephemeral.airbase_by_oid.get(&hub.oid).is_some() {
@@ -2128,6 +2170,7 @@ impl Db {
             }
             OrbitPattern::Custom(x) => bail!("invalid orbit pattern {x}"),
         };
+        ai_air::ensure_player_may_control_ai_air(self, args.group)?;
         let group = group_mut!(self, args.group)?;
         if group.side != side {
             bail!("can't move the other team's awacs")
@@ -2184,6 +2227,9 @@ impl Db {
                             | SpawnLoc::AtTrigger { .. } => (),
                         }
                         if ai_air.phase != ai_air::AiAirPhase::Legacy {
+                            for id in marks.drain() {
+                                self.ephemeral.msgs().delete_mark(id);
+                            }
                             ai_air.active_mission = ai_air::snapshot_from_loiter(
                                 args.pos,
                                 a.altitude,
@@ -2421,13 +2467,18 @@ impl Db {
         spctx: &SpawnCtx<'lua>,
         idx: &MizIndex,
         gid: GroupId,
+        resume_airborne: bool,
     ) -> Result<Vec<MissionPoint<'lua>>> {
         let group = group!(self, gid)?;
         let side = group.side;
-        let spawn_pos = ai_air::flight_center_pos(lua, &ai_air::dcs_spawn_names_for(self, gid)?)?;
         let mission_pos = match &group.origin {
             DeployKind::Action { ai_air, .. } => ai_air.active_mission.pos,
             _ => bail!("not action"),
+        };
+        let spawn_pos = if resume_airborne {
+            mission_pos
+        } else {
+            ai_air::flight_center_pos(lua, &ai_air::dcs_spawn_names_for(self, gid)?)?
         };
         let args = WithPosAndGroup {
             cfg: (),
@@ -2447,6 +2498,47 @@ impl Db {
             ActionKind::Drone(_) => self.drone_mission(side, ucid, spawn_pos, args),
             ActionKind::CruiseMissileSpawn(_) => {
                 self.cruise_missile_mission(side, ucid, spawn_pos, args)
+            }
+            ActionKind::FighersWaypoint
+            | ActionKind::AttackersWaypoint
+            | ActionKind::SeadWaypoint
+            | ActionKind::AwacsWaypoint
+            | ActionKind::DroneWaypoint
+            | ActionKind::CruiseMissileWaypoint
+            | ActionKind::TankerWaypoint => {
+                let args = WithPosAndGroup {
+                    cfg: (),
+                    pos: mission_pos,
+                    group: gid,
+                };
+                match ai_air::ai_air_mission_kind(self, gid) {
+                    ai_air::AiAirMissionKind::Fighters => {
+                        self.ai_fighters_mission(side, ucid, spawn_pos, args)
+                    }
+                    ai_air::AiAirMissionKind::Attackers => {
+                        self.ai_attackers_mission(side, ucid, spawn_pos, args)
+                    }
+                    ai_air::AiAirMissionKind::Sead => self.ai_sead_mission(side, ucid, spawn_pos, args),
+                    ai_air::AiAirMissionKind::Tanker => self.tanker_mission(side, ucid, spawn_pos, args),
+                    ai_air::AiAirMissionKind::Awacs => self.awacs_mission(side, ucid, spawn_pos, args),
+                    ai_air::AiAirMissionKind::Drone => self.drone_mission(side, ucid, spawn_pos, args),
+                    ai_air::AiAirMissionKind::CruiseMissileSpawn => {
+                        self.cruise_missile_mission(side, ucid, spawn_pos, args)
+                    }
+                    ai_air::AiAirMissionKind::PointToPoint => {
+                        self.ai_point_to_point_mission(gid, || Task::ComboTask(vec![]))
+                    }
+                    ai_air::AiAirMissionKind::Unknown => {
+                        let DeployKind::Action { ai_air, .. } = &group.origin else {
+                            bail!("not action");
+                        };
+                        Ok(ai_air::cap_orbit_mission(
+                            &ai_air.active_mission,
+                            spawn_pos,
+                            vec![],
+                        ))
+                    }
+                }
             }
             ActionKind::Bomber(_)
             | ActionKind::Nuke(_)
@@ -2514,6 +2606,7 @@ impl Db {
                 hub: args.hub,
                 hold: args.hold,
                 preserve_mission_kind: true,
+                duration_shutdown: false,
             },
         )?;
         Ok(Some(args.group))
@@ -2873,28 +2966,13 @@ impl Db {
             } = &mut group.origin
             {
                 match &spec.kind {
-                    ActionKind::Awacs(AwacsCfg { plane: ai, .. })
-                    | ActionKind::Fighters(ai)
-                    | ActionKind::Attackers(ai)
-                    | ActionKind::CruiseMissileSpawn(ai)
-                    | ActionKind::Drone(DroneCfg { plane: ai, .. })
-                    | ActionKind::Tanker(ai) => {
-                        if let Some(d) = ai.duration {
-                            if now - *time > Duration::hours(d as i64) {
-                                to_delete.push(*gid);
-                            }
-                        }
-                    }
-                    ActionKind::Sead(ai) => {
-                        // Check duration first
-                        if let Some(d) = ai.duration {
-                            if now - *time > Duration::hours(d as i64) {
-                                to_delete.push(*gid);
-                                continue;
-                            }
-                        }
-                        // SEAD groups now require manual RTB - no automatic RTB based on ammunition
-                    }
+                    ActionKind::Awacs(AwacsCfg { .. })
+                    | ActionKind::Fighters(_)
+                    | ActionKind::Attackers(_)
+                    | ActionKind::CruiseMissileSpawn(_)
+                    | ActionKind::Drone(DroneCfg { .. })
+                    | ActionKind::Tanker(_) => (),
+                    ActionKind::Sead(_) => (),
                     ActionKind::Bomber(b) => {
                         if let Some(target) = *destination {
                             if at_dest!(group, target, 10_000.) {

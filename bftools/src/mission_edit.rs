@@ -3875,6 +3875,106 @@ fn merge_dep_farp_objective_stock_export(
 const SETTINGS_AI_ZONE_PREFIX: &str = "SETTINGS-Ai-";
 
 #[derive(Debug, Clone)]
+struct AiTemplateFuelSpec {
+    /// Zone suffix as authored in ME (for logs).
+    zone_label: StdString,
+    /// Group name or prefix (`BDRONE-S-` matches `BDRONE-S-Enfield`, …).
+    match_key: StdString,
+    prefix_match: bool,
+    /// Internal tank fraction (0..1) on `unit.fuel`; also scales `payload.fuel` when `fuel_kg_cap` is set.
+    fuel_frac: Option<f64>,
+    /// Absolute fuel in kg for `unit.fuel` / `payload.fuel` (DCS ME payload convention).
+    fuel_kg: Option<f64>,
+    /// Max internal payload fuel kg for this template (`fuel_frac` * cap on `payload.fuel`).
+    fuel_kg_cap: Option<f64>,
+}
+
+/// `BDRONE-S-` → prefix; `BDRONE-S-Enfield` → family prefix `BDRONE-S-`; `BAWACS_E2D` → exact.
+fn fuel_match_key_from_zone_suffix(suffix: &str) -> (StdString, bool) {
+    if suffix.ends_with('-') {
+        return (StdString::from(suffix), true);
+    }
+    if let Some(i) = suffix.rfind('-') {
+        if i + 1 < suffix.len() {
+            return (StdString::from(&suffix[..=i]), true);
+        }
+    }
+    (StdString::from(suffix), false)
+}
+
+fn fuel_spec_matches_group(spec: &AiTemplateFuelSpec, group_name: &str) -> bool {
+    if spec.prefix_match {
+        group_name.starts_with(spec.match_key.as_str())
+    } else {
+        group_name == spec.match_key.as_str()
+    }
+}
+
+fn resolve_fuel_spec_for_group<'a>(
+    specs: &'a [AiTemplateFuelSpec],
+    group_name: &str,
+) -> Option<&'a AiTemplateFuelSpec> {
+    specs
+        .iter()
+        .filter(|s| fuel_spec_matches_group(s, group_name))
+        .max_by_key(|s| s.match_key.len())
+}
+
+fn ai_template_stock_property_is_fuel_key(key: &str) -> bool {
+    key.eq_ignore_ascii_case("fuel_frac")
+        || key.eq_ignore_ascii_case("fuel_kg")
+        || key.eq_ignore_ascii_case("fuel_kg_cap")
+}
+
+fn parse_ai_template_fuel_zone_properties(
+    zone: &miz::TriggerZone<'static>,
+    zone_label: &str,
+) -> Result<Option<(Option<f64>, Option<f64>, Option<f64>)>> {
+    let mut fuel_frac: Option<f64> = None;
+    let mut fuel_kg: Option<f64> = None;
+    let mut fuel_kg_cap: Option<f64> = None;
+    for prop in zone.properties()? {
+        let prop = prop?;
+        let key = prop.key.as_str();
+        if key.eq_ignore_ascii_case("fuel_frac") {
+            fuel_frac = Some(
+                prop.value
+                    .trim()
+                    .parse()
+                    .with_context(|| {
+                        format_compact!("SETTINGS-Ai-{zone_label}: fuel_frac={}", prop.value.as_ref())
+                    })?,
+            );
+        } else if key.eq_ignore_ascii_case("fuel_kg") {
+            fuel_kg = Some(
+                prop.value
+                    .trim()
+                    .parse()
+                    .with_context(|| {
+                        format_compact!("SETTINGS-Ai-{zone_label}: fuel_kg={}", prop.value.as_ref())
+                    })?,
+            );
+        } else if key.eq_ignore_ascii_case("fuel_kg_cap") {
+            fuel_kg_cap = Some(
+                prop.value
+                    .trim()
+                    .parse()
+                    .with_context(|| {
+                        format_compact!(
+                            "SETTINGS-Ai-{zone_label}: fuel_kg_cap={}",
+                            prop.value.as_ref()
+                        )
+                    })?,
+            );
+        }
+    }
+    if fuel_frac.is_none() && fuel_kg.is_none() {
+        return Ok(None);
+    }
+    Ok(Some((fuel_frac, fuel_kg, fuel_kg_cap)))
+}
+
+#[derive(Debug, Clone)]
 struct AiTemplateStockSpec {
     template_name: StdString,
     airframe: StdString,
@@ -3930,6 +4030,193 @@ fn resolve_ai_stock_objective<'a>(
     None
 }
 
+fn fuel_setting_value_nonzero(v: &Value) -> bool {
+    match v {
+        Value::Integer(n) => *n != 0,
+        Value::Number(n) => *n != 0.0,
+        _ => false,
+    }
+}
+
+fn set_fuel_setting_value(table: &Table, key: &str, existing: &Value, frac: f64) -> Result<()> {
+    match existing {
+        Value::Integer(_) => table.raw_set(key, (frac * 100.0).round() as i64)?,
+        Value::Number(_) => table.raw_set(key, frac)?,
+        _ => table.raw_set(key, frac)?,
+    }
+    Ok(())
+}
+
+fn set_fuel_kg_value(table: &Table, key: &str, existing: &Value, kg: f64) -> Result<()> {
+    match existing {
+        Value::Integer(_) => table.raw_set(key, kg.round() as i64)?,
+        Value::Number(_) => table.raw_set(key, kg)?,
+        _ => table.raw_set(key, kg)?,
+    }
+    Ok(())
+}
+
+fn patch_unit_fuel_kg_if_nonzero(unit: &Table, kg: f64) -> Result<bool> {
+    let mut changed = false;
+    if let Ok(v) = unit.raw_get::<_, Value>("fuel") {
+        if fuel_setting_value_nonzero(&v) {
+            set_fuel_kg_value(unit, "fuel", &v, kg)?;
+            changed = true;
+        }
+    }
+    if let Ok(pl) = unit.raw_get::<_, Table>("payload") {
+        if let Ok(v) = pl.raw_get::<_, Value>("fuel") {
+            if fuel_setting_value_nonzero(&v) {
+                set_fuel_kg_value(&pl, "fuel", &v, kg)?;
+                changed = true;
+            }
+        }
+    }
+    Ok(changed)
+}
+
+fn patch_unit_fuel_from_spec(unit: &Table, spec: &AiTemplateFuelSpec) -> Result<bool> {
+    if let Some(kg) = spec.fuel_kg {
+        return patch_unit_fuel_kg_if_nonzero(unit, kg);
+    }
+    let Some(frac) = spec.fuel_frac else {
+        return Ok(false);
+    };
+    let mut changed = false;
+    if let Ok(v) = unit.raw_get::<_, Value>("fuel") {
+        if fuel_setting_value_nonzero(&v) {
+            set_fuel_setting_value(unit, "fuel", &v, frac)?;
+            changed = true;
+        }
+    }
+    if let Ok(pl) = unit.raw_get::<_, Table>("payload") {
+        if let Ok(v) = pl.raw_get::<_, Value>("fuel") {
+            if fuel_setting_value_nonzero(&v) {
+                if let Some(cap) = spec.fuel_kg_cap {
+                    set_fuel_kg_value(&pl, "fuel", &v, frac * cap)?;
+                    changed = true;
+                } else {
+                    warn!(
+                        "SETTINGS-Ai-{}: payload fuel is kg; add fuel_kg or fuel_kg_cap for fuel_frac",
+                        spec.zone_label.as_str()
+                    );
+                }
+            }
+        }
+    }
+    Ok(changed)
+}
+
+fn load_ai_template_fuel_settings(base: &LoadedMiz) -> Result<Vec<AiTemplateFuelSpec>> {
+    let mut out = Vec::new();
+    for zone in base.mission.triggers()? {
+        let zone = zone?;
+        let name = zone.name()?;
+        let Some(zone_suffix) = name.as_str().strip_prefix(SETTINGS_AI_ZONE_PREFIX) else {
+            continue;
+        };
+        if zone_suffix.is_empty() {
+            warn!("SETTINGS-Ai zone with empty template suffix, skipping fuel");
+            continue;
+        }
+        let Some((fuel_frac, fuel_kg, fuel_kg_cap)) =
+            parse_ai_template_fuel_zone_properties(&zone, zone_suffix)?
+        else {
+            continue;
+        };
+        let (match_key, prefix_match) = fuel_match_key_from_zone_suffix(zone_suffix);
+        let match_desc = if prefix_match {
+            format_compact!("prefix `{match_key}*`")
+        } else {
+            format_compact!("exact `{match_key}`")
+        };
+        info!(
+            "SETTINGS-Ai-{zone_suffix}: fuel {match_desc} (fuel_kg={fuel_kg:?}, fuel_frac={fuel_frac:?})"
+        );
+        out.push(AiTemplateFuelSpec {
+            zone_label: StdString::from(zone_suffix),
+            match_key,
+            prefix_match,
+            fuel_frac,
+            fuel_kg,
+            fuel_kg_cap,
+        });
+    }
+    if !out.is_empty() {
+        info!(
+            "SETTINGS-Ai: loaded fuel from {} zone(s)",
+            out.len()
+        );
+    }
+    Ok(out)
+}
+
+fn apply_ai_template_fuel_in_base(
+    base: &LoadedMiz,
+    specs: &[AiTemplateFuelSpec],
+) -> Result<usize> {
+    if specs.is_empty() {
+        return Ok(0);
+    }
+    let mut units = 0usize;
+    let mut units_by_spec: HashMap<&str, usize> = HashMap::new();
+    let mut groups_by_spec: HashMap<&str, HashSet<String>> = HashMap::new();
+    for side in Side::ALL {
+        let coa = base.mission.coalition(side)?;
+        for country in coa.raw_get::<_, Table>("country")?.pairs::<Value, Table>() {
+            let country = country?.1;
+            for group in vehicle(&country, "plane")
+                .context("getting planes")?
+                .chain(vehicle(&country, "helicopter").context("getting helicopters")?)
+            {
+                let group = group?;
+                let gname: String = group.raw_get("name")?;
+                let Some(spec) = resolve_fuel_spec_for_group(specs, gname.as_str()) else {
+                    continue;
+                };
+                groups_by_spec
+                    .entry(spec.zone_label.as_str())
+                    .or_default()
+                    .insert(gname.clone());
+                for unit in group
+                    .raw_get::<_, Table>("units")?
+                    .pairs::<Value, Table>()
+                {
+                    let unit = unit?.1;
+                    if patch_unit_fuel_from_spec(&unit, spec)? {
+                        units += 1;
+                        *units_by_spec.entry(spec.zone_label.as_str()).or_default() += 1;
+                    }
+                }
+            }
+        }
+    }
+    for spec in specs {
+        let label = spec.zone_label.as_str();
+        match groups_by_spec.get(label) {
+            Some(gs) if !gs.is_empty() => {
+                let mut names: Vec<_> = gs.iter().cloned().collect();
+                names.sort();
+                let n = units_by_spec.get(label).copied().unwrap_or(0);
+                info!(
+                    "SETTINGS-Ai-{label}: patched {n} unit(s) in group(s) {}",
+                    names.join(", ")
+                );
+            }
+            _ => warn!(
+                "SETTINGS-Ai-{label}: fuel_kg/fuel_frac set but no matching plane/heli group in base.miz"
+            ),
+        }
+    }
+    if units > 0 {
+        info!(
+            "SETTINGS-Ai: patched fuel on {units} unit(s) from {} zone(s)",
+            specs.len()
+        );
+    }
+    Ok(units)
+}
+
 fn load_ai_template_stock_settings(base: &LoadedMiz) -> Result<Vec<AiTemplateStockSpec>> {
     let mut out = Vec::new();
     for zone in base.mission.triggers()? {
@@ -3949,6 +4236,8 @@ fn load_ai_template_stock_settings(base: &LoadedMiz) -> Result<Vec<AiTemplateSto
             let key = prop.key.as_str();
             if key.eq_ignore_ascii_case("airframe") || key.eq_ignore_ascii_case("aiframe") {
                 airframe = Some(StdString::from(prop.value.as_str()));
+            } else if ai_template_stock_property_is_fuel_key(key) {
+                continue;
             } else {
                 match prop.value.trim().parse::<u32>() {
                     Ok(n) => {
@@ -11937,14 +12226,7 @@ pub fn run(cfg: &MizCmd) -> Result<()> {
                 .with_context(|| format_compact!("opening campaign cfg {:?}", cfg_path))?,
         )
         .with_context(|| format_compact!("decoding campaign cfg {:?}", cfg_path))?;
-        let drone_tpls = collect_drone_action_template_names(&fowl_cfg);
-        if !drone_tpls.is_empty() {
-            let n = zero_drone_template_fuel_in_base(&base, &drone_tpls)?;
-            info!(
-                "Drone (ActionKind::Drone): zeroed internal fuel on {n} unit(s) in {} ME template group(s)",
-                drone_tpls.len()
-            );
-        }
+        // Drone fuel must stay as in ME templates; DCS `timeReFuAr` / `LandingReFuAr` will refuel/rearm.
     }
     validate_base_fowl_trigger_zone_names(&base.mission)
         .context("validating Fowl trigger zone names (must match runtime)")?;
@@ -12192,6 +12474,13 @@ pub fn run(cfg: &MizCmd) -> Result<()> {
     let dynamic_emit = vehicle_templates
         .emit_dynamic_spawn_templates(lua, &mut base)
         .context("emitting dynamic spawn templates")?;
+        let ai_template_fuel = load_ai_template_fuel_settings(&base)
+            .context("loading SETTINGS-Ai template fuel from stock zones")?;
+        if !ai_template_fuel.is_empty() {
+            let n = apply_ai_template_fuel_in_base(&base, &ai_template_fuel)
+                .context("applying SETTINGS-Ai template fuel in base.miz")?;
+            info!("SETTINGS-Ai: applied fuel to {n} unit(s) before mission serialize");
+        }
     let obj_dyn_allow = build_objective_dyn_allow(&base, &dynamic_emit.dyn_templates)
         .context("building per-base objective dyn allow map")?;
     extend_hub_warehouse_ids_for_olo_logistics(&mut hub_warehouse_ids, &obj_dyn_allow, &base)

@@ -61,6 +61,10 @@ use serde_derive::{Deserialize, Serialize};
 use smallvec::{SmallVec, smallvec};
 use std::{cmp::max, str::FromStr, sync::Arc};
 
+fn naval_carrier_pad(db: &Db, pad: &str) -> bool {
+    db.ephemeral.global_pad_templates.contains(pad)
+}
+
 /// Ground XZ for mobile FARP markup / zone (persisted unit.pos can lag ME template after spawn).
 fn mobile_farp_anchor_ground2(lua: MizLua<'_>, pad_template: &str) -> Option<Vector2> {
     let name = String::from(pad_template);
@@ -1109,6 +1113,11 @@ impl Db {
         self.persisted.objectives.insert_cow(oid, obj);
         self.persisted.objectives_by_name.insert_cow(name, oid);
         self.persisted.farps.insert_cow(oid);
+        if naval_carrier_pad(self, pad_template.as_str()) {
+            self.ephemeral
+                .pad_template_to_objective
+                .insert(pad_template.clone(), oid);
+        }
         // move the pad to the new location
         spctx
             .move_farp_pad(idx, side, pad_template.as_str(), pos)

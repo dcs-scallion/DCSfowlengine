@@ -406,7 +406,7 @@
         "penalty": 60,
         "limit": 2
       },
-      "alcm Tu-95MS": {
+      "alcm-Tu-95MS": {
         "kind": {
           "CruiseMissileSpawn": {
             "kind": "FixedWing",
