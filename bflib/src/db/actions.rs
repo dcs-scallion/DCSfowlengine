@@ -566,9 +566,11 @@ impl Db {
             ActionArgs::Rtb(args) => self
                 .ai_rtb(lua, spctx, idx, side, args)
                 .context("rtbing unit")?,
-            ActionArgs::Start(args) => self
-                .ai_start(spctx, side, args)
-                .context("starting ai air unit")?,
+            ActionArgs::Start(args) => {
+                let ucid = ucid.ok_or_else(|| anyhow!("ucid is required for start"))?;
+                self.ai_start(spctx, idx, side, &ucid, args)
+                    .context("starting ai air unit")?
+            }
             ActionArgs::Status(args) => {
                 let ucid = ucid.ok_or_else(|| anyhow!("ucid is required for status"))?;
                 self.ai_status(lua, side, &ucid, args)
@@ -727,7 +729,7 @@ impl Db {
                 ai_air::AiAirPhase::Legacy => vec![],
             };
             ai_air::spawn_ai_air_group(
-                perf,
+                Some(perf),
                 self,
                 spctx,
                 idx,
@@ -768,7 +770,13 @@ impl Db {
                         .get(i)
                         .or(hub_pick.slots.first())
                         .ok_or_else(|| anyhow!("no hub slot"))?;
-                    let route = ai_air::bootstrap_route(lua, self, &hub_pick, slot, false)?;
+                    let route = ai_air::bootstrap_route(
+                        lua,
+                        self,
+                        &hub_pick,
+                        slot,
+                        ai_air::BootstrapMode::ColdSpawn,
+                    )?;
                     self.ai_air_push_mission_to_name(spctx, dcs_name, route, false)?;
                 }
                 if let DeployKind::Action { ai_air, .. } = &mut group_mut!(self, gid)?.origin {
@@ -1093,19 +1101,41 @@ impl Db {
         spawn_pos: Vector2,
         args: WithPosAndGroup<()>,
     ) -> Result<Vec<MissionPoint<'lua>>> {
-        let main_task = Task::EngageTargets {
+        let plane_kind = {
+            let group = group!(self, args.group)?;
+            match &group.origin {
+                DeployKind::Action {
+                    spec,
+                    ai_air,
+                    ..
+                } => ai_air
+                    .plane_cfg
+                    .as_ref()
+                    .map(|c| c.kind)
+                    .or_else(|| match &spec.kind {
+                        ActionKind::Attackers(c) => Some(c.kind),
+                        _ => None,
+                    }),
+                _ => None,
+            }
+        };
+        if matches!(plane_kind, Some(AiPlaneKind::FixedWing)) {
+            return self.ai_fixed_wing_cas_mission(side, ucid, spawn_pos, args);
+        }
+        let main_task = Task::EngageTargetsInZone {
+            point: LuaVec2(args.pos),
+            zone_radius: 15_000.,
             target_types: vec![
+                Attribute::GroundUnits,
+                Attribute::GroundVehicles,
+                Attribute::ArmedGroundUnits,
                 Attribute::Fighters,
                 Attribute::MultiroleFighters,
                 Attribute::BattleAirplanes,
                 Attribute::Battleplanes,
                 Attribute::Helicopters,
                 Attribute::AttackHelicopters,
-                Attribute::GroundUnits,
-                Attribute::GroundVehicles,
-                Attribute::ArmedGroundUnits,
             ],
-            max_dist: Some(15_000.),
             priority: None,
         };
         let init_task = Task::ComboTask(vec![main_task.clone()]);
@@ -1122,6 +1152,119 @@ impl Db {
             move || init_task.clone(),
             move || vec![main_task.clone()],
         )
+    }
+
+    /// Fixed-wing CAS: patrol the mark zone and engage ground targets (no orbit circle).
+    fn ai_fixed_wing_cas_mission<'lua>(
+        &mut self,
+        side: Side,
+        ucid: Option<Ucid>,
+        spawn_pos: Vector2,
+        args: WithPosAndGroup<()>,
+    ) -> Result<Vec<MissionPoint<'lua>>> {
+        ai_air::ensure_player_may_control_ai_air(self, args.group, ucid.as_ref())?;
+        let group = group_mut!(self, args.group)?;
+        if group.side != side {
+            bail!("can't move the other team's awacs")
+        }
+        let (altitude, alt_typ, speed, marks, player) = match &mut group.origin {
+            DeployKind::Action {
+                marks,
+                spec,
+                loc,
+                player,
+                ai_air,
+                ..
+            } => {
+                if !matches!(spec.kind, ActionKind::Attackers(_)) {
+                    bail!("this move action is not compatible with the selected group")
+                }
+                let ActionKind::Attackers(a) = &spec.kind else {
+                    bail!("not attackers");
+                };
+                if ai_air.phase != ai_air::AiAirPhase::Legacy {
+                    for id in marks.drain() {
+                        self.ephemeral.msgs().delete_mark(id);
+                    }
+                    ai_air.active_mission = ai_air::snapshot_from_loiter(
+                        args.pos,
+                        a.altitude,
+                        a.altitude_typ.clone(),
+                        a.speed,
+                        false,
+                    );
+                }
+                (a.altitude, a.altitude_typ.clone(), a.speed, marks, player)
+            }
+            _ => bail!("not an action aircraft"),
+        };
+        let responsible = player
+            .as_ref()
+            .and_then(|u| self.persisted.players.get(u))
+            .map(|p| p.name.clone())
+            .unwrap_or(String::from(""));
+        marks.insert(self.ephemeral.msgs().mark_to_side(
+            side,
+            args.pos,
+            true,
+            format_compact!(
+                "{} CAS zone\nresponsible party: {}",
+                args.group,
+                responsible
+            ),
+        ));
+        self.ephemeral.dirty();
+        let zone_task = Task::EngageTargetsInZone {
+            point: LuaVec2(args.pos),
+            zone_radius: 15_000.,
+            target_types: vec![
+                Attribute::GroundUnits,
+                Attribute::GroundVehicles,
+                Attribute::ArmedGroundUnits,
+                Attribute::Fighters,
+                Attribute::Helicopters,
+                Attribute::AttackHelicopters,
+            ],
+            priority: None,
+        };
+        Ok(vec![
+            MissionPoint {
+                action: Some(ActionTyp::Air(TurnMethod::FlyOverPoint)),
+                typ: PointType::TurningPoint,
+                airdrome_id: None,
+                helipad: None,
+                time_re_fu_ar: None,
+                link_unit: None,
+                pos: LuaVec2(spawn_pos),
+                alt: altitude,
+                alt_typ: Some(alt_typ.clone()),
+                speed,
+                speed_locked: None,
+                eta: None,
+                eta_locked: None,
+                name: Some(String::from("ip")),
+                parking: None,
+                task: Box::new(Task::ComboTask(vec![])),
+            },
+            MissionPoint {
+                action: Some(ActionTyp::Air(TurnMethod::FlyOverPoint)),
+                typ: PointType::TurningPoint,
+                airdrome_id: None,
+                helipad: None,
+                time_re_fu_ar: None,
+                link_unit: None,
+                pos: LuaVec2(args.pos),
+                alt: altitude,
+                alt_typ: Some(alt_typ),
+                speed,
+                speed_locked: None,
+                eta: None,
+                eta_locked: None,
+                name: Some(String::from("cas")),
+                parking: None,
+                task: Box::new(Task::ComboTask(vec![zone_task])),
+            },
+        ])
     }
 
     fn ai_sead_mission<'lua>(
@@ -1999,6 +2142,7 @@ impl Db {
                 mission_kind,
                 phase_since: Utc::now(),
                 duration_shutdown: false,
+                attrition: false,
             },
         };
         let gid = self
@@ -2016,7 +2160,7 @@ impl Db {
             .context("creating group")?;
         let _ = gen_mission(self, gid, hub_pos).context("generating mission for new unit")?;
         if let Err(e) = ai_air::spawn_ai_air_group(
-            perf,
+            Some(perf),
             self,
             spctx,
             idx,
@@ -2170,7 +2314,7 @@ impl Db {
             }
             OrbitPattern::Custom(x) => bail!("invalid orbit pattern {x}"),
         };
-        ai_air::ensure_player_may_control_ai_air(self, args.group)?;
+        ai_air::ensure_player_may_control_ai_air(self, args.group, ucid.as_ref())?;
         let group = group_mut!(self, args.group)?;
         if group.side != side {
             bail!("can't move the other team's awacs")
@@ -2612,9 +2756,16 @@ impl Db {
         Ok(Some(args.group))
     }
 
-    fn ai_start(&mut self, spctx: &SpawnCtx, side: Side, args: WithGroup) -> Result<Option<GroupId>> {
+    fn ai_start(
+        &mut self,
+        spctx: &SpawnCtx,
+        idx: &MizIndex,
+        side: Side,
+        ucid: &Ucid,
+        args: WithGroup,
+    ) -> Result<Option<GroupId>> {
         let lua = spctx.lua();
-        ai_air::issue_start(self, lua, spctx, args.group, side)?;
+        ai_air::issue_start(self, lua, spctx, idx, args.group, side, ucid)?;
         Ok(Some(args.group))
     }
 
@@ -2917,11 +3068,12 @@ impl Db {
         idx: &MizIndex,
         jtacs: &Jtacs,
         now: DateTime<Utc>,
+        perf: &mut PerfInner,
     ) -> Result<()> {
         let spctx = SpawnCtx::new(lua)?;
         let ai_gids: Vec<GroupId> = self.persisted.actions.into_iter().copied().collect();
         for gid in ai_gids {
-            if let Err(e) = ai_air::advance_ai_air(lua, self, &spctx, idx, gid, now) {
+            if let Err(e) = ai_air::advance_ai_air(lua, self, &spctx, idx, gid, now, Some(perf)) {
                 error!("ai air tick {gid}: {e:?}");
             }
         }

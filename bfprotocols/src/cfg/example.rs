@@ -2118,6 +2118,7 @@ impl Default for Cfg {
             discord_map: DiscordMapCfg::default(),
             debugging_online_red_players: 0,
             debugging_online_blue_players: 0,
+            ai_air_action_owner_hours: None,
         }
     }
 }

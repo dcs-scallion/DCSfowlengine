@@ -15,7 +15,7 @@ for more details.
 */
 
 use super::{
-    ai_air::AiAirState,
+    ai_air::{self, AiAirState},
     csar::is_fowl_csar_unit_unit,
     ephemeral::SlotInfo,
     objective::ObjGroupClass,
@@ -1457,6 +1457,9 @@ impl Db {
                 unit.position = unit.spawn_position;
                 self.ephemeral.dirty();
                 let gid = unit.group;
+                if self.persisted.actions.contains(&gid) {
+                    crate::db::ai_air::mark_ai_air_attrition(self, gid);
+                }
                 let health = group_health!(self, gid)?.0;
                 if let Some(oid) = self.persisted.objectives_by_group.get(&gid).copied() {
                     self.update_objective_status(None, &oid, now)?;
@@ -1687,11 +1690,13 @@ impl Db {
                                     Some(unit) => unit.change_instance(id),
                                     None => Unit::get_instance(lua, id),
                                 };
-                                ammo = (|| -> anyhow::Result<i32> {
-                                    Ok(instance?.get_ammo()?.first()?.count()? as i32)
-                                })()
-                                .unwrap_or(0);
-                            };
+                                if let Ok(inst) = instance {
+                                    ammo = ai_air::unit_alcm_missile_count(lua, &inst)
+                                        .unwrap_or(0)
+                                        .try_into()
+                                        .unwrap_or(0);
+                                }
+                            }
                         }
 
                         Some((group.id, ammo))

@@ -1013,6 +1013,7 @@ impl Db {
             self.ephemeral.defer_initial_hub_distribute = false;
             return Ok(());
         }
+        self.build_carrier_slot_maps(&miz)?;
         self.ephemeral.preserve_initial_warehouse_fill = true;
         self.setup_warehouses_after_load(lua)
             .context("warehouses after deferred TISP")?;

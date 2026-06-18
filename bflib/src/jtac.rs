@@ -15,7 +15,7 @@ for more details.
 */
 
 use crate::{
-    db::{Db, JtDesc, group::SpawnedUnit, player::InstancedPlayer},
+    db::{Db, JtDesc, ai_air, group::SpawnedUnit, player::InstancedPlayer},
     landcache::LandCache,
 };
 use anyhow::{Context, Result, anyhow, bail};
@@ -33,7 +33,7 @@ use dcso3::{
     LuaVec2, LuaVec3, MizLua, String, Vector2, Vector3,
     coalition::Side,
     controller::{
-        ActionTyp, AltType, AttackParams, Command, MissionPoint, PointType, Task, TurnMethod,
+        ActionTyp, AltType, AttackParams, MissionPoint, PointType, Task, TurnMethod,
         VehicleFormation, WeaponExpend,
     },
     cvt_err, err,
@@ -852,31 +852,25 @@ impl Jtac {
                     _ => bail!("invalid per target {0}", per_target),
                 };
 
-                let mut allocated_ammo = {
-                    let mut ammo = 0;
-                    for i in db.group(gid)?.units.into_iter() {
-                        let first = Unit::get_by_name(lua, &db.unit(i)?.name)?
-                            .get_ammo()?
-                            .first();
-                        ammo = match first {
-                            Ok(ammo) => ammo.count()? as u8,
-                            Err(_e) => bail! {"ALCM Abort: {gid} is out of missiles."},
-                        };
-                        if ammo < per_target {
-                            bail!(
-                                "ALCM Abort: {gid} has only {ammo} missiles remaining, cannot launch {per_target}."
-                            );
-                        }
-                    }
+                let total = ai_air::flight_alcm_missile_count(lua, db, *gid)?;
+                if total == 0 {
+                    bail!("ALCM Abort: {gid} is out of missiles.");
+                }
+                if total < per_target as u32 {
+                    bail!(
+                        "ALCM Abort: {gid} has only {total} missiles remaining, cannot launch {per_target} per target."
+                    );
+                }
 
+                let mut allocated_ammo = {
                     let ammo = match expend {
-                        WeaponExpend::Quarter => ammo / 4,
-                        WeaponExpend::Half => ammo / 2,
-                        WeaponExpend::All => ammo,
-                        _ => bail!("nice job"),
+                        WeaponExpend::Quarter => total / 4,
+                        WeaponExpend::Half => total / 2,
+                        WeaponExpend::All => total,
+                        _ => bail!("invalid magazine expend"),
                     };
                     if ammo > 0 {
-                        ammo
+                        ammo as u8
                     } else {
                         bail!("ALCM Abort: not enough missiles to complete a minimum launch.")
                     }
@@ -885,9 +879,24 @@ impl Jtac {
                 let mut bombing_task_vec: Vec<MissionPoint> = vec![];
                 let mut fire_task_vec: Vec<Task> = vec![];
 
-                info!("allocated ammo: {} {}", allocated_ammo, per_target);
+                info!(
+                    "ALCM expend {:?} total {total} allocated {allocated_ammo} per_target {per_target}",
+                    expend
+                );
 
-                for (_, target) in &self.contacts {
+                let mut alcm_targets: Vec<&Contact> = Vec::new();
+                if let Some(t) = self.target.as_ref() {
+                    if let Some(ct) = self.contacts.get(&t.id) {
+                        alcm_targets.push(ct);
+                    }
+                }
+                for (id, ct) in &self.contacts {
+                    if self.target.as_ref().map(|t| &t.id) != Some(id) {
+                        alcm_targets.push(ct);
+                    }
+                }
+
+                for target in alcm_targets {
                     if allocated_ammo >= per_target {
                         allocated_ammo -= per_target;
                     } else {
@@ -914,8 +923,6 @@ impl Jtac {
                         params: attack_params,
                     });
                 }
-
-                fire_task_vec.push(Task::WrappedCommand(Command::SetUnlimitedFuel(true)));
 
                 bombing_task_vec.push(MissionPoint {
                     action: Some(ActionTyp::Air(TurnMethod::FlyOverPoint)),

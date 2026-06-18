@@ -1,82 +1,143 @@
-# AI air — persist in-air resume (handoff)
+# AI air — handoff (Fowl 2.0, Caucasus1985-SARH)
 
-Session work: Fowl 2.0 air AI can resume **in flight** after campaign persist reload, while keeping the ground hub lifecycle for takeoff/landing cases.
+Continuation doc for air AI work. Covers the full hub lifecycle effort; last session focus was **persist in-air resume**.
 
-## What changed
+**Commit:** `001f7fd2` — `air Ai actions & persistence`  
+**Reference mission:** `miz/Scenarios/80s/Caucasus1985-SARH/`
 
-| Area | File | Summary |
-|------|------|---------|
-| Fuel persist | `bflib/src/db/group.rs` | `SpawnedUnit.fuel_fraction: Option<f32>` saved on `update_unit_positions` via DCS `getFuel()` |
-| In-air spawn | `bflib/src/db/ai_air.rs` | `AiAirPersistSpawn` (`NewDeploy` / `PersistGround` / `PersistInAir`), `should_resume_airborne()`, in-air ME template placement |
-| Respawn branch | `bflib/src/db/actions.rs` | `respawn_action` chooses in-air vs ground; ground bootstrap race fix (`bootstrap_grounded = true`) |
-| Mission regen | `bflib/src/db/actions.rs` | `*Waypoint` action kinds route through `mission_kind` (fixes drone/awacs after waypoint move) |
+---
 
-## Resume rules (implemented)
+## Project goal (why we are doing this)
 
-**In-air resume** when ALL alive units pass:
+Replace Fowl 1.0 air AI (spawn in air, unlimited fuel, simple orbit) with Fowl 2.0:
 
-- Phase is `OnMission`, `RtbInbound`, or `Departing`
+- Cold spawn from allied hub (airfield / FOB / carrier), warehouse debit for fuel + weapons
+- Waypoint orbit during mission; waypoint move via `-action *-waypoint`
+- Real fuel; Fowl-controlled bingo RTB (not DCS default)
+- RTB cycle: land → service → return to waypoint
+- Commands: `-action rtb`, `start`, `status`, `rearm`
+- `duration` in CFG: `null` = fly until destroyed; `Some(h)` = shutdown after landing
+- **Persistence:** resume after mission reload — ground at hub **or** in air at last position (Fowl 1.0 behaviour restored)
+
+---
+
+## In this commit (summary)
+
+| Area | File | What |
+|------|------|------|
+| Phase machine | `ai_air.rs` | Bootstrap, OnMission, RtbInbound, Servicing, Departing, duration shutdown, … |
+| Hub / spawn | `ai_air.rs` | Parking, helipad, carrier deck slots; `spawn_ai_air_group(..., mode)` |
+| Commands | `actions.rs`, `ai_air.rs` | rtb, start, status, rearm |
+| Partial loadout | `ai_air.rs` | `AwaitingLaunch` hold + panel; `-action rearm` |
+| DCS RTB off | `ai_air.rs` | `RtbOnBingo(false)`, `RtbOnOutOfAmmo(false)`; Fowl bingo after 120 s |
+| Carrier hubs | `ai_air.rs` | Fixed-wing hub = any friendly obj with `airbase_by_oid` |
+| Multi-unit DCS | `ai_air.rs` | One DCS group per airframe; missions on all `dcs_spawn_names` |
+| Helipad spawn | `ai_air.rs` | Spawn on `slot.pos`, correct `helipadId` / `linkUnit` |
+| Weapon flags | `dcso3/unit.rs` | `try_weapon_flags` (status tick no longer crashes on nil) |
+| **Fuel persist** | `group.rs` | `SpawnedUnit.fuel_fraction` from `getFuel()` on position updates |
+| **In-air resume** | `ai_air.rs`, `actions.rs` | `should_resume_airborne`, `PersistInAir` spawn path |
+| **Ground resume fix** | `actions.rs` | `bootstrap_grounded = true` after ground persist bootstrap |
+| **Waypoint regen** | `actions.rs` | `*Waypoint` spec kinds → `mission_kind` for orbit regen |
+| CFG | `Caucasus1985-SARH_CFG` | `rearm` action added |
+
+---
+
+## Persist in-air resume (detail)
+
+### In-air resume when ALL alive units pass
+
+- Phase: `OnMission`, `RtbInbound`, or `Departing`
 - Persisted AGL > **80 m** (`PERSIST_RESUME_MIN_AGL_M`) for every alive unit
 - `Departing` → normalized to `OnMission` with orbit mission
+- Mission pushed immediately in `respawn_action` (no bootstrap)
+- Fuel from `fuel_fraction`; **no** warehouse rearm on in-air path
 
-**Ground resume** (existing bootstrap flow) when:
+### Ground resume when
 
-- Phase is `Bootstrap`, `Servicing`, `AwaitingLaunch`, `Refueling`, `ShutdownParked`, etc.
-- OR any unit is on/near ground during takeoff/landing transition
+- Phase: `Bootstrap`, `Servicing`, `AwaitingLaunch`, `Refueling`, `ShutdownParked`, …
+- OR any unit AGL ≤ 80 m (takeoff / landing transition)
 - `OnMission` / `Departing` on ground → `Bootstrap` at hub parking
 
-**Fuel:** applied from `fuel_fraction` on persist reload (no warehouse top-up on in-air resume; no `arm_flight_from_template` on in-air path).
+### Known limitation
 
-**Loadout:** not persisted — ME template default weapons on in-air spawn (known limitation).
+- **Loadout not persisted** on in-air resume — ME template default weapons
+- **`fuel_fraction`** only exists after at least one flight + save with this DLL (field is new)
 
-## Log lines to verify
+### Log lines to verify
 
 ```
 ai air {gid}: in-air persist resume (N unit(s))
 ai air {gid} unit {name}: in-air resume baro {alt}m pos [...] fuel {pct}%
 ai air {gid}: ground persist resume (fuel {pct}%)
-ai air {gid}: airborne -> on-mission orbit (N wpts)   # tick after ground bootstrap only
+ai air {gid}: airborne -> on-mission orbit (N wpts)   # ground bootstrap path only
+ai air rtb {gid} -> hub "..." (bingo/auto)
+ai air rtb {gid} -> hub "..." (explicit)
 ```
 
-After in-air resume, orbit mission is pushed immediately in `respawn_action` (no bootstrap).
+---
 
-## Test plan (Caucasus1985-SARH)
+## DCS test plan (do first)
 
-1. Build: `. .\setup-build.ps1` then `cargo build --release --package=bflib`
-2. Copy `target/release/bflib.dll` to mission folder / DCS hook path
-3. **In-air persist test**
-   - Deploy drone-small + fighters; set waypoints; fly orbits 5+ min
-   - Note fuel % and positions
-   - Exit DCS (save persist)
-   - Reload mission
-   - Expect: units at last positions, orbit mission active, fuel ~same as before save
-   - Log: `in-air persist resume`
-4. **Ground persist test**
-   - RTB fighters to hub, park (or leave in `Servicing` / on parking)
-   - Reload
-   - Expect: hub parking spawn, bootstrap or RTB route, **not** in-air
-5. **Transition test**
-   - Reload while drone is on final / just after takeoff (low AGL)
-   - Expect: ground bootstrap (safe fallback)
-6. Tacview + `bfnext.txt` for trajectories and phase logs
+1. `. .\setup-build.ps1` → `cargo build --release --package=bflib` → copy `bflib.dll`
+2. Copy `Caucasus1985-SARH_fowl_export.json` next to CFG in Saved Games if needed
+3. **In-air persist:** deploy drone + fighters, orbit 5+ min, note fuel/pos, exit, reload  
+   → expect last positions + orbit; log `in-air persist resume`
+4. **Ground persist:** RTB to hub, park / Servicing, reload  
+   → hub parking, bootstrap, **not** in-air
+5. **Transition:** reload during takeoff (low AGL) → ground bootstrap
+6. **status:** `-action status <gid>` — fuel % + stores (see open items if no panel)
+7. **Bingo:** fighters/ALCM hold orbit; after bingo → log `bingo/auto`, Fowl RTB
+8. **Explicit RTB:** `-action rtb <gid>` on mark at distant base → log `explicit`; check Tacview landing airfield
+9. **AWACS on carrier:** `-action awacs-small` near carrier → hub name Naval …
+10. **Partial loadout:** exhaust warehouse → `AwaitingLaunch` + `partial loadout:` panel → `rearm` / `start`
+11. Tacview + `C:\Users\Robo\Saved Games\DCS\Logs\bfnext.txt`
 
-## Still open (not in this patch)
+---
 
-- RTB landing on correct hub (not spawn airfield)
-- False `on ground at hub -> servicing` right after spawn
-- Post-RTB ingress altitude / objective-centre orbit bug
-- ALCM bomber orbit / empty cruise tasks
-- Heli hub spawn failures (logging)
-- `racetrack_leg_m` CFG (AWACS/tanker 30 km hardcoded)
-- Carrier deck edge cases for in-air resume (fallback: ground if AGL ≤ 80 m)
+## Still open (priority)
+
+| P | Issue | Notes |
+|---|--------|------|
+| 1 | **Test in-air persist** | Implemented in `001f7fd2`; not yet confirmed in DCS after user tests |
+| 2 | **`status` panel off-slot** | `issue_status` uses `panel_to_player` only — invisible in GCI/observer; use `panel_to_side` fallback |
+| 3 | **Explicit RTB wrong airfield** | `issue_rtb` logs explicit hub; verify `rtb_inbound_route` / `LandingReFuAr` lands on chosen base not nearest |
+| 4 | **False servicing after spawn** | `on ground at hub -> servicing` right after ground persist (fighters 1509 in old log) |
+| 5 | **Post-RTB orbit ingress** | After service, low flight toward objective centre not waypoint |
+| 6 | **ALCM bomber** | Orbit height, cruise tasks, JTAC launch — re-verify after multi-unit fix |
+| 7 | **Attack heli** | FOB spawn + helipad assignment — re-verify player cannot take same pad |
+| 8 | **Duration shutdown** | Multi-ship: all landed before park/off; delete persist only after DCS despawn |
+| 9 | **`racetrack_leg_m` CFG** | AWACS/tanker use hardcoded 30 km legs (large “circles” on map) |
+| 10 | **Loadout persist** | Optional future work for in-air resume |
+
+---
 
 ## Key code entry points
 
-- `Db::respawn_action` — persist reload branch (~line 635)
-- `ai_air::should_resume_airborne` — AGL + phase gate
-- `ai_air::spawn_ai_air_group(..., mode)` — spawn mode
-- `Db::regenerate_ai_air_mission(..., resume_airborne: bool)` — orbit ingress from live pos when true
+| Topic | Location |
+|-------|----------|
+| Persist reload | `actions.rs` — `respawn_action` (~635) |
+| In-air gate | `ai_air.rs` — `should_resume_airborne`, `PERSIST_RESUME_MIN_AGL_M` |
+| Spawn modes | `ai_air.rs` — `AiAirPersistSpawn`, `spawn_ai_air_group` |
+| Orbit regen | `actions.rs` — `regenerate_ai_air_mission(..., resume_airborne)` |
+| RTB | `ai_air.rs` — `issue_rtb`, `rtb_inbound_route`, `landing_hub_mission_point` |
+| Bingo tick | `ai_air.rs` — `advance_ai_air`, `BINGO_FUEL_FRAC`, `ON_MISSION_BINGO_MIN` |
+| Status | `ai_air.rs` — `issue_status` |
+| Rearm / hold | `ai_air.rs` — `try_rearm_from_template`, `issue_rearm`, `AwaitingLaunch` |
+| Fuel save | `group.rs` — `update_unit_positions` → `fuel_fraction` |
 
-## Git status
+---
 
-Changes are **uncommitted**. Build verified: `cargo build --release --package=bflib` OK.
+## Fowl 1.0 reference (`c:\GitHub\bfnext`)
+
+- Spawn: `SpawnLoc::InAir`; waypoint in `loc.pos`
+- Persist: respawn at `unit.pos` + immediate orbit mission
+- No hub cycle, unlimited fuel on many types
+- Useful when validating “resume where they left off” behaviour
+
+---
+
+## User notes (`air Ai.docx`)
+
+- Restart showed only marks → fixed hub respawn; in-air resume added later
+- Kh-101 vs Kh-555 was template/warehouse mismatch, not arm logic bug
+- Large drone “circles” on other engine likely race-track 30 km (AWACS) or high `speed` (Circle) — no radius in DCS Lua API
