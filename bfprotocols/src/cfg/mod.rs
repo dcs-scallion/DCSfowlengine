@@ -998,6 +998,12 @@ pub struct DiscordMapCfg {
     /// Requires `front_line: true` in CFG root; validated at mission start.
     #[serde(default)]
     pub front_line_in_map: bool,
+    /// Show Tacview ACMI download link in interactive map header (icon + label).
+    #[serde(default)]
+    pub dowload_acmi: bool,
+    /// Public URL to Tacview ACMI downloads (Google Drive folder or file list).
+    #[serde(default)]
+    pub dowload_acmi_url: String,
 }
 
 impl Default for DiscordMapCfg {
@@ -1012,6 +1018,8 @@ impl Default for DiscordMapCfg {
             padding: 0,
             http_port: default_discord_map_http_port(),
             front_line_in_map: false,
+            dowload_acmi: false,
+            dowload_acmi_url: Default::default(),
         }
     }
 }

@@ -462,18 +462,16 @@ fn carrier_fallback_deck_slot(lua: MizLua, db: &Db, obj: &Objective) -> Result<O
         if ab.is_exist()? {
             if let Ok(p) = ab.get_point() {
                 let pos = Vector2::new(p.x, p.z);
-                if hub_slot_is_land(lua, pos) {
-                    return Ok(Some(HubSlot {
-                        kind: HubSlotKind::Parking,
-                        slot_id: 1,
-                        pos,
-                        heading: 0.,
-                        baro_alt: Some(p.y.round()),
-                        term_type: Some(TERM_RUNWAY),
-                        heading_from_spot: false,
-                        link_unit: Some(ship_id),
-                    }));
-                }
+                return Ok(Some(HubSlot {
+                    kind: HubSlotKind::Parking,
+                    slot_id: 1,
+                    pos,
+                    heading: 0.,
+                    baro_alt: Some(p.y.round()),
+                    term_type: Some(TERM_RUNWAY),
+                    heading_from_spot: false,
+                    link_unit: Some(ship_id),
+                }));
             }
         }
     }
@@ -485,9 +483,6 @@ fn carrier_fallback_deck_slot(lua: MizLua, db: &Db, obj: &Objective) -> Result<O
     }
     let pt = u.get_point()?;
     let pos = Vector2::new(pt.x, pt.z);
-    if !hub_slot_is_land(lua, pos) {
-        return Ok(None);
-    }
     Ok(Some(HubSlot {
         kind: HubSlotKind::Parking,
         slot_id: 1,
@@ -554,8 +549,13 @@ fn hub_candidate_filter<'a>(
         if matches!(obj.kind, ObjectiveKind::Production) {
             return None;
         }
-        if obj.threatened {
-            return None;
+        if mode == HubSelectMode::Spawn && obj.threatened {
+            let deployed_farp_hub = matches!(obj.kind, ObjectiveKind::Farp { .. })
+                && (objective_has_airfield_hub(db, obj)
+                    || objective_has_operational_carrier(lua, db, obj));
+            if !deployed_farp_hub {
+                return None;
+            }
         }
         if mode == HubSelectMode::Spawn && obj.captureable() {
             let naval_spawn_hub = objective_is_naval_carrier(db, obj)
@@ -1198,6 +1198,16 @@ pub(super) fn is_hub_ai_air_action(db: &Db, gid: GroupId) -> bool {
     }
 }
 
+pub(super) fn ai_air_spawn_on_carrier_deck(origin: &DeployKind) -> bool {
+    match origin {
+        DeployKind::Action { ai_air, .. } => ai_air
+            .hub_slots
+            .first()
+            .is_some_and(|s| s.link_unit.is_some()),
+        _ => false,
+    }
+}
+
 fn template_unit_fuel_fraction(unit: &miz::Unit<'_>) -> f64 {
     let cap = unit
         .typ()
@@ -1742,7 +1752,11 @@ fn free_slots_at_hub(
         HubSlotKind::Helipad => true,
         HubSlotKind::Parking => parking_allowed_for_kind(s.term_type, kind, naval),
     });
-    pool.retain(|s| hub_slot_is_land(lua, s.pos));
+    pool.retain(|s| {
+        s.link_unit.is_some()
+            || s.kind == HubSlotKind::Helipad
+            || hub_slot_is_land(lua, s.pos)
+    });
     pool.sort_by(|a, b| {
         a.slot_id
             .cmp(&b.slot_id)

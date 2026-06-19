@@ -27,7 +27,9 @@
     "width": 1280,
     "retina": true,
     "padding": 0,
-    "http_port": 17842
+    "http_port": 17842,
+    "dowload_acmi": false,
+    "dowload_acmi_url": ""
   },
   "name_filter": "^[a-zA-Z0-9_<>|= ]+$",
   "max_msgs_per_second": 5,

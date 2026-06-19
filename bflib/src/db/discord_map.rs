@@ -809,6 +809,8 @@ pub fn collect_map_status_bar(
         dcs_bind_address: server.bind_address,
         dcs_port: server.port,
         dcs_name: server.name,
+        dowload_acmi: cfg.discord_map.dowload_acmi,
+        dowload_acmi_url: cfg.discord_map.dowload_acmi_url.to_string(),
     })
 }
 

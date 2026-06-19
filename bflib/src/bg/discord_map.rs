@@ -49,6 +49,17 @@ static FOWL_HDR_ICON_B64: Lazy<String> = Lazy::new(|| {
 });
 const FOWL_HDR_ICON_W: u32 = 117;
 const FOWL_HDR_ICON_H: u32 = 93;
+static TACVIEW_HDR_ICON_OFF_B64: Lazy<String> = Lazy::new(|| {
+    B64.encode(include_bytes!(
+        "../../../assets/discord-objective-map/png/Tacview.png"
+    ))
+});
+static TACVIEW_HDR_ICON_ON_B64: Lazy<String> = Lazy::new(|| {
+    B64.encode(include_bytes!(
+        "../../../assets/discord-objective-map/png/Tacview_select.png"
+    ))
+});
+const TACVIEW_HDR_ICON_PX: u32 = 38;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DiscordMapPilotEntry {
@@ -92,6 +103,8 @@ pub struct DiscordMapStatusBar {
     pub dcs_bind_address: String,
     pub dcs_port: String,
     pub dcs_name: String,
+    pub dowload_acmi: bool,
+    pub dowload_acmi_url: String,
 }
 
 #[derive(Debug, Clone)]
@@ -834,9 +847,27 @@ fn dcs_bind_display(bind: &str) -> &str {
     }
 }
 
+fn map_header_tacview_html(bar: &DiscordMapStatusBar) -> String {
+    if !bar.dowload_acmi {
+        return String::new();
+    }
+    let url = bar.dowload_acmi_url.trim();
+    if url.is_empty() {
+        return String::new();
+    }
+    format!(
+        r#"<a class="map-hdr-tacview" href="{url}" target="_blank" rel="noopener noreferrer"><span class="map-hdr-tacview-icons" aria-hidden="true"><img class="map-hdr-tacview-off" src="data:image/png;base64,{off}" width="{w}" height="{h}" alt=""><img class="map-hdr-tacview-on" src="data:image/png;base64,{on}" width="{w}" height="{h}" alt=""></span><span class="map-hdr-tacview-label">Tacview</span></a>"#,
+        url = html_escape(url),
+        off = TACVIEW_HDR_ICON_OFF_B64.as_str(),
+        on = TACVIEW_HDR_ICON_ON_B64.as_str(),
+        w = TACVIEW_HDR_ICON_PX,
+        h = TACVIEW_HDR_ICON_PX,
+    )
+}
+
 fn map_header_left_html(bar: &DiscordMapStatusBar) -> String {
     format!(
-        r#"<img class="map-hdr-icon" src="data:image/png;base64,{icon}" width="{icon_w}" height="{icon_h}" alt="" aria-hidden="true"><span class="map-hdr-text"><span class="map-hdr-part">DCS server IP {bind}:{port}</span><span class="map-hdr-part map-hdr-name">{name}</span><span class="map-hdr-part">{mission}</span><span class="map-hdr-part">{engine}</span></span>"#,
+        r#"<img class="map-hdr-icon" src="data:image/png;base64,{icon}" width="{icon_w}" height="{icon_h}" alt="" aria-hidden="true"><span class="map-hdr-text"><span class="map-hdr-part">DCS server IP {bind}:{port}</span><span class="map-hdr-part map-hdr-name">{name}</span><span class="map-hdr-part">{mission}</span><span class="map-hdr-part">{engine}</span>{tacview}</span>"#,
         icon = FOWL_HDR_ICON_B64.as_str(),
         icon_w = FOWL_HDR_ICON_W,
         icon_h = FOWL_HDR_ICON_H,
@@ -845,6 +876,7 @@ fn map_header_left_html(bar: &DiscordMapStatusBar) -> String {
         name = html_escape(&bar.dcs_name),
         mission = html_escape(&bar.mission_name),
         engine = html_escape(&fowl_engine_brand_label()),
+        tacview = map_header_tacview_html(bar),
     )
 }
 
@@ -911,6 +943,13 @@ body{{margin:0;background:#000;color:#686a6e;font-family:"Roboto Condensed",Robo
 .map-hdr-text{{display:flex;flex-direction:row;flex-wrap:nowrap;align-items:center;align-self:stretch;gap:1.5em;margin-left:1.5em;overflow:hidden;min-width:0;padding-top:15px}}
 .map-hdr-part{{white-space:nowrap;overflow:hidden;text-overflow:ellipsis;min-width:0;flex:0 1 auto}}
 .map-hdr-name{{font-weight:700}}
+.map-hdr-tacview{{display:inline-flex;align-items:center;flex:0 0 auto;margin-left:2.5em;gap:0.35em;text-decoration:none;color:inherit;vertical-align:middle}}
+.map-hdr-tacview-icons{{position:relative;display:inline-block;width:{tacview_w}px;height:{tacview_h}px;flex:0 0 auto}}
+.map-hdr-tacview-off,.map-hdr-tacview-on{{position:absolute;left:0;top:0;width:{tacview_w}px;height:{tacview_h}px;image-rendering:pixelated}}
+.map-hdr-tacview-on{{display:none}}
+.map-hdr-tacview:hover .map-hdr-tacview-off{{display:none}}
+.map-hdr-tacview:hover .map-hdr-tacview-on{{display:block}}
+.map-hdr-tacview-label{{white-space:nowrap}}
 .map-hdr-right{{display:flex;align-items:center;align-self:stretch;text-align:right;flex:0 1 auto;white-space:nowrap;padding-top:15px}}
 .map-body{{display:flex;flex-direction:column;gap:{layout_gap}px;width:100%}}
 .map-body-top{{display:flex;flex-direction:row;align-items:stretch;gap:{layout_gap}px;width:100%;box-sizing:border-box}}
@@ -1129,6 +1168,8 @@ body{{margin:0;background:#000;color:#686a6e;font-family:"Roboto Condensed",Robo
         panel_w = panel_w,
         icon_w = FOWL_HDR_ICON_W,
         icon_h = FOWL_HDR_ICON_H,
+        tacview_w = TACVIEW_HDR_ICON_PX,
+        tacview_h = TACVIEW_HDR_ICON_PX,
         img_w = img_w,
         img_h = img_h,
         body = body,

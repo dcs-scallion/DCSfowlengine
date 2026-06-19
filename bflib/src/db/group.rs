@@ -854,6 +854,8 @@ impl Db {
                     && &template_name == tmpl
                 {
                     () // it's ok to spawn crates on ships
+                } else if ai_air::ai_air_spawn_on_carrier_deck(&spawned.origin) {
+                    () // ME TakeOffParking + linkUnit on carrier deck
                 } else if spawned.tags.contains(UnitTag::Boat) {
                     check_land_boat_hulls_at_deploy(
                         &land,
