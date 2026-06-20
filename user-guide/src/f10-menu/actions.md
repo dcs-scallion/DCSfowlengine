@@ -179,7 +179,7 @@ Relocate deployed ground units:
 - Bomber: **200 pts**
 - Small Drone: **50 pts**
 - Large Drone: **100 pts**
-- ALCM Platform: **25-150 pts** (RTB refund: 6-38 pts)
+- CALCM Platform: **25-150 pts** (RTB refund: 6-38 pts)
 
 **Ground Deployables** (via cargo):
 - See [Deployable Units Reference](../reference/deployables.md)

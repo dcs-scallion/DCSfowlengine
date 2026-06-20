@@ -60,7 +60,7 @@ F10 → Actions → [Deploy Action] → [Location]
 - **SEAD Package**: **200 points**
 - **Attack Helicopters**: **200-300 points**
 - **Bomber**: **200 points**
-- **ALCM** (Cruise Missile Platform): **25-150 points**
+- **CALCM** (Cruise Missile Platform): **25-150 points**
 
 **Special Actions**:
 - **Logistics Repair**: **100 points** (helo), **200 points** (fast)

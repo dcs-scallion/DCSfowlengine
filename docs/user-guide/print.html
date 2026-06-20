@@ -205,7 +205,7 @@
 <li><strong>Getting Started</strong>: Registration and interface</li>
 <li><strong>Core Gameplay</strong>: Campaign mechanics</li>
 <li><strong>F10 Menu Systems</strong>: Menu systems documentation</li>
-<li><strong>Advanced Topics</strong>: Artillery and ALCM operations</li>
+<li><strong>Advanced Topics</strong>: Artillery and CALCM operations</li>
 <li><strong>Reference</strong>: Command lists and unit tables</li>
 </ul>
 <div style="break-before: page; page-break-before: always;"></div><h1 id="welcome-to-fowl-engine"><a class="header" href="#welcome-to-fowl-engine">Welcome to Fowl Engine</a></h1>
@@ -1181,7 +1181,7 @@ Points: 0
 <li><strong>SEAD Package</strong>: <strong>200 points</strong></li>
 <li><strong>Attack Helicopters</strong>: <strong>200-300 points</strong></li>
 <li><strong>Bomber</strong>: <strong>200 points</strong></li>
-<li><strong>ALCM</strong> (Cruise Missile Platform): <strong>25-150 points</strong></li>
+<li><strong>CALCM</strong> (Cruise Missile Platform): <strong>25-150 points</strong></li>
 </ul>
 <p><strong>Special Actions</strong>:</p>
 <ul>
@@ -2130,7 +2130,7 @@ Side Switches: 1
 <li>Bomber: <strong>200 pts</strong></li>
 <li>Small Drone: <strong>50 pts</strong></li>
 <li>Large Drone: <strong>100 pts</strong></li>
-<li>ALCM Platform: <strong>25-150 pts</strong> (RTB refund: 6-38 pts)</li>
+<li>CALCM Platform: <strong>25-150 pts</strong> (RTB refund: 6-38 pts)</li>
 </ul>
 <p><strong>Ground Deployables</strong> (via cargo):</p>
 <ul>
@@ -2244,7 +2244,7 @@ Visual On: T-72Bx3, BMP-3x2, SA-13
 autoshift: true, ir_pointer: false
 filter: [Tank, APC]
 available artillery: [54321]
-available ALCM: [65432(4)]
+available CALCM: [65432(4)]
 </code></pre>
 <h2 id="target-management"><a class="header" href="#target-management">Target Management</a></h2>
 <h3 id="shifting-targets"><a class="header" href="#shifting-targets">Shifting Targets</a></h3>
@@ -2350,8 +2350,8 @@ available ALCM: [65432(4)]
 <li>Typically 50-100m increments</li>
 </ul>
 <h3 id="cruise-missile-missions"><a class="header" href="#cruise-missile-missions">Cruise Missile Missions</a></h3>
-<p><strong>Request ALCM Strike</strong>:</p>
-<pre><code>F10 → JTAC → [JTAC ID] → ALCM → [Unit ID] → [Settings]
+<p><strong>Request CALCM Strike</strong>:</p>
+<pre><code>F10 → JTAC → [JTAC ID] → CALCM → [Unit ID] → [Settings]
 </code></pre>
 <p><strong>Parameters</strong>:</p>
 <ul>
@@ -2360,7 +2360,7 @@ available ALCM: [65432(4)]
 <li>Targets multiple contacts</li>
 </ul>
 <p><strong>Cost</strong>: May cost points</p>
-<p><strong>See</strong>: <a href="f10-menu/../advanced/alcm.html">ALCM Guide</a> for details</p>
+<p><strong>See</strong>: <a href="f10-menu/../advanced/calcm.html">CALCM Guide</a> for details</p>
 <h3 id="smoke-marker"><a class="header" href="#smoke-marker">Smoke Marker</a></h3>
 <pre><code>F10 → JTAC → [JTAC ID] → Smoke Target
 </code></pre>
@@ -2393,12 +2393,12 @@ available ALCM: [65432(4)]
 <li>Use different battery</li>
 <li>Check JTAC status for available units</li>
 </ul>
-<h3 id="alcm-out-of-range"><a class="header" href="#alcm-out-of-range">"ALCM out of range"</a></h3>
+<h3 id="calcm-out-of-range"><a class="header" href="#calcm-out-of-range">"CALCM out of range"</a></h3>
 <ul>
 <li>Cruise missile platform too far from target (max range: 300km)</li>
 <li>Reposition platform using waypoint commands</li>
 <li>Deploy new platform closer</li>
-<li>Check JTAC status for available ALCM units</li>
+<li>Check JTAC status for available CALCM units</li>
 </ul>
 <h3 id="laser-not-tracking"><a class="header" href="#laser-not-tracking">"Laser not tracking"</a></h3>
 <ul>
@@ -2410,7 +2410,7 @@ available ALCM: [65432(4)]
 <h2 id="see-also-3"><a class="header" href="#see-also-3">See Also</a></h2>
 <ul>
 <li><a href="f10-menu/../advanced/artillery.html">Artillery Operations</a> - Fire mission details</li>
-<li><a href="f10-menu/../advanced/alcm.html">ALCM Operations</a> - Cruise missile strikes</li>
+<li><a href="f10-menu/../advanced/calcm.html">CALCM Operations</a> - Cruise missile strikes</li>
 </ul>
 <div style="break-before: page; page-break-before: always;"></div><h1 id="cargo-operations"><a class="header" href="#cargo-operations">Cargo Operations</a></h1>
 <p>Transport supplies and equipment using the cargo system to support your team's war effort.</p>
@@ -2821,26 +2821,26 @@ BRAA 270/15/20000/COLD
 <div style="break-before: page; page-break-before: always;"></div><h1 id="air-launched-cruise-missiles"><a class="header" href="#air-launched-cruise-missiles">Air-Launched Cruise Missiles</a></h1>
 <p>Deploy long-range cruise missiles for precision strikes on high-value targets.</p>
 <h2 id="overview-6"><a class="header" href="#overview-6">Overview</a></h2>
-<p>ALCMs provide:</p>
+<p>CALCMs provide:</p>
 <ul>
 <li>Stand-off capability</li>
 <li>Precision strikes</li>
 <li>High survivability</li>
 <li>Strategic reach</li>
 </ul>
-<h2 id="deploying-alcm-units"><a class="header" href="#deploying-alcm-units">Deploying ALCM Units</a></h2>
+<h2 id="deploying-calcm-units"><a class="header" href="#deploying-calcm-units">Deploying CALCM Units</a></h2>
 <p><strong>Via Actions Menu</strong>:</p>
-<pre><code>F10 → Actions → Deploy ALCM → [Location]
+<pre><code>F10 → Actions → Deploy CALCM → [Location]
 </code></pre>
 <p><strong>Cost</strong>: Typically 1000-3000 points</p>
 <p><strong>Unit</strong>: Usually bomber/strike aircraft (Tu-95, B-52, etc.)</p>
-<h2 id="requesting-alcm-strike"><a class="header" href="#requesting-alcm-strike">Requesting ALCM Strike</a></h2>
+<h2 id="requesting-calcm-strike"><a class="header" href="#requesting-calcm-strike">Requesting CALCM Strike</a></h2>
 <p><strong>Via JTAC Menu</strong>:</p>
-<pre><code>F10 → JTAC → [JTAC ID] → ALCM → [Unit ID] → [Parameters]
+<pre><code>F10 → JTAC → [JTAC ID] → CALCM → [Unit ID] → [Parameters]
 </code></pre>
 <p><strong>Requirements</strong>:</p>
 <ol>
-<li>Deployed ALCM unit</li>
+<li>Deployed CALCM unit</li>
 <li>JTAC with contacts</li>
 <li>Sufficient missiles</li>
 <li>In range</li>
@@ -2869,7 +2869,7 @@ BRAA 270/15/20000/COLD
 <h2 id="target-selection"><a class="header" href="#target-selection">Target Selection</a></h2>
 <p><strong>JTAC Contacts</strong>:</p>
 <ul>
-<li>ALCM strikes all contacts JTAC has</li>
+<li>CALCM strikes all contacts JTAC has</li>
 <li>Prioritized by JTAC's priority list</li>
 <li>Up to magazine limit</li>
 </ul>
@@ -2882,7 +2882,7 @@ BRAA 270/15/20000/COLD
 <li>High-value units</li>
 </ul>
 <h2 id="mission-profile"><a class="header" href="#mission-profile">Mission Profile</a></h2>
-<p><strong>Typical ALCM Strike</strong>:</p>
+<p><strong>Typical CALCM Strike</strong>:</p>
 <ol>
 <li>Unit receives launch order</li>
 <li>Aircraft launches missiles</li>
@@ -2891,7 +2891,7 @@ BRAA 270/15/20000/COLD
 <li>BDA via JTAC</li>
 </ol>
 <p><strong>Time to Impact</strong>: 5-15 minutes depending on range</p>
-<h2 id="alcm-specifications"><a class="header" href="#alcm-specifications">ALCM Specifications</a></h2>
+<h2 id="calcm-specifications"><a class="header" href="#calcm-specifications">CALCM Specifications</a></h2>
 <p><strong>Deployment Cost</strong> (PG Tempest):</p>
 <ul>
 <li>S-3B: 25 points</li>
@@ -3049,7 +3049,7 @@ BRAA 270/15/20000/COLD
 </ul>
 <h3 id="cruise-missile-platform"><a class="header" href="#cruise-missile-platform">Cruise Missile Platform</a></h3>
 <ul>
-<li><strong>Type</strong>: ALCM launcher (S-3B/Tu-95/Tu-160)</li>
+<li><strong>Type</strong>: CALCM launcher (S-3B/Tu-95/Tu-160)</li>
 <li><strong>Cost</strong>: <strong>25-150 points</strong> (PG Tempest)
 <ul>
 <li>S-3B: <strong>25 points</strong></li>
@@ -3261,7 +3261,7 @@ BRAA 270/15/20000/COLD
 <li><strong>Drone Waypoint</strong>: <strong>5 points</strong> - Redirect drone</li>
 <li><strong>SEAD Waypoint</strong>: <strong>5 points</strong> - Retask SEAD mission</li>
 <li><strong>Attack Waypoint</strong>: <strong>5 points</strong> - Retask attack helicopters</li>
-<li><strong>ALCM Waypoint</strong>: <strong>10 points</strong> - Reposition cruise missile platform</li>
+<li><strong>CALCM Waypoint</strong>: <strong>10 points</strong> - Reposition cruise missile platform</li>
 </ul>
 <h2 id="action-costs-by-category-pg-tempest"><a class="header" href="#action-costs-by-category-pg-tempest">Action Costs by Category (PG Tempest)</a></h2>
 <p><strong>Budget (0-50 pts)</strong>:</p>
@@ -3269,7 +3269,7 @@ BRAA 270/15/20000/COLD
 <li><strong>Deploy EWR</strong>: 50 pts</li>
 <li><strong>Drone (Small)</strong>: 50 pts</li>
 <li><strong>AWACS</strong>: 50 pts</li>
-<li><strong>ALCM (S-3B)</strong>: 25 pts</li>
+<li><strong>CALCM (S-3B)</strong>: 25 pts</li>
 </ul>
 <p><strong>Economy (100-150 pts)</strong>:</p>
 <ul>
@@ -3279,7 +3279,7 @@ BRAA 270/15/20000/COLD
 <li><strong>Logistics Transfer</strong>: 100 pts</li>
 <li><strong>Light Attack Helicopters</strong>: 120 pts</li>
 <li><strong>Naval FARP Destroyer</strong>: 100 pts</li>
-<li><strong>ALCM (Tu-95/Tu-160)</strong>: 150 pts</li>
+<li><strong>CALCM (Tu-95/Tu-160)</strong>: 150 pts</li>
 <li><strong>Naval FARP Carrier</strong>: 150 pts</li>
 </ul>
 <p><strong>Standard (200-300 pts)</strong>:</p>
@@ -3294,7 +3294,7 @@ BRAA 270/15/20000/COLD
 <ul>
 <li><strong>RTB</strong>: 0 pts</li>
 <li><strong>Most Waypoints</strong>: 5 pts</li>
-<li><strong>AWACS/ALCM Waypoint</strong>: 10 pts</li>
+<li><strong>AWACS/CALCM Waypoint</strong>: 10 pts</li>
 <li><strong>Move Ground Units</strong>: 15 pts</li>
 </ul>
 <p><strong>Note</strong>: Always check F10 menu for current costs, as server config may change</p>

@@ -1,35 +1,35 @@
-# Air-Launched Cruise Missiles
+# CALCM (Conventional Air-Launched Cruise Missiles)
 
 Deploy long-range cruise missiles for precision strikes on high-value targets.
 
 ## Overview
 
-ALCMs provide:
+CALCMs provide:
 - Stand-off capability
 - Precision strikes
 - High survivability
 - Strategic reach
 
-## Deploying ALCM Units
+## Deploying CALCM Units
 
 **Via Actions Menu**:
 ```
-F10 → Actions → Deploy ALCM → [Location]
+F10 → Actions → Deploy CALCM → [Location]
 ```
 
 **Cost**: Typically 1000-3000 points
 
 **Unit**: Usually bomber/strike aircraft (Tu-95, B-52, etc.)
 
-## Requesting ALCM Strike
+## Requesting CALCM Strike
 
 **Via JTAC Menu**:
 ```
-F10 → JTAC → [JTAC ID] → ALCM → [Unit ID] → [Parameters]
+F10 → JTAC → [JTAC ID] → CALCM → [Unit ID] → [Parameters]
 ```
 
 **Requirements**:
-1. Deployed ALCM unit
+1. Deployed CALCM unit
 2. JTAC with contacts
 3. Sufficient missiles
 4. In range
@@ -59,7 +59,7 @@ F10 → JTAC → [JTAC ID] → ALCM → [Unit ID] → [Parameters]
 ## Target Selection
 
 **JTAC Contacts**:
-- ALCM strikes all contacts JTAC has
+- CALCM strikes all contacts JTAC has
 - Prioritized by JTAC's priority list
 - Up to magazine limit
 
@@ -72,7 +72,7 @@ F10 → JTAC → [JTAC ID] → ALCM → [Unit ID] → [Parameters]
 
 ## Mission Profile
 
-**Typical ALCM Strike**:
+**Typical CALCM Strike**:
 1. Unit receives launch order
 2. Aircraft launches missiles
 3. Missiles fly to targets
@@ -81,7 +81,7 @@ F10 → JTAC → [JTAC ID] → ALCM → [Unit ID] → [Parameters]
 
 **Time to Impact**: 5-15 minutes depending on range
 
-## ALCM Specifications
+## CALCM Specifications
 
 **Deployment Cost** (PG Tempest):
 - S-3B: 25 points

@@ -2442,7 +2442,7 @@ fn ammo_weapon_flags(ammo: &dcso3::unit::Ammo<'_>) -> Option<u64> {
     ammo.try_weapon_flags()
 }
 
-fn is_alcm_store_ammo(ammo: &dcso3::unit::Ammo<'_>) -> bool {
+fn is_calcm_store_ammo(ammo: &dcso3::unit::Ammo<'_>) -> bool {
     let typ = ammo.type_name().unwrap_or_default().to_ascii_uppercase();
     let display = ammo.display_name().unwrap_or_default().to_ascii_uppercase();
     if typ.contains("FLARE")
@@ -2463,26 +2463,28 @@ fn is_alcm_store_ammo(ammo: &dcso3::unit::Ammo<'_>) -> bool {
     typ.contains("KH")
         || typ.contains("CM-")
         || typ.contains("AGM")
-        || typ.contains("ALCM")
+        || typ.contains("CALCM")
+        || typ.contains("ALCM") // DCS weapon typ strings still use ALCM
         || display.contains("KH")
+        || display.contains("CALCM")
         || display.contains("ALCM")
 }
 
-pub(crate) fn unit_alcm_missile_count(_lua: MizLua, unit: &Unit) -> Result<u32> {
+pub(crate) fn unit_calcm_missile_count(_lua: MizLua, unit: &Unit) -> Result<u32> {
     let mut total = 0u32;
     if !unit.is_exist()? {
         return Ok(0);
     }
     for ammo in unit.get_ammo()? {
         let ammo = ammo?;
-        if is_alcm_store_ammo(&ammo) {
+        if is_calcm_store_ammo(&ammo) {
             total = total.saturating_add(ammo.count()?);
         }
     }
     Ok(total)
 }
 
-pub(crate) fn flight_alcm_missile_count(lua: MizLua, db: &Db, gid: GroupId) -> Result<u32> {
+pub(crate) fn flight_calcm_missile_count(lua: MizLua, db: &Db, gid: GroupId) -> Result<u32> {
     let dcs_names = dcs_spawn_names_for(db, gid)?;
     let mut total = 0u32;
     for name in &dcs_names {
@@ -2491,7 +2493,7 @@ pub(crate) fn flight_alcm_missile_count(lua: MizLua, db: &Db, gid: GroupId) -> R
         };
         for u in group.get_units()? {
             let u = u?;
-            total = total.saturating_add(unit_alcm_missile_count(lua, &u)?);
+            total = total.saturating_add(unit_calcm_missile_count(lua, &u)?);
         }
     }
     Ok(total)
@@ -2592,7 +2594,7 @@ fn weapon_bingo(
     mission_kind: AiAirMissionKind,
 ) -> Result<bool> {
     if mission_kind == AiAirMissionKind::CruiseMissileSpawn {
-        return Ok(flight_alcm_missile_count(lua, db, gid)? == 0);
+        return Ok(flight_calcm_missile_count(lua, db, gid)? == 0);
     }
     let ag_slots = template_ag_weapon_slots(template_unit);
     if ag_slots == 0 {
@@ -3021,6 +3023,8 @@ fn begin_duration_shutdown(
 const BINGO_FUEL_FRAC: f32 = 0.25;
 /// Ignore bingo checks right after entering `OnMission` (DCS ammo/fuel reads settle).
 const ON_MISSION_BINGO_MIN: Duration = Duration::seconds(120);
+/// Re-push orbit when airframes drift this far from the CAP mark (e.g. stale ME template task).
+const ORBIT_LOST_RADIUS_M: f64 = 100_000.;
 
 pub(super) fn apply_fowl_air_controller_options(con: &Controller) -> Result<()> {
     con.set_option(AiOption::Air(AirOption::RtbOnBingo(false)))?;
@@ -3219,14 +3223,38 @@ fn ensure_airborne_orbit_task(
     if phase != AiAirPhase::OnMission {
         return Ok(());
     }
+    let orbit_center = {
+        let group = group!(db, gid)?;
+        let DeployKind::Action { ai_air, .. } = &group.origin else {
+            return Ok(());
+        };
+        ai_air.active_mission.pos
+    };
+    let orbit_lost = flight_center_pos(lua, dcs_names)
+        .ok()
+        .filter(|cur| orbit_center != Vector2::default())
+        .map(|cur| !near_point(cur, orbit_center, ORBIT_LOST_RADIUS_M))
+        .unwrap_or(false);
     for dcs_name in dcs_names {
         if !group_in_air(lua, dcs_name).unwrap_or(false) {
             continue;
         }
-        if controller_has_active_task(lua, dcs_name) {
+        if controller_has_active_task(lua, dcs_name) && !orbit_lost {
             continue;
         }
-        let route = db.regenerate_ai_air_mission(lua, spctx, idx, gid, true)?;
+        if orbit_lost {
+            log::info!("ai air {gid}: far from orbit mark -> re-pushing mission");
+        }
+        if let Ok(cur) = flight_center_pos(lua, dcs_names) {
+            let group = group_mut!(db, gid)?;
+            if let DeployKind::Action { ai_air, .. } = &mut group.origin {
+                if ai_air.active_mission.pos == Vector2::default() {
+                    ai_air.active_mission.pos = cur;
+                }
+            }
+        }
+        // Ingress from live position; orbit center stays active_mission.pos.
+        let route = db.regenerate_ai_air_mission(lua, spctx, idx, gid, false)?;
         db.ai_air_push_mission_to_name(spctx, dcs_name, route, true)?;
         log::info!("ai air {gid}: re-pushed orbit (no active DCS task)");
     }
@@ -3747,7 +3775,7 @@ fn mission_kind_from_template(template: &str) -> AiAirMissionKind {
         AiAirMissionKind::Awacs
     } else if t.contains("DRONE") {
         AiAirMissionKind::Drone
-    } else if t.contains("ALCM") || t.contains("BOMBER") {
+    } else if t.contains("CALCM") || t.contains("ALCM") || t.contains("BOMBER") {
         AiAirMissionKind::CruiseMissileSpawn
     } else {
         AiAirMissionKind::Unknown
@@ -3917,7 +3945,7 @@ fn try_rehydrate_vanished_ai_air(
         }
         AiAirPhase::OnMission | AiAirPhase::Departing | AiAirPhase::RtbInbound => {
             if flight_any_in_air(lua, &dcs_names).unwrap_or(false) {
-                let route = db.regenerate_ai_air_mission(lua, spctx, idx, gid, true)?;
+                let route = db.regenerate_ai_air_mission(lua, spctx, idx, gid, false)?;
                 for dcs_name in &dcs_names {
                     db.ai_air_push_mission_to_name(spctx, dcs_name, route.clone(), true)?;
                 }
@@ -4263,7 +4291,7 @@ pub(super) fn advance_ai_air(
                 if let Err(e) = db.sync_warehouse_to_objective(lua, hub) {
                     log::warn!("ai air {gid}: warehouse sync after bootstrap failed: {e:#}");
                 }
-                let route = db.regenerate_ai_air_mission(lua, spctx, idx, gid, true)?;
+                let route = db.regenerate_ai_air_mission(lua, spctx, idx, gid, false)?;
                 log::info!("ai air {gid}: airborne -> on-mission orbit ({} wpts)", route.len());
                 db.ai_air_push_mission(spctx, gid, route, true)?;
             } else if on_ground {
@@ -4545,7 +4573,7 @@ pub(super) fn advance_ai_air(
                     set_phase(ai_air, AiAirPhase::OnMission);
                     snap
                 };
-                let route = db.regenerate_ai_air_mission(lua, spctx, idx, gid, true)?;
+                let route = db.regenerate_ai_air_mission(lua, spctx, idx, gid, false)?;
                 log::info!("ai air {gid}: depart -> on-mission orbit ({} wpts)", route.len());
                 db.ai_air_push_mission(spctx, gid, route, true)?;
             } else if on_ground {
@@ -4661,18 +4689,13 @@ fn rtb_hub_search_pos(lua: MizLua, db: &Db, gid: GroupId) -> Result<Vector2> {
     let DeployKind::Action { ai_air, .. } = &group.origin else {
         bail!("not an action aircraft");
     };
-    let live = flight_center_pos(lua, &dcs_spawn_names_for(db, gid)?).ok();
-    let mission = (ai_air.active_mission.pos != Vector2::default()).then_some(ai_air.active_mission.pos);
-    let use_mission = matches!(
-        ai_air.phase,
-        AiAirPhase::OnMission | AiAirPhase::Bootstrap | AiAirPhase::Legacy
-    );
-    match (live, mission) {
-        (_, Some(m)) if use_mission => Ok(m),
-        (Some(l), _) => Ok(l),
-        (_, Some(m)) => Ok(m),
-        _ => Err(anyhow!("no live ai air position for RTB")),
+    if let Ok(live) = flight_center_pos(lua, &dcs_spawn_names_for(db, gid)?) {
+        return Ok(live);
     }
+    if ai_air.active_mission.pos != Vector2::default() {
+        return Ok(ai_air.active_mission.pos);
+    }
+    Err(anyhow!("no live ai air position for RTB"))
 }
 
 pub(super) fn issue_rtb(
@@ -5147,7 +5170,7 @@ pub(super) fn spawn_ai_air_group<'lua>(
         }
         AiAirPersistSpawn::PersistInAir => {
             log::info!("ai air {gid}: in-air persist resume ({} unit(s))", dcs_names.len());
-            let route = db.regenerate_ai_air_mission(lua, spctx, idx, gid, true)?;
+            let route = db.regenerate_ai_air_mission(lua, spctx, idx, gid, false)?;
             log::info!(
                 "ai air {gid}: in-air resume mission pushed ({} wpts)",
                 route.len()

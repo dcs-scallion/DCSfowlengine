@@ -1667,17 +1667,17 @@ impl Db {
         artillery
     }
 
-    pub fn alcm_near_point(
+    pub fn calcm_near_point(
         &self,
         side: Side,
         lua: MizLua,
         pos: Vector2,
     ) -> SmallVec<[(GroupId, i32); 8]> {
-        let range2 = (self.ephemeral.cfg.alcm_mission_range as f64).powi(2);
-        let alcm = self
+        let range2 = (self.ephemeral.cfg.calcm_mission_range as f64).powi(2);
+        let calcm = self
             .actions()
             .filter_map(|group| {
-                if group.tags.contains(UnitTag::ALCM) && group.side == side {
+                if group.tags.contains(UnitTag::CALCM) && group.side == side {
                     let center = self.group_center(&group.id).ok()?;
                     if na::distance_squared(
                         &pos.into(),
@@ -1693,7 +1693,7 @@ impl Db {
                                     None => Unit::get_instance(lua, id),
                                 };
                                 if let Ok(inst) = instance {
-                                    ammo = ai_air::unit_alcm_missile_count(lua, &inst)
+                                    ammo = ai_air::unit_calcm_missile_count(lua, &inst)
                                         .unwrap_or(0)
                                         .try_into()
                                         .unwrap_or(0);
@@ -1710,7 +1710,7 @@ impl Db {
                 }
             })
             .collect::<SmallVec<[(GroupId, i32); 8]>>();
-        alcm
+        calcm
     }
 
     pub fn update_unit_positions_incremental(

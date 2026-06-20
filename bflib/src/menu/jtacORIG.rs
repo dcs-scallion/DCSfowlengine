@@ -296,17 +296,17 @@ pub fn jtac_artillery_combo_mission(lua: MizLua, arg: ArgQuad<JtId, DbGid, Vec<u
     Ok(())
 }
 
-pub fn jtac_alcm_mission(lua: MizLua, arg: ArgQuad<JtId, DbGid, Vec<u8>, Ucid>) -> Result<()> {
+pub fn jtac_calcm_mission(lua: MizLua, arg: ArgQuad<JtId, DbGid, Vec<u8>, Ucid>) -> Result<()> {
     let ctx = unsafe { Context::get_mut() };
     match ctx
         .jtac
-        .alcm_mission(&ctx.db, lua, &arg.fst, &arg.snd, arg.trd)
+        .calcm_mission(&ctx.db, lua, &arg.fst, &arg.snd, arg.trd)
     {
         Ok(()) => {
             let jtac = get_jtac(&ctx.jtac, &arg.fst).context("getting jtac")?;
             let (near, name) = change_info(jtac, &ctx.db, &arg.fth);
             let msg = format_compact!(
-                "ALCM MISSION STARTED for {}\ndirected by jtac {} near {}\nrequested by {}",
+                "CALCM MISSION STARTED for {}\ndirected by jtac {} near {}\nrequested by {}",
                 arg.snd,
                 arg.fst,
                 near,
@@ -318,7 +318,7 @@ pub fn jtac_alcm_mission(lua: MizLua, arg: ArgQuad<JtId, DbGid, Vec<u8>, Ucid>) 
                 .panel_to_side(10, false, jtac.side(), msg)
         }
         Err(e) => {
-            let msg = format!("jtac {} could not start ALCM mission {:?}", arg.fst, e);
+            let msg = format!("jtac {} could not start CALCM mission {:?}", arg.fst, e);
             ctx.db
                 .ephemeral
                 .panel_to_player(&ctx.db.persisted, 10, &arg.fth, msg);
@@ -553,18 +553,18 @@ fn add_artillery_menu_for_jtac(
     Ok(())
 }
 
-fn add_alcm_menu_for_jtac(
+fn add_calcm_menu_for_jtac(
     lua: MizLua,
     mizgid: GroupId,
     ucid: Ucid,
     root: GroupSubMenu,
     jtac: JtId,
-    alcm: &[(DbGid, i32)],
+    calcm: &[(DbGid, i32)],
 ) -> Result<()> {
     let mc = MissionCommands::singleton(lua)?;
 
-    let root = mc.add_submenu_for_group(mizgid, "ALCM".into(), Some(root.clone()))?;
-    for (gid, ammo) in alcm {
+    let root = mc.add_submenu_for_group(mizgid, "CALCM".into(), Some(root.clone()))?;
+    for (gid, ammo) in calcm {
         let root = mc.add_submenu_for_group(
             mizgid,
             format_compact!("{gid}({ammo})").into(),
@@ -581,7 +581,7 @@ fn add_alcm_menu_for_jtac(
                 mizgid,
                 "Fire One per target".into(),
                 Some(submenu.clone()),
-                jtac_alcm_mission,
+                jtac_calcm_mission,
                 ArgQuad {
                     fst: jtac,
                     snd: *gid,
@@ -593,7 +593,7 @@ fn add_alcm_menu_for_jtac(
                 mizgid,
                 "Fire Two per target".into(),
                 Some(submenu.clone()),
-                jtac_alcm_mission,
+                jtac_calcm_mission,
                 ArgQuad {
                     fst: jtac,
                     snd: *gid,
@@ -605,7 +605,7 @@ fn add_alcm_menu_for_jtac(
                 mizgid,
                 "Fire Four per target".into(),
                 Some(submenu.clone()),
-                jtac_alcm_mission,
+                jtac_calcm_mission,
                 ArgQuad {
                     fst: jtac,
                     snd: *gid,
@@ -860,13 +860,13 @@ pub(super) fn add_menu_for_jtac(
         jtac.nearby_artillery(),
     )?;
 
-    add_alcm_menu_for_jtac(
+    add_calcm_menu_for_jtac(
         lua,
         mizgid,
         *ucid,
         root.clone(),
         jtac.gid(),
-        jtac.nearby_alcm(),
+        jtac.nearby_calcm(),
     )?;
 
     let bomber_missions = db.ephemeral.cfg.actions.get(&side);

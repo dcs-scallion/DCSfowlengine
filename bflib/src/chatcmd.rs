@@ -348,7 +348,11 @@ fn delete_command(ctx: &mut Context, id: PlayerId, s: &str) {
 }
 
 fn action_help(ctx: &mut Context, actions: &IndexMap<String, Action, FxBuildHasher>, id: PlayerId) {
+    let calcm_enabled = ctx.db.ephemeral.cfg.calcm_mission;
     for (name, action) in actions {
+        if !calcm_enabled && action.kind.is_calcm_deploy() {
+            continue;
+        }
         let msg = match &action.kind {
             ActionKind::Attackers(_) => Some(format_compact!(
                 "{name}: <key> | Spawn ai attackers. cost {}",

@@ -80,7 +80,7 @@ Visual On: T-72Bx3, BMP-3x2, SA-13
 autoshift: true, ir_pointer: false
 filter: [Tank, APC]
 available artillery: [54321]
-available ALCM: [65432(4)]
+available CALCM: [65432(4)]
 ```
 
 ## Target Management
@@ -205,9 +205,9 @@ Options:
 
 ### Cruise Missile Missions
 
-**Request ALCM Strike**:
+**Request CALCM Strike**:
 ```
-F10 → JTAC → [JTAC ID] → ALCM → [Unit ID] → [Settings]
+F10 → JTAC → [JTAC ID] → CALCM → [Unit ID] → [Settings]
 ```
 
 **Parameters**:
@@ -217,7 +217,7 @@ F10 → JTAC → [JTAC ID] → ALCM → [Unit ID] → [Settings]
 
 **Cost**: May cost points
 
-**See**: [ALCM Guide](../advanced/alcm.md) for details
+**See**: [CALCM Guide](../advanced/calcm.md) for details
 
 ### Smoke Marker
 
@@ -251,11 +251,11 @@ F10 → JTAC → [JTAC ID] → Smoke Target
 - Use different battery
 - Check JTAC status for available units
 
-### "ALCM out of range"
+### "CALCM out of range"
 - Cruise missile platform too far from target (max range: 300km)
 - Reposition platform using waypoint commands
 - Deploy new platform closer
-- Check JTAC status for available ALCM units
+- Check JTAC status for available CALCM units
 
 ### "Laser not tracking"
 - Wrong laser code
@@ -266,5 +266,5 @@ F10 → JTAC → [JTAC ID] → Smoke Target
 ## See Also
 
 - [Artillery Operations](../advanced/artillery.md) - Fire mission details
-- [ALCM Operations](../advanced/alcm.md) - Cruise missile strikes
+- [CALCM Operations](../advanced/calcm.md) - Cruise missile strikes
 

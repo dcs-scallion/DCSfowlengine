@@ -365,6 +365,9 @@ impl ActionCmd {
                     .and_then(|actions| actions.get(name))
                     .ok_or_else(|| anyhow!("no such action {name}"))?
                     .clone();
+                if !db.ephemeral.cfg.calcm_mission && action.kind.is_calcm_deploy() {
+                    bail!("calcm missions are disabled");
+                }
                 let args = ActionArgs::parse(db, &action.kind, lua, side, args)?;
                 Ok(Self {
                     name: name.into(),
@@ -719,7 +722,8 @@ impl Db {
                     )?
                 }
                 ai_air::AiAirPhase::OnMission => {
-                    self.regenerate_ai_air_mission(lua, spctx, idx, gid, resume_air)?
+                    // Ingress from live position; orbit center stays active_mission.pos.
+                    self.regenerate_ai_air_mission(lua, spctx, idx, gid, false)?
                 }
                 ai_air::AiAirPhase::AwaitingLaunch
                 | ai_air::AiAirPhase::Servicing
@@ -838,7 +842,7 @@ impl Db {
                     let player = *player;
                     let mission = self
                         .cruise_missile_mission(side, player, spawn_pos, args)
-                        .context("generate alcm mission")?;
+                        .context("generate calcm mission")?;
                     let group = group!(self, gid)?;
                     self.ephemeral.spawn_group(
                         perf,

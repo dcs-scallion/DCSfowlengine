@@ -28,7 +28,7 @@
 # Advanced Topics
 
 - [Artillery Missions](./advanced/artillery.md)
-- [Air-to-Ground Cruise Missiles](./advanced/alcm.md)
+- [Air-to-Ground Cruise Missiles](./advanced/calcm.md)
 
 # Reference
 

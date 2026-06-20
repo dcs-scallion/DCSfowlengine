@@ -54,7 +54,7 @@ fn ewr_report(lua: MizLua, gid: GroupId) -> Result<()> {
                 let chickens = ctx
                     .ewr
                     .where_chicken(Utc::now(), false, true, ucid, player, inst, &ctx.db, ctx.db.ephemeral.cfg.ewr_mode, ctx.db.ephemeral.cfg.ewr_delay);
-                write!(report, "{}\n", ewr::HEADER)?;
+                write!(report, "{}\n", ewr::report_header())?;
                 for braa in chickens {
                     write!(report, "{braa}\n")?;
                 }
@@ -64,7 +64,7 @@ fn ewr_report(lua: MizLua, gid: GroupId) -> Result<()> {
     ctx.db
         .ephemeral
         .msgs()
-        .panel_to_group(10, false, gid, report);
+        .panel_to_group(ewr::EWR_PANEL_DISPLAY_SECS, false, gid, report);
     Ok(())
 }
 
@@ -78,7 +78,7 @@ fn friendly_ewr_report(lua: MizLua, gid: GroupId) -> Result<()> {
                 let friendlies = ctx
                     .ewr
                     .where_chicken(Utc::now(), true, true, ucid, player, inst, &ctx.db, ctx.db.ephemeral.cfg.ewr_mode, ctx.db.ephemeral.cfg.ewr_delay);
-                write!(report, "{}\n", ewr::HEADER)?;
+                write!(report, "{}\n", ewr::report_header())?;
                 for braa in friendlies {
                     write!(report, "{braa}\n")?;
                 }
@@ -88,7 +88,7 @@ fn friendly_ewr_report(lua: MizLua, gid: GroupId) -> Result<()> {
     ctx.db
         .ephemeral
         .msgs()
-        .panel_to_group(10, false, gid, report);
+        .panel_to_group(ewr::EWR_PANEL_DISPLAY_SECS, false, gid, report);
     Ok(())
 }
 

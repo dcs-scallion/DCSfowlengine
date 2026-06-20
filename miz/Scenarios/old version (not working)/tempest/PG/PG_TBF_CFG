@@ -192,7 +192,7 @@
   "crate_load_distance": 50,
   "crate_spread": 500,
   "artillery_mission_range": 300000,
-  "alcm_mission_range": 300000,
+  "calcm_mission_range": 300000,
   "lock_sides": true,
   "side_switches": 1,
   "max_crates": 6,
@@ -410,12 +410,12 @@
         "penalty": null,
         "limit": null
       },
-	   "alcm-tu952": {
+	   "calcm-tu952": {
         "kind": {
           "CruiseMissileSpawn": {
             "kind": "FixedWing",
             "duration": 8,
-            "template": "RALCMTU952",
+            "template": "RCALCMTU952",
             "altitude": 9000,
             "altitude_typ": "BARO",
             "speed": 500,
@@ -426,12 +426,12 @@
         "penalty": 50,
         "limit": null
       },
-      "alcm-tu160": {
+      "calcm-tu160": {
         "kind": {
           "CruiseMissileSpawn": {
             "kind": "FixedWing",
             "duration": 8,
-            "template": "RALCM",
+            "template": "RCALCM",
             "altitude": 9000,
             "altitude_typ": "BARO",
             "speed": 1000,
@@ -442,12 +442,12 @@
         "penalty": 50,
         "limit": null
       },
-      "alcm-tu95": {
+      "calcm-tu95": {
         "kind": {
           "CruiseMissileSpawn": {
             "kind": "FixedWing",
             "duration": 8,
-            "template": "RALCMTU95",
+            "template": "RCALCMTU95",
             "altitude": 9000,
             "altitude_typ": "BARO",
             "speed": 500,
@@ -458,7 +458,7 @@
         "penalty": 50,
         "limit": null
       },
-      "alcm-waypoint": {
+      "calcm-waypoint": {
         "kind": "CruiseMissileWaypoint",
         "cost": 10,
         "penalty": null,
@@ -890,12 +890,12 @@
         "limit": null,
         "geo_limit": "Unlimited"
       },
-      "alcm-b52": {
+      "calcm-b52": {
         "kind": {
           "CruiseMissileSpawn": {
             "kind": "FixedWing",
             "duration": 8,
-            "template": "BALCM",
+            "template": "BCALCM",
             "altitude": 9000,
             "altitude_typ": "BARO",
             "speed": 600,
@@ -906,12 +906,12 @@
         "penalty": 50,
         "limit": null
       },
-      "alcm-s3": {
+      "calcm-s3": {
         "kind": {
           "CruiseMissileSpawn": {
             "kind": "FixedWing",
             "duration": 8,
-            "template": "BALCMS3B",
+            "template": "BCALCMS3B",
             "altitude": 9000,
             "altitude_typ": "BARO",
             "speed": 600,
@@ -922,7 +922,7 @@
         "penalty": 50,
         "limit": null
       },
-      "alcm-waypoint": {
+      "calcm-waypoint": {
         "kind": "CruiseMissileWaypoint",
         "cost": 10,
         "penalty": null,
@@ -4649,15 +4649,15 @@
     ],
     "Tu-95MS": [
       "Aircraft",
-      "ALCM"
+      "CALCM"
     ],
     "S-3B": [
       "Aircraft",
-      "ALCM"
+      "CALCM"
     ],
     "B-52H": [
       "Aircraft",
-      "ALCM"
+      "CALCM"
     ],
     "Tornado GR4": [
       "Aircraft"
@@ -4870,7 +4870,7 @@
     ],
     "Tu-160": [
       "Aircraft",
-      "ALCM"
+      "CALCM"
     ],
     "T-72B": [
       "Armor",

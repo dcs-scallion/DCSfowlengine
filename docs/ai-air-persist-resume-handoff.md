@@ -86,7 +86,7 @@ ai air rtb {gid} -> hub "..." (explicit)
    → hub parking, bootstrap, **not** in-air
 5. **Transition:** reload during takeoff (low AGL) → ground bootstrap
 6. **status:** `-action status <gid>` — fuel % + stores (see open items if no panel)
-7. **Bingo:** fighters/ALCM hold orbit; after bingo → log `bingo/auto`, Fowl RTB
+7. **Bingo:** fighters/CALCM hold orbit; after bingo → log `bingo/auto`, Fowl RTB
 8. **Explicit RTB:** `-action rtb <gid>` on mark at distant base → log `explicit`; check Tacview landing airfield
 9. **AWACS on carrier:** `-action awacs-small` near carrier → hub name Naval …
 10. **Partial loadout:** exhaust warehouse → `AwaitingLaunch` + `partial loadout:` panel → `rearm` / `start`
@@ -103,7 +103,7 @@ ai air rtb {gid} -> hub "..." (explicit)
 | 3 | **Explicit RTB wrong airfield** | `issue_rtb` logs explicit hub; verify `rtb_inbound_route` / `LandingReFuAr` lands on chosen base not nearest |
 | 4 | **False servicing after spawn** | `on ground at hub -> servicing` right after ground persist (fighters 1509 in old log) |
 | 5 | **Post-RTB orbit ingress** | After service, low flight toward objective centre not waypoint |
-| 6 | **ALCM bomber** | Orbit height, cruise tasks, JTAC launch — re-verify after multi-unit fix |
+| 6 | **CALCM bomber** | Orbit height, cruise tasks, JTAC launch — re-verify after multi-unit fix |
 | 7 | **Attack heli** | FOB spawn + helipad assignment — re-verify player cannot take same pad |
 | 8 | **Duration shutdown** | Multi-ship: all landed before park/off; delete persist only after DCS despawn |
 | 9 | **`racetrack_leg_m` CFG** | AWACS/tanker use hardcoded 30 km legs (large “circles” on map) |

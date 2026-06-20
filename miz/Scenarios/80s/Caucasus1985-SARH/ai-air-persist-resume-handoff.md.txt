@@ -65,7 +65,7 @@ After in-air resume, orbit mission is pushed immediately in `respawn_action` (no
 - RTB landing on correct hub (not spawn airfield)
 - False `on ground at hub -> servicing` right after spawn
 - Post-RTB ingress altitude / objective-centre orbit bug
-- ALCM bomber orbit / empty cruise tasks
+- CALCM bomber orbit / empty cruise tasks
 - Heli hub spawn failures (logging)
 - `racetrack_leg_m` CFG (AWACS/tanker 30 km hardcoded)
 - Carrier deck edge cases for in-air resume (fallback: ground if AGL ≤ 80 m)

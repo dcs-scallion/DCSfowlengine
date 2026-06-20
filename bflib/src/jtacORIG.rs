@@ -246,7 +246,7 @@ pub struct Jtac {
     code: u16,
     last_smoke: DateTime<Utc>,
     nearby_artillery: SmallVec<[GroupId; 8]>,
-    nearby_alcm: SmallVec<[(GroupId, i32); 8]>,
+    nearby_calcm: SmallVec<[(GroupId, i32); 8]>,
     menu_dirty: bool,
     air: bool,
 }
@@ -273,7 +273,7 @@ impl Jtac {
             code: 1688,
             last_smoke: DateTime::<Utc>::default(),
             nearby_artillery: smallvec![],
-            nearby_alcm: smallvec![],
+            nearby_calcm: smallvec![],
             menu_dirty: false,
             air,
         }
@@ -392,9 +392,9 @@ impl Jtac {
             }
         }
         write!(msg, "]\n")?;
-        write!(msg, "available ALCM: [")?;
-        let len = self.nearby_alcm.len();
-        for (i, (gid, ammo)) in self.nearby_alcm.iter().enumerate() {
+        write!(msg, "available CALCM: [")?;
+        let len = self.nearby_calcm.len();
+        for (i, (gid, ammo)) in self.nearby_calcm.iter().enumerate() {
             if i < len - 1 {
                 write!(msg, "{gid}({ammo}),")?;
             } else {
@@ -456,15 +456,15 @@ impl Jtac {
         let id = *id;
         let pos = ct.pos;
         let prev_arty = self.nearby_artillery.clone();
-        let prev_alcm = self.nearby_alcm.clone();
+        let prev_calcm = self.nearby_calcm.clone();
         match &self.target {
             Some(target) if target.id == id => {
                 self.nearby_artillery =
                     db.artillery_near_point(self.side, Vector2::new(pos.x, pos.z));
                 self.menu_dirty |= prev_arty != self.nearby_artillery;
 
-                self.nearby_alcm = db.alcm_near_point(self.side, lua, Vector2::new(pos.x, pos.z));
-                self.menu_dirty |= prev_alcm != self.nearby_alcm;
+                self.nearby_calcm = db.calcm_near_point(self.side, lua, Vector2::new(pos.x, pos.z));
+                self.menu_dirty |= prev_calcm != self.nearby_calcm;
 
                 Ok(false)
             }
@@ -528,9 +528,9 @@ impl Jtac {
                 });
                 self.nearby_artillery =
                     db.artillery_near_point(self.side, Vector2::new(pos.x, pos.z));
-                self.nearby_alcm = db.alcm_near_point(self.side, lua, Vector2::new(pos.x, pos.z));
+                self.nearby_calcm = db.calcm_near_point(self.side, lua, Vector2::new(pos.x, pos.z));
                 self.menu_dirty |= prev_arty != self.nearby_artillery;
-                self.menu_dirty |= prev_alcm != self.nearby_alcm;
+                self.menu_dirty |= prev_calcm != self.nearby_calcm;
                 self.mark_target(lua).context("marking target")?;
                 Ok(true)
             }
@@ -821,7 +821,7 @@ impl Jtac {
         Ok(())
     }
 
-    pub fn alcm_mission(
+    pub fn calcm_mission(
         &mut self,
         db: &Db,
         lua: MizLua,
@@ -858,11 +858,11 @@ impl Jtac {
                             .first();
                         ammo = match first {
                             Ok(ammo) => ammo.count()? as u8,
-                            Err(_e) => bail! {"ALCM Abort: {gid} is out of missiles."},
+                            Err(_e) => bail! {"CALCM Abort: {gid} is out of missiles."},
                         };
                         if ammo < per_target {
                             bail!(
-                                "ALCM Abort: {gid} has only {ammo} missiles remaining, cannot launch {per_target}."
+                                "CALCM Abort: {gid} has only {ammo} missiles remaining, cannot launch {per_target}."
                             );
                         }
                     }
@@ -876,7 +876,7 @@ impl Jtac {
                     if ammo > 0 {
                         ammo
                     } else {
-                        bail!("ALCM Abort: not enough missiles to complete a minimum launch.")
+                        bail!("CALCM Abort: not enough missiles to complete a minimum launch.")
                     }
                 };
 
@@ -1147,8 +1147,8 @@ impl Jtac {
         &self.nearby_artillery
     }
 
-    pub fn nearby_alcm(&self) -> &[(GroupId, i32)] {
-        &self.nearby_alcm
+    pub fn nearby_calcm(&self) -> &[(GroupId, i32)] {
+        &self.nearby_calcm
     }
 }
 
@@ -1311,7 +1311,7 @@ impl Jtacs {
         jtac.artillery_combo_mission(db, lua, adjustment, &shooter, rounds_per_target, num_targets)
     }
 
-    pub fn alcm_mission(
+    pub fn calcm_mission(
         &mut self,
         db: &Db,
         lua: MizLua,
@@ -1325,7 +1325,7 @@ impl Jtacs {
             .find_map(|(_, jtx)| jtx.get_mut(&jtid))
             .ok_or_else(|| anyhow!("no such jtac"))?;
 
-        jtac.alcm_mission(db, lua, &shooter, n)
+        jtac.calcm_mission(db, lua, &shooter, n)
     }
 
     /// set part of the laser code, defined by the scale of the passed in number. For example,
@@ -1779,7 +1779,7 @@ impl Jtacs {
         let mut new_contacts: SmallVec<[&Jtac; 32]> = smallvec![];
         for j in self.jtacs.values_mut() {
             for (_, jtac) in j.iter_mut() {
-                jtac.nearby_alcm = db.alcm_near_point(jtac.side, lua, jtac.location().pos);
+                jtac.nearby_calcm = db.calcm_near_point(jtac.side, lua, jtac.location().pos);
                 match jtac.sort_contacts(db, lua) {
                     Ok(false) => (),
                     Ok(true) => new_contacts.push(jtac),

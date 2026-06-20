@@ -164,6 +164,11 @@
   "ground_vehicle_cull_distance": 10000,
   "cull_after": 600,
   "slow_timed_events_freq": 10,
+  "ewr_mode": "Original",
+  "ewr_delay": 60,
+  "ewr_antenna_height_m": 6,
+  "ewr_min_speed_kmh": 200,
+  "ewr_min_ralt_m": 500,
   "threatened_distance": {
     "C-101CC": 9000,
     "L-39C": 9000,
@@ -233,7 +238,8 @@
   "crate_load_distance": 50,
   "crate_spread": 500,
   "artillery_mission_range": 70000,
-  "alcm_mission_range": 600000,
+  "calcm_mission": true,
+  "calcm_mission_range": 600000,
   "lock_sides": false,
   "side_switches": 1,
   "max_crates": 6,
@@ -414,12 +420,12 @@
         "penalty": 60,
         "limit": 2
       },
-      "alcm-Tu-95MS": {
+      "calcm": {
         "kind": {
           "CruiseMissileSpawn": {
             "kind": "FixedWing",
             "duration": null,
-            "template": "RBOMBERALCM",
+            "template": "RBOMBERCALCM",
             "altitude": 8892,
             "altitude_typ": "BARO",
             "speed": 514,
@@ -430,7 +436,7 @@
         "penalty": 80,
         "limit": 2
       },
-      "alcm-waypoint": {
+      "calcm-waypoint": {
         "kind": "CruiseMissileWaypoint",
         "cost": 10,
         "penalty": null,
@@ -847,12 +853,12 @@
         "penalty": 60,
         "limit": 2
       },
-      "alcm B-52H": {
+      "calcm": {
         "kind": {
           "CruiseMissileSpawn": {
             "kind": "FixedWing",
             "duration": null,
-            "template": "BBOMBERALCM",
+            "template": "BBOMBERCALCM",
             "altitude": 8833,
             "altitude_typ": "BARO",
             "speed": 302,
@@ -863,7 +869,7 @@
         "penalty": 80,
         "limit": 2
       },
-      "alcm-waypoint": {
+      "calcm-waypoint": {
         "kind": "CruiseMissileWaypoint",
         "cost": 10,
         "penalty": null,
@@ -3489,11 +3495,11 @@
     ],
     "Tu-95MS": [
       "Aircraft",
-      "ALCM"
+      "CALCM"
     ],
     "B-52H": [
       "Aircraft",
-      "ALCM"
+      "CALCM"
     ],
     "C-130J-30": [
       "Aircraft"

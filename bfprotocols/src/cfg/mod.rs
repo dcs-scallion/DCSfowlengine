@@ -166,7 +166,7 @@ pub enum UnitTag {
     AWACS,
     Link16,
     Boat,
-    ALCM,
+    CALCM,
     NavalSpawnPoint,
     /// `shipsNoHeliport_kill` — plain naval hull (author assigns per DCS type).
     ShipNoHeliport,
@@ -830,6 +830,15 @@ pub enum ActionKind {
     Rearm,
 }
 
+impl ActionKind {
+    pub fn is_calcm_deploy(&self) -> bool {
+        matches!(
+            self,
+            ActionKind::CruiseMissileSpawn(_) | ActionKind::CruiseMissileWaypoint
+        )
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum ActionGeoLimit {
     Unlimited,
@@ -1086,6 +1095,14 @@ fn default_ewr_delay() -> u32 {
     60
 }
 
+fn default_ewr_antenna_height_m() -> u32 {
+    10
+}
+
+fn default_calcm_mission() -> bool {
+    true
+}
+
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -1211,9 +1228,12 @@ pub struct Cfg {
     /// how close must artillery be to participate in an artillery mission
     /// (meters).
     pub artillery_mission_range: u32,
-    /// how close must alcm be to participate in an alcm mission
+    /// how close a CALCM unit must be to participate in a CALCM mission
     /// (meters).
-    pub alcm_mission_range: u32,
+    pub calcm_mission_range: u32,
+    /// When false, CALCM deploy/waypoint actions are hidden from F10 Actions and chat.
+    #[serde(default = "default_calcm_mission")]
+    pub calcm_mission: bool,
     /// If true players will be locked to the side they initially
     /// choose for the duration of the round
     #[serde(default = "default_lock_sides")]
@@ -1284,6 +1304,15 @@ pub struct Cfg {
     /// EWR track update delay in seconds (only used when ewr_mode is Delayed)
     #[serde(default = "default_ewr_delay")]
     pub ewr_delay: u32,
+    /// Enemy EWR report: min speed (km/h) for low/slow filter. None or 0 = ignore.
+    #[serde(default)]
+    pub ewr_min_speed_kmh: Option<u32>,
+    /// Enemy EWR report: min AGL (m) for low/slow filter. None or 0 = ignore.
+    #[serde(default)]
+    pub ewr_min_ralt_m: Option<u32>,
+    /// Meters added to EWR group centroid height for line-of-sight checks.
+    #[serde(default = "default_ewr_antenna_height_m")]
+    pub ewr_antenna_height_m: u32,
     #[serde(default)]
     pub discord_map: DiscordMapCfg,
     /// Test-only: extra Red headcount for `balancing_point_gain` (not Discord map).

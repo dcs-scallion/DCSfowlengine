@@ -28,6 +28,6 @@ This guide is organized into sections:
 - **Getting Started**: Registration and interface
 - **Core Gameplay**: Campaign mechanics
 - **F10 Menu Systems**: Menu systems documentation
-- **Advanced Topics**: Artillery and ALCM operations
+- **Advanced Topics**: Artillery and CALCM operations
 - **Reference**: Command lists and unit tables
 

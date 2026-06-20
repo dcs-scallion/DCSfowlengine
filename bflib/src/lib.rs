@@ -1632,7 +1632,7 @@ fn generate_ewr_reports(ctx: &mut Context, now: DateTime<Utc>) -> Result<()> {
         );
         if !braa_to_chickens.is_empty() {
             let mut report = format_compact!("Bandits BRAA\n");
-            write!(report, "{}\n", ewr::HEADER)?;
+            write!(report, "{}\n", ewr::report_header())?;
             for gibbraa in braa_to_chickens {
                 write!(report, "{gibbraa}\n")?;
             }
@@ -1640,7 +1640,7 @@ fn generate_ewr_reports(ctx: &mut Context, now: DateTime<Utc>) -> Result<()> {
         }
     }
     for (uid, msg) in msgs {
-        ctx.db.ephemeral.msgs().panel_to_unit(10, false, uid, msg)
+        ctx.db.ephemeral.msgs().panel_to_unit(ewr::EWR_PANEL_DISPLAY_SECS, false, uid, msg)
     }
     Ok(())
 }
@@ -1974,6 +1974,7 @@ fn run_slow_timed_events(
             ts,
             ctx.db.ephemeral.cfg.ewr_mode,
             ctx.db.ephemeral.cfg.ewr_delay,
+            ctx.db.ephemeral.cfg.ewr_antenna_height_m,
         ) {
             error!("could not update ewr tracks {e}")
         }

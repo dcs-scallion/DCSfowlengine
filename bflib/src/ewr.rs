@@ -36,46 +36,213 @@ use bfprotocols::{
 };
 use chrono::prelude::*;
 use dcso3::{
-    MizLua, Position3, Vector2, Vector3, azumith2d_to, azumith3d, coalition::Side, land::Land,
-    net::Ucid, radians_to_degrees,
+    LuaVec2, MizLua, Position3, Vector2, Vector3, azumith2d_to, azumith3d, coalition::Side,
+    land::Land, net::Ucid, radians_to_degrees,
 };
 use fxhash::FxHashMap;
 use smallvec::{SmallVec, smallvec};
 use std::fmt;
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone)]
 pub struct GibBraa {
     pub bearing: u16,
     pub range: u32,
     pub altitude: u32,
     pub heading: u16,
     pub speed: u16,
+    pub aspect: String,
     pub age: u16,
     pub units: EwrUnits,
     converted: bool,
 }
 
-pub const HEADER: &'static str = "BRG      RNG      ALT      SPD        HDG      AGE";
+const COL_BRG: usize = 4;
+const COL_ASP: usize = 7;
+const ASP_HYST_DEG: f64 = 5.;
+
+/// DCS panel message display time for EWR contact reports (seconds).
+pub const EWR_PANEL_DISPLAY_SECS: i64 = 20;
+
+struct NumUnitCol {
+    num_w: usize,
+    unit_w: usize,
+}
+
+const COL_RNG: NumUnitCol = NumUnitCol {
+    num_w: 7,
+    unit_w: 2,
+};
+const COL_ALT: NumUnitCol = NumUnitCol {
+    num_w: 7,
+    unit_w: 2,
+};
+const COL_SPD: NumUnitCol = NumUnitCol {
+    num_w: 7,
+    unit_w: 3,
+};
+const COL_AGE: NumUnitCol = NumUnitCol {
+    num_w: 4,
+    unit_w: 1,
+};
+
+impl NumUnitCol {
+    fn format_label(&self, label: &str) -> String {
+        format!("{:>num_w$} {units}", label, units = " ".repeat(self.unit_w), num_w = self.num_w)
+    }
+
+    fn format_value(&self, value: u32, unit: &str) -> String {
+        format!(
+            "{:>num_w$} {unit:<unit_w$}",
+            format_thousands(value),
+            unit = unit,
+            num_w = self.num_w,
+            unit_w = self.unit_w,
+        )
+    }
+}
+
+fn format_thousands(n: u32) -> String {
+    let s = n.to_string();
+    if s.len() <= 3 {
+        return s;
+    }
+    let mut out = String::new();
+    for (i, ch) in s.chars().rev().enumerate() {
+        if i > 0 && i % 3 == 0 {
+            out.push('.');
+        }
+        out.push(ch);
+    }
+    out.chars().rev().collect()
+}
+
+pub fn report_header() -> String {
+    format!(
+        "{:>COL_BRG$} {} {} {} {:>COL_ASP$} {}",
+        "BRG",
+        COL_RNG.format_label("RNG"),
+        COL_ALT.format_label("ALT"),
+        COL_SPD.format_label("SPD"),
+        "ASP",
+        COL_AGE.format_label("AGE"),
+        COL_BRG = COL_BRG,
+        COL_ASP = COL_ASP,
+    )
+    .to_string()
+}
+
+fn round_display_altitude(alt: u32) -> u32 {
+    if alt >= 1000 {
+        ((alt + 50) / 100) * 100
+    } else {
+        ((alt + 5) / 10) * 10
+    }
+}
+
+fn round_display_speed(speed: u16) -> u16 {
+    ((speed + 5) / 10) * 10
+}
 
 impl fmt::Display for GibBraa {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        let (range_u, altitude_u, _u) = match self.units {
-            EwrUnits::Imperial => ("nm", "ft", "kts "),
-            EwrUnits::Metric => ("km", "m ", "km/h"),
+        let (range_u, alt_u, spd_u) = match self.units {
+            EwrUnits::Imperial => ("nm", "ft", "kt"),
+            EwrUnits::Metric => ("km", "m", "kmh"),
         };
         write!(
             f,
-            "{:>6} {:>6}{} {:>6}{} {:>6}{} {:>6} {:>6}s",
+            "{:>COL_BRG$} {} {} {} {:>COL_ASP$} {}",
             self.bearing,
-            self.range,
-            range_u,
-            self.altitude,
-            altitude_u,
-            self.speed,
-            _u,
-            self.heading,
-            self.age
+            COL_RNG.format_value(self.range, range_u),
+            COL_ALT.format_value(round_display_altitude(self.altitude), alt_u),
+            COL_SPD.format_value(round_display_speed(self.speed).into(), spd_u),
+            self.aspect,
+            COL_AGE.format_value(self.age as u32, "s"),
+            COL_BRG = COL_BRG,
+            COL_ASP = COL_ASP,
         )
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn ewr_low_slow_filter_thresholds() {
+        assert!(!excluded_by_ewr_low_slow_filter(30., 30., None, None));
+        assert!(!excluded_by_ewr_low_slow_filter(30., 30., Some(0), Some(0)));
+        assert!(excluded_by_ewr_low_slow_filter(20., 100., Some(100), None));
+        assert!(!excluded_by_ewr_low_slow_filter(40., 100., Some(100), None));
+        assert!(excluded_by_ewr_low_slow_filter(40., 30., None, Some(50)));
+        assert!(!excluded_by_ewr_low_slow_filter(40., 80., None, Some(50)));
+        assert!(excluded_by_ewr_low_slow_filter(20., 30., Some(100), Some(50)));
+        assert!(!excluded_by_ewr_low_slow_filter(40., 80., Some(100), Some(50)));
+    }
+
+    #[test]
+    fn format_thousands_groups_from_right() {
+        assert_eq!(format_thousands(25), "25");
+        assert_eq!(format_thousands(999), "999");
+        assert_eq!(format_thousands(1234), "1.234");
+        assert_eq!(format_thousands(15200), "15.200");
+        assert_eq!(format_thousands(60000), "60.000");
+    }
+
+    #[test]
+    fn report_columns_align_with_header() {
+        let header = report_header();
+        let row = format!(
+            "{}",
+            GibBraa {
+                bearing: 45,
+                range: 25,
+                altitude: 15200,
+                heading: 270,
+                speed: 450,
+                aspect: "HOT".into(),
+                age: 12,
+                units: EwrUnits::Imperial,
+                converted: true,
+            }
+        );
+        assert_eq!(
+            header,
+            " BRG     RNG        ALT        SPD         ASP  AGE  ",
+            "header mismatch"
+        );
+        assert_eq!(
+            row,
+            "  45      25 nm  15.200 ft     450 kt      HOT   12 s",
+            "row mismatch"
+        );
+        assert_eq!(header.len(), row.len(), "column width drift");
+    }
+
+    #[test]
+    fn round_display_speed_to_tens() {
+        assert_eq!(round_display_speed(626), 630);
+        assert_eq!(round_display_speed(673), 670);
+        assert_eq!(round_display_speed(455), 460);
+    }
+
+    #[test]
+    fn aspect_label_buckets() {
+        assert_eq!(format_aspect_label(15., 'L'), "HOT");
+        assert_eq!(format_aspect_label(45., 'R'), "FLANK R");
+        assert_eq!(format_aspect_label(90., 'L'), "BEAM L");
+        assert_eq!(format_aspect_label(140., 'R'), "DRAG R");
+        assert_eq!(format_aspect_label(170., 'L'), "COLD");
+    }
+
+    #[test]
+    fn round_display_altitude_buckets() {
+        assert_eq!(round_display_altitude(950), 950);
+        assert_eq!(round_display_altitude(954), 950);
+        assert_eq!(round_display_altitude(956), 960);
+        assert_eq!(round_display_altitude(1000), 1000);
+        assert_eq!(round_display_altitude(15234), 15200);
+        assert_eq!(round_display_altitude(15250), 15300);
     }
 }
 
@@ -104,11 +271,138 @@ impl GibBraa {
 struct Track {
     pos: Position3,
     velocity: Vector3,
+    agl: f64,
     last: DateTime<Utc>,          // Last detection time (for age calculation)
     last_update: DateTime<Utc>,   // Last data update time (for delay mechanism)
     side: Side,
     was_detected: bool,
     detected: bool,
+}
+
+fn track_heading_deg(track: &Track) -> u16 {
+    let vx = track.velocity.x;
+    let vz = track.velocity.z;
+    let mag_sq = vx * vx + vz * vz;
+    if mag_sq > 1. {
+        return normalize_heading_deg(radians_to_degrees(vx.atan2(vz)));
+    }
+    normalize_heading_deg(radians_to_degrees(azumith3d(track.pos.x.0)))
+}
+
+fn normalize_heading_deg(deg: f64) -> u16 {
+    deg.rem_euclid(360.) as u16
+}
+
+fn compute_target_aspect(track: &Track, player_pos: Vector2) -> (f64, char) {
+    let target = Vector2::new(track.pos.p.x, track.pos.p.z);
+    let dx = player_pos.x - target.x;
+    let dz = player_pos.y - target.y;
+    let dist = (dx * dx + dz * dz).sqrt();
+    if dist < 1. {
+        return (0., ' ');
+    }
+    let to_x = dx / dist;
+    let to_z = dz / dist;
+    let (fwd_x, fwd_z) = track_forward_xz(track);
+    let dot = (fwd_x * to_x + fwd_z * to_z).clamp(-1., 1.);
+    let angle = dot.acos().to_degrees();
+    let cross = fwd_x * to_z - fwd_z * to_x;
+    let lr = if cross >= 0. { 'R' } else { 'L' };
+    (angle, lr)
+}
+
+fn track_forward_xz(track: &Track) -> (f64, f64) {
+    let vx = track.velocity.x;
+    let vz = track.velocity.z;
+    let mag = (vx * vx + vz * vz).sqrt();
+    if mag > 1. {
+        return (vx / mag, vz / mag);
+    }
+    let hd = radians_to_degrees(azumith3d(track.pos.x.0));
+    let rad = hd.to_radians();
+    (rad.sin(), rad.cos())
+}
+
+fn format_aspect_label(angle: f64, lr: char) -> String {
+    if angle <= 30. {
+        "HOT".into()
+    } else if angle >= 160. {
+        "COLD".into()
+    } else if angle <= 70. {
+        format!("FLANK {lr}")
+    } else if angle <= 120. {
+        format!("BEAM {lr}")
+    } else {
+        format!("DRAG {lr}")
+    }
+}
+
+fn aspect_bucket_index(label: &str) -> u8 {
+    if label.starts_with("HOT") {
+        0
+    } else if label.starts_with("FLANK") {
+        1
+    } else if label.starts_with("BEAM") {
+        2
+    } else if label.starts_with("DRAG") {
+        3
+    } else {
+        4
+    }
+}
+
+fn aspect_boundary_between(a: u8, b: u8) -> f64 {
+    match (a.min(b), a.max(b)) {
+        (0, 1) => 30.,
+        (1, 2) => 70.,
+        (2, 3) => 120.,
+        (3, 4) => 160.,
+        _ => 0.,
+    }
+}
+
+fn stable_aspect_label(
+    cache: &mut FxHashMap<(Ucid, EnId), String>,
+    ucid: &Ucid,
+    id: EnId,
+    angle: f64,
+    lr: char,
+) -> String {
+    let label = format_aspect_label(angle, lr);
+    let key = (ucid.clone(), id);
+    if let Some(prev) = cache.get(&key) {
+        if prev == &label {
+            return label;
+        }
+        let prev_bucket = aspect_bucket_index(prev);
+        let new_bucket = aspect_bucket_index(&label);
+        if prev_bucket != new_bucket {
+            let boundary = aspect_boundary_between(prev_bucket, new_bucket);
+            if boundary > 0. && (angle - boundary).abs() <= ASP_HYST_DEG {
+                return prev.clone();
+            }
+        }
+    }
+    cache.insert(key, label.clone());
+    label
+}
+
+fn excluded_by_ewr_low_slow_filter(
+    speed_ms: f64,
+    agl_m: f64,
+    min_speed_kmh: Option<u32>,
+    min_ralt_m: Option<u32>,
+) -> bool {
+    let speed_min = min_speed_kmh.filter(|v| *v > 0);
+    let ralt_min = min_ralt_m.filter(|v| *v > 0);
+    if speed_min.is_none() && ralt_min.is_none() {
+        return false;
+    }
+    let slow = speed_min
+        .map(|m| speed_ms * 3.6 < f64::from(m))
+        .unwrap_or(true);
+    let low = ralt_min.map(|m| agl_m < f64::from(m)).unwrap_or(true);
+    slow && low
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -144,6 +438,7 @@ impl Default for PlayerState {
 pub struct Ewr {
     tracks: FxHashMap<Side, FxHashMap<EnId, Track>>,
     player_state: FxHashMap<Ucid, PlayerState>,
+    aspect_labels: FxHashMap<(Ucid, EnId), String>,
 }
 
 impl Ewr {
@@ -155,6 +450,7 @@ impl Ewr {
         now: DateTime<Utc>,
         ewr_mode: EwrMode,
         ewr_delay: u32,
+        ewr_antenna_height_m: u32,
     ) -> Result<()> {
         let land = Land::singleton(lua)?;
         let aircraft: SmallVec<[(EnId, Side, Position3, Vector3); 128]> = {
@@ -194,7 +490,7 @@ impl Ewr {
         for (mut ewr_pos, ewr_side, ewr) in db.ewrs() {
             let range = (ewr.range as f64).powi(2);
             let tracks = self.tracks.entry(ewr_side).or_default();
-            ewr_pos.y += 10.; // factor in antenna height
+            ewr_pos.y += f64::from(ewr_antenna_height_m);
             for (id, obj_side, pos, velocity) in &aircraft {
                 let track = tracks.entry(*id).or_default();
                 if track.last != now {
@@ -203,18 +499,22 @@ impl Ewr {
                         if landcache.is_visible(&land, dist.sqrt(), ewr_pos, pos.p.0)? {
                             match ewr_mode {
                                 EwrMode::Original => {
-                                    // Original implementation: update track data immediately
                                     track.pos = *pos;
                                     track.velocity = *velocity;
+                                    track.agl = pos.p.y
+                                        - land.get_height(LuaVec2::new(pos.p.x, pos.p.z))?;
                                     track.last_update = now;
                                 }
                                 EwrMode::Delayed => {
-                                    // Configurable delay: only update track data if the configured delay has passed since last update
-                                    // For new tracks (last_update_time is epoch), update immediately
-                                    let time_since_update = (now - track.last_update).num_seconds();
-                                    if time_since_update >= ewr_delay as i64 || track.last_update == DateTime::<Utc>::UNIX_EPOCH {
+                                    let time_since_update =
+                                        (now - track.last_update).num_seconds();
+                                    if time_since_update >= ewr_delay as i64
+                                        || track.last_update == DateTime::<Utc>::UNIX_EPOCH
+                                    {
                                         track.pos = *pos;
                                         track.velocity = *velocity;
+                                        track.agl = pos.p.y
+                                            - land.get_height(LuaVec2::new(pos.p.x, pos.p.z))?;
                                         track.last_update = now;
                                     }
                                 }
@@ -288,16 +588,35 @@ impl Ewr {
                 let cpos = Vector2::new(track.pos.p.x, track.pos.p.z);
                 let range = na::distance(&pos.into(), &cpos.into());
                 let bearing = radians_to_degrees(azumith2d_to(pos, cpos));
-                let heading = radians_to_degrees(azumith3d(track.pos.x.0));
                 let speed = track.velocity.magnitude();
                 let altitude = track.pos.p.y;
+                if !friendly
+                    && excluded_by_ewr_low_slow_filter(
+                        speed,
+                        track.agl,
+                        db.ephemeral.cfg.ewr_min_speed_kmh,
+                        db.ephemeral.cfg.ewr_min_ralt_m,
+                    )
+                {
+                    return age <= 120;
+                }
+                let heading = track_heading_deg(track);
+                let (aspect_angle, aspect_lr) = compute_target_aspect(track, pos);
+                let aspect = stable_aspect_label(
+                    &mut self.aspect_labels,
+                    ucid,
+                    *tucid,
+                    aspect_angle,
+                    aspect_lr,
+                );
                 reports.push(GibBraa {
                     range: range as u32,
-                    heading: heading as u16,
+                    heading,
                     altitude: altitude as u32,
                     bearing: bearing as u16,
                     age: age as u16,
                     speed: speed as u16,
+                    aspect,
                     units: EwrUnits::Metric,
                     converted: false,
                 })

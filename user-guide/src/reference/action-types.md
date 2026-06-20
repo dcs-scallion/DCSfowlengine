@@ -86,7 +86,7 @@ Complete reference of all action types available via the F10 Actions menu.
 - **Waypoint Control**: Yes
 
 ### Cruise Missile Platform
-- **Type**: ALCM launcher (S-3B/Tu-95/Tu-160)
+- **Type**: CALCM launcher (S-3B/Tu-95/Tu-160)
 - **Cost**: **25-150 points** (PG Tempest)
   - S-3B: **25 points**
   - Tu-95: **150 points**
@@ -282,7 +282,7 @@ These control already-deployed units (PG Tempest costs):
 - **Drone Waypoint**: **5 points** - Redirect drone
 - **SEAD Waypoint**: **5 points** - Retask SEAD mission
 - **Attack Waypoint**: **5 points** - Retask attack helicopters
-- **ALCM Waypoint**: **10 points** - Reposition cruise missile platform
+- **CALCM Waypoint**: **10 points** - Reposition cruise missile platform
 
 ## Action Costs by Category (PG Tempest)
 
@@ -290,7 +290,7 @@ These control already-deployed units (PG Tempest costs):
 - **Deploy EWR**: 50 pts
 - **Drone (Small)**: 50 pts
 - **AWACS**: 50 pts
-- **ALCM (S-3B)**: 25 pts
+- **CALCM (S-3B)**: 25 pts
 
 **Economy (100-150 pts)**:
 - **Drone (Large)**: 100 pts
@@ -299,7 +299,7 @@ These control already-deployed units (PG Tempest costs):
 - **Logistics Transfer**: 100 pts
 - **Light Attack Helicopters**: 120 pts
 - **Naval FARP Destroyer**: 100 pts
-- **ALCM (Tu-95/Tu-160)**: 150 pts
+- **CALCM (Tu-95/Tu-160)**: 150 pts
 - **Naval FARP Carrier**: 150 pts
 
 **Standard (200-300 pts)**:
@@ -312,7 +312,7 @@ These control already-deployed units (PG Tempest costs):
 **Waypoints (0-15 pts)**:
 - **RTB**: 0 pts
 - **Most Waypoints**: 5 pts
-- **AWACS/ALCM Waypoint**: 10 pts
+- **AWACS/CALCM Waypoint**: 10 pts
 - **Move Ground Units**: 15 pts
 
 **Note**: Always check F10 menu for current costs, as server config may change
