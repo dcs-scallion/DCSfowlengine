@@ -44,7 +44,7 @@
     "air_kill": 30,
     "production_kill": 20,
     "logistics_transfer": 10,
-    "lr_sam_bonus": 10,
+    "lr_sam_bonus": 5,
     "ground_kill": 5,
     "tk_window": 24,
     "provisional": true,
@@ -105,7 +105,11 @@
     },
     ".Ammunition depot": {
       "zones": ["AB", "LO"],
-      "kill_points": 30
+      "kill_points": 50
+    },
+    "FARP CP Blindage": {
+      "zones": ["FO"],
+      "kill_points": 10
     }
   },
   "objective_group_marks": false,
@@ -3252,7 +3256,15 @@
       "ControlUnit",
       "Unarmed"
     ],
-    "Ammunition depot": [
+    ".Ammunition depot": [
+      "Logistics",
+      "Unarmed"
+    ],
+    "FARP CP Blindage": [
+      "ControlUnit",
+      "Unarmed"
+    ],
+    "Comms tower M": [
       "Unarmed"
     ],
     "Building01_PBR": [
@@ -3410,9 +3422,6 @@
     ],
     "C-101CC": [
       "Aircraft"
-    ],
-    "TV tower": [
-      "Unarmed"
     ],
     "L-39C": [
       "Aircraft"
@@ -3836,11 +3845,7 @@
       "LightCannon",
       "Driveable"
     ],
-    ".Ammunition depot": [
-      "Logistics",
-      "Unarmed"
-    ],
-	"Chieftain_mk3": [
+    "Chieftain_mk3": [
       "Armor",
       "MR",
       "HeavyCannon",
