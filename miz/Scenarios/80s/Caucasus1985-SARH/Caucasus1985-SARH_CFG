@@ -67,7 +67,7 @@
     "AGM_86C",
     "AGM_86D"
   ],
-  "repair_time": 1800,
+  "repair_time": 3600,
   "repair_crate": {
     "Red": {
       "name": "Repair",
@@ -171,8 +171,9 @@
   "ewr_mode": "Original",
   "ewr_delay": 60,
   "ewr_antenna_height_m": 6,
-  "ewr_min_speed_kmh": 200,
+  "ewr_min_speed_kmh": 400,
   "ewr_min_ralt_m": 500,
+  "ewr_aspect_hysteresis_deg": 2.5,
   "threatened_distance": {
     "C-101CC": 9000,
     "L-39C": 9000,
@@ -568,7 +569,7 @@
               "kind": "FixedWing",
               "duration": null,
               "template": "RDRONE-S-Chevy",
-              "altitude": 5105.0,
+              "altitude": 5315.0,
               "altitude_typ": "BARO",
               "speed": 68.0,
               "freq": 147000000
@@ -590,7 +591,7 @@
               "kind": "FixedWing",
               "duration": null,
               "template": "RDRONE-S-Springfield",
-              "altitude": 5284.0,
+              "altitude": 5294.0,
               "altitude_typ": "BARO",
               "speed": 68.0,
               "freq": 148000000
@@ -1001,7 +1002,7 @@
               "kind": "FixedWing",
               "duration": null,
               "template": "BDRONE-S-Pontiac",
-              "altitude": 5476.0,
+              "altitude": 5465.0,
               "altitude_typ": "BARO",
               "speed": 68.0,
               "freq": 232000000
@@ -1478,7 +1479,7 @@
         "crates": [
           {
             "name": "ZU-23 on Ural",
-            "weight": 1000,
+            "weight": 1500,
             "required": 1,
             "pos_unit": null,
             "max_drop_height_agl": 10,
@@ -2464,7 +2465,7 @@
         "crates": [
           {
             "name": "ZU-23 Emplacement",
-            "weight": 1000,
+            "weight": 1500,
             "required": 1,
             "pos_unit": null,
             "max_drop_height_agl": 10,
@@ -3587,6 +3588,10 @@
       "Unarmed"
     ],
     "Container_10ft": [
+      "Logistics",
+      "Unarmed"
+    ],
+    "container_cargo": [
       "Logistics",
       "Unarmed"
     ],

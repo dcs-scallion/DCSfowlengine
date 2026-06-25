@@ -56,49 +56,16 @@ pub struct GibBraa {
     converted: bool,
 }
 
-const COL_BRG: usize = 4;
-const COL_ASP: usize = 7;
-const ASP_HYST_DEG: f64 = 5.;
+const PAD: char = '_';
 
 /// DCS panel message display time for EWR contact reports (seconds).
 pub const EWR_PANEL_DISPLAY_SECS: i64 = 20;
 
-struct NumUnitCol {
-    num_w: usize,
-    unit_w: usize,
-}
-
-const COL_RNG: NumUnitCol = NumUnitCol {
-    num_w: 7,
-    unit_w: 2,
-};
-const COL_ALT: NumUnitCol = NumUnitCol {
-    num_w: 7,
-    unit_w: 2,
-};
-const COL_SPD: NumUnitCol = NumUnitCol {
-    num_w: 7,
-    unit_w: 3,
-};
-const COL_AGE: NumUnitCol = NumUnitCol {
-    num_w: 4,
-    unit_w: 1,
-};
-
-impl NumUnitCol {
-    fn format_label(&self, label: &str) -> String {
-        format!("{:>num_w$} {units}", label, units = " ".repeat(self.unit_w), num_w = self.num_w)
+fn pad_field(width: usize, s: &str) -> String {
+    if s.len() >= width {
+        return s.to_string();
     }
-
-    fn format_value(&self, value: u32, unit: &str) -> String {
-        format!(
-            "{:>num_w$} {unit:<unit_w$}",
-            format_thousands(value),
-            unit = unit,
-            num_w = self.num_w,
-            unit_w = self.unit_w,
-        )
-    }
+    format!("{}{s}", PAD.to_string().repeat(width - s.len()))
 }
 
 fn format_thousands(n: u32) -> String {
@@ -116,19 +83,20 @@ fn format_thousands(n: u32) -> String {
     out.chars().rev().collect()
 }
 
+fn format_age_field(age: u16) -> String {
+    format!("{}s", pad_field(3, &age.to_string()))
+}
+
+fn format_balt_num(alt: u32) -> String {
+    if alt < 1000 {
+        format!("__.{}", pad_field(3, &alt.to_string()))
+    } else {
+        pad_field(6, &format_thousands(alt))
+    }
+}
+
 pub fn report_header() -> String {
-    format!(
-        "{:>COL_BRG$} {} {} {} {:>COL_ASP$} {}",
-        "BRG",
-        COL_RNG.format_label("RNG"),
-        COL_ALT.format_label("ALT"),
-        COL_SPD.format_label("SPD"),
-        "ASP",
-        COL_AGE.format_label("AGE"),
-        COL_BRG = COL_BRG,
-        COL_ASP = COL_ASP,
-    )
-    .to_string()
+    String::from("AGE    BRG   RNG        BALT        SPD          ASP")
 }
 
 fn round_display_altitude(alt: u32) -> u32 {
@@ -149,17 +117,21 @@ impl fmt::Display for GibBraa {
             EwrUnits::Imperial => ("nm", "ft", "kt"),
             EwrUnits::Metric => ("km", "m", "kmh"),
         };
+        let age = format_age_field(self.age);
+        let brg = format!("{:03}", self.bearing);
+        let rng = format!("{} {range_u}", pad_field(4, &self.range.to_string()));
+        let balt = format!(
+            "{} {alt_u}",
+            format_balt_num(round_display_altitude(self.altitude))
+        );
+        let spd = format!(
+            "{} {spd_u}",
+            pad_field(4, &round_display_speed(self.speed).to_string())
+        );
         write!(
             f,
-            "{:>COL_BRG$} {} {} {} {:>COL_ASP$} {}",
-            self.bearing,
-            COL_RNG.format_value(self.range, range_u),
-            COL_ALT.format_value(round_display_altitude(self.altitude), alt_u),
-            COL_SPD.format_value(round_display_speed(self.speed).into(), spd_u),
-            self.aspect,
-            COL_AGE.format_value(self.age as u32, "s"),
-            COL_BRG = COL_BRG,
-            COL_ASP = COL_ASP,
+            "{age} > {brg} | {rng} | {balt} | {spd} | {}",
+            self.aspect
         )
     }
 }
@@ -192,31 +164,86 @@ mod tests {
     #[test]
     fn report_columns_align_with_header() {
         let header = report_header();
-        let row = format!(
-            "{}",
-            GibBraa {
-                bearing: 45,
-                range: 25,
-                altitude: 15200,
-                heading: 270,
-                speed: 450,
-                aspect: "HOT".into(),
-                age: 12,
-                units: EwrUnits::Imperial,
-                converted: true,
-            }
-        );
-        assert_eq!(
-            header,
-            " BRG     RNG        ALT        SPD         ASP  AGE  ",
-            "header mismatch"
-        );
-        assert_eq!(
-            row,
-            "  45      25 nm  15.200 ft     450 kt      HOT   12 s",
-            "row mismatch"
-        );
-        assert_eq!(header.len(), row.len(), "column width drift");
+        assert_eq!(header, "AGE    BRG   RNG                   BALT        SPD    ASP");
+    }
+
+    #[test]
+    fn ewr_pipe_format_examples() {
+        let rows = [
+            (
+                GibBraa {
+                    bearing: 9,
+                    range: 4,
+                    altitude: 50,
+                    heading: 0,
+                    speed: 90,
+                    aspect: "HOT".into(),
+                    age: 1,
+                    units: EwrUnits::Metric,
+                    converted: true,
+                },
+                "__1s > 009 | ___4 km | __._50 m | __90 kmh | HOT",
+            ),
+            (
+                GibBraa {
+                    bearing: 245,
+                    range: 12,
+                    altitude: 100,
+                    heading: 0,
+                    speed: 220,
+                    aspect: "FLANK R".into(),
+                    age: 12,
+                    units: EwrUnits::Metric,
+                    converted: true,
+                },
+                "_12s > 245 | __12 km | __.100 m | _220 kmh | FLANK R",
+            ),
+            (
+                GibBraa {
+                    bearing: 15,
+                    range: 29,
+                    altitude: 570,
+                    heading: 0,
+                    speed: 380,
+                    aspect: "BEAM L".into(),
+                    age: 9,
+                    units: EwrUnits::Metric,
+                    converted: true,
+                },
+                "__9s > 015 | __29 km | __.570 m | _380 kmh | BEAM L",
+            ),
+            (
+                GibBraa {
+                    bearing: 167,
+                    range: 124,
+                    altitude: 1300,
+                    heading: 0,
+                    speed: 380,
+                    aspect: "DRAG R".into(),
+                    age: 5,
+                    units: EwrUnits::Metric,
+                    converted: true,
+                },
+                "__5s > 167 | _124 km | _1.300 m | _380 kmh | DRAG R",
+            ),
+            (
+                GibBraa {
+                    bearing: 309,
+                    range: 1019,
+                    altitude: 10500,
+                    heading: 0,
+                    speed: 380,
+                    aspect: "COLD".into(),
+                    age: 120,
+                    units: EwrUnits::Metric,
+                    converted: true,
+                },
+                "120s > 309 | 1019 km | 10.500 m | _380 kmh | COLD",
+            ),
+        ];
+        for (row, want) in rows {
+            assert_eq!(format!("{row}"), want);
+        }
     }
 
     #[test]
@@ -367,9 +394,14 @@ fn stable_aspect_label(
     id: EnId,
     angle: f64,
     lr: char,
+    hyst_deg: f64,
 ) -> String {
     let label = format_aspect_label(angle, lr);
     let key = (ucid.clone(), id);
+    if hyst_deg <= 0. {
+        cache.insert(key, label.clone());
+        return label;
+    }
     if let Some(prev) = cache.get(&key) {
         if prev == &label {
             return label;
@@ -378,7 +410,7 @@ fn stable_aspect_label(
         let new_bucket = aspect_bucket_index(&label);
         if prev_bucket != new_bucket {
             let boundary = aspect_boundary_between(prev_bucket, new_bucket);
-            if boundary > 0. && (angle - boundary).abs() <= ASP_HYST_DEG {
+            if boundary > 0. && (angle - boundary).abs() <= hyst_deg {
                 return prev.clone();
             }
         }
@@ -608,6 +640,7 @@ impl Ewr {
                     *tucid,
                     aspect_angle,
                     aspect_lr,
+                    db.ephemeral.cfg.ewr_aspect_hysteresis_deg,
                 );
                 reports.push(GibBraa {
                     range: range as u32,

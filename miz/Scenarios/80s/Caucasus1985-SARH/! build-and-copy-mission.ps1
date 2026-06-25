@@ -17,6 +17,119 @@ if (Test-Path $log_file) { Remove-Item $log_file -Force }
 
 # Skip Start-Transcript (it duplicates lines); log manually instead.
 
+function Get-DcsMissionScriptingLuaPaths {
+    param(
+        [Parameter(Mandatory = $true)][string]$DcsUserPath
+    )
+
+    $paths = [System.Collections.Generic.List[string]]::new()
+    foreach ($installRoot in @(
+            (Join-Path $env:ProgramFiles "Eagle Dynamics\DCS World"),
+            (Join-Path $env:ProgramFiles "Eagle Dynamics\DCS World OpenBeta")
+        )) {
+        $candidate = Join-Path $installRoot "Scripts\MissionScripting.lua"
+        if (Test-Path -LiteralPath $candidate -PathType Leaf) {
+            [void]$paths.Add((Resolve-Path -LiteralPath $candidate).Path)
+        }
+    }
+
+    $userCandidate = Join-Path $DcsUserPath "Scripts\MissionScripting.lua"
+    if (Test-Path -LiteralPath $userCandidate -PathType Leaf) {
+        [void]$paths.Add((Resolve-Path -LiteralPath $userCandidate).Path)
+    }
+
+    return @($paths | Select-Object -Unique)
+}
+
+function Test-MissionScriptingLuaSanitized {
+    param(
+        [Parameter(Mandatory = $true)][string]$FilePath
+    )
+
+    $issues = [System.Collections.Generic.List[string]]::new()
+    $lineNumber = 0
+    foreach ($line in (Get-Content -LiteralPath $FilePath -ErrorAction Stop)) {
+        $lineNumber++
+        $trimmed = $line.Trim()
+        if ($trimmed.StartsWith('--')) {
+            continue
+        }
+
+        if ($trimmed -match "sanitizeModule\s*\(\s*['\`"]lfs['\`"]\s*\)") {
+            [void]$issues.Add("line ${lineNumber}: sanitizeModule('lfs') is active")
+        }
+        if ($trimmed -match "_G\s*\[\s*['\`"]require['\`"]\s*\]\s*=\s*nil" -or $trimmed -match '^\s*require\s*=\s*nil\s*$') {
+            [void]$issues.Add("line ${lineNumber}: require is disabled")
+        }
+        if ($trimmed -match "_G\s*\[\s*['\`"]package['\`"]\s*\]\s*=\s*nil") {
+            [void]$issues.Add("line ${lineNumber}: package is disabled")
+        }
+    }
+
+    return [pscustomobject]@{
+        Sanitized = ($issues.Count -gt 0)
+        Issues    = @($issues)
+    }
+}
+
+function Warn-IfDcsMissionScriptingSanitized {
+    param(
+        [Parameter(Mandatory = $true)][string]$DcsUserPath,
+        [Parameter(Mandatory = $true)][string]$LogFile
+    )
+
+    $paths = Get-DcsMissionScriptingLuaPaths -DcsUserPath $DcsUserPath
+    if ($paths.Count -eq 0) {
+        $missing = @"
+WARNING: MissionScripting.lua was not found (checked DCS install Scripts\ and $DcsUserPath\Scripts\).
+Fowl needs lfs, require, and package enabled in that file. Locate it manually after a DCS update.
+"@
+        Write-Host $missing -ForegroundColor Red
+        $missing | Out-File -FilePath $LogFile -Append
+        return
+    }
+
+    $anySanitized = $false
+    foreach ($path in $paths) {
+        $result = Test-MissionScriptingLuaSanitized -FilePath $path
+        if (-not $result.Sanitized) {
+            continue
+        }
+        $anySanitized = $true
+        $header = @"
+
+================================================================================
+WARNING: DCS MissionScripting.lua SANITIZATION IS ENABLED
+================================================================================
+File: $path
+
+A DCS update restores the default sanitize block. Fowl cannot start until you edit this file:
+  - Comment out sanitizeModule('lfs')  (add -- at line start)
+  - Comment out _G['require'] = nil
+  - Comment out _G['package'] = nil
+
+Then restart DCS completely (server and clients if multiplayer).
+
+Detected:
+"@
+        Write-Host $header -ForegroundColor Red
+        $header | Out-File -FilePath $LogFile -Append
+        foreach ($issue in $result.Issues) {
+            $issueLine = "  - $issue"
+            Write-Host $issueLine -ForegroundColor Yellow
+            $issueLine | Out-File -FilePath $LogFile -Append
+        }
+        Write-Host "================================================================================`n" -ForegroundColor Red
+        "================================================================================" | Out-File -FilePath $LogFile -Append
+    }
+
+    if (-not $anySanitized) {
+        $ok = "MissionScripting.lua: lfs / require / package look desanitized (Fowl SSE bootstrap should work)."
+        Write-Host $ok -ForegroundColor Green
+        $ok | Out-File -FilePath $LogFile -Append
+    }
+}
+
 function Ensure-FowlExportHooksRemoved {
     param(
         [Parameter(Mandatory = $true)][string]$DcsUserPath,
@@ -254,6 +367,8 @@ try {
         Write-Host $miz_copy_msg -ForegroundColor Cyan
         $miz_copy_msg | Out-File -FilePath $log_file -Append
         Copy-Item -LiteralPath $mizSrc -Destination $mizDst -Force -ErrorAction Stop
+
+        Warn-IfDcsMissionScriptingSanitized -DcsUserPath $DCS_user_path -LogFile $log_file
     }
     else {
         $skipMsg = "Mission build failed: skipping copy to DCS Saved Games (CFG and .miz were not updated; any existing files there are unchanged)."

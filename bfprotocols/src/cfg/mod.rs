@@ -1099,6 +1099,10 @@ fn default_ewr_antenna_height_m() -> u32 {
     10
 }
 
+fn default_ewr_aspect_hysteresis_deg() -> f64 {
+    5.
+}
+
 fn default_calcm_mission() -> bool {
     true
 }
@@ -1313,6 +1317,9 @@ pub struct Cfg {
     /// Meters added to EWR group centroid height for line-of-sight checks.
     #[serde(default = "default_ewr_antenna_height_m")]
     pub ewr_antenna_height_m: u32,
+    /// Aspect bucket hysteresis (degrees). Lower = faster HOT/FLANK/BEAM/DRAG/COLD transitions; 0 = off.
+    #[serde(default = "default_ewr_aspect_hysteresis_deg")]
+    pub ewr_aspect_hysteresis_deg: f64,
     #[serde(default)]
     pub discord_map: DiscordMapCfg,
     /// Test-only: extra Red headcount for `balancing_point_gain` (not Discord map).

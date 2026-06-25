@@ -1468,7 +1468,9 @@ simple_enum!(AirReactionToThreat, u8, [
     PassiveDefence => 1,
     EvadeFire => 2,
     BypassAndEscape => 3,
-    AllowAbortMission => 4
+    AllowAbortMission => 4,
+    // ME "Horizontal AAA Fire Evade"; Hoggit AAA_EVADE_FIRE (not in DCS enum table)
+    HorizontalAaaFireEvade => 5
 ]);
 
 simple_enum!(AirEcmUsing, u8, [
