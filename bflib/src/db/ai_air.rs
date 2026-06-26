@@ -20,11 +20,12 @@ use compact_str::{format_compact, CompactString};
 use rand::{Rng, thread_rng};
 use dcso3::{
     airbase::{Airbase, AirbaseId},
+    attribute::Attribute,
     centroid2d,
     coalition::{Side, Static},
     controller::{
-        ActionTyp, AiOption, AirOption, AltType, Controller, MissionPoint, OrbitPattern,
-        PointType, Task, TurnMethod,
+        ActionTyp, AiOption, AirOption, AirRadarUsing, AirReactionToThreat, AirRoe, AltType,
+        Controller, MissionPoint, OrbitPattern, PointType, Task, TurnMethod,
     },
     env::miz::{self, GroupInfo, GroupKind, MizIndex, UnitId},
     group::Group,
@@ -32,6 +33,7 @@ use dcso3::{
     net::Ucid,
     object::{DcsObject, Object, ObjectCategory},
     perf::record_perf,
+    pointing_towards2,
     static_object::StaticObject,
     unit::Unit,
     warehouse::LiquidType,
@@ -2001,7 +2003,7 @@ fn patch_me_carrier_deck_route_lua<'lua>(
 }
 
 fn random_onboard_num() -> String {
-    String::from(format_compact!("{:03}", thread_rng().gen_range(11..=999)))
+    String::from(format_compact!("{:02}", thread_rng().gen_range(1..=99)))
 }
 
 fn prepare_me_spawn_group<'lua>(
@@ -2529,6 +2531,127 @@ pub(super) fn mission_from_snapshot<'lua>(snap: &ActiveMissionSnapshot, task: Ta
         parking: None,
         task: Box::new(task),
     }]
+}
+
+/// ME CAS patrol radius around the action mark (~8 km legs).
+const CAS_PATROL_RADIUS_M: f64 = 8_000.;
+
+fn cas_engage_max_dist(kind: AiPlaneKind) -> f64 {
+    match kind {
+        AiPlaneKind::Helicopter => 10_000.,
+        AiPlaneKind::FixedWing => 20_000.,
+    }
+}
+
+fn cas_patrol_offsets(center: Vector2, radius: f64) -> [Vector2; 3] {
+    [0., 2. * std::f64::consts::PI / 3., 4. * std::f64::consts::PI / 3.].map(|h| {
+        center + pointing_towards2(h) * radius
+    })
+}
+
+/// ME-style CAS enroute combo (test mission `test CAS`).
+pub(super) fn cas_combo_task<'lua>(kind: AiPlaneKind) -> Task<'lua> {
+    let cas_preset = Task::EngageTargets {
+        target_types: vec![
+            Attribute::Helicopters,
+            Attribute::GroundUnits,
+            Attribute::LightArmedShips,
+        ],
+        max_dist: None,
+        max_dist_enabled: None,
+        no_target_types: None,
+        priority: Some(0),
+        preset_key: Some(String::from("CAS")),
+    };
+    let main_engage = Task::EngageTargets {
+        target_types: vec![
+            Attribute::Helicopters,
+            Attribute::Infantry,
+            Attribute::GroundVehicles,
+            Attribute::AirDefence,
+        ],
+        max_dist: Some(cas_engage_max_dist(kind)),
+        max_dist_enabled: Some(true),
+        no_target_types: Some(vec![
+            Attribute::Fortifications,
+            Attribute::LightArmedShips,
+        ]),
+        priority: Some(1),
+        preset_key: None,
+    };
+    let mut tasks: Vec<Task<'lua>> = vec![
+        cas_preset,
+        main_engage,
+        Task::WrappedOption(AiOption::Air(AirOption::Roe(AirRoe::WeaponFree))),
+        Task::WrappedOption(AiOption::Air(AirOption::ReactionOnThreat(
+            match kind {
+                AiPlaneKind::Helicopter => AirReactionToThreat::PassiveDefence,
+                AiPlaneKind::FixedWing => AirReactionToThreat::HorizontalAaaFireEvade,
+            },
+        ))),
+    ];
+    if matches!(kind, AiPlaneKind::FixedWing) {
+        tasks.extend([
+            Task::WrappedOption(AiOption::Air(AirOption::RadarUsing(AirRadarUsing::Never))),
+            Task::WrappedOption(AiOption::Air(AirOption::ProhibitWPPassReport(true))),
+            Task::WrappedOption(AiOption::Air(AirOption::AllowFormationSideSwap(true))),
+        ]);
+    }
+    Task::ComboTask(tasks)
+}
+
+fn cas_empty_task<'lua>() -> Task<'lua> {
+    Task::ComboTask(vec![])
+}
+
+fn cas_mission_point<'lua>(
+    name: &str,
+    pos: Vector2,
+    alt: f64,
+    alt_typ: AltType,
+    speed: f64,
+    task: Task<'lua>,
+) -> MissionPoint<'lua> {
+    MissionPoint {
+        typ: PointType::TurningPoint,
+        airdrome_id: None,
+        helipad: None,
+        time_re_fu_ar: None,
+        link_unit: None,
+        action: Some(ActionTyp::Air(TurnMethod::FlyOverPoint)),
+        pos: LuaVec2(pos),
+        alt,
+        alt_typ: Some(alt_typ),
+        speed,
+        speed_locked: None,
+        eta: None,
+        eta_locked: None,
+        name: Some(String::from(name)),
+        parking: None,
+        task: Box::new(task),
+    }
+}
+
+/// CAS patrol: ingress to the player mark, then a small triangle around it (ME enroute pattern).
+pub(super) fn cas_patrol_mission<'lua>(
+    mark_pos: Vector2,
+    spawn_pos: Vector2,
+    alt: f64,
+    alt_typ: AltType,
+    speed: f64,
+    kind: AiPlaneKind,
+) -> Vec<MissionPoint<'lua>> {
+    let patrol = cas_patrol_offsets(mark_pos, CAS_PATROL_RADIUS_M);
+    let empty = cas_empty_task();
+    let cas = cas_combo_task(kind);
+    vec![
+        cas_mission_point("ingress", spawn_pos, alt, alt_typ.clone(), speed, empty.clone()),
+        cas_mission_point("cas", mark_pos, alt, alt_typ.clone(), speed, cas),
+        cas_mission_point("cas-1", patrol[0], alt, alt_typ.clone(), speed, empty.clone()),
+        cas_mission_point("cas-2", patrol[1], alt, alt_typ.clone(), speed, empty.clone()),
+        cas_mission_point("cas-3", patrol[2], alt, alt_typ.clone(), speed, empty.clone()),
+        cas_mission_point("cas", mark_pos, alt, alt_typ, speed, empty),
+    ]
 }
 
 /// CAP-style orbit at `snap.pos` after an ingress point at `spawn_pos`.
@@ -3248,7 +3371,9 @@ fn ensure_airborne_orbit_task(
         if let Ok(cur) = flight_center_pos(lua, dcs_names) {
             let group = group_mut!(db, gid)?;
             if let DeployKind::Action { ai_air, .. } = &mut group.origin {
-                if ai_air.active_mission.pos == Vector2::default() {
+                if ai_air.active_mission.pos == Vector2::default()
+                    && !matches!(ai_air.mission_kind, AiAirMissionKind::Attackers)
+                {
                     ai_air.active_mission.pos = cur;
                 }
             }
@@ -4292,7 +4417,12 @@ pub(super) fn advance_ai_air(
                     log::warn!("ai air {gid}: warehouse sync after bootstrap failed: {e:#}");
                 }
                 let route = db.regenerate_ai_air_mission(lua, spctx, idx, gid, false)?;
-                log::info!("ai air {gid}: airborne -> on-mission orbit ({} wpts)", route.len());
+                let kind = if mission_kind == AiAirMissionKind::Attackers {
+                    "cas"
+                } else {
+                    "orbit"
+                };
+                log::info!("ai air {gid}: airborne -> on-mission {kind} ({} wpts)", route.len());
                 db.ai_air_push_mission(spctx, gid, route, true)?;
             } else if on_ground {
                 let retry = {
@@ -4574,7 +4704,12 @@ pub(super) fn advance_ai_air(
                     snap
                 };
                 let route = db.regenerate_ai_air_mission(lua, spctx, idx, gid, false)?;
-                log::info!("ai air {gid}: depart -> on-mission orbit ({} wpts)", route.len());
+                let kind = if mission_kind == AiAirMissionKind::Attackers {
+                    "cas"
+                } else {
+                    "orbit"
+                };
+                log::info!("ai air {gid}: depart -> on-mission {kind} ({} wpts)", route.len());
                 db.ai_air_push_mission(spctx, gid, route, true)?;
             } else if on_ground {
                 let phase_since = {
@@ -5138,8 +5273,7 @@ pub(super) fn spawn_ai_air_group<'lua>(
         AiAirPersistSpawn::NewDeploy => {
             match arm_flight_from_template(lua, db, spctx, idx, side, gid, &cfg_template, hub.oid) {
                 Err(e) => log::warn!("ai air {gid}: initial armament from warehouse failed: {e:?}"),
-                Ok(lines) => {
-                    notify_partial_loadout(db, gid, player_ucid.as_ref(), &lines);
+                Ok(_lines) => {
                     if let Some(ucid) = player_ucid.as_ref() {
                         let _ = panel_stores_report(db, lua, ucid, gid);
                     }
@@ -5160,8 +5294,7 @@ pub(super) fn spawn_ai_air_group<'lua>(
             }
             match arm_flight_from_template(lua, db, spctx, idx, side, gid, &cfg_template, hub.oid) {
                 Err(e) => log::warn!("ai air {gid}: persist ground armament failed: {e:?}"),
-                Ok(lines) => {
-                    notify_partial_loadout(db, gid, player_ucid.as_ref(), &lines);
+                Ok(_lines) => {
                     if let Some(ucid) = player_ucid.as_ref() {
                         let _ = panel_stores_report(db, lua, ucid, gid);
                     }

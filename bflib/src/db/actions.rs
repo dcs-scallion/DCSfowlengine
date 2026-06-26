@@ -1025,7 +1025,10 @@ impl Db {
                 Attribute::AttackHelicopters,
             ],
             max_dist: Some(30_000.),
+            max_dist_enabled: None,
+            no_target_types: None,
             priority: None,
+            preset_key: None,
         };
         let init_task = Task::ComboTask(vec![main_task.clone()]);
         self.ai_loiter_point_mission(
@@ -1105,77 +1108,15 @@ impl Db {
         spawn_pos: Vector2,
         args: WithPosAndGroup<()>,
     ) -> Result<Vec<MissionPoint<'lua>>> {
-        let plane_kind = {
-            let group = group!(self, args.group)?;
-            match &group.origin {
-                DeployKind::Action {
-                    spec,
-                    ai_air,
-                    ..
-                } => ai_air
-                    .plane_cfg
-                    .as_ref()
-                    .map(|c| c.kind)
-                    .or_else(|| match &spec.kind {
-                        ActionKind::Attackers(c) => Some(c.kind),
-                        _ => None,
-                    }),
-                _ => None,
-            }
-        };
-        if matches!(plane_kind, Some(AiPlaneKind::FixedWing)) {
-            return self.ai_fixed_wing_cas_mission(side, ucid, spawn_pos, args);
-        }
-        let main_task = Task::EngageTargetsInZone {
-            point: LuaVec2(args.pos),
-            zone_radius: 15_000.,
-            target_types: vec![
-                Attribute::GroundUnits,
-                Attribute::GroundVehicles,
-                Attribute::ArmedGroundUnits,
-                Attribute::Fighters,
-                Attribute::MultiroleFighters,
-                Attribute::BattleAirplanes,
-                Attribute::Battleplanes,
-                Attribute::Helicopters,
-                Attribute::AttackHelicopters,
-            ],
-            priority: None,
-        };
-        let init_task = Task::ComboTask(vec![main_task.clone()]);
-        self.ai_loiter_point_mission(
-            side,
-            ucid,
-            args,
-            OrbitPattern::Circle,
-            spawn_pos,
-            |k| match k {
-                ActionKind::Attackers(_) => true,
-                _ => false,
-            },
-            move || init_task.clone(),
-            move || vec![main_task.clone()],
-        )
-    }
-
-    /// Fixed-wing CAS: patrol the mark zone and engage ground targets (no orbit circle).
-    fn ai_fixed_wing_cas_mission<'lua>(
-        &mut self,
-        side: Side,
-        ucid: Option<Ucid>,
-        spawn_pos: Vector2,
-        args: WithPosAndGroup<()>,
-    ) -> Result<Vec<MissionPoint<'lua>>> {
         ai_air::ensure_player_may_control_ai_air(self, args.group, ucid.as_ref())?;
         let group = group_mut!(self, args.group)?;
         if group.side != side {
             bail!("can't move the other team's awacs")
         }
-        let (altitude, alt_typ, speed, marks, player) = match &mut group.origin {
+        let (altitude, alt_typ, speed, marks, player, plane_kind) = match &mut group.origin {
             DeployKind::Action {
                 marks,
                 spec,
-                loc,
                 player,
                 ai_air,
                 ..
@@ -1186,6 +1127,11 @@ impl Db {
                 let ActionKind::Attackers(a) = &spec.kind else {
                     bail!("not attackers");
                 };
+                let kind = ai_air
+                    .plane_cfg
+                    .as_ref()
+                    .map(|c| c.kind)
+                    .unwrap_or(a.kind);
                 if ai_air.phase != ai_air::AiAirPhase::Legacy {
                     for id in marks.drain() {
                         self.ephemeral.msgs().delete_mark(id);
@@ -1198,7 +1144,7 @@ impl Db {
                         false,
                     );
                 }
-                (a.altitude, a.altitude_typ.clone(), a.speed, marks, player)
+                (a.altitude, a.altitude_typ.clone(), a.speed, marks, player, kind)
             }
             _ => bail!("not an action aircraft"),
         };
@@ -1218,57 +1164,22 @@ impl Db {
             ),
         ));
         self.ephemeral.dirty();
-        let zone_task = Task::EngageTargetsInZone {
-            point: LuaVec2(args.pos),
-            zone_radius: 15_000.,
-            target_types: vec![
-                Attribute::GroundUnits,
-                Attribute::GroundVehicles,
-                Attribute::ArmedGroundUnits,
-                Attribute::Fighters,
-                Attribute::Helicopters,
-                Attribute::AttackHelicopters,
-            ],
-            priority: None,
-        };
-        Ok(vec![
-            MissionPoint {
-                action: Some(ActionTyp::Air(TurnMethod::FlyOverPoint)),
-                typ: PointType::TurningPoint,
-                airdrome_id: None,
-                helipad: None,
-                time_re_fu_ar: None,
-                link_unit: None,
-                pos: LuaVec2(spawn_pos),
-                alt: altitude,
-                alt_typ: Some(alt_typ.clone()),
-                speed,
-                speed_locked: None,
-                eta: None,
-                eta_locked: None,
-                name: Some(String::from("ip")),
-                parking: None,
-                task: Box::new(Task::ComboTask(vec![])),
-            },
-            MissionPoint {
-                action: Some(ActionTyp::Air(TurnMethod::FlyOverPoint)),
-                typ: PointType::TurningPoint,
-                airdrome_id: None,
-                helipad: None,
-                time_re_fu_ar: None,
-                link_unit: None,
-                pos: LuaVec2(args.pos),
-                alt: altitude,
-                alt_typ: Some(alt_typ),
-                speed,
-                speed_locked: None,
-                eta: None,
-                eta_locked: None,
-                name: Some(String::from("cas")),
-                parking: None,
-                task: Box::new(Task::ComboTask(vec![zone_task])),
-            },
-        ])
+        let route = ai_air::cas_patrol_mission(
+            args.pos,
+            spawn_pos,
+            altitude,
+            alt_typ,
+            speed,
+            plane_kind,
+        );
+        log::info!(
+            "ai air {}: CAS route to mark [{:.0},{:.0}] ({} wpts)",
+            args.group,
+            args.pos.x,
+            args.pos.y,
+            route.len()
+        );
+        Ok(route)
     }
 
     fn ai_sead_mission<'lua>(
@@ -1301,7 +1212,10 @@ impl Db {
                 Attribute::MobileAAA,   // Mobile AAA
             ],
             max_dist: Some(15_000.), // Same range as Attackers
+            max_dist_enabled: None,
+            no_target_types: None,
             priority: None,
+            preset_key: None,
         };
         let init_task = Task::ComboTask(vec![main_task.clone()]);
         self.ai_loiter_point_mission(
@@ -1327,12 +1241,17 @@ impl Db {
         args: WithPosAndGroup<()>,
     ) -> Result<Option<GroupId>> {
         let gid = args.group;
-        let pos = action_group_position(self, spctx.lua(), gid)?;
+        let lua = spctx.lua();
+        let spawn_pos = action_group_position(self, lua, gid)?;
         let mission = self
-            .ai_attackers_mission(side, ucid, pos, args)
+            .ai_attackers_mission(side, ucid, spawn_pos, args)
             .context("generate attackers mission")?;
-        self.set_ai_mission(spctx, gid, mission, true)
-            .context("setting ai mission")?;
+        let in_air = ai_air::flight_any_in_air(lua, &ai_air::dcs_spawn_names_for(self, gid)?)
+            .unwrap_or(false);
+        if in_air {
+            self.set_ai_mission(spctx, gid, mission, true)
+                .context("setting ai mission")?;
+        }
         Ok(None)
     }
 
@@ -1482,7 +1401,10 @@ impl Db {
                 Attribute::ArmedGroundUnits,
             ],
             max_dist: Some(2_000.),
+            max_dist_enabled: None,
+            no_target_types: None,
             priority: None,
+            preset_key: None,
         };
         con.set_task(Task::Mission {
             airborne: Some(false),

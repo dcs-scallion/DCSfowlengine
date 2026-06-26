@@ -563,7 +563,11 @@ pub enum Task<'lua> {
     EngageTargets {
         target_types: Vec<Attribute>,
         max_dist: Option<f64>,
+        max_dist_enabled: Option<bool>,
+        no_target_types: Option<Vec<Attribute>>,
         priority: Option<i64>,
+        /// ME CAS/SEAD preset key on the task table (`key = "CAS"`).
+        preset_key: Option<String>,
     },
     EngageTargetsInZone {
         point: LuaVec2,
@@ -727,7 +731,10 @@ impl<'lua> FromLua<'lua> for Task<'lua> {
             "EngageTargets" => Ok(Self::EngageTargets {
                 target_types: params.raw_get("targetTypes")?,
                 max_dist: params.raw_get("maxDist")?,
+                max_dist_enabled: params.raw_get("maxDistEnabled").ok(),
+                no_target_types: params.raw_get("noTargetTypes").ok(),
                 priority: params.raw_get("priority")?,
+                preset_key: root.raw_get("key").ok(),
             }),
             "EngageTargetsInZone" => Ok(Self::EngageTargetsInZone {
                 point: params.raw_get("point")?,
@@ -997,12 +1004,31 @@ impl<'lua> IntoLua<'lua> for Task<'lua> {
             Self::EngageTargets {
                 target_types,
                 max_dist,
+                max_dist_enabled,
+                no_target_types,
                 priority,
+                preset_key,
             } => {
                 root.raw_set("id", "EngageTargets")?;
+                root.raw_set("enabled", true)?;
+                if let Some(key) = preset_key {
+                    root.raw_set("key", key)?;
+                    root.raw_set("auto", true)?;
+                } else {
+                    root.raw_set("auto", false)?;
+                }
                 params.raw_set("targetTypes", target_types)?;
+                if let Some(nt) = no_target_types {
+                    params.raw_set("noTargetTypes", nt)?;
+                }
                 if let Some(d) = max_dist {
                     params.raw_set("maxDist", d)?;
+                    params.raw_set(
+                        "maxDistEnabled",
+                        max_dist_enabled.unwrap_or(true),
+                    )?;
+                } else if let Some(en) = max_dist_enabled {
+                    params.raw_set("maxDistEnabled", en)?;
                 }
                 if let Some(p) = priority {
                     params.raw_set("priority", p)?;
@@ -1536,6 +1562,8 @@ pub enum AirOption<'lua> {
     RtbOnOutOfAmmo(bool),
     Silence(bool),
     AllowFormationSideSwap(bool),
+    /// ME `Prefer Take Off/Land vertically` (helicopters).
+    PreferVertical(bool),
 }
 
 impl<'lua> IntoLua<'lua> for AirOption<'lua> {
@@ -1561,7 +1589,8 @@ impl<'lua> IntoLua<'lua> for AirOption<'lua> {
             Self::RtbOnBingo(v)
             | Self::RtbOnOutOfAmmo(v)
             | Self::Silence(v)
-            | Self::AllowFormationSideSwap(v) => v.into_lua(lua),
+            | Self::AllowFormationSideSwap(v)
+            | Self::PreferVertical(v) => v.into_lua(lua),
         }
     }
 }
@@ -1590,6 +1619,7 @@ impl<'lua> AirOption<'lua> {
             Self::RtbOnOutOfAmmo(_) => 10,
             Self::Silence(_) => 7,
             Self::AllowFormationSideSwap(_) => 35,
+            Self::PreferVertical(_) => 32,
         }
     }
 
@@ -1622,6 +1652,7 @@ impl<'lua> AirOption<'lua> {
             10 => Ok(Self::RtbOnOutOfAmmo(FromLua::from_lua(val, lua)?)),
             7 => Ok(Self::Silence(FromLua::from_lua(val, lua)?)),
             35 => Ok(Self::AllowFormationSideSwap(FromLua::from_lua(val, lua)?)),
+            32 => Ok(Self::PreferVertical(FromLua::from_lua(val, lua)?)),
             e => Err(err(&format_compact!("invalid AirOption {e}"))),
         }
     }
@@ -1639,13 +1670,68 @@ simple_enum!(GroundRoe, u8, [
     WeaponHold => 4
 ]);
 
+simple_enum!(GroundRestrictTargets, u8, [
+    AnyTarget => 0,
+    AirUnitsOnly => 1,
+    GroundUnitsOnly => 2
+]);
+
+/// ME option value preserved when dcso3 has no typed variant yet.
+#[derive(Debug, Clone, Serialize)]
+pub enum RawOptionValue {
+    None,
+    Bool(bool),
+    Int(i64),
+    Float(f64),
+    String(String),
+}
+
+impl<'lua> FromLua<'lua> for RawOptionValue {
+    fn from_lua(value: Value<'lua>, _lua: &'lua Lua) -> LuaResult<Self> {
+        match value {
+            Value::Nil => Ok(Self::None),
+            Value::Boolean(b) => Ok(Self::Bool(b)),
+            Value::Integer(n) => Ok(Self::Int(n)),
+            Value::Number(n) => Ok(Self::Float(n)),
+            Value::String(s) => Ok(Self::String(String::from(s.to_string_lossy().as_ref()))),
+            v => Ok(Self::String(String::from(v.to_string()?))),
+        }
+    }
+}
+
+impl<'lua> IntoLua<'lua> for RawOptionValue {
+    fn into_lua(self, lua: &'lua Lua) -> LuaResult<Value<'lua>> {
+        match self {
+            Self::None => Ok(Value::Nil),
+            Self::Bool(v) => v.into_lua(lua),
+            Self::Int(v) => v.into_lua(lua),
+            Self::Float(v) => v.into_lua(lua),
+            Self::String(v) => v.into_lua(lua),
+        }
+    }
+}
+
+fn option_bool(lua: &Lua, val: Value) -> LuaResult<bool> {
+    match val {
+        Value::Boolean(b) => Ok(b),
+        Value::Integer(n) => Ok(n != 0),
+        Value::Number(n) => Ok(n != 0.0),
+        v => FromLua::from_lua(v, lua),
+    }
+}
+
 #[derive(Debug, Clone, Serialize)]
 pub enum GroundOption {
     AcEngagementRangeRestriction(u8),
     AlarmState(AlarmState),
     DisperseOnAttack(i64),
     EngageAirWeapons(bool),
+    EvasionOfArm(bool),
     Formation(VehicleFormation),
+    FormationInterval(u8),
+    RestrictAaaMax(i64),
+    RestrictAaaMin(i64),
+    RestrictTargets(GroundRestrictTargets),
     Roe(GroundRoe),
     AllowFormationSideSwap(bool),
 }
@@ -1657,7 +1743,12 @@ impl<'lua> IntoLua<'lua> for GroundOption {
             Self::AlarmState(v) => v.into_lua(lua),
             Self::DisperseOnAttack(v) => v.into_lua(lua),
             Self::EngageAirWeapons(v) => v.into_lua(lua),
+            Self::EvasionOfArm(v) => v.into_lua(lua),
             Self::Formation(v) => v.into_lua(lua),
+            Self::FormationInterval(v) => v.into_lua(lua),
+            Self::RestrictAaaMax(v) => v.into_lua(lua),
+            Self::RestrictAaaMin(v) => v.into_lua(lua),
+            Self::RestrictTargets(v) => v.into_lua(lua),
             Self::Roe(v) => v.into_lua(lua),
             Self::AllowFormationSideSwap(v) => v.into_lua(lua),
         }
@@ -1671,7 +1762,12 @@ impl GroundOption {
             Self::AlarmState(_) => 9,
             Self::DisperseOnAttack(_) => 8,
             Self::EngageAirWeapons(_) => 20,
+            Self::EvasionOfArm(_) => 31,
             Self::Formation(_) => 5,
+            Self::FormationInterval(_) => 30,
+            Self::RestrictAaaMax(_) => 29,
+            Self::RestrictAaaMin(_) => 27,
+            Self::RestrictTargets(_) => 28,
             Self::Roe(_) => 0,
             Self::AllowFormationSideSwap(_) => 35,
         }
@@ -1687,6 +1783,11 @@ impl GroundOption {
             24 => Ok(Self::AcEngagementRangeRestriction(FromLua::from_lua(
                 val, lua,
             )?)),
+            27 => Ok(Self::RestrictAaaMin(FromLua::from_lua(val, lua)?)),
+            28 => Ok(Self::RestrictTargets(FromLua::from_lua(val, lua)?)),
+            29 => Ok(Self::RestrictAaaMax(FromLua::from_lua(val, lua)?)),
+            30 => Ok(Self::FormationInterval(FromLua::from_lua(val, lua)?)),
+            31 => Ok(Self::EvasionOfArm(option_bool(lua, val)?)),
             35 => Ok(Self::AllowFormationSideSwap(FromLua::from_lua(val, lua)?)),
             e => Err(err(&format_compact!("unknown GroundOption {e}"))),
         }
@@ -1726,6 +1827,8 @@ pub enum AiOption<'lua> {
     Air(AirOption<'lua>),
     Ground(GroundOption),
     Naval(NavalOption),
+    /// Unmapped ME option id; round-trips name/value without failing mission load.
+    Unknown(u8, RawOptionValue),
 }
 
 impl<'lua> IntoLua<'lua> for AiOption<'lua> {
@@ -1734,6 +1837,7 @@ impl<'lua> IntoLua<'lua> for AiOption<'lua> {
             Self::Air(v) => v.into_lua(lua),
             Self::Ground(v) => v.into_lua(lua),
             Self::Naval(v) => v.into_lua(lua),
+            Self::Unknown(_, v) => v.into_lua(lua),
         }
     }
 }
@@ -1744,6 +1848,7 @@ impl<'lua> AiOption<'lua> {
             Self::Air(v) => v.tag(),
             Self::Ground(v) => v.tag(),
             Self::Naval(v) => v.tag(),
+            Self::Unknown(tag, _) => *tag,
         }
     }
 
@@ -1752,11 +1857,16 @@ impl<'lua> AiOption<'lua> {
             Ok(v) => Ok(Self::Air(v)),
             Err(ae) => match GroundOption::from_tag_val(lua, tag, val.clone()) {
                 Ok(v) => Ok(Self::Ground(v)),
-                Err(ge) => match NavalOption::from_tag_val(lua, tag, val) {
+                Err(ge) => match NavalOption::from_tag_val(lua, tag, val.clone()) {
                     Ok(v) => Ok(Self::Naval(v)),
-                    Err(ne) => Err(err(&format_compact!(
-                        "unknown option, air: {ae:?} ground: {ge:?} naval: {ne:?}"
-                    ))),
+                    Err(ne) => Ok(Self::Unknown(
+                        tag,
+                        RawOptionValue::from_lua(val, lua).map_err(|e| {
+                            err(&format_compact!(
+                                "unknown option {tag}, air: {ae:?} ground: {ge:?} naval: {ne:?} raw: {e:?}"
+                            ))
+                        })?,
+                    )),
                 },
             },
         }

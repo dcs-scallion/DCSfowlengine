@@ -285,8 +285,25 @@ impl Db {
                             ..
                         },
                     ..
+                } => {
+                    let airborne = group.units.into_iter().any(|uid| {
+                        self.persisted
+                            .units
+                            .get(uid)
+                            .is_some_and(|u| u.airborne_velocity.is_some())
+                    });
+                    if !airborne {
+                        return None;
+                    }
+                    let pos = centroid3d(
+                        group
+                            .units
+                            .into_iter()
+                            .map(|u| self.persisted.units[u].position.p.0),
+                    );
+                    Some((pos, group.side, ewr))
                 }
-                | DeployKind::Deployed {
+                DeployKind::Deployed {
                     spec: Deployable { ewr: Some(ewr), .. },
                     ..
                 } => {

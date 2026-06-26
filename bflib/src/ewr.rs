@@ -96,7 +96,7 @@ fn format_balt_num(alt: u32) -> String {
 }
 
 pub fn report_header() -> String {
-    String::from("AGE    BRG   RNG        BALT        SPD          ASP")
+    String::from("AGE    BRG   RNG              BALT        SPD          ASP")
 }
 
 fn round_display_altitude(alt: u32) -> u32 {
@@ -164,7 +164,7 @@ mod tests {
     #[test]
     fn report_columns_align_with_header() {
         let header = report_header();
-        assert_eq!(header, "AGE    BRG   RNG                   BALT        SPD    ASP");
+        assert_eq!(header, "AGE    BRG   RNG              BALT        SPD          ASP");
     }
 
     #[test]
@@ -437,6 +437,19 @@ fn excluded_by_ewr_low_slow_filter(
     slow && low
 }
 
+fn entity_still_airborne(db: &Db, id: &EnId) -> bool {
+    match id {
+        EnId::Player(ucid) => db
+            .instanced_players()
+            .any(|(u, _, inst)| u == ucid && inst.in_air),
+        EnId::Unit(uid) => db
+            .persisted
+            .units
+            .get(uid)
+            .is_some_and(|u| u.airborne_velocity.is_some()),
+    }
+}
+
 #[derive(Debug, Clone, Copy)]
 pub enum EwrUnits {
     Imperial,
@@ -559,6 +572,16 @@ impl Ewr {
                 }
             }
         }
+        const COAST_MAX_AGE_SECS: i64 = 120;
+        for tracks in self.tracks.values_mut() {
+            tracks.retain(|id, track| {
+                if track.detected {
+                    return true;
+                }
+                entity_still_airborne(db, id)
+                    && (now - track.last).num_seconds() <= COAST_MAX_AGE_SECS
+            });
+        }
         for tracks in self.tracks.values_mut() {
             for (id, track) in tracks.iter_mut() {
                 if track.was_detected != track.detected {
@@ -611,7 +634,11 @@ impl Ewr {
         tracks.retain(|tucid, track| {
             let age = (now - track.last).num_seconds();
             let include = (friendly && track.side == side) || (!friendly && track.side != side);
-            if include && age <= 120 && tucid != &ownship {
+            if include
+                && age <= 120
+                && tucid != &ownship
+                && (track.detected || entity_still_airborne(db, tucid))
+            {
                 if let EnId::Player(pid) = tucid {
                     if db.csar_downed_pilot(pid) {
                         return age <= 120;
