@@ -153,6 +153,10 @@ pub fn webhook_message_path(sortie_state_path: &Path) -> PathBuf {
     sortie_state_path.with_extension("discord_map_webhook.json")
 }
 
+pub fn virtual_resupply_decay_png_path(writedir: &Path) -> PathBuf {
+    writedir.join("virtual_resupply_decay.png")
+}
+
 pub fn mission_name_from_sortie_path(sortie_state_path: &Path) -> String {
     sortie_state_path
         .file_name()
@@ -811,6 +815,19 @@ pub fn collect_map_status_bar(
         dcs_name: server.name,
         dowload_acmi: cfg.discord_map.dowload_acmi,
         dowload_acmi_url: cfg.discord_map.dowload_acmi_url.to_string(),
+        discord_url: cfg.discord_map.discord_url.to_string(),
+        stats_url: cfg.discord_map.stats_url.to_string(),
+        manual_url: cfg.discord_map.manual_url.to_string(),
+        bugs_report_url: cfg.discord_map.bugs_report_url.to_string(),
+        deliveries_url: {
+            let writedir = PathBuf::from(Lfs::singleton(lua)?.writedir()?.as_str());
+            let decay = virtual_resupply_decay_png_path(&writedir);
+            if decay.is_file() {
+                "/virtual_resupply_decay.png".to_string()
+            } else {
+                String::new()
+            }
+        },
     })
 }
 
@@ -1000,6 +1017,8 @@ pub fn init_discord_map(
     let meta_path = meta_path(sortie_state_path);
     let webhook_message_path = webhook_message_path(sortie_state_path);
     let mission_name = mission_name_from_sortie_path(sortie_state_path);
+    let writedir = PathBuf::from(Lfs::singleton(lua)?.writedir()?.as_str());
+    let virtual_resupply_decay_path = virtual_resupply_decay_png_path(&writedir);
     info!(
         "discord map: viewport {}x{} bbox [{:.4},{:.4},{:.4},{:.4}] icons={} http_port={}",
         viewport.width,
@@ -1031,6 +1050,7 @@ pub fn init_discord_map(
         map_version_path,
         composited_png_path,
         base_png_path,
+        virtual_resupply_decay_path,
     });
     Ok(())
 }

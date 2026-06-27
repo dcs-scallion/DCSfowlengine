@@ -1013,6 +1013,15 @@ pub struct DiscordMapCfg {
     /// Public URL to Tacview ACMI downloads (Google Drive folder or file list).
     #[serde(default)]
     pub dowload_acmi_url: String,
+    /// Interactive map header link (empty = hidden).
+    #[serde(default)]
+    pub discord_url: String,
+    #[serde(default)]
+    pub stats_url: String,
+    #[serde(default)]
+    pub manual_url: String,
+    #[serde(default)]
+    pub bugs_report_url: String,
 }
 
 impl Default for DiscordMapCfg {
@@ -1029,6 +1038,10 @@ impl Default for DiscordMapCfg {
             front_line_in_map: false,
             dowload_acmi: false,
             dowload_acmi_url: Default::default(),
+            discord_url: Default::default(),
+            stats_url: Default::default(),
+            manual_url: Default::default(),
+            bugs_report_url: Default::default(),
         }
     }
 }

@@ -780,6 +780,7 @@ impl Db {
                         &hub_pick,
                         slot,
                         ai_air::BootstrapMode::ColdSpawn,
+                        false,
                     )?;
                     self.ai_air_push_mission_to_name(spctx, dcs_name, route, false)?;
                 }
@@ -2069,6 +2070,9 @@ impl Db {
                 phase_since: Utc::now(),
                 duration_shutdown: false,
                 attrition: false,
+                aar_tanker: None,
+                aar_since: None,
+                servicing_handoff: false,
             },
         };
         let gid = self

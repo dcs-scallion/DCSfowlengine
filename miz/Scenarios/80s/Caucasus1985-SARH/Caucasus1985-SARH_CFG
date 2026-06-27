@@ -29,6 +29,10 @@
     "padding": 0,
     "http_port": 17842,
     "dowload_acmi": false,
+    "discord_url": "",
+    "stats_url": "",
+    "manual_url": "",
+    "bugs_report_url": "",
     "dowload_acmi_url": ""
   },
   "name_filter": "^[a-zA-Z0-9_<>|= ]+$",

@@ -1,4 +1,4 @@
-//! Read-only GET server for interactive Discord map (`/map`, `/map-version`, `/map.png`, `/map-base.png`).
+//! Read-only GET server for interactive Discord map (`/map`, `/map-version`, `/map.png`, `/map-base.png`, `/virtual_resupply_decay.png`).
 
 use http_body_util::Full;
 use hyper::body::Bytes;
@@ -23,6 +23,7 @@ struct MapHttpState {
     map_version_path: PathBuf,
     composited_png_path: PathBuf,
     base_png_path: PathBuf,
+    virtual_resupply_decay_path: PathBuf,
 }
 
 pub async fn ensure_map_http_server(
@@ -31,6 +32,7 @@ pub async fn ensure_map_http_server(
     map_version_path: PathBuf,
     composited_png_path: PathBuf,
     base_png_path: PathBuf,
+    virtual_resupply_decay_path: PathBuf,
 ) {
     if MAP_HTTP_STARTED.load(Ordering::Acquire) {
         return;
@@ -50,6 +52,7 @@ pub async fn ensure_map_http_server(
         map_version_path,
         composited_png_path,
         base_png_path,
+        virtual_resupply_decay_path,
     });
     tokio::spawn(async move {
         loop {
@@ -87,6 +90,9 @@ async fn handle_map_http(
         "/map-version" => serve_path(&state.map_version_path, "text/plain; charset=utf-8").await,
         "/map.png" => serve_path(&state.composited_png_path, "image/png").await,
         "/map-base.png" => serve_path(&state.base_png_path, "image/png").await,
+        "/virtual_resupply_decay.png" => {
+            serve_path(&state.virtual_resupply_decay_path, "image/png").await
+        }
         _ => Ok(Response::builder()
             .status(StatusCode::NOT_FOUND)
             .body(Full::new(Bytes::from_static(b"not found")))

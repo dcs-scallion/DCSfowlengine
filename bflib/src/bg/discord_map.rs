@@ -28,27 +28,35 @@ const THREAT_RING_MIN_PX: u32 = 8;
 const LABEL_GAP_PX: i32 = 4;
 const LABEL_FONT_PX: i32 = 8;
 const MAP_CORNER_GUARD_LOGICAL: f32 = 40.0;
-const MAP_BRAND_ENGINE_VERSION: &str = env!("CARGO_PKG_VERSION");
-
-fn map_brand_version_major_minor() -> String {
-    let mut parts = MAP_BRAND_ENGINE_VERSION.split('.');
-    let major = parts.next().unwrap_or("0");
-    let minor = parts.next().unwrap_or("0");
-    format!("{major}.{minor}")
-}
-
-fn fowl_engine_brand_label() -> String {
-    format!("( Fowl engine {} )", map_brand_version_major_minor())
-}
 
 static MAP_LABEL_FONT: Lazy<MapLabelFont> = Lazy::new(MapLabelFont::embedded);
-static FOWL_HDR_ICON_B64: Lazy<String> = Lazy::new(|| {
+static MAP_LABEL_GR_B64: Lazy<String> = Lazy::new(|| {
     B64.encode(include_bytes!(
-        "../../../assets/discord-objective-map/png/Fowl-icon-bw.png"
+        "../../../assets/discord-objective-map/png/map-label-gr.png"
     ))
 });
-const FOWL_HDR_ICON_W: u32 = 117;
-const FOWL_HDR_ICON_H: u32 = 93;
+static MAP_LABEL_B64: Lazy<String> = Lazy::new(|| {
+    B64.encode(include_bytes!(
+        "../../../assets/discord-objective-map/png/map-label.png"
+    ))
+});
+const MAP_LABEL_SRC_W: u32 = 458;
+const MAP_LABEL_SRC_H: u32 = 200;
+
+fn map_label_display_w() -> u32 {
+    SIDEBAR_WIDTH_PX
+}
+
+fn map_label_display_h() -> u32 {
+    ((MAP_LABEL_SRC_H as u64 * SIDEBAR_WIDTH_PX as u64) / MAP_LABEL_SRC_W as u64) as u32
+}
+
+const HDR_LINK_ICON_H: u32 = 38;
+
+fn hdr_link_icon_w(src_w: u32, src_h: u32) -> u32 {
+    ((src_w as u64 * HDR_LINK_ICON_H as u64) / src_h.max(1) as u64).max(1) as u32
+}
+
 static TACVIEW_HDR_ICON_OFF_B64: Lazy<String> = Lazy::new(|| {
     B64.encode(include_bytes!(
         "../../../assets/discord-objective-map/png/Tacview.png"
@@ -59,7 +67,62 @@ static TACVIEW_HDR_ICON_ON_B64: Lazy<String> = Lazy::new(|| {
         "../../../assets/discord-objective-map/png/Tacview_select.png"
     ))
 });
-const TACVIEW_HDR_ICON_PX: u32 = 38;
+static DISCORD_HDR_ICON_OFF_B64: Lazy<String> = Lazy::new(|| {
+    B64.encode(include_bytes!(
+        "../../../assets/discord-objective-map/png/discord.png"
+    ))
+});
+static DISCORD_HDR_ICON_ON_B64: Lazy<String> = Lazy::new(|| {
+    B64.encode(include_bytes!(
+        "../../../assets/discord-objective-map/png/discord_select.png"
+    ))
+});
+static STATS_HDR_ICON_OFF_B64: Lazy<String> = Lazy::new(|| {
+    B64.encode(include_bytes!(
+        "../../../assets/discord-objective-map/png/statistics.png"
+    ))
+});
+static STATS_HDR_ICON_ON_B64: Lazy<String> = Lazy::new(|| {
+    B64.encode(include_bytes!(
+        "../../../assets/discord-objective-map/png/statistics_select.png"
+    ))
+});
+static MANUAL_HDR_ICON_OFF_B64: Lazy<String> = Lazy::new(|| {
+    B64.encode(include_bytes!(
+        "../../../assets/discord-objective-map/png/manual.png"
+    ))
+});
+static MANUAL_HDR_ICON_ON_B64: Lazy<String> = Lazy::new(|| {
+    B64.encode(include_bytes!(
+        "../../../assets/discord-objective-map/png/manual_select.png"
+    ))
+});
+static DELIVERIES_HDR_ICON_OFF_B64: Lazy<String> = Lazy::new(|| {
+    B64.encode(include_bytes!(
+        "../../../assets/discord-objective-map/png/deliveries.png"
+    ))
+});
+static DELIVERIES_HDR_ICON_ON_B64: Lazy<String> = Lazy::new(|| {
+    B64.encode(include_bytes!(
+        "../../../assets/discord-objective-map/png/deliveries _select.png"
+    ))
+});
+static BUGS_HDR_ICON_OFF_B64: Lazy<String> = Lazy::new(|| {
+    B64.encode(include_bytes!(
+        "../../../assets/discord-objective-map/png/bugs.png"
+    ))
+});
+static BUGS_HDR_ICON_ON_B64: Lazy<String> = Lazy::new(|| {
+    B64.encode(include_bytes!(
+        "../../../assets/discord-objective-map/png/bugs_select.png"
+    ))
+});
+const TACVIEW_HDR_ICON_SRC: (u32, u32) = (76, 76);
+const DISCORD_HDR_ICON_SRC: (u32, u32) = (96, 96);
+const STATS_HDR_ICON_SRC: (u32, u32) = (96, 89);
+const MANUAL_HDR_ICON_SRC: (u32, u32) = (96, 96);
+const DELIVERIES_HDR_ICON_SRC: (u32, u32) = (96, 96);
+const BUGS_HDR_ICON_SRC: (u32, u32) = (96, 94);
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DiscordMapPilotEntry {
@@ -105,6 +168,12 @@ pub struct DiscordMapStatusBar {
     pub dcs_name: String,
     pub dowload_acmi: bool,
     pub dowload_acmi_url: String,
+    pub discord_url: String,
+    pub stats_url: String,
+    pub manual_url: String,
+    pub bugs_report_url: String,
+    /// Relative map HTTP path when `virtual_resupply_decay.png` exists beside CFG.
+    pub deliveries_url: String,
 }
 
 #[derive(Debug, Clone)]
@@ -168,6 +237,7 @@ pub async fn start_map_http_server(
     map_version_path: PathBuf,
     composited_png_path: PathBuf,
     base_png_path: PathBuf,
+    virtual_resupply_decay_path: PathBuf,
 ) {
     discord_map_http::ensure_map_http_server(
         port,
@@ -175,6 +245,7 @@ pub async fn start_map_http_server(
         map_version_path,
         composited_png_path,
         base_png_path,
+        virtual_resupply_decay_path,
     )
     .await;
 }
@@ -833,8 +904,9 @@ fn stats_row_html(bar: &DiscordMapStatusBar, top: bool) -> String {
 
 fn map_header_html(bar: &DiscordMapStatusBar) -> String {
     format!(
-        r#"<div class="map-hdr"><div class="map-hdr-left">{left}</div><div class="map-hdr-right">Campaign status as of {status_utc} UTC</div></div>"#,
+        r#"<div class="map-hdr"><div class="map-hdr-left">{left}</div><div class="map-hdr-right">{links}<span class="map-hdr-status-sep">          </span>Campaign status as of {status_utc} UTC</div></div>"#,
         left = map_header_left_html(bar),
+        links = map_header_links_html(bar),
         status_utc = html_escape(&bar.status_utc),
     )
 }
@@ -847,36 +919,111 @@ fn dcs_bind_display(bind: &str) -> &str {
     }
 }
 
-fn map_header_tacview_html(bar: &DiscordMapStatusBar) -> String {
-    if !bar.dowload_acmi {
-        return String::new();
-    }
-    let url = bar.dowload_acmi_url.trim();
-    if url.is_empty() {
-        return String::new();
-    }
+fn map_header_link_html(
+    url: &str,
+    label: &str,
+    off_b64: &str,
+    on_b64: &str,
+    src_w: u32,
+    src_h: u32,
+) -> String {
+    let w = hdr_link_icon_w(src_w, src_h);
     format!(
-        r#"<a class="map-hdr-tacview" href="{url}" target="_blank" rel="noopener noreferrer"><span class="map-hdr-tacview-icons" aria-hidden="true"><img class="map-hdr-tacview-off" src="data:image/png;base64,{off}" width="{w}" height="{h}" alt=""><img class="map-hdr-tacview-on" src="data:image/png;base64,{on}" width="{w}" height="{h}" alt=""></span><span class="map-hdr-tacview-label">Tacview</span></a>"#,
+        r#"<a class="map-hdr-link" href="{url}" target="_blank" rel="noopener noreferrer"><span class="map-hdr-link-label">{label}</span><span class="map-hdr-link-icons" style="width:{w}px;height:{h}px" aria-hidden="true"><img class="map-hdr-link-off" src="data:image/png;base64,{off}" width="{w}" height="{h}" alt=""><img class="map-hdr-link-on" src="data:image/png;base64,{on}" width="{w}" height="{h}" alt=""></span></a>"#,
         url = html_escape(url),
-        off = TACVIEW_HDR_ICON_OFF_B64.as_str(),
-        on = TACVIEW_HDR_ICON_ON_B64.as_str(),
-        w = TACVIEW_HDR_ICON_PX,
-        h = TACVIEW_HDR_ICON_PX,
+        label = html_escape(label),
+        off = off_b64,
+        on = on_b64,
+        w = w,
+        h = HDR_LINK_ICON_H,
     )
 }
 
+fn map_header_link_if_url(
+    url: &str,
+    label: &str,
+    off_b64: &str,
+    on_b64: &str,
+    src_w: u32,
+    src_h: u32,
+) -> String {
+    if url.trim().is_empty() {
+        return String::new();
+    }
+    map_header_link_html(url.trim(), label, off_b64, on_b64, src_w, src_h)
+}
+
+fn map_header_links_html(bar: &DiscordMapStatusBar) -> String {
+    let mut links = String::new();
+    if bar.dowload_acmi {
+        links.push_str(&map_header_link_if_url(
+            &bar.dowload_acmi_url,
+            "Tacview",
+            TACVIEW_HDR_ICON_OFF_B64.as_str(),
+            TACVIEW_HDR_ICON_ON_B64.as_str(),
+            TACVIEW_HDR_ICON_SRC.0,
+            TACVIEW_HDR_ICON_SRC.1,
+        ));
+    }
+    links.push_str(&map_header_link_if_url(
+        &bar.discord_url,
+        "Discord",
+        DISCORD_HDR_ICON_OFF_B64.as_str(),
+        DISCORD_HDR_ICON_ON_B64.as_str(),
+        DISCORD_HDR_ICON_SRC.0,
+        DISCORD_HDR_ICON_SRC.1,
+    ));
+    links.push_str(&map_header_link_if_url(
+        &bar.stats_url,
+        "Stats",
+        STATS_HDR_ICON_OFF_B64.as_str(),
+        STATS_HDR_ICON_ON_B64.as_str(),
+        STATS_HDR_ICON_SRC.0,
+        STATS_HDR_ICON_SRC.1,
+    ));
+    links.push_str(&map_header_link_if_url(
+        &bar.manual_url,
+        "Manual",
+        MANUAL_HDR_ICON_OFF_B64.as_str(),
+        MANUAL_HDR_ICON_ON_B64.as_str(),
+        MANUAL_HDR_ICON_SRC.0,
+        MANUAL_HDR_ICON_SRC.1,
+    ));
+    links.push_str(&map_header_link_if_url(
+        &bar.deliveries_url,
+        "Deliveries",
+        DELIVERIES_HDR_ICON_OFF_B64.as_str(),
+        DELIVERIES_HDR_ICON_ON_B64.as_str(),
+        DELIVERIES_HDR_ICON_SRC.0,
+        DELIVERIES_HDR_ICON_SRC.1,
+    ));
+    links.push_str(&map_header_link_if_url(
+        &bar.bugs_report_url,
+        "Bugs",
+        BUGS_HDR_ICON_OFF_B64.as_str(),
+        BUGS_HDR_ICON_ON_B64.as_str(),
+        BUGS_HDR_ICON_SRC.0,
+        BUGS_HDR_ICON_SRC.1,
+    ));
+    if links.is_empty() {
+        return links;
+    }
+    format!(r#"<span class="map-hdr-links">{links}</span>"#)
+}
+
 fn map_header_left_html(bar: &DiscordMapStatusBar) -> String {
+    let brand_w = map_label_display_w();
+    let brand_h = map_label_display_h();
     format!(
-        r#"<img class="map-hdr-icon" src="data:image/png;base64,{icon}" width="{icon_w}" height="{icon_h}" alt="" aria-hidden="true"><span class="map-hdr-text"><span class="map-hdr-part">DCS server IP {bind}:{port}</span><span class="map-hdr-part map-hdr-name">{name}</span><span class="map-hdr-part">{mission}</span><span class="map-hdr-part">{engine}</span>{tacview}</span>"#,
-        icon = FOWL_HDR_ICON_B64.as_str(),
-        icon_w = FOWL_HDR_ICON_W,
-        icon_h = FOWL_HDR_ICON_H,
+        r#"<span class="map-hdr-brand" aria-hidden="true"><span class="map-hdr-brand-icons" style="width:{brand_w}px;height:{brand_h}px"><img class="map-hdr-brand-off" src="data:image/png;base64,{icon_off}" width="{brand_w}" height="{brand_h}" alt=""><img class="map-hdr-brand-on" src="data:image/png;base64,{icon_on}" width="{brand_w}" height="{brand_h}" alt=""></span></span><span class="map-hdr-text"><span class="map-hdr-part">DCS server IP {bind}:{port}</span><span class="map-hdr-part map-hdr-name">{name}</span><span class="map-hdr-part">{mission}</span></span>"#,
+        icon_off = MAP_LABEL_GR_B64.as_str(),
+        icon_on = MAP_LABEL_B64.as_str(),
+        brand_w = brand_w,
+        brand_h = brand_h,
         bind = html_escape(dcs_bind_display(&bar.dcs_bind_address)),
         port = html_escape(&bar.dcs_port),
         name = html_escape(&bar.dcs_name),
         mission = html_escape(&bar.mission_name),
-        engine = html_escape(&fowl_engine_brand_label()),
-        tacview = map_header_tacview_html(bar),
     )
 }
 
@@ -937,20 +1084,28 @@ fn build_interactive_html(
 <style>
 body{{margin:0;background:#000;color:#686a6e;font-family:"Roboto Condensed",Roboto,sans-serif;font-size:24px;overflow-x:auto}}
 .map-panel{{display:flex;flex-direction:column;gap:{layout_gap}px;width:{panel_w}px;min-width:{panel_w}px;box-sizing:border-box}}
-.map-hdr{{display:flex;justify-content:space-between;align-items:center;gap:8px;width:100%;min-height:{icon_h}px;padding:0;line-height:1;color:#686a6e;font-size:clamp(15px,calc(100vw*24/{panel_w}),24px)}}
+.map-hdr{{display:flex;justify-content:space-between;align-items:center;gap:8px;width:100%;min-height:{brand_h}px;padding:0;line-height:1;color:#686a6e;font-size:clamp(15px,calc(100vw*24/{panel_w}),24px)}}
 .map-hdr-left{{display:flex;flex-direction:row;align-items:center;gap:0;text-align:left;flex:1 1 auto;min-width:0;overflow:hidden;align-self:stretch}}
-.map-hdr-icon{{flex:0 0 auto;display:block;width:{icon_w}px;height:{icon_h}px;image-rendering:pixelated;align-self:center}}
+.map-hdr-brand{{flex:0 0 auto;display:inline-flex;align-items:center;align-self:center;max-width:{sidebar_w}px}}
+.map-hdr-brand-icons{{position:relative;display:inline-block;flex:0 0 auto;max-width:{sidebar_w}px}}
+.map-hdr-brand-off,.map-hdr-brand-on{{position:absolute;left:0;top:0;width:100%;height:100%;max-width:{sidebar_w}px;object-fit:contain;image-rendering:auto}}
+.map-hdr-brand-on{{display:none}}
+.map-hdr-brand:hover .map-hdr-brand-off{{display:none}}
+.map-hdr-brand:hover .map-hdr-brand-on{{display:block}}
 .map-hdr-text{{display:flex;flex-direction:row;flex-wrap:nowrap;align-items:center;align-self:stretch;gap:1.5em;margin-left:1.5em;overflow:hidden;min-width:0;padding-top:15px}}
 .map-hdr-part{{white-space:nowrap;overflow:hidden;text-overflow:ellipsis;min-width:0;flex:0 1 auto}}
 .map-hdr-name{{font-weight:700}}
-.map-hdr-tacview{{display:inline-flex;align-items:center;flex:0 0 auto;margin-left:2.5em;gap:0.35em;text-decoration:none;color:inherit;vertical-align:middle}}
-.map-hdr-tacview-icons{{position:relative;display:inline-block;width:{tacview_w}px;height:{tacview_h}px;flex:0 0 auto}}
-.map-hdr-tacview-off,.map-hdr-tacview-on{{position:absolute;left:0;top:0;width:{tacview_w}px;height:{tacview_h}px;image-rendering:pixelated}}
-.map-hdr-tacview-on{{display:none}}
-.map-hdr-tacview:hover .map-hdr-tacview-off{{display:none}}
-.map-hdr-tacview:hover .map-hdr-tacview-on{{display:block}}
-.map-hdr-tacview-label{{white-space:nowrap}}
-.map-hdr-right{{display:flex;align-items:center;align-self:stretch;text-align:right;flex:0 1 auto;white-space:nowrap;padding-top:15px}}
+.map-hdr-links{{display:inline-flex;flex-direction:row;flex-wrap:nowrap;align-items:center;gap:0.75em;flex:0 0 auto}}
+.map-hdr-link{{display:inline-flex;flex-direction:row;align-items:center;flex:0 0 auto;gap:0.35em;text-decoration:none;color:inherit;vertical-align:middle}}
+.map-hdr-link-icons{{position:relative;display:inline-block;flex:0 0 auto;order:2}}
+.map-hdr-link-label{{display:none;white-space:nowrap;order:1}}
+.map-hdr-link-off,.map-hdr-link-on{{position:absolute;left:0;top:0;width:100%;height:100%;object-fit:contain;image-rendering:pixelated}}
+.map-hdr-link-on{{display:none}}
+.map-hdr-link:hover .map-hdr-link-off{{display:none}}
+.map-hdr-link:hover .map-hdr-link-on{{display:block}}
+.map-hdr-link:hover .map-hdr-link-label{{display:inline}}
+.map-hdr-right{{display:flex;flex-direction:row;flex-wrap:nowrap;align-items:center;align-self:stretch;justify-content:flex-end;text-align:right;flex:0 1 auto;white-space:nowrap;padding-top:15px}}
+.map-hdr-status-sep{{white-space:pre}}
 .map-body{{display:flex;flex-direction:column;gap:{layout_gap}px;width:100%}}
 .map-body-top{{display:flex;flex-direction:row;align-items:stretch;gap:{layout_gap}px;width:100%;box-sizing:border-box}}
 .map-body-bottom{{display:flex;flex-direction:row;align-items:flex-start;gap:{layout_gap}px;width:100%;box-sizing:border-box}}
@@ -1166,10 +1321,7 @@ body{{margin:0;background:#000;color:#686a6e;font-family:"Roboto Condensed",Robo
         status_utc = html_escape(status_utc),
         base_b64 = base_b64,
         panel_w = panel_w,
-        icon_w = FOWL_HDR_ICON_W,
-        icon_h = FOWL_HDR_ICON_H,
-        tacview_w = TACVIEW_HDR_ICON_PX,
-        tacview_h = TACVIEW_HDR_ICON_PX,
+        brand_h = map_label_display_h(),
         img_w = img_w,
         img_h = img_h,
         body = body,

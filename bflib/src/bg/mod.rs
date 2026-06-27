@@ -293,6 +293,7 @@ pub(super) enum Task {
         map_version_path: PathBuf,
         composited_png_path: PathBuf,
         base_png_path: PathBuf,
+        virtual_resupply_decay_path: PathBuf,
     },
 }
 
@@ -633,6 +634,7 @@ async fn background_loop(write_dir: PathBuf, mut rx: UnboundedReceiver<Task>) {
                 map_version_path,
                 composited_png_path,
                 base_png_path,
+                virtual_resupply_decay_path,
             } => {
                 discord_map::start_map_http_server(
                     port,
@@ -640,6 +642,7 @@ async fn background_loop(write_dir: PathBuf, mut rx: UnboundedReceiver<Task>) {
                     map_version_path,
                     composited_png_path,
                     base_png_path,
+                    virtual_resupply_decay_path,
                 )
                 .await;
             }
