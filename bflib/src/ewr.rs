@@ -96,7 +96,7 @@ fn format_balt_num(alt: u32) -> String {
 }
 
 pub fn report_header() -> String {
-    String::from("AGE    BRG   RNG              BALT        SPD          ASP")
+    String::from("AGE    BRG   RNG            BALT        SPD            ASP")
 }
 
 fn round_display_altitude(alt: u32) -> u32 {
@@ -164,7 +164,7 @@ mod tests {
     #[test]
     fn report_columns_align_with_header() {
         let header = report_header();
-        assert_eq!(header, "AGE    BRG   RNG              BALT        SPD          ASP");
+        assert_eq!(header, "AGE    BRG   RNG            BALT        SPD            ASP");
     }
 
     #[test]

@@ -1653,7 +1653,7 @@ impl Db {
                 },
                 Some(args.pos),
                 BitFlags::empty(),
-                |db, gid, _pos| db.ai_point_to_point_mission(gid, || Task::ComboTask(vec![])),
+                |db, gid, _pos| db.ai_point_to_point_mission(gid),
             )?,
         ))
     }
@@ -1697,7 +1697,7 @@ impl Db {
             },
             Some(to),
             BitFlags::empty(),
-            |db, gid, _pos| db.ai_point_to_point_mission(gid, || Task::ComboTask(vec![])),
+            |db, gid, _pos| db.ai_point_to_point_mission(gid),
         )?))
     }
 
@@ -1728,7 +1728,7 @@ impl Db {
             },
             Some(pos),
             BitFlags::empty(),
-            |db, gid, _pos| db.ai_point_to_point_mission(gid, || Task::ComboTask(vec![])),
+            |db, gid, _pos| db.ai_point_to_point_mission(gid),
         )?))
     }
 
@@ -1760,7 +1760,7 @@ impl Db {
                 },
                 Some(args.pos),
                 BitFlags::empty(),
-                |db, gid, _pos| db.ai_point_to_point_mission(gid, || Task::ComboTask(vec![])),
+                |db, gid, _pos| db.ai_point_to_point_mission(gid),
             )?)),
             None => {
                 self.deployable_to_point(
@@ -1779,10 +1779,9 @@ impl Db {
     fn ai_point_to_point_mission<'lua>(
         &mut self,
         gid: GroupId,
-        task: impl Fn() -> Task<'lua> + 'static,
     ) -> Result<Vec<MissionPoint<'lua>>> {
         let group = group!(self, gid)?;
-        let (src, tgt, alt, alt_typ, speed) = match &group.origin {
+        let (_src, tgt, alt, alt_typ, speed) = match &group.origin {
             DeployKind::Action {
                 spec,
                 destination: Some(tgt),
@@ -1810,8 +1809,15 @@ impl Db {
             },
             _ => bail!("expected action group with rtb and destination"),
         };
+        let hold_orbit = Task::ComboTask(vec![Task::Orbit {
+            pattern: OrbitPattern::Circle,
+            point: Some(LuaVec2(tgt)),
+            point2: None,
+            speed: Some(speed),
+            altitude: Some(alt),
+        }]);
         macro_rules! wpt {
-            ($name:expr, $pos:expr) => {
+            ($name:expr, $pos:expr, $task:expr) => {
                 MissionPoint {
                     action: Some(ActionTyp::Air(TurnMethod::FlyOverPoint)),
                     typ: PointType::TurningPoint,
@@ -1828,11 +1834,14 @@ impl Db {
                     eta_locked: None,
                     name: Some($name.into()),
                     parking: None,
-                    task: Box::new(task()),
+                    task: Box::new($task),
                 }
             };
         }
-        Ok(vec![wpt!("tgt", tgt), wpt!("rtb", src)])
+        Ok(vec![
+            wpt!("ingress", tgt, Task::ComboTask(vec![])),
+            wpt!("hold", tgt, hold_orbit),
+        ])
     }
 
     fn ai_rtb_mission<'lua>(
@@ -1988,7 +1997,7 @@ impl Db {
             },
             Some(tgt),
             BitFlags::empty(),
-            |db, gid, _pos| db.ai_point_to_point_mission(gid, || Task::ComboTask(vec![])),
+            |db, gid, _pos| db.ai_point_to_point_mission(gid),
         )?))
     }
 
@@ -2073,6 +2082,8 @@ impl Db {
                 aar_tanker: None,
                 aar_since: None,
                 servicing_handoff: false,
+                last_airborne_task_push: None,
+                calcm_rack_empty_since: None,
             },
         };
         let gid = self
@@ -2600,7 +2611,7 @@ impl Db {
                         self.cruise_missile_mission(side, ucid, spawn_pos, args)
                     }
                     ai_air::AiAirMissionKind::PointToPoint => {
-                        self.ai_point_to_point_mission(gid, || Task::ComboTask(vec![]))
+                        self.ai_point_to_point_mission(gid)
                     }
                     ai_air::AiAirMissionKind::Unknown => {
                         let DeployKind::Action { ai_air, .. } = &group.origin else {
@@ -2620,7 +2631,7 @@ impl Db {
             | ActionKind::Paratrooper(_)
             | ActionKind::LogisticsRepair(_)
             | ActionKind::LogisticsTransfer(_) => {
-                self.ai_point_to_point_mission(gid, || Task::ComboTask(vec![]))
+                self.ai_point_to_point_mission(gid)
             }
             ActionKind::Rtb | ActionKind::Start | ActionKind::Status | ActionKind::Rearm => {
                 let args = WithPosAndGroup {
@@ -2643,7 +2654,7 @@ impl Db {
                         self.cruise_missile_mission(side, ucid, spawn_pos, args)
                     }
                     ai_air::AiAirMissionKind::PointToPoint => {
-                        self.ai_point_to_point_mission(gid, || Task::ComboTask(vec![]))
+                        self.ai_point_to_point_mission(gid)
                     }
                     ai_air::AiAirMissionKind::Unknown => {
                         let DeployKind::Action { ai_air, .. } = &group.origin else {

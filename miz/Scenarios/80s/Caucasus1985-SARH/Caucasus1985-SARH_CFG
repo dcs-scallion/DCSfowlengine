@@ -359,6 +359,28 @@
         "penalty": null,
         "limit": 3
       },
+            "sead": {
+        "kind": {
+          "Sead": {
+            "kind": "FixedWing",
+            "duration": null,
+            "template": "RSEAD",
+            "altitude": 410.0,
+            "altitude_typ": "RADIO",
+            "speed": 194.0,
+            "freq": 120000000
+          }
+        },
+        "cost": 170,
+        "penalty": 30,
+        "limit": 2
+      },
+      "sead-waypoint": {
+        "kind": "SeadWaypoint",
+        "cost": 5,
+        "penalty": null,
+        "limit": null
+      },
       "attack-planes": {
         "kind": {
           "Attackers": {
@@ -770,6 +792,28 @@
         "cost": 150,
         "penalty": 30,
         "limit": 3
+      },
+      "sead": {
+        "kind": {
+          "Sead": {
+            "kind": "FixedWing",
+            "duration": null,
+            "template": "BSEAD",
+            "altitude": 420.0,
+            "altitude_typ": "RADIO",
+            "speed": 254.0,
+            "freq": 240000000
+          }
+        },
+        "cost": 170,
+        "penalty": 30,
+        "limit": 2
+      },
+      "sead-waypoint": {
+        "kind": "SeadWaypoint",
+        "cost": 5,
+        "penalty": null,
+        "limit": null
       },
       "attack-planes": {
         "kind": {

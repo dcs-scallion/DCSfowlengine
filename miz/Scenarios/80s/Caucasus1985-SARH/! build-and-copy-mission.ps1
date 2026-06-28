@@ -192,6 +192,88 @@ Close DCS, delete the hook, then run '! build-and-copy-mission.ps1' again.
     }
 }
 
+function Copy-VirtualResupplyDecayGraph {
+    param(
+        [Parameter(Mandatory = $true)][string]$ScriptRoot,
+        [Parameter(Mandatory = $true)][string]$DcsUserPath,
+        [Parameter(Mandatory = $true)][string]$LogFile
+    )
+
+    $graphScript = Join-Path -Path $ScriptRoot -ChildPath "generate_virtual_resupply_decay_graph.py"
+    $graphPng = Join-Path -Path $ScriptRoot -ChildPath "virtual_resupply_decay.png"
+
+    if (-not (Test-Path -LiteralPath $graphScript -PathType Leaf)) {
+        $skip = "Skipping virtual_resupply_decay.png: generator not found at $graphScript"
+        Write-Host $skip -ForegroundColor DarkYellow
+        $skip | Out-File -FilePath $LogFile -Append
+        return
+    }
+
+    $genOk = $false
+    $genOutput = @()
+    $pythonAttempts = @(
+        @{ Label = "py -3"; Command = "py"; Args = @("-3", $graphScript) },
+        @{ Label = "python"; Command = "python"; Args = @($graphScript) }
+    )
+
+    foreach ($attempt in $pythonAttempts) {
+        if (-not (Get-Command $attempt.Command -ErrorAction SilentlyContinue)) {
+            continue
+        }
+        try {
+            Push-Location -LiteralPath $ScriptRoot -ErrorAction Stop
+            $genOutput = & $attempt.Command @($attempt.Args) 2>&1
+            $genExit = $LASTEXITCODE
+        }
+        catch {
+            $genOutput = @($_.Exception.Message)
+            $genExit = 1
+        }
+        finally {
+            Pop-Location
+        }
+
+        if ($genExit -eq 0) {
+            $genOk = $true
+            $ok = "Generated virtual_resupply_decay.png via $($attempt.Label) (CFG values from scenario folder)."
+            Write-Host $ok -ForegroundColor Green
+            $ok | Out-File -FilePath $LogFile -Append
+            break
+        }
+
+        $fail = "virtual_resupply_decay graph generation failed via $($attempt.Label) (exit $genExit); trying next Python launcher if available."
+        Write-Host $fail -ForegroundColor DarkYellow
+        $fail | Out-File -FilePath $LogFile -Append
+        foreach ($line in $genOutput) {
+            if (-not [string]::IsNullOrWhiteSpace($line.ToString())) {
+                $detail = "  $line"
+                Write-Host $detail -ForegroundColor DarkYellow
+                $detail | Out-File -FilePath $LogFile -Append
+            }
+        }
+    }
+
+    if (-not $genOk) {
+        $skip = "Skipping copy of virtual_resupply_decay.png (Python generator could not run or failed)."
+        Write-Host $skip -ForegroundColor DarkYellow
+        $skip | Out-File -FilePath $LogFile -Append
+        return
+    }
+
+    if (-not (Test-Path -LiteralPath $graphPng -PathType Leaf)) {
+        $skip = "Skipping copy of virtual_resupply_decay.png: file was not produced at $graphPng"
+        Write-Host $skip -ForegroundColor DarkYellow
+        $skip | Out-File -FilePath $LogFile -Append
+        return
+    }
+
+    $graphDst = Join-Path -Path $DcsUserPath -ChildPath "virtual_resupply_decay.png"
+    $copyMsg = "Copying virtual_resupply_decay.png to $graphDst"
+    Write-Host $copyMsg -ForegroundColor Cyan
+    $copyMsg | Out-File -FilePath $LogFile -Append
+    Copy-Item -LiteralPath $graphPng -Destination $graphDst -Force -ErrorAction Stop
+}
+
 try {
     Write-Host "--- Process Started: $(Get-Date) ---" -ForegroundColor Cyan
     "--- Process Started: $(Get-Date) ---" | Out-File -FilePath $log_file -Append
@@ -367,6 +449,8 @@ try {
         Write-Host $miz_copy_msg -ForegroundColor Cyan
         $miz_copy_msg | Out-File -FilePath $log_file -Append
         Copy-Item -LiteralPath $mizSrc -Destination $mizDst -Force -ErrorAction Stop
+
+        Copy-VirtualResupplyDecayGraph -ScriptRoot $PSScriptRoot -DcsUserPath $DCS_user_path -LogFile $log_file
 
         Warn-IfDcsMissionScriptingSanitized -DcsUserPath $DCS_user_path -LogFile $log_file
     }

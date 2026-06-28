@@ -326,7 +326,7 @@ pub struct AiAirState {
     /// Duration elapsed: RTB shutdown only; players cannot extend via commands.
     #[serde(default)]
     pub duration_shutdown: bool,
-    /// Any member destroyed (combat, crash, collision) — never re-spawn from persist.
+    /// Combat losses in this flight; cycle respawn skips dead persisted units only.
     #[serde(default)]
     pub attrition: bool,
     /// Bingo AAR in progress; `GroupId` of allied tanker action group.
@@ -337,6 +337,12 @@ pub struct AiAirState {
     /// Servicing handoff done (depart or awaiting-launch); avoids repeat warehouse sync.
     #[serde(default)]
     pub servicing_handoff: bool,
+    /// Throttle airborne mission re-push (DCS task watchdog).
+    #[serde(default)]
+    pub last_airborne_task_push: Option<DateTime<Utc>>,
+    /// CALCM rack empty; bingo waits for in-flight missiles to impact.
+    #[serde(default)]
+    pub calcm_rack_empty_since: Option<DateTime<Utc>>,
 }
 
 #[derive(Debug, Clone)]
@@ -963,6 +969,8 @@ const PERSIST_RESUME_MIN_AGL_M: f64 = 80.;
 pub(super) enum AiAirPersistSpawn {
     NewDeploy,
     PersistGround,
+    /// MOOSE-style respawn on hub parking after RTB service (destroy + fresh ME template).
+    PostServiceCycle,
     PersistInAir,
 }
 
@@ -2417,6 +2425,9 @@ fn flight_template_weapon_count(
             }
             for ammo in u.get_ammo()? {
                 let ammo = ammo?;
+                if is_cannon_ammo(&ammo) {
+                    continue;
+                }
                 if ammo_matches_template_key(&ammo, &keys) {
                     total = total.saturating_add(ammo.count()?);
                 }
@@ -2513,6 +2524,33 @@ pub(crate) fn flight_calcm_missile_count(lua: MizLua, db: &Db, gid: GroupId) -> 
         }
     }
     Ok(total)
+}
+
+fn calcm_weapon_bingo_ready(
+    lua: MizLua,
+    db: &mut Db,
+    gid: GroupId,
+    now: DateTime<Utc>,
+) -> Result<bool> {
+    let count = flight_calcm_missile_count(lua, db, gid)?;
+    let group = group_mut!(db, gid)?;
+    let DeployKind::Action { ai_air, .. } = &mut group.origin else {
+        return Ok(false);
+    };
+    if count > 0 {
+        ai_air.calcm_rack_empty_since = None;
+        return Ok(false);
+    }
+    if ai_air.calcm_rack_empty_since.is_none() {
+        ai_air.calcm_rack_empty_since = Some(now);
+        log::info!("ai air {gid}: CALCM rack empty, waiting for salvo to complete");
+        return Ok(false);
+    }
+    let since = ai_air.calcm_rack_empty_since.unwrap();
+    if now - since < CALCM_SALVO_SETTLE {
+        return Ok(false);
+    }
+    Ok(true)
 }
 
 pub(super) fn snapshot_from_loiter(pos: Vector2, alt: f64, alt_typ: AltType, speed: f64, racetrack: bool) -> ActiveMissionSnapshot {
@@ -2722,16 +2760,91 @@ pub(super) fn cap_orbit_mission<'lua>(
     ]
 }
 
+fn flight_ag_weapon_remaining(lua: MizLua, names: &[String]) -> Result<u32> {
+    let mut total = 0u32;
+    for name in names {
+        let Ok(group) = Group::get_by_name(lua, name) else {
+            continue;
+        };
+        for u in group.get_units()? {
+            let u = u?;
+            if !u.is_exist()? {
+                continue;
+            }
+            for ammo in u.get_ammo()? {
+                let ammo = ammo?;
+                if !is_ag_ammo_store(&ammo) {
+                    continue;
+                }
+                total = total.saturating_add(ammo.count()?);
+            }
+        }
+    }
+    Ok(total)
+}
+
+fn flight_has_ag_ammo_stores(lua: MizLua, names: &[String]) -> Result<bool> {
+    for name in names {
+        let Ok(group) = Group::get_by_name(lua, name) else {
+            continue;
+        };
+        for u in group.get_units()? {
+            let u = u?;
+            if !u.is_exist()? {
+                continue;
+            }
+            for ammo in u.get_ammo()? {
+                let ammo = ammo?;
+                if is_ag_ammo_store(&ammo) {
+                    return Ok(true);
+                }
+            }
+        }
+    }
+    Ok(false)
+}
+
+fn is_ag_ammo_store(ammo: &dcso3::unit::Ammo<'_>) -> bool {
+    if is_cannon_ammo(ammo) {
+        return false;
+    }
+    if let Some(flags) = ammo_weapon_flags(ammo) {
+        if flags & WeaponFlag::ArmWeapon as u64 != 0 {
+            let typ = ammo.type_name().unwrap_or_default();
+            return is_status_store(Some(flags), typ.as_ref());
+        }
+    }
+    let typ = ammo.type_name().unwrap_or_default().to_ascii_uppercase();
+    typ.contains("ROCKET")
+        || typ.contains("AGM")
+        || typ.contains("KH")
+        || typ.contains("C-8")
+        || typ.contains("C-13")
+        || typ.contains("S-8")
+        || typ.contains("S-13")
+}
+
 fn weapon_bingo(
     lua: MizLua,
-    db: &Db,
+    db: &mut Db,
     gid: GroupId,
     dcs_names: &[String],
     template_unit: &miz::Unit<'_>,
     mission_kind: AiAirMissionKind,
+    now: DateTime<Utc>,
 ) -> Result<bool> {
     if mission_kind == AiAirMissionKind::CruiseMissileSpawn {
-        return Ok(flight_calcm_missile_count(lua, db, gid)? == 0);
+        return calcm_weapon_bingo_ready(lua, db, gid, now);
+    }
+    let plane_kind = plane_cfg_for_ai_air(db, gid)?.kind;
+    if matches!(mission_kind, AiAirMissionKind::Attackers)
+        || matches!(plane_kind, AiPlaneKind::Helicopter)
+    {
+        let remaining = flight_ag_weapon_remaining(lua, dcs_names)?;
+        if remaining > 0 {
+            return Ok(false);
+        }
+        return Ok(flight_has_ag_ammo_stores(lua, dcs_names)?);
     }
     let ag_slots = template_ag_weapon_slots(template_unit);
     if ag_slots == 0 {
@@ -2768,6 +2881,9 @@ fn flight_has_readable_template_ammo(
             }
             for ammo in u.get_ammo()? {
                 let ammo = ammo?;
+                if is_cannon_ammo(&ammo) {
+                    continue;
+                }
                 if ammo_matches_template_key(&ammo, &keys) {
                     return Ok(true);
                 }
@@ -2917,6 +3033,13 @@ pub(super) fn flight_any_in_air(lua: MizLua, names: &[String]) -> Result<bool> {
     Ok(names
         .iter()
         .any(|n| group_in_air(lua, n).unwrap_or(false)))
+}
+
+pub(super) fn flight_all_in_air(lua: MizLua, names: &[String]) -> Result<bool> {
+    Ok(!names.is_empty()
+        && names
+            .iter()
+            .all(|n| group_in_air(lua, n).unwrap_or(false)))
 }
 
 pub(super) fn flight_any_alive(lua: MizLua, names: &[String]) -> bool {
@@ -3160,6 +3283,10 @@ fn begin_duration_shutdown(
 const BINGO_FUEL_FRAC: f32 = 0.25;
 /// Ignore bingo checks right after entering `OnMission` (DCS ammo/fuel reads settle).
 const ON_MISSION_BINGO_MIN: Duration = Duration::seconds(120);
+/// Min interval between airborne mission re-pushes when DCS drops `hasTask`.
+const AIR_TASK_REPUSH_MIN: Duration = Duration::seconds(90);
+/// After CALCM rack reads empty, wait for in-flight missiles before weapon bingo RTB.
+const CALCM_SALVO_SETTLE: Duration = Duration::minutes(12);
 /// Re-push orbit when airframes drift this far from the CAP mark (e.g. stale ME template task).
 const ORBIT_LOST_RADIUS_M: f64 = 100_000.;
 /// Max slant range to allied tanker for bingo AAR (m).
@@ -3572,20 +3699,21 @@ fn controller_has_active_task(lua: MizLua, dcs_name: &str) -> bool {
         .unwrap_or(false)
 }
 
-fn ensure_airborne_orbit_task(
+fn ensure_airborne_mission_task(
     lua: MizLua,
     db: &mut Db,
     spctx: &SpawnCtx,
     idx: &MizIndex,
     gid: GroupId,
     dcs_names: &[String],
+    now: DateTime<Utc>,
 ) -> Result<()> {
-    let phase = {
+    let (phase, mission_kind, last_push) = {
         let group = group!(db, gid)?;
         let DeployKind::Action { ai_air, .. } = &group.origin else {
             return Ok(());
         };
-        ai_air.phase
+        (ai_air.phase, ai_air.mission_kind, ai_air.last_airborne_task_push)
     };
     if phase != AiAirPhase::OnMission {
         return Ok(());
@@ -3599,18 +3727,29 @@ fn ensure_airborne_orbit_task(
     };
     let orbit_lost = flight_center_pos(lua, dcs_names)
         .ok()
-        .filter(|cur| orbit_center != Vector2::default())
+        .filter(|_| orbit_center != Vector2::default())
         .map(|cur| !near_point(cur, orbit_center, ORBIT_LOST_RADIUS_M))
         .unwrap_or(false);
+    let repush_due = last_push
+        .map(|t| now - t >= AIR_TASK_REPUSH_MIN)
+        .unwrap_or(true);
+    let task_label = if mission_kind == AiAirMissionKind::Attackers {
+        "cas"
+    } else {
+        "orbit"
+    };
     for dcs_name in dcs_names {
-        if !group_in_air(lua, dcs_name).unwrap_or(false) {
+        if group_on_ground(lua, dcs_name).unwrap_or(false) {
             continue;
         }
         if controller_has_active_task(lua, dcs_name) && !orbit_lost {
             continue;
         }
+        if !orbit_lost && !repush_due {
+            continue;
+        }
         if orbit_lost {
-            log::info!("ai air {gid}: far from orbit mark -> re-pushing mission");
+            log::info!("ai air {gid}: far from orbit mark -> re-pushing {task_label} mission");
         }
         if let Ok(cur) = flight_center_pos(lua, dcs_names) {
             let group = group_mut!(db, gid)?;
@@ -3622,10 +3761,74 @@ fn ensure_airborne_orbit_task(
                 }
             }
         }
-        // Ingress from live position; orbit center stays active_mission.pos.
         let route = db.regenerate_ai_air_mission(lua, spctx, idx, gid, false)?;
         db.ai_air_push_mission_to_name(spctx, dcs_name, route, true)?;
-        log::info!("ai air {gid}: re-pushed orbit (no active DCS task)");
+        log::info!("ai air {gid}: re-pushed {task_label} (no active DCS task)");
+    }
+    {
+        let group = group_mut!(db, gid)?;
+        if let DeployKind::Action { ai_air, .. } = &mut group.origin {
+            ai_air.last_airborne_task_push = Some(now);
+        }
+    }
+    Ok(())
+}
+
+fn ensure_one_shot_outbound_task(
+    lua: MizLua,
+    db: &mut Db,
+    spctx: &SpawnCtx,
+    idx: &MizIndex,
+    gid: GroupId,
+    dcs_names: &[String],
+    now: DateTime<Utc>,
+) -> Result<()> {
+    let (phase, last_push) = {
+        let group = group!(db, gid)?;
+        let DeployKind::Action { ai_air, .. } = &group.origin else {
+            return Ok(());
+        };
+        (ai_air.phase, ai_air.last_airborne_task_push)
+    };
+    if phase != AiAirPhase::OnMission {
+        return Ok(());
+    }
+    let repush_due = last_push
+        .map(|t| now - t >= AIR_TASK_REPUSH_MIN)
+        .unwrap_or(true);
+    let mut pushed = false;
+    for dcs_name in dcs_names {
+        if group_on_ground(lua, dcs_name).unwrap_or(false) {
+            continue;
+        }
+        if controller_has_active_task(lua, dcs_name) {
+            continue;
+        }
+        if !repush_due {
+            continue;
+        }
+        let route = db.regenerate_ai_air_mission(lua, spctx, idx, gid, false)?;
+        db.ai_air_push_mission_to_name(spctx, dcs_name, route, true)?;
+        log::info!("ai air {gid}: re-pushed one-shot outbound (no active DCS task)");
+        pushed = true;
+    }
+    if pushed {
+        let group = group_mut!(db, gid)?;
+        if let DeployKind::Action { ai_air, .. } = &mut group.origin {
+            ai_air.last_airborne_task_push = Some(now);
+        }
+    }
+    Ok(())
+}
+
+fn idle_ground_engine_off(lua: MizLua, dcs_name: &str) -> Result<()> {
+    if !group_on_ground(lua, dcs_name).unwrap_or(false) {
+        return Ok(());
+    }
+    if let Ok(group) = Group::get_by_name(lua, dcs_name) {
+        if let Ok(con) = group.get_controller() {
+            let _ = con.set_on_off(false);
+        }
     }
     Ok(())
 }
@@ -3650,6 +3853,137 @@ fn ensure_ground_parking_task(
             .or(slots.first())
             .ok_or_else(|| anyhow!("no hub slot"))?;
         push_parking_await(lua, db, spctx, hub, slot, dcs_name)?;
+        idle_ground_engine_off(lua, dcs_name)?;
+    }
+    Ok(())
+}
+
+fn ensure_rtb_inbound_task(
+    lua: MizLua,
+    db: &mut Db,
+    spctx: &SpawnCtx,
+    gid: GroupId,
+    hub_pick: &HubPick,
+    dcs_names: &[String],
+    land_mode: HubLandMode,
+    inbound_alt: f64,
+    inbound_alt_typ: AltType,
+    now: DateTime<Utc>,
+) -> Result<()> {
+    let (phase, last_push) = {
+        let group = group!(db, gid)?;
+        let DeployKind::Action { ai_air, .. } = &group.origin else {
+            return Ok(());
+        };
+        (ai_air.phase, ai_air.last_airborne_task_push)
+    };
+    if phase != AiAirPhase::RtbInbound {
+        return Ok(());
+    }
+    let repush_due = last_push
+        .map(|t| now - t >= AIR_TASK_REPUSH_MIN)
+        .unwrap_or(true);
+    let mut pushed = false;
+    for (i, dcs_name) in dcs_names.iter().enumerate() {
+        if group_on_ground(lua, dcs_name).unwrap_or(false) {
+            continue;
+        }
+        if controller_has_active_task(lua, dcs_name) && !repush_due {
+            continue;
+        }
+        let slot = hub_pick
+            .slots
+            .get(i)
+            .or(hub_pick.slots.first())
+            .ok_or_else(|| anyhow!("hub has no landing slot"))?;
+        let route = rtb_inbound_route(
+            lua,
+            hub_pick,
+            slot,
+            inbound_alt,
+            inbound_alt_typ.clone(),
+            land_mode,
+        )?;
+        db.ai_air_push_mission_to_name(spctx, dcs_name, route, true)?;
+        log::info!("ai air {gid}: re-pushed RTB inbound (no active DCS task)");
+        pushed = true;
+    }
+    if pushed {
+        let group = group_mut!(db, gid)?;
+        if let DeployKind::Action { ai_air, .. } = &mut group.origin {
+            ai_air.last_airborne_task_push = Some(now);
+        }
+    }
+    Ok(())
+}
+
+fn ensure_cyclic_ground_recovery(
+    lua: MizLua,
+    db: &mut Db,
+    spctx: &SpawnCtx,
+    idx: &MizIndex,
+    gid: GroupId,
+    side: Side,
+    hub_pick: &HubPick,
+    hub_pos: Vector2,
+    dcs_names: &[String],
+) -> Result<()> {
+    if flight_all_on_ground_at_hub(lua, dcs_names, hub_pick, hub_pos, &hub_pick.slots) {
+        log::info!("ai air {gid}: on-mission on ground at hub -> parking hold / servicing");
+        ensure_ground_parking_task(lua, db, spctx, hub_pick, &hub_pick.slots, dcs_names)?;
+        let group = group_mut!(db, gid)?;
+        if let DeployKind::Action { ai_air, .. } = &mut group.origin {
+            ai_air.servicing_handoff = false;
+            set_phase(ai_air, AiAirPhase::Servicing);
+        }
+        return Ok(());
+    }
+    log::info!("ai air {gid}: on-mission on ground off parking -> RTB nearest hub");
+    issue_rtb(
+        db,
+        lua,
+        spctx,
+        idx,
+        side,
+        RtbRequest {
+            group: gid,
+            hub: None,
+            hold: false,
+            preserve_mission_kind: true,
+            duration_shutdown: false,
+        },
+    )
+}
+
+fn ensure_one_shot_ground_depart(
+    lua: MizLua,
+    db: &mut Db,
+    spctx: &SpawnCtx,
+    gid: GroupId,
+    hub_pick: &HubPick,
+    dcs_names: &[String],
+) -> Result<()> {
+    let slots = {
+        let group = group!(db, gid)?;
+        let DeployKind::Action { ai_air, .. } = &group.origin else {
+            return Ok(());
+        };
+        ai_air.hub_slots.clone()
+    };
+    for (i, dcs_name) in dcs_names.iter().enumerate() {
+        if group_in_air(lua, dcs_name).unwrap_or(false) {
+            continue;
+        }
+        if controller_has_active_task(lua, dcs_name) {
+            continue;
+        }
+        let slot = slots
+            .get(i)
+            .or(slots.first())
+            .ok_or_else(|| anyhow!("no hub slot for one-shot depart"))?;
+        let route = bootstrap_route(lua, db, hub_pick, slot, BootstrapMode::ColdSpawn, false)?;
+        db.ai_air_push_mission_to_name(spctx, dcs_name, route, false)?;
+        log::info!("ai air {gid}: one-shot on ground -> re-pushed bootstrap takeoff");
     }
     Ok(())
 }
@@ -3665,7 +3999,176 @@ fn mission_kind_one_shot(kind: AiAirMissionKind) -> bool {
     matches!(kind, AiAirMissionKind::PointToPoint)
 }
 
-const ONE_SHOT_RETURN_HUB_RADIUS_M: f64 = 8_000.;
+fn mission_kind_cycles(kind: AiAirMissionKind) -> bool {
+    !mission_kind_one_shot(kind)
+}
+
+fn destroy_ai_air_dcs_units(lua: MizLua, names: &[String]) -> Result<()> {
+    for name in names {
+        if let Ok(g) = Group::get_by_name(lua, name.as_str()) {
+            if g.is_exist()? {
+                g.destroy()?;
+            }
+        }
+    }
+    Ok(())
+}
+
+fn alive_ai_air_unit_count(db: &Db, gid: GroupId) -> Result<usize> {
+    let group = group!(db, gid)?;
+    Ok(group
+        .units
+        .into_iter()
+        .filter(|uid| db.persisted.units.get(uid).is_some_and(|u| !u.dead))
+        .count())
+}
+
+fn hub_slots_for_cycle_respawn(
+    lua: MizLua,
+    db: &Db,
+    gid: GroupId,
+    side: Side,
+    hub_oid: ObjectiveId,
+    plane_kind: AiPlaneKind,
+    alive_count: usize,
+    existing: &[HubSlot],
+) -> Result<Vec<HubSlot>> {
+    if alive_count == 0 {
+        bail!("no alive units for hub slots");
+    }
+    let obj = objective!(db, hub_oid)?;
+    let claimed = claimed_hub_slots_excluding(db, Some(gid));
+    if let Ok(slots) = free_slots_at_hub(lua, db, obj, side, plane_kind, alive_count, &claimed) {
+        if slots.len() >= alive_count {
+            return Ok(slots.into_iter().take(alive_count).collect());
+        }
+    }
+    let refreshed = refresh_hub_slots(lua, db, hub_oid, existing, plane_kind)?;
+    if refreshed.len() < alive_count {
+        bail!(
+            "hub has {} slot(s), need {} for cycle respawn",
+            refreshed.len(),
+            alive_count
+        );
+    }
+    Ok(refreshed.into_iter().take(alive_count).collect())
+}
+
+fn apply_post_service_template_fuel(
+    lua: MizLua,
+    db: &mut Db,
+    hub_oid: ObjectiveId,
+    unit: &miz::Unit<'_>,
+    airframe_type: &str,
+) -> Result<u32> {
+    let cap = spawn_fuel_kg_per_airframe(airframe_type);
+    let hub_has_fuel = fuel_available_at_hub(lua, db, hub_oid).unwrap_or(false);
+    let fuel_kg = if hub_has_fuel {
+        cap
+    } else {
+        let from_template = read_unit_fuel_kg(unit, cap);
+        if from_template > 0 {
+            from_template
+        } else {
+            cap
+        }
+    };
+    apply_me_template_fuel_kg(unit, fuel_kg)?;
+    if hub_has_fuel {
+        let liq = spawn_liquid_type(airframe_type);
+        if let Err(e) = deduct_hub_liquid(lua, db, hub_oid, liq, fuel_kg) {
+            log::warn!("cycle respawn fuel warehouse deduct failed: {e:#}");
+        }
+    }
+    Ok(fuel_kg)
+}
+
+/// Respawn alive members on hub parking (MOOSE parking respawn); optional bootstrap takeoff.
+fn cycle_respawn_ai_air_at_hub<'lua>(
+    lua: MizLua<'lua>,
+    db: &mut Db,
+    spctx: &SpawnCtx<'lua>,
+    idx: &MizIndex,
+    gid: GroupId,
+    side: Side,
+    hub_pick: &HubPick,
+    plane_kind: AiPlaneKind,
+    launch: bool,
+    perf: Option<&mut bfprotocols::perf::PerfInner>,
+) -> Result<()> {
+    let alive_count = alive_ai_air_unit_count(db, gid)?;
+    if alive_count == 0 {
+        bail!("no alive units for cycle respawn");
+    }
+    let dcs_names_before = dcs_spawn_names_for(db, gid)?;
+    let _ = prune_alive_dcs_names(db, lua, gid, &dcs_names_before);
+    destroy_ai_air_dcs_units(lua, &dcs_names_before)?;
+    let slots = hub_slots_for_cycle_respawn(
+        lua,
+        db,
+        gid,
+        side,
+        hub_pick.oid,
+        plane_kind,
+        alive_count,
+        &hub_pick.slots,
+    )?;
+    let hub_pick = finish_hub_pick(
+        lua,
+        db,
+        hub_pick.oid,
+        slots.clone(),
+        hub_pick.airbase_id,
+    )?;
+    {
+        let group = group_mut!(db, gid)?;
+        if let DeployKind::Action { ai_air, .. } = &mut group.origin {
+            ai_air.hub_slots = slots.clone();
+        }
+    }
+    spawn_ai_air_group(
+        perf,
+        db,
+        spctx,
+        idx,
+        gid,
+        &hub_pick,
+        AiAirPersistSpawn::PostServiceCycle,
+    )?;
+    let dcs_names = dcs_spawn_names_for(db, gid)?;
+    if launch {
+        push_bootstrap_missions(lua, db, spctx, gid, &hub_pick, &dcs_names)?;
+        let group = group_mut!(db, gid)?;
+        if let DeployKind::Action { ai_air, .. } = &mut group.origin {
+            ai_air.bootstrap_mission_pushed = true;
+            ai_air.bootstrap_grounded = true;
+            ai_air.bootstrap_retries = 0;
+            set_phase(ai_air, AiAirPhase::Bootstrap);
+        }
+        log::info!(
+            "ai air {gid}: cycle respawn -> bootstrap ({} unit(s))",
+            dcs_names.len()
+        );
+    } else {
+        for (i, dcs_name) in dcs_names.iter().enumerate() {
+            let slot = slots
+                .get(i)
+                .or(slots.first())
+                .ok_or_else(|| anyhow!("no hub slot for parking await"))?;
+            push_parking_await(lua, db, spctx, &hub_pick, slot, dcs_name)?;
+            idle_ground_engine_off(lua, dcs_name)?;
+        }
+        let group = group_mut!(db, gid)?;
+        if let DeployKind::Action { ai_air, .. } = &mut group.origin {
+            set_phase(ai_air, AiAirPhase::AwaitingLaunch);
+        }
+        log::info!(
+            "ai air {gid}: cycle respawn -> awaiting launch ({} unit(s), parking hold)",
+            dcs_names.len()
+        );
+    }
+    Ok(())
+}
 
 fn group_min_fuel(lua: MizLua, group_name: &str) -> Result<Option<f32>> {
     let g = Group::get_by_name(lua, group_name)?;
@@ -3679,6 +4182,28 @@ fn group_min_fuel(lua: MizLua, group_name: &str) -> Result<Option<f32>> {
         min = Some(min.map(|m| m.min(f)).unwrap_or(f));
     }
     Ok(min)
+}
+
+fn flight_all_fueled(lua: MizLua, names: &[String], min_frac: f32) -> Result<bool> {
+    Ok(!names.is_empty()
+        && names.iter().all(|n| {
+            group_min_fuel(lua, n)
+                .ok()
+                .flatten()
+                .is_some_and(|f| f > min_frac)
+        }))
+}
+
+fn is_cannon_ammo(ammo: &dcso3::unit::Ammo<'_>) -> bool {
+    if let Some(flags) = ammo_weapon_flags(ammo) {
+        if flags & WeaponFlag::BuiltInCannon as u64 != 0
+            || flags & WeaponFlag::Cannons as u64 != 0
+        {
+            return true;
+        }
+    }
+    let typ = ammo.type_name().unwrap_or_default().to_ascii_uppercase();
+    typ.contains("CANNON") || typ.contains("GUN") || typ.contains("VULCAN") || typ.contains("GSH")
 }
 
 fn flight_min_fuel(lua: MizLua, names: &[String]) -> Result<Option<f32>> {
@@ -4216,7 +4741,6 @@ fn ai_air_rehydrate_allowed(phase: AiAirPhase) -> bool {
     )
 }
 
-/// Mark flight as lost after DCS reports unit destruction (kill, crash, collision).
 pub(super) fn mark_ai_air_attrition(db: &mut Db, gid: GroupId) {
     let Some(group) = db.persisted.groups.get_mut_cow(&gid) else {
         return;
@@ -4228,20 +4752,8 @@ pub(super) fn mark_ai_air_attrition(db: &mut Db, gid: GroupId) {
     }
 }
 
-fn ai_air_has_attrition(db: &Db, gid: GroupId) -> bool {
-    let Ok(group) = group!(db, gid) else {
-        return false;
-    };
-    match &group.origin {
-        DeployKind::Action { ai_air, .. } => ai_air.attrition,
-        _ => false,
-    }
-}
-
 fn ai_air_may_rehydrate(db: &Db, gid: GroupId, phase: AiAirPhase) -> bool {
-    ai_air_rehydrate_allowed(phase)
-        && !ai_air_has_attrition(db, gid)
-        && !group_has_dead_persisted_units(db, gid)
+    ai_air_rehydrate_allowed(phase) && group_has_live_persisted_units(db, gid)
 }
 
 fn finalize_ai_air_attrition(db: &mut Db, gid: GroupId) -> Result<()> {
@@ -4291,14 +4803,39 @@ fn try_rehydrate_vanished_ai_air(
     perf: Option<&mut bfprotocols::perf::PerfInner>,
 ) -> Result<()> {
     log::warn!("ai air {gid}: DCS units missing, re-spawning from persist");
+    let plane_kind = plane_cfg_for_ai_air(db, gid)?.kind;
+    let side = group!(db, gid)?.side;
+    let alive_count = alive_ai_air_unit_count(db, gid)?;
+    let slots = hub_slots_for_cycle_respawn(
+        lua,
+        db,
+        gid,
+        side,
+        hub.oid,
+        plane_kind,
+        alive_count,
+        &hub.slots,
+    )?;
+    let hub = finish_hub_pick(lua, db, hub.oid, slots.clone(), hub.airbase_id)?;
+    {
+        let group = group_mut!(db, gid)?;
+        if let DeployKind::Action { ai_air, .. } = &mut group.origin {
+            ai_air.hub_slots = slots;
+        }
+    }
+    let spawn_mode = if mission_kind_cycles(ai_air_mission_kind(db, gid)) {
+        AiAirPersistSpawn::PostServiceCycle
+    } else {
+        AiAirPersistSpawn::PersistGround
+    };
     spawn_ai_air_group(
         perf,
         db,
         spctx,
         idx,
         gid,
-        hub,
-        AiAirPersistSpawn::PersistGround,
+        &hub,
+        spawn_mode,
     )?;
     let dcs_names = dcs_spawn_names_for(db, gid)?;
     match phase {
@@ -4307,10 +4844,10 @@ fn try_rehydrate_vanished_ai_air(
             if let DeployKind::Action { ai_air, .. } = &mut group.origin {
                 set_phase(ai_air, AiAirPhase::AwaitingLaunch);
             }
-            ensure_ground_parking_task(lua, db, spctx, hub, &hub.slots, &dcs_names)?;
+            ensure_ground_parking_task(lua, db, spctx, &hub, &hub.slots, &dcs_names)?;
         }
         AiAirPhase::Bootstrap => {
-            push_bootstrap_missions(lua, db, spctx, gid, hub, &dcs_names)?;
+            push_bootstrap_missions(lua, db, spctx, gid, &hub, &dcs_names)?;
         }
         AiAirPhase::OnMission | AiAirPhase::Departing | AiAirPhase::RtbInbound => {
             if flight_any_in_air(lua, &dcs_names).unwrap_or(false) {
@@ -4318,6 +4855,19 @@ fn try_rehydrate_vanished_ai_air(
                 for dcs_name in &dcs_names {
                     db.ai_air_push_mission_to_name(spctx, dcs_name, route.clone(), true)?;
                 }
+            } else if mission_kind_cycles(ai_air_mission_kind(db, gid)) {
+                cycle_respawn_ai_air_at_hub(
+                    lua,
+                    db,
+                    spctx,
+                    idx,
+                    gid,
+                    side,
+                    &hub,
+                    plane_kind,
+                    true,
+                    None,
+                )?;
             } else {
                 push_post_service_depart(
                     lua,
@@ -4325,7 +4875,7 @@ fn try_rehydrate_vanished_ai_air(
                     spctx,
                     idx,
                     gid,
-                    hub,
+                    &hub,
                     &hub.slots,
                     &dcs_names,
                     plane_cfg_for_ai_air(db, gid)?.kind,
@@ -4394,22 +4944,17 @@ pub(super) fn advance_ai_air(
             return Ok(());
         }
         if !group_has_live_persisted_units(db, gid) {
-            db.delete_group(&gid)?;
-            return Ok(());
-        }
-        if !ai_air_may_rehydrate(db, gid, phase) {
-            if ai_air_has_attrition(db, gid) || group_has_dead_persisted_units(db, gid) {
-                log::info!("ai air {gid}: attrition — not re-spawning destroyed units");
-            } else {
-                log::warn!(
-                    "ai air {gid}: all DCS units gone in phase {:?} — not re-spawning",
-                    phase
-                );
-            }
             finalize_ai_air_attrition(db, gid)?;
             return Ok(());
         }
-        if mission_kind_one_shot(ai_air_mission_kind(db, gid)) {
+        if mission_kind_one_shot(mission_kind) {
+            return Ok(());
+        }
+        if !ai_air_may_rehydrate(db, gid, phase) {
+            log::warn!(
+                "ai air {gid}: all DCS units gone in phase {:?} — not re-spawning",
+                phase
+            );
             return Ok(());
         }
         let Some(hub_oid) = hub else {
@@ -4645,7 +5190,7 @@ pub(super) fn advance_ai_air(
                     _ => false,
                 }
             };
-            if in_air && grounded {
+            if in_air && grounded && flight_all_in_air(lua, &dcs_names).unwrap_or(false) {
                 let _snap = {
                     let group = group_mut!(db, gid)?;
                     let DeployKind::Action { ai_air, .. } = &mut group.origin else {
@@ -4661,10 +5206,10 @@ pub(super) fn advance_ai_air(
                     log::warn!("ai air {gid}: warehouse sync after bootstrap failed: {e:#}");
                 }
                 let route = db.regenerate_ai_air_mission(lua, spctx, idx, gid, false)?;
-                let kind = if mission_kind == AiAirMissionKind::Attackers {
-                    "cas"
-                } else {
-                    "orbit"
+                let kind = match mission_kind {
+                    AiAirMissionKind::Attackers => "cas",
+                    AiAirMissionKind::PointToPoint => "outbound",
+                    _ => "orbit",
                 };
                 log::info!("ai air {gid}: airborne -> on-mission {kind} ({} wpts)", route.len());
                 db.ai_air_push_mission(spctx, gid, route, true)?;
@@ -4719,26 +5264,27 @@ pub(super) fn advance_ai_air(
                 }
             } else if mission_kind_one_shot(mission_kind) {
                 if in_air {
-                    let return_home = match &group!(db, gid)?.origin {
-                        DeployKind::Action {
-                            destination: None,
-                            rtb: Some(origin),
-                            ai_air,
-                            ..
-                        } if !ai_air.duration_shutdown => flight_center_pos(lua, &dcs_names)
-                            .map(|p| near_point(p, *origin, ONE_SHOT_RETURN_HUB_RADIUS_M))
-                            .unwrap_or(false),
-                        _ => false,
+                    let (has_dest, shutdown, hub) = {
+                        let group = group!(db, gid)?;
+                        match &group.origin {
+                            DeployKind::Action {
+                                destination,
+                                ai_air,
+                                ..
+                            } => (
+                                destination.is_some(),
+                                ai_air.duration_shutdown,
+                                ai_air.hub,
+                            ),
+                            _ => (false, false, None),
+                        }
                     };
-                    if return_home {
-                        log::info!("ai air {gid}: one-shot return near hub -> shutdown RTB");
-                        let origin_hub = {
-                            let group = group!(db, gid)?;
-                            let DeployKind::Action { ai_air, .. } = &group.origin else {
-                                return Ok(());
-                            };
-                            ai_air.hub
-                        };
+                    if has_dest {
+                        ensure_one_shot_outbound_task(
+                            lua, db, spctx, idx, gid, &dcs_names, now,
+                        )?;
+                    } else if !shutdown {
+                        log::info!("ai air {gid}: one-shot deploy done -> RTB shutdown");
                         {
                             let group = group_mut!(db, gid)?;
                             if let DeployKind::Action { ai_air, .. } = &mut group.origin {
@@ -4753,17 +5299,33 @@ pub(super) fn advance_ai_air(
                             side,
                             RtbRequest {
                                 group: gid,
-                                hub: origin_hub,
+                                hub,
                                 hold: false,
                                 preserve_mission_kind: true,
                                 duration_shutdown: true,
                             },
                         )?;
-                        return Ok(());
                     }
-                    ensure_airborne_orbit_task(lua, db, spctx, idx, gid, &dcs_names)?;
+                } else if on_ground {
+                    ensure_one_shot_ground_depart(
+                        lua, db, spctx, gid, &hub_pick, &dcs_names,
+                    )?;
                 }
             } else {
+                if on_ground && !in_air {
+                    ensure_cyclic_ground_recovery(
+                        lua,
+                        db,
+                        spctx,
+                        idx,
+                        gid,
+                        side,
+                        &hub_pick,
+                        hub_pos,
+                        &dcs_names,
+                    )?;
+                    return Ok(());
+                }
                 let mut issued_rtb = false;
                 let aar_state = {
                     let group = group!(db, gid)?;
@@ -4872,7 +5434,15 @@ pub(super) fn advance_ai_air(
                     if !issued_rtb && mission_kind_weapon_bingo(mission_kind) {
                         let tpl = spctx.get_template(idx, GroupKind::Any, side, &template_name)?;
                         let template_unit = tpl.group.units()?.get(1)?;
-                        if weapon_bingo(lua, db, gid, &dcs_names, &template_unit, mission_kind)? {
+                        if weapon_bingo(
+                            lua,
+                            db,
+                            gid,
+                            &dcs_names,
+                            &template_unit,
+                            mission_kind,
+                            now,
+                        )? {
                             log::info!("ai air {gid}: bingo weapons -> RTB nearest hub");
                             issue_rtb(
                                 db,
@@ -4896,12 +5466,41 @@ pub(super) fn advance_ai_air(
                     for dcs_name in &dcs_names {
                         let _ = apply_fowl_air_options_to_name(lua, dcs_name);
                     }
-                    ensure_airborne_orbit_task(lua, db, spctx, idx, gid, &dcs_names)?;
+                    ensure_airborne_mission_task(
+                        lua, db, spctx, idx, gid, &dcs_names, now,
+                    )?;
                 }
             }
         }
         AiAirPhase::RtbInbound => {
+            let land_mode = if duration_shutdown {
+                HubLandMode::DurationShutdown
+            } else {
+                HubLandMode::CycleRtb
+            };
+            let (inbound_alt, inbound_alt_typ) = {
+                let group = group!(db, gid)?;
+                let DeployKind::Action { ai_air, .. } = &group.origin else {
+                    return Ok(());
+                };
+                (
+                    ai_air.active_mission.alt,
+                    ai_air.active_mission.alt_typ.clone(),
+                )
+            };
             if !flight_all_on_ground_at_hub(lua, &dcs_names, &hub_pick, hub_pos, &hub_pick.slots) {
+                ensure_rtb_inbound_task(
+                    lua,
+                    db,
+                    spctx,
+                    gid,
+                    &hub_pick,
+                    &dcs_names,
+                    land_mode,
+                    inbound_alt,
+                    inbound_alt_typ,
+                    now,
+                )?;
                 return Ok(());
             }
             if duration_shutdown {
@@ -4931,6 +5530,10 @@ pub(super) fn advance_ai_air(
             if already_handoff {
                 return Ok(());
             }
+            if !flight_all_on_ground_at_hub(lua, &dcs_names, &hub_pick, hub_pos, &hub_pick.slots) {
+                ensure_ground_parking_task(lua, db, spctx, &hub_pick, &hub_pick.slots, &dcs_names)?;
+                return Ok(());
+            }
             if now - phase_since < Duration::seconds(3) {
                 return Ok(());
             }
@@ -4938,9 +5541,8 @@ pub(super) fn advance_ai_air(
                 ensure_ground_parking_task(lua, db, spctx, &hub_pick, &hub_pick.slots, &dcs_names)?;
                 return Ok(());
             }
-            let fuel_ok = flight_min_fuel(lua, &dcs_names)?
-                .map(|f| f > BINGO_FUEL_FRAC + 0.05)
-                .unwrap_or(false);
+            let fuel_min = BINGO_FUEL_FRAC + 0.05;
+            let fuel_ok = flight_all_fueled(lua, &dcs_names, fuel_min)?;
             if !fuel_ok && now - phase_since < servicing_complete_wait() + Duration::seconds(90) {
                 ensure_ground_parking_task(lua, db, spctx, &hub_pick, &hub_pick.slots, &dcs_names)?;
                 return Ok(());
@@ -4949,9 +5551,7 @@ pub(super) fn advance_ai_air(
             if let Err(e) = db.sync_warehouse_to_objective(lua, hub) {
                 log::warn!("ai air {gid}: warehouse sync after servicing failed: {e:#}");
             }
-            let aircraft_fueled = flight_min_fuel(lua, &dcs_names)?
-                .map(|f| f > BINGO_FUEL_FRAC + 0.05)
-                .unwrap_or(false);
+            let aircraft_fueled = flight_all_fueled(lua, &dcs_names, fuel_min)?;
             let hub_has_fuel = fuel_available_at_hub(lua, db, hub).unwrap_or(false);
             let (hold, panel) = {
                 let group = group!(db, gid)?;
@@ -4974,13 +5574,18 @@ pub(super) fn advance_ai_air(
                 (ai_air.rtb_hold, panel)
             };
             let departing = !hold && (aircraft_fueled || hub_has_fuel);
+            if mission_kind_cycles(mission_kind) && departing && !aircraft_fueled && hub_has_fuel {
+                log::info!(
+                    "ai air {gid}: servicing complete, cycle respawn with full warehouse fuel"
+                );
+            }
             {
                 let group = group_mut!(db, gid)?;
                 if let DeployKind::Action { ai_air, .. } = &mut group.origin {
                     ai_air.servicing_handoff = true;
                     if hold || (!aircraft_fueled && !hub_has_fuel) {
                         set_phase(ai_air, AiAirPhase::AwaitingLaunch);
-                    } else {
+                    } else if !mission_kind_cycles(mission_kind) {
                         set_phase(ai_air, AiAirPhase::Departing);
                     }
                 }
@@ -4989,31 +5594,87 @@ pub(super) fn advance_ai_air(
                 db.ephemeral.panel_to_player(&db.persisted, 15, &ucid, msg);
             }
             if !departing {
-                ensure_ground_parking_task(lua, db, spctx, &hub_pick, &hub_pick.slots, &dcs_names)?;
+                if mission_kind_cycles(mission_kind) {
+                    cycle_respawn_ai_air_at_hub(
+                        lua,
+                        db,
+                        spctx,
+                        idx,
+                        gid,
+                        side,
+                        &hub_pick,
+                        plane_kind,
+                        false,
+                        perf,
+                    )?;
+                } else {
+                    ensure_ground_parking_task(
+                        lua,
+                        db,
+                        spctx,
+                        &hub_pick,
+                        &hub_pick.slots,
+                        &dcs_names,
+                    )?;
+                }
                 return Ok(());
             }
-            log::info!("ai air {gid}: servicing done -> depart (post-service takeoff + orbit)");
-            let slots = {
-                let group = group!(db, gid)?;
-                let DeployKind::Action { ai_air, .. } = &group.origin else {
-                    return Ok(());
+            if mission_kind_cycles(mission_kind) {
+                log::info!("ai air {gid}: servicing done -> cycle respawn + bootstrap");
+                cycle_respawn_ai_air_at_hub(
+                    lua,
+                    db,
+                    spctx,
+                    idx,
+                    gid,
+                    side,
+                    &hub_pick,
+                    plane_kind,
+                    true,
+                    perf,
+                )?;
+            } else {
+                log::info!("ai air {gid}: servicing done -> depart (post-service takeoff + orbit)");
+                let slots = {
+                    let group = group!(db, gid)?;
+                    let DeployKind::Action { ai_air, .. } = &group.origin else {
+                        return Ok(());
+                    };
+                    ai_air.hub_slots.clone()
                 };
-                ai_air.hub_slots.clone()
-            };
-            push_post_service_depart(
-                lua,
-                db,
-                spctx,
-                idx,
-                gid,
-                &hub_pick,
-                &slots,
-                &dcs_names,
-                plane_kind,
-            )?;
+                push_post_service_depart(
+                    lua,
+                    db,
+                    spctx,
+                    idx,
+                    gid,
+                    &hub_pick,
+                    &slots,
+                    &dcs_names,
+                    plane_kind,
+                )?;
+            }
         }
         AiAirPhase::AwaitingLaunch => {
             ensure_ground_parking_task(lua, db, spctx, &hub_pick, &hub_pick.slots, &dcs_names)?;
+            if !flight_any_alive(lua, &dcs_names)
+                && group_has_live_persisted_units(db, gid)
+                && mission_kind_cycles(mission_kind)
+            {
+                log::warn!("ai air {gid}: awaiting launch units vanished — cycle respawn hold");
+                cycle_respawn_ai_air_at_hub(
+                    lua,
+                    db,
+                    spctx,
+                    idx,
+                    gid,
+                    side,
+                    &hub_pick,
+                    plane_kind,
+                    false,
+                    perf,
+                )?;
+            }
         }
         AiAirPhase::Departing => {
             if in_air {
@@ -5043,21 +5704,37 @@ pub(super) fn advance_ai_air(
                     ai_air.phase_since
                 };
                 if now - phase_since > Duration::seconds(30) {
-                    log::info!("ai air {gid}: depart retry (post-service takeoff + orbit)");
-                    push_post_service_depart(
-                        lua,
-                        db,
-                        spctx,
-                        idx,
-                        gid,
-                        &hub_pick,
-                        &hub_slots,
-                        &dcs_names,
-                        plane_kind,
-                    )?;
-                    let group = group_mut!(db, gid)?;
-                    if let DeployKind::Action { ai_air, .. } = &mut group.origin {
-                        set_phase(ai_air, AiAirPhase::Departing);
+                    if mission_kind_cycles(mission_kind) {
+                        log::info!("ai air {gid}: depart retry -> cycle respawn + bootstrap");
+                        cycle_respawn_ai_air_at_hub(
+                            lua,
+                            db,
+                            spctx,
+                            idx,
+                            gid,
+                            side,
+                            &hub_pick,
+                            plane_kind,
+                            true,
+                            perf,
+                        )?;
+                    } else {
+                        log::info!("ai air {gid}: depart retry (post-service takeoff + orbit)");
+                        push_post_service_depart(
+                            lua,
+                            db,
+                            spctx,
+                            idx,
+                            gid,
+                            &hub_pick,
+                            &hub_slots,
+                            &dcs_names,
+                            plane_kind,
+                        )?;
+                        let group = group_mut!(db, gid)?;
+                        if let DeployKind::Action { ai_air, .. } = &mut group.origin {
+                            set_phase(ai_air, AiAirPhase::Departing);
+                        }
                     }
                 }
             }
@@ -5188,7 +5865,7 @@ pub(super) fn issue_rtb(
             }
             log::info!("ai air rtb {} -> hub {:?} (explicit)", req.group, obj.name);
             let airbase_id = hub_airbase_id(db, lua, h)?;
-            let n = group!(db, req.group)?.units.len().max(1);
+            let n = alive_ai_air_unit_count(db, req.group)?.max(1);
             let slots = {
                 let group = group!(db, req.group)?;
                 let DeployKind::Action { ai_air, .. } = &group.origin else {
@@ -5209,7 +5886,7 @@ pub(super) fn issue_rtb(
             finish_hub_pick(lua, db, h, slots, airbase_id)?
         }
         None => {
-            let n = group!(db, req.group)?.units.len().max(1);
+            let n = alive_ai_air_unit_count(db, req.group)?.max(1);
             let hub = select_hub_for_ai(
                 lua,
                 db,
@@ -5283,6 +5960,7 @@ pub(super) fn issue_rtb(
             ai_air.duration_shutdown = true;
         }
         clear_aar_state(ai_air);
+        ai_air.calcm_rack_empty_since = None;
         set_phase(ai_air, AiAirPhase::RtbInbound);
         if !req.preserve_mission_kind {
             spec.kind = ActionKind::Rtb;
@@ -5429,25 +6107,43 @@ pub(super) fn issue_start(
     };
     let airbase_id = hub_airbase_id(db, lua, hub_oid)?;
     let hub_pick = finish_hub_pick(lua, db, hub_oid, slots.clone(), airbase_id)?;
+    let cycles = mission_kind_cycles(ai_air_mission_kind(db, gid));
     {
         let group = group_mut!(db, gid)?;
         if let DeployKind::Action { ai_air, .. } = &mut group.origin {
             ai_air.rtb_hold = false;
-            set_phase(ai_air, AiAirPhase::Departing);
+            if !cycles {
+                set_phase(ai_air, AiAirPhase::Departing);
+            }
         }
     }
     let plane_kind = plane_cfg_for_ai_air(db, gid)?.kind;
-    push_post_service_depart(
-        lua,
-        db,
-        spctx,
-        idx,
-        gid,
-        &hub_pick,
-        &slots,
-        &dcs_names,
-        plane_kind,
-    )?;
+    if cycles {
+        cycle_respawn_ai_air_at_hub(
+            lua,
+            db,
+            spctx,
+            idx,
+            gid,
+            side,
+            &hub_pick,
+            plane_kind,
+            true,
+            None,
+        )?;
+    } else {
+        push_post_service_depart(
+            lua,
+            db,
+            spctx,
+            idx,
+            gid,
+            &hub_pick,
+            &slots,
+            &dcs_names,
+            plane_kind,
+        )?;
+    }
     Ok(())
 }
 
@@ -5480,7 +6176,7 @@ pub(super) fn spawn_ai_air_group<'lua>(
             mission_kind,
         )
     };
-    let unit_pool: Vec<(&SpawnedUnit, String)> = {
+    let unit_pool: Vec<(SpawnedUnit, String)> = {
         let group = group!(db, gid)?;
         group
             .units
@@ -5490,7 +6186,7 @@ pub(super) fn spawn_ai_air_group<'lua>(
                     if u.dead {
                         None
                     } else {
-                        Some((u, u.template_name.clone()))
+                        Some((u.clone(), u.template_name.clone()))
                     }
                 })
             })
@@ -5536,7 +6232,9 @@ pub(super) fn spawn_ai_air_group<'lua>(
                     su.fuel_fraction.map(|f| (f * 100.) as u32)
                 );
             }
-            AiAirPersistSpawn::NewDeploy | AiAirPersistSpawn::PersistGround => {
+            AiAirPersistSpawn::NewDeploy
+            | AiAirPersistSpawn::PersistGround
+            | AiAirPersistSpawn::PostServiceCycle => {
                 let slot = hub
                     .slots
                     .get(slot_i)
@@ -5566,6 +6264,19 @@ pub(super) fn spawn_ai_air_group<'lua>(
                     if let Some(frac) = su.fuel_fraction {
                         apply_me_template_fuel_fraction(&unit, airframe_type.as_ref(), frac)?;
                     }
+                }
+                if mode == AiAirPersistSpawn::PostServiceCycle {
+                    let fuel_kg = apply_post_service_template_fuel(
+                        lua,
+                        db,
+                        hub.oid,
+                        &unit,
+                        airframe_type.as_ref(),
+                    )?;
+                    log::info!(
+                        "ai air {gid} unit {}: cycle respawn fuel {fuel_kg} kg",
+                        su.name
+                    );
                 }
             }
         }
@@ -5624,6 +6335,28 @@ pub(super) fn spawn_ai_air_group<'lua>(
                     }
                 }
             }
+        }
+        AiAirPersistSpawn::PostServiceCycle => {
+            if let Err(e) = try_rearm_from_template(
+                lua,
+                db,
+                spctx,
+                idx,
+                side,
+                gid,
+                &cfg_template,
+                hub.oid,
+                None,
+                true,
+            ) {
+                log::warn!("ai air {gid}: cycle respawn armament failed: {e:?}");
+            } else if let Some(ucid) = player_ucid.as_ref() {
+                let _ = panel_stores_report(db, lua, ucid, gid);
+            }
+            log::info!(
+                "ai air {gid}: post-service cycle spawn ({} unit(s))",
+                dcs_names.len()
+            );
         }
         AiAirPersistSpawn::PersistInAir => {
             log::info!("ai air {gid}: in-air persist resume ({} unit(s))", dcs_names.len());
