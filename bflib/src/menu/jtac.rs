@@ -44,6 +44,24 @@ use log::error;
 use smallvec::{SmallVec, smallvec};
 use std::sync::Arc;
 
+/// DCS F10 group menu exposes 10 F-keys; paginate before the 9th root entry.
+const JTAC_ROOT_PAGE: usize = 8;
+
+fn jtac_root_submenu(
+    mc: &MissionCommands,
+    mizgid: GroupId,
+    root: &mut GroupSubMenu,
+    count: &mut usize,
+    label: impl Into<String>,
+) -> Result<GroupSubMenu> {
+    if *count >= JTAC_ROOT_PAGE {
+        *root = mc.add_submenu_for_group(mizgid, "Next>>".into(), Some(root.clone()))?;
+        *count = 0;
+    }
+    *count += 1;
+    mc.add_submenu_for_group(mizgid, label.into(), Some(root.clone()))
+}
+
 pub fn jtac_status(_: MizLua, arg: ArgTuple<Option<Ucid>, JtId>) -> Result<()> {
     let ctx = unsafe { Context::get_mut() };
     let jtac = ctx
@@ -421,12 +439,13 @@ fn add_artillery_menu_for_jtac(
     lua: MizLua,
     mizgid: GroupId,
     ucid: Ucid,
-    root: GroupSubMenu,
+    root: &mut GroupSubMenu,
+    page_count: &mut usize,
     jtac: JtId,
     arty: &[DbGid],
 ) -> Result<()> {
     let mc = MissionCommands::singleton(lua)?;
-    let root = mc.add_submenu_for_group(mizgid, "Artillery".into(), Some(root.clone()))?;
+    let root = jtac_root_submenu(&mc, mizgid, root, page_count, "Artillery")?;
     for gid in arty {
         let root =
             mc.add_submenu_for_group(mizgid, format_compact!("{gid}").into(), Some(root.clone()))?;
@@ -557,13 +576,14 @@ fn add_calcm_menu_for_jtac(
     lua: MizLua,
     mizgid: GroupId,
     ucid: Ucid,
-    root: GroupSubMenu,
+    root: &mut GroupSubMenu,
+    page_count: &mut usize,
     jtac: JtId,
     calcm: &[(DbGid, i32)],
 ) -> Result<()> {
     let mc = MissionCommands::singleton(lua)?;
 
-    let root = mc.add_submenu_for_group(mizgid, "CALCM".into(), Some(root.clone()))?;
+    let root = jtac_root_submenu(&mc, mizgid, root, page_count, "CALCM")?;
     for (gid, ammo) in calcm {
         let root = mc.add_submenu_for_group(
             mizgid,
@@ -737,7 +757,7 @@ pub(super) fn add_menu_for_jtac(
             format_compact!("sl{sl}({typ} {name})")
         }
     };
-    let root = mc.add_submenu_for_group(mizgid, name.clone().into(), Some(root))?;
+    let mut root = mc.add_submenu_for_group(mizgid, name.clone().into(), Some(root))?;
     mc.add_command_for_group(
         mizgid,
         if !pinned {
@@ -851,11 +871,13 @@ pub(super) fn add_menu_for_jtac(
             )?;
         }
     }
+    let mut root_page_count = 0usize;
     add_artillery_menu_for_jtac(
         lua,
         mizgid,
         *ucid,
-        root.clone(),
+        &mut root,
+        &mut root_page_count,
         jtac.gid(),
         jtac.nearby_artillery(),
     )?;
@@ -864,7 +886,8 @@ pub(super) fn add_menu_for_jtac(
         lua,
         mizgid,
         *ucid,
-        root.clone(),
+        &mut root,
+        &mut root_page_count,
         jtac.gid(),
         jtac.nearby_calcm(),
     )?;
@@ -877,10 +900,12 @@ pub(super) fn add_menu_for_jtac(
         })
     });
     for name in bomber_missions {
-        let root = mc.add_submenu_for_group(
+        let root = jtac_root_submenu(
+            &mc,
             mizgid,
-            format_compact!("Bomber Mission({name})").into(),
-            Some(root.clone()),
+            &mut root,
+            &mut root_page_count,
+            format_compact!("Bomber Mission({name})"),
         )?;
         mc.add_command_for_group(
             mizgid,

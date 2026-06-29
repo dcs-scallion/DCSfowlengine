@@ -37,7 +37,7 @@ use bfprotocols::{
 
 };
 use chrono::{Duration, prelude::*};
-use compact_str::format_compact;
+use compact_str::{format_compact, CompactString};
 use core::f64;
 use dcso3::{
     LuaVec2, LuaVec3, MizLua, Quad2, String, Vector2, Vector3,
@@ -89,6 +89,10 @@ fn mobile_farp_anchor_ground2(lua: MizLua<'_>, pad_template: &str) -> Option<Vec
 
 fn default_objective_production() -> u8 {
     100
+}
+
+fn default_true() -> bool {
+    true
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
@@ -413,6 +417,18 @@ pub struct Objective {
     /// Next OPR repair-queue tick (`production_repair` = queued crates).
     #[serde(default)]
     pub(super) production_repair_due: DateTime<Utc>,
+    /// Dead ME `ObjectiveStatic` count (repair crates after spawnable logi is full).
+    #[serde(default)]
+    pub(super) static_repair_need: u16,
+    /// Queued repair crates for ME static respawn.
+    #[serde(default)]
+    pub(super) static_repair: u16,
+    /// Next ME static repair tick (`static_repair` = queued crates).
+    #[serde(default)]
+    pub(super) static_repair_due: DateTime<Utc>,
+    /// All spawnable logi groups alive (gates static repair crate queue + markup).
+    #[serde(default = "default_true")]
+    pub(super) spawnable_logi_repaired: bool,
     pub(super) threatened: bool,
     pub(super) last_threatened_ts: DateTime<Utc>,
     pub(super) last_change_ts: DateTime<Utc>,
@@ -465,6 +481,27 @@ impl Objective {
             return false;
         }
         self.production_repair < self.production_repair_slots_needed()
+    }
+
+    pub(super) fn static_repair_slots_needed(&self) -> u16 {
+        self.static_repair_need
+    }
+
+    pub(super) fn can_queue_static_repair_crate(&self) -> bool {
+        if matches!(self.kind, ObjectiveKind::Production) {
+            return false;
+        }
+        if !self.spawnable_logi_repaired {
+            return false;
+        }
+        if self.static_repair_need == 0 {
+            return false;
+        }
+        self.static_repair < self.static_repair_need
+    }
+
+    pub(super) fn show_static_repair_in_markup(&self) -> bool {
+        self.spawnable_logi_repaired && self.static_repair_need > 0
     }
 
     pub fn captureable(&self) -> bool {
@@ -652,6 +689,55 @@ impl Db {
             }
         }
         best_out.map(|(o, _)| o)
+    }
+
+    fn compute_static_repair_need(&self, obj: &Objective) -> Result<u16> {
+        let Some(groups) = obj.groups.get(&obj.owner) else {
+            return Ok(0);
+        };
+        let mut need = 0u16;
+        for gid in groups {
+            let group = group!(self, gid)?;
+            if group.class != ObjGroupClass::ObjectiveStatic {
+                continue;
+            }
+            for uid in &group.units {
+                if unit!(self, uid)?.dead {
+                    need = need.saturating_add(1);
+                }
+            }
+        }
+        Ok(need)
+    }
+
+    fn objective_static_durability(&self, unit: &SpawnedUnit) -> i64 {
+        if unit.static_max_life > 0 {
+            return unit.static_max_life;
+        }
+        self.ephemeral
+            .cfg
+            .objective_static_units
+            .get(unit.typ.as_str())
+            .and_then(|c| c.max_life)
+            .unwrap_or(i64::MAX)
+    }
+
+    fn compute_spawnable_logi_repaired(&self, obj: &Objective) -> Result<bool> {
+        let Some(groups) = obj.groups.get(&obj.owner) else {
+            return Ok(true);
+        };
+        for gid in groups {
+            let group = group!(self, gid)?;
+            if !group.class.is_logi() {
+                continue;
+            }
+            for uid in &group.units {
+                if unit!(self, uid)?.dead {
+                    return Ok(false);
+                }
+            }
+        }
+        Ok(true)
     }
 
     fn compute_objective_status(&self, obj: &Objective) -> Result<(u8, u8)> {
@@ -1085,6 +1171,10 @@ impl Db {
             production_repair_need: 0,
             feed_hub: None,
             production_repair_due: now,
+            static_repair_need: 0,
+            static_repair: 0,
+            static_repair_due: now,
+            spawnable_logi_repaired: true,
             spawned: true,
             enabled: true,
             threatened: true,
@@ -1189,16 +1279,35 @@ impl Db {
                 (h, l, obj.production, obj.production_hp_sum, obj.production_repair_need)
             }
         };
+        let (static_need, spawnable_ok) = if matches!(kind, ObjectiveKind::Production) {
+            (0u16, true)
+        } else {
+            let obj = objective!(self, oid)?;
+            (
+                self.compute_static_repair_need(obj)?,
+                self.compute_spawnable_logi_repaired(obj)?,
+            )
+        };
         {
             let obj = objective_mut!(self, oid)?;
+            let health_changed = obj.health != health;
+            let logi_changed = obj.logi != logi;
             obj.health = health;
             obj.logi = logi;
             if matches!(kind, ObjectiveKind::Production) {
                 obj.production = production;
                 obj.production_hp_sum = hp_sum;
                 obj.production_repair_need = repair_need;
+            } else {
+                obj.static_repair_need = static_need;
+                obj.spawnable_logi_repaired = spawnable_ok;
+                if obj.static_repair > obj.static_repair_need {
+                    obj.static_repair = obj.static_repair_need;
+                }
             }
-            obj.last_change_ts = now;
+            if health_changed || logi_changed {
+                obj.last_change_ts = now;
+            }
         }
         self.ephemeral.stat(Stat::ObjectiveHealth {
             id: *oid,
@@ -1647,6 +1756,130 @@ impl Db {
         }
         self.ephemeral.dirty();
         let _ = (lua, now);
+        Ok(true)
+    }
+
+    /// Spawnable `RLOGI`/`BLOGI` only; ME `ObjectiveStatic` uses repair-crate queue.
+    pub fn maybe_do_spawnable_logi_repairs(&mut self, now: DateTime<Utc>) -> Result<()> {
+        let oids: Vec<ObjectiveId> = self
+            .persisted
+            .objectives
+            .into_iter()
+            .filter(|(_, obj)| {
+                !matches!(obj.kind, ObjectiveKind::Production)
+                    && !obj.captureable()
+                    && obj.supply > 0
+                    && !obj.spawnable_logi_repaired
+            })
+            .map(|(id, _)| *id)
+            .collect();
+        for oid in oids {
+            let side = objective!(self, oid)?.owner;
+            let prev_logi = objective!(self, oid)?.logi;
+            self.repair_one_logi_step(side, now, oid)?;
+            let obj = objective!(self, oid)?;
+            if prev_logi != obj.logi {
+                self.ephemeral
+                    .update_objective_markup(&self.persisted, obj, &[]);
+            }
+        }
+        Ok(())
+    }
+
+    pub fn maybe_do_static_repairs(
+        &mut self,
+        lua: MizLua,
+        spctx: &SpawnCtx,
+        idx: &MizIndex,
+        now: DateTime<Utc>,
+    ) -> Result<()> {
+        let rate = self.ephemeral.cfg.static_repair_rate_seconds;
+        if rate == 0 {
+            return Ok(());
+        }
+        let interval = Duration::seconds(rate as i64);
+        let oids: Vec<ObjectiveId> = self
+            .persisted
+            .objectives
+            .into_iter()
+            .filter(|(_, obj)| {
+                !matches!(obj.kind, ObjectiveKind::Production)
+                    && obj.static_repair > 0
+                    && obj.static_repair_need > 0
+                    && now >= obj.static_repair_due
+            })
+            .map(|(id, _)| *id)
+            .collect();
+        for oid in oids {
+            if self.repair_one_objective_static(lua, spctx, idx, oid, now)? {
+                let obj = objective_mut!(self, oid)?;
+                obj.static_repair = obj.static_repair.saturating_sub(1);
+                obj.static_repair_due = now + interval;
+            }
+            self.update_objective_status(None, &oid, now)?;
+            if let Some(obj) = self.persisted.objectives.get(&oid) {
+                self.ephemeral
+                    .update_objective_markup(&self.persisted, obj, &[]);
+            }
+        }
+        Ok(())
+    }
+
+    fn repair_one_objective_static(
+        &mut self,
+        lua: MizLua,
+        spctx: &SpawnCtx,
+        idx: &MizIndex,
+        oid: ObjectiveId,
+        now: DateTime<Utc>,
+    ) -> Result<bool> {
+        use dcso3::{coalition::Static, static_object::StaticObject};
+
+        let obj = objective!(self, oid)?;
+        let side = obj.owner;
+        let mut targets: SmallVec<[(UnitId, i64, CompactString); 8]> = smallvec![];
+        for gid in obj.groups.get(&side).into_iter().flatten() {
+            let group = group!(self, gid)?;
+            if group.class != ObjGroupClass::ObjectiveStatic {
+                continue;
+            }
+            for uid in &group.units {
+                let unit = unit!(self, uid)?;
+                if unit.dead {
+                    targets.push((
+                        *uid,
+                        self.objective_static_durability(unit),
+                        CompactString::from(unit.name.as_str()),
+                    ));
+                }
+            }
+        }
+        targets.sort_by(|a, b| a.1.cmp(&b.1).then_with(|| a.2.cmp(&b.2)));
+        let Some(uid) = targets.first().map(|(u, _, _)| *u) else {
+            return Ok(false);
+        };
+        let (unit_name, template_name) = {
+            let unit = unit!(self, uid)?;
+            (unit.name.clone(), {
+                let group = group!(self, unit.group)?;
+                group.template_name.clone()
+            })
+        };
+        if let Ok(Static::Static(st)) = StaticObject::get_by_name(lua, unit_name.as_str()) {
+            let _ = st.destroy();
+        }
+        let tpl = spctx
+            .get_template_ref(idx, GroupKind::Any, side, template_name.as_str())
+            .with_context(|| format_compact!("objective static template {template_name}"))?;
+        spctx
+            .spawn(tpl)
+            .with_context(|| format_compact!("respawning objective static {unit_name}"))?;
+        if let Some(unit) = self.persisted.units.get_mut_cow(&uid) {
+            unit.dead = false;
+            unit.hp_percent = 100;
+        }
+        self.ephemeral.dirty();
+        let _ = now;
         Ok(true)
     }
 

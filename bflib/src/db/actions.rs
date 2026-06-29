@@ -3120,13 +3120,6 @@ impl Db {
                                 ));
                             }
                         }
-                        if destination.is_none() {
-                            if let Some(target) = *rtb {
-                                if at_dest!(group, target, 800.) {
-                                    to_delete.push(*gid);
-                                }
-                            }
-                        }
                     }
                     ActionKind::Deployable(d) => {
                         if let Some(target) = *destination {
@@ -3136,13 +3129,6 @@ impl Db {
                                     anyhow!("deployables missions require a ucid")
                                 })?;
                                 to_deploy.push((target, d.name.clone(), group.side, ucid));
-                            }
-                        }
-                        if destination.is_none() {
-                            if let Some(target) = *rtb {
-                                if at_dest!(group, target, 800.) {
-                                    to_delete.push(*gid);
-                                }
                             }
                         }
                     }

@@ -65,6 +65,7 @@ pub enum Unpakistan {
     Repaired(String),
     RepairedBase(String, u8),
     RepairedProduction(String, u8),
+    RepairedStaticQueue(String, u16, u16),
     TransferedSupplies(String, String),
 }
 
@@ -86,6 +87,9 @@ impl fmt::Display for Unpakistan {
             Self::RepairedBase(base, logi) => write!(f, "repaired logistics at {base} to %{logi}"),
             Self::RepairedProduction(opr, pct) => {
                 write!(f, "queued production repair at {opr} (production {pct}%)")
+            }
+            Self::RepairedStaticQueue(base, queued, need) => {
+                write!(f, "queued ME static repair at {base} ({queued}/{need})")
             }
             Self::TransferedSupplies(from, to) => {
                 write!(f, "transfered supplies from {from} to {to}")
@@ -800,9 +804,12 @@ impl Db {
             });
             if let Some(oid) = oid {
                 let obj = objective!(self, oid)?;
-                if obj.logi == 100 {
+                if obj.spawnable_logi_repaired
+                    && obj.static_repair_need == 0
+                    && obj.logi == 100
+                {
                     reasons.push("objective logistics are completely repaired".into());
-                } else {
+                } else if !obj.spawnable_logi_repaired {
                     self.repair_one_logi_step(st.side, Utc::now(), oid)?;
                     self.delete_group(base_repairs.keys().next().unwrap())?;
                     self.ephemeral.stat(Stat::Repair {
@@ -820,6 +827,40 @@ impl Db {
                     }
                     let obj = objective!(self, oid)?;
                     return Ok(Unpakistan::RepairedBase(obj.name.clone(), obj.logi()));
+                } else if obj.can_queue_static_repair_crate() {
+                    let rate = self.ephemeral.cfg.static_repair_rate_seconds;
+                    let now = Utc::now();
+                    let obj = objective_mut!(self, oid)?;
+                    if obj.static_repair == 0 {
+                        obj.static_repair_due =
+                            now + chrono::Duration::seconds(rate.max(1) as i64);
+                    }
+                    obj.static_repair += 1;
+                    self.delete_group(base_repairs.keys().next().unwrap())?;
+                    self.ephemeral.stat(Stat::Repair {
+                        id: oid,
+                        by: st.ucid,
+                    });
+                    let cost = self.ephemeral.cfg.static_repair_crate_cost;
+                    if cost != 0 {
+                        self.adjust_points(
+                            &st.ucid,
+                            cost,
+                            "for ME static repair crate queue",
+                        );
+                    }
+                    let obj = objective!(self, oid)?;
+                    return Ok(Unpakistan::RepairedStaticQueue(
+                        obj.name.clone(),
+                        obj.static_repair,
+                        obj.static_repair_need,
+                    ));
+                } else if obj.static_repair_need > 0 {
+                    reasons.push(
+                        "ME static repair queue is full (unload more repair crates)".into(),
+                    );
+                } else {
+                    reasons.push("objective logistics are completely repaired".into());
                 }
             } else {
                 reasons.push("not close enough to a friendly objective".into());
@@ -840,10 +881,9 @@ impl Db {
                     );
                 } else {
                     let cost = self.ephemeral.cfg.production_repair_crate_cost;
-                    if cost > 0 {
-                        let _ = self.charge_for_item(
+                    if cost != 0 {
+                        self.adjust_points(
                             &st.ucid,
-                            oid,
                             cost,
                             "for OPR production repair crate",
                         );

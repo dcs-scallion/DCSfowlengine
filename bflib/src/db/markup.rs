@@ -95,6 +95,9 @@ pub(super) struct ObjectiveMarkup {
     production_hp_sum: u32,
     production_repair_need: u16,
     production_repair: u16,
+    static_repair_need: u16,
+    static_repair: u16,
+    spawnable_logi_repaired: bool,
     points: i32,
     name: String,
     owner_ring: MarkId,
@@ -161,6 +164,19 @@ fn stat_plain_repair_row(queued: u16, need: u16) -> CompactString {
     stat_plain_row("Repair", stat_repair_field(queued, need).as_str())
 }
 
+fn base_stats_points_and_static_repair(obj: &Objective) -> CompactString {
+    let points = stat_plain_row("Points", &format_compact!("{}", obj.points));
+    if obj.show_static_repair_in_markup() {
+        format_compact!(
+            "{}\n{}",
+            points,
+            stat_plain_repair_row(obj.static_repair, obj.static_repair_need),
+        )
+    } else {
+        points
+    }
+}
+
 /// Infobar row: `{bar}{gap}{value}{gap}{label}`.
 fn stat_row(bar: &str, value: &str, label: &'static str) -> CompactString {
     format_compact!(
@@ -220,7 +236,7 @@ fn objective_stats_text(
                     kinds,
                 )
             },
-            stat_plain_row("Points", &format_compact!("{}", obj.points)),
+            base_stats_points_and_static_repair(obj),
         ),
         (_, true) => format_compact!(
             "\n\n{}\n{}",
@@ -240,7 +256,7 @@ fn objective_stats_text(
                     kinds,
                 )
             },
-            stat_plain_row("Points", &format_compact!("{}", obj.points)),
+            base_stats_points_and_static_repair(obj),
         ),
     }
 }
@@ -556,6 +572,9 @@ fn sync_overlay_cache_from_objective(
     t.production_hp_sum = obj.production_hp_sum;
     t.production_repair_need = obj.production_repair_need;
     t.production_repair = obj.production_repair;
+    t.static_repair_need = obj.static_repair_need;
+    t.static_repair = obj.static_repair;
+    t.spawnable_logi_repaired = obj.spawnable_logi_repaired;
     t.points = obj.points;
 }
 
@@ -675,6 +694,9 @@ impl ObjectiveMarkup {
             || self.production_hp_sum != obj.production_hp_sum
             || self.production_repair_need != obj.production_repair_need
             || self.production_repair != obj.production_repair
+            || self.static_repair_need != obj.static_repair_need
+            || self.static_repair != obj.static_repair
+            || self.spawnable_logi_repaired != obj.spawnable_logi_repaired
             || self.points != obj.points
         {
             if self.logi != obj.logi {
@@ -693,6 +715,9 @@ impl ObjectiveMarkup {
             self.production_hp_sum = obj.production_hp_sum;
             self.production_repair_need = obj.production_repair_need;
             self.production_repair = obj.production_repair;
+            self.static_repair_need = obj.static_repair_need;
+            self.static_repair = obj.static_repair;
+            self.spawnable_logi_repaired = obj.spawnable_logi_repaired;
             self.points = obj.points;
             if let Some(id) = self.stats_label {
                 msgq.set_overlay_markup_text(
@@ -833,6 +858,9 @@ impl ObjectiveMarkup {
         t.production_hp_sum = obj.production_hp_sum;
         t.production_repair_need = obj.production_repair_need;
         t.production_repair = obj.production_repair;
+        t.static_repair_need = obj.static_repair_need;
+        t.static_repair = obj.static_repair;
+        t.spawnable_logi_repaired = obj.spawnable_logi_repaired;
         let label = resolve_objective_f10_map_label(display_aliases, obj);
         t.name = format_compact!(" {} ", label).into();
         t.pos = obj.zone.pos();

@@ -1962,6 +1962,9 @@ fn run_slow_timed_events(
         if let Err(e) = ctx.db.maybe_do_production_repairs(lua, &spctx, &ctx.idx, ts) {
             error!("error doing OPR production repairs {:?}", e)
         }
+        if let Err(e) = ctx.db.maybe_do_static_repairs(lua, &spctx, &ctx.idx, ts) {
+            error!("error doing ME static repairs {:?}", e)
+        }
         record_perf(&mut perf.do_repairs, start_ts);
         if let Err(e) = ctx.db.advance_actions(lua, &ctx.idx, &ctx.jtac, start_ts, perf) {
             error!("could not advance actions {e:?}")

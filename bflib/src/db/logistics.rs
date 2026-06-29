@@ -2086,6 +2086,9 @@ impl Db {
                         );
                         self.update_supply_status()
                             .context("supply status after bootstrap")?;
+                        if let Err(e) = self.maybe_do_spawnable_logi_repairs(ts) {
+                            error!("spawnable logi auto-repair {e:?}");
+                        }
                         self.ephemeral.logistics_stage = LogiStage::Complete { last_tick: ts };
                     } else {
                         self.balance_logistics_hubs()?;
@@ -2108,7 +2111,12 @@ impl Db {
                     record_perf(&mut perf.logistics_transfer, st);
                 }
                 LogiStage::SyncToWarehouses { objectives } => match objectives.pop() {
-                    None => self.ephemeral.logistics_stage = LogiStage::Complete { last_tick: ts },
+                    None => {
+                        if let Err(e) = self.maybe_do_spawnable_logi_repairs(ts) {
+                            error!("spawnable logi auto-repair {e:?}");
+                        }
+                        self.ephemeral.logistics_stage = LogiStage::Complete { last_tick: ts };
+                    }
                     Some(oid) => {
                         let start_ts = Utc::now();
                         if let Err(e) = self.sync_objective_to_warehouse(lua, oid) {

@@ -161,6 +161,7 @@ pub struct DiscordMapStatusBar {
     pub threatened: String,
     pub bases_repair: String,
     pub factory_repair: String,
+    pub static_repair: String,
     pub supply_to_bases: String,
     pub delivery_to_hubs: String,
     pub dcs_bind_address: String,
@@ -886,6 +887,7 @@ fn stats_row_html(bar: &DiscordMapStatusBar, top: bool) -> String {
   <div class="stat"><div class="stat-h">Threatened</div><div class="stat-v stat-accent">{threatened}</div></div>
   <div class="stat"><div class="stat-h">Bases repair</div><div class="stat-v stat-accent">{bases_repair}</div></div>
   <div class="stat"><div class="stat-h">Factory repair</div><div class="stat-v stat-accent">{factory_repair}</div></div>
+  <div class="stat"><div class="stat-h">Static repair</div><div class="stat-v stat-accent">{static_repair}</div></div>
   <div class="stat"><div class="stat-h">Supply to bases</div><div class="stat-v stat-accent">{supply}</div></div>
   <div class="stat"><div class="stat-h">Delivery to HUBs</div><div class="stat-v stat-accent">{delivery}</div></div>
 </div>"#,
@@ -896,6 +898,7 @@ fn stats_row_html(bar: &DiscordMapStatusBar, top: bool) -> String {
             threatened = html_escape(&bar.threatened),
             bases_repair = html_escape(&bar.bases_repair),
             factory_repair = html_escape(&bar.factory_repair),
+            static_repair = html_escape(&bar.static_repair),
             supply = html_escape(&bar.supply_to_bases),
             delivery = html_escape(&bar.delivery_to_hubs),
         )

@@ -156,6 +156,9 @@ pub struct SpawnedUnit {
     /// OPR factory static HP; event-driven updates, persisted across saves.
     #[serde(default = "default_factory_hp")]
     pub hp_percent: u8,
+    /// DCS `getLife0` for ME objective statics (repair queue: lowest first).
+    #[serde(default)]
+    pub static_max_life: i64,
     #[serde(skip)]
     pub moved: Option<DateTime<Utc>>,
     #[serde(skip)]
@@ -183,6 +186,7 @@ impl Default for SpawnedUnit {
             position: Position3::default(),
             dead: false,
             hp_percent: default_factory_hp(),
+            static_max_life: 0,
             moved: None,
             airborne_velocity: None,
             fuel_fraction: None,
@@ -933,6 +937,7 @@ impl Db {
                 heading: pos.heading,
                 dead: false,
                 hp_percent: 100,
+                static_max_life: 0,
                 moved: None,
                 airborne_velocity: None,
                 fuel_fraction: None,
@@ -1228,6 +1233,7 @@ impl Db {
             heading,
             dead: false,
             hp_percent: 100,
+            static_max_life: 0,
             moved: None,
             airborne_velocity: None,
             fuel_fraction: None,
@@ -1263,32 +1269,45 @@ impl Db {
         let name = st.get_name()?;
         if let Some(uid) = self.persisted.units_by_name.get(name.as_str()) {
             self.ephemeral.uid_by_static.insert(id, *uid);
+            Self::cache_unit_static_max_life(self, *uid, st);
         }
         Ok(())
+    }
+
+    fn cache_unit_static_max_life(db: &mut Db, uid: UnitId, st: &StaticObject) {
+        let Some(l0) = st.try_get_life0() else {
+            return;
+        };
+        if let Some(unit) = db.persisted.units.get_mut_cow(&uid) {
+            unit.static_max_life = l0;
+        }
     }
 
     /// ME objective statics may Birth before linking; bind DCS ids by name.
     pub(super) fn sync_production_static_uid_map(&mut self, lua: MizLua) -> Result<()> {
         let mut synced = 0usize;
-        for (uid, unit) in self.persisted.units.into_iter() {
-            let group = match self.persisted.groups.get(&unit.group) {
-                Some(g) => g,
-                None => continue,
-            };
-            if !group.class.is_me_objective_static() || unit.dead {
-                continue;
-            }
-            match StaticObject::get_by_name(lua, unit.name.as_str()) {
+        let statics: SmallVec<[(UnitId, CompactString); 32]> = self
+            .persisted
+            .units
+            .into_iter()
+            .filter_map(|(uid, unit)| {
+                let group = self.persisted.groups.get(&unit.group)?;
+                if !group.class.is_me_objective_static() {
+                    return None;
+                }
+                Some((*uid, CompactString::from(unit.name.as_str())))
+            })
+            .collect();
+        for (uid, name) in statics {
+            match StaticObject::get_by_name(lua, name.as_str()) {
                 Ok(Static::Static(st)) => {
                     let id = st.object_id()?;
-                    self.ephemeral.uid_by_static.insert(id, *uid);
+                    self.ephemeral.uid_by_static.insert(id, uid);
+                    Self::cache_unit_static_max_life(self, uid, &st);
                     synced += 1;
                 }
                 Ok(Static::Airbase(_)) => {}
-                Err(e) => warn!(
-                    "ME objective static {:?} not in world: {e:?}",
-                    unit.name
-                ),
+                Err(e) => warn!("ME objective static {name} not in world: {e:?}"),
             }
         }
         if synced > 0 {

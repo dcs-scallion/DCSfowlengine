@@ -1965,6 +1965,8 @@ impl Default for Cfg {
             repair_time: 1800,
             production_repair_crate_cost: 50,
             production_repair_rate_seconds: 300,
+            static_repair_rate_seconds: 300,
+            static_repair_crate_cost: 25,
             production_factory_units: FxHashSet::from_iter([
                 String::from("Building01_PBR"),
                 String::from("Building02_PBR"),
@@ -1984,6 +1986,7 @@ impl Default for Cfg {
                         String::from("LO"),
                     ]),
                     kill_points: 25,
+                    max_life: None,
                 },
             )]),
             repair_crate: default_repair_crate(),

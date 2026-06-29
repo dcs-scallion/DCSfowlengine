@@ -641,6 +641,9 @@ pub struct ObjectiveStaticUnitCfg {
     pub zones: FxHashSet<String>,
     /// Points awarded to the enemy coalition when this static is destroyed.
     pub kill_points: u32,
+    /// DCS max HP (`getLife0`); ME static repair queue orders lowest first when not cached on unit.
+    #[serde(default)]
+    pub max_life: Option<i64>,
 }
 
 impl ObjectiveStaticUnitCfg {
@@ -1158,12 +1161,18 @@ pub struct Cfg {
     pub weapon_target_exclusions: FxHashSet<String>,
     /// how often a base will repair if it has full logistics (Seconds)
     pub repair_time: u32,
-    /// OPR repair crate point cost.
+    /// OPR repair crate: added to unpacker's points (negative deducts).
     #[serde(default)]
-    pub production_repair_crate_cost: u32,
+    pub production_repair_crate_cost: i32,
     /// OPR repair tick interval in seconds.
     #[serde(default)]
     pub production_repair_rate_seconds: u32,
+    /// ME objective static repair tick interval in seconds (`ObjectiveStatic` queue from repair crates).
+    #[serde(default)]
+    pub static_repair_rate_seconds: u32,
+    /// ME static repair crate: added to unpacker's points (negative deducts).
+    #[serde(default)]
+    pub static_repair_crate_cost: i32,
     /// DCS unit types counted as OPR factory statics (must also be in `unit_classification`).
     #[serde(default)]
     pub production_factory_units: FxHashSet<String>,

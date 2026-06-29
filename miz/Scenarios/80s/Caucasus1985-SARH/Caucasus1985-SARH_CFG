@@ -90,8 +90,10 @@
       "max_drop_speed": 50
     }
   },
-  "production_repair_crate_cost": 40,
+  "production_repair_crate_cost": 20,
   "production_repair_rate_seconds": 18000,
+  "static_repair_crate_cost": 20,
+  "static_repair_rate_seconds": 36000,
   "production_factory_units": [
     "Building01_PBR",
     "Building02_PBR",
