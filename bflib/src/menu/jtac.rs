@@ -46,6 +46,8 @@ use std::sync::Arc;
 
 /// DCS F10 group menu exposes 10 F-keys; paginate before the 9th root entry.
 const JTAC_ROOT_PAGE: usize = 8;
+/// Pin..Code fixed entries occupy the first page before Artillery/CALCM/Bomber.
+const JTAC_MENU_FIXED_SLOTS: usize = 8;
 
 fn jtac_root_submenu(
     mc: &MissionCommands,
@@ -871,7 +873,7 @@ pub(super) fn add_menu_for_jtac(
             )?;
         }
     }
-    let mut root_page_count = 0usize;
+    let mut root_page_count = JTAC_MENU_FIXED_SLOTS;
     add_artillery_menu_for_jtac(
         lua,
         mizgid,

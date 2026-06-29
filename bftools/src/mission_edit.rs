@@ -4456,49 +4456,21 @@ fn resolve_ai_stock_naval_target(
 }
 
 fn merge_ai_template_stock_export(
-    out: &mut HashMap<StdString, ObjectiveStockByCoalition>,
+    _out: &mut HashMap<StdString, ObjectiveStockByCoalition>,
     ai_template_airframes: &mut HashMap<std::string::String, std::string::String>,
     specs: &[AiTemplateStockSpec],
-    obj_dyn_allow: &[ObjectiveDynAllow],
-    ship_wh_map: &HashMap<i64, (Side, String)>,
+    _obj_dyn_allow: &[ObjectiveDynAllow],
+    _ship_wh_map: &HashMap<i64, (Side, String)>,
 ) {
     for spec in specs {
         ai_template_airframes.insert(
             spec.template_name.as_str().into(),
             spec.airframe.as_str().into(),
         );
-        for (obj_key, amount) in &spec.objectives {
-            if *amount == 0 {
-                continue;
-            }
-            let Some((side, export_name)) = resolve_ai_stock_objective(obj_key.as_str(), obj_dyn_allow)
-                .map(|(allow, name)| (allow.side, name))
-                .or_else(|| resolve_ai_stock_naval_target(ship_wh_map, obj_key.as_str()))
-            else {
-                warn!(
-                    "SETTINGS-Ai-{}: export skip unknown objective {:?}",
-                    spec.template_name.as_str(),
-                    obj_key.as_str()
-                );
-                continue;
-            };
-            let entry = out.entry(export_name).or_default();
-            let stock = match side {
-                Side::Blue => &mut entry.blue,
-                Side::Red => &mut entry.red,
-                Side::Neutral => continue,
-            };
-            stock
-                .equipment
-                .entry(spec.airframe.as_str().into())
-                .and_modify(|i| i.baseline = i.baseline.saturating_add(*amount))
-                .or_insert(ObjectiveStockItem {
-                    baseline: *amount,
-                    ws_type: None,
-                    production: 0,
-                });
-        }
     }
+    // Aircraft baselines come from `extract_objective_coalition_stock` on the patched ME
+    // warehouse row (after `apply_settings_ai_template_stock`); do not add SETTINGS-Ai amounts
+    // again here — that doubled capacity vs DCS `get_item_count` (50% supply on hubs).
 }
 
 struct WarehouseTemplate {

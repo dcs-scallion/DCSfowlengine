@@ -444,7 +444,7 @@
               "template": "RBOMBER",
               "altitude": 9186.0,
               "altitude_typ": "BARO",
-              "speed": 527.0,
+              "speed": 227.0,
               "freq": 120000000
             }
           }
@@ -461,7 +461,7 @@
             "template": "RBOMBERCALCM",
             "altitude": 8892,
             "altitude_typ": "BARO",
-            "speed": 514,
+            "speed": 153,
             "freq": 120000000
           }
         },
@@ -899,7 +899,7 @@
               "template": "BBOMBER",
               "altitude": 8975.0,
               "altitude_typ": "BARO",
-              "speed": 365.0,
+              "speed": 274.0,
               "freq": 240000000
             }
           }
@@ -916,7 +916,7 @@
             "template": "BBOMBERCALCM",
             "altitude": 8833,
             "altitude_typ": "BARO",
-            "speed": 302,
+            "speed": 172,
             "freq": 240000000
           }
         },

@@ -805,13 +805,136 @@ fn resolve_export_equipment_dcs_name(
     resource_meta: &FxHashMap<String, WarehouseResourceMeta>,
 ) -> String {
     if let Some(quad) = parse_export_ws_type_key(export_key) {
+        let mut best: Option<&String> = None;
         for (name, meta) in resource_meta {
             if meta.quad == Some(quad) {
-                return name.clone();
+                best = Some(match best {
+                    None => name,
+                    Some(cur) => {
+                        let pick = preferred_dcs_equipment_name(cur.as_str(), name.as_str());
+                        if pick == name.as_str() {
+                            name
+                        } else {
+                            cur
+                        }
+                    }
+                });
             }
+        }
+        if let Some(name) = best {
+            return name.clone();
         }
     }
     String::from(export_key)
+}
+
+fn preferred_dcs_equipment_name<'a>(a: &'a str, b: &'a str) -> &'a str {
+    let a_empty = a.contains("EMPTY") || a.contains("Empty");
+    let b_empty = b.contains("EMPTY") || b.contains("Empty");
+    if a_empty != b_empty {
+        return if a_empty { b } else { a };
+    }
+    if a.len() != b.len() {
+        return if a.len() < b.len() { a } else { b };
+    }
+    if a < b {
+        a
+    } else {
+        b
+    }
+}
+
+/// Merge export `wsType [...]` virtual rows onto resolved DCS resource names.
+fn canonicalize_virtual_equipment_keys(
+    obj: &mut Objective,
+    resource_meta: &FxHashMap<String, WarehouseResourceMeta>,
+) {
+    let names: SmallVec<[String; 64]> = obj
+        .warehouse
+        .equipment
+        .iter_mut_cow()
+        .map(|(name, _)| name.clone())
+        .collect();
+    for old in names {
+        let canonical = resolve_export_equipment_dcs_name(old.as_str(), resource_meta);
+        if canonical == old {
+            continue;
+        }
+        let Some(old_inv) = obj.warehouse.equipment.remove_cow(&old) else {
+            continue;
+        };
+        let row = obj.warehouse.equipment.get_or_default_cow(canonical);
+        if old_inv.stored > row.stored {
+            row.stored = old_inv.stored;
+        }
+        if old_inv.capacity > row.capacity {
+            row.capacity = old_inv.capacity;
+        }
+    }
+}
+
+fn collect_dcs_warehouse_equipment_names(
+    warehouse: &warehouse::Warehouse,
+) -> Result<FxHashSet<String>> {
+    let inv = warehouse
+        .get_inventory(None)
+        .context("warehouse getInventory for supply tracking")?;
+    let mut out: FxHashSet<String> = FxHashSet::default();
+    let mut ingest = |items: warehouse::ItemInventory<'_>| -> Result<()> {
+        items.for_each(|name, _qty| {
+            out.insert(name);
+            Ok(())
+        })
+    };
+    ingest(inv.weapons().context("warehouse weapon inventory for supply tracking")?)?;
+    ingest(inv.aircraft().context("warehouse aircraft inventory for supply tracking")?)?;
+    Ok(out)
+}
+
+fn record_objective_dcs_equipment_names(
+    ephemeral: &mut super::ephemeral::Ephemeral,
+    oid: ObjectiveId,
+    warehouse: &warehouse::Warehouse,
+) -> Result<()> {
+    ephemeral
+        .warehouse_dcs_equipment_names
+        .insert(oid, collect_dcs_warehouse_equipment_names(warehouse)?);
+    Ok(())
+}
+
+/// SETTINGS-Ai supplement airframes (`production == 0`): align virtual capacity to DCS stock.
+/// Legacy exports doubled baseline via `merge_ai_template_stock_export`; skip when already matched.
+fn reconcile_objective_stock_aircraft_capacity_to_dcs(
+    obj: &mut Objective,
+    export: &FowlMizExport,
+    resource_meta: &FxHashMap<String, WarehouseResourceMeta>,
+) {
+    let Some(profile) = objective_coalition_stock_for_objective(export, obj) else {
+        return;
+    };
+    if matches!(obj.kind, ObjectiveKind::Production) {
+        return;
+    }
+    for (name, inv) in obj.warehouse.equipment.iter_mut_cow() {
+        let Some(meta) = resource_meta.get(name) else {
+            continue;
+        };
+        if !meta.is_aircraft {
+            continue;
+        }
+        let Some(item) = profile_export_equipment_item(profile, name.as_str(), resource_meta) else {
+            continue;
+        };
+        if item.production != 0 {
+            continue;
+        }
+        if inv.stored == 0 || inv.capacity <= inv.stored {
+            continue;
+        }
+        if inv.capacity == inv.stored.saturating_mul(2) {
+            inv.capacity = inv.stored.max(1);
+        }
+    }
 }
 
 fn profile_export_equipment_item<'a>(
@@ -1441,6 +1564,7 @@ impl Db {
                         },
                     );
                 }
+                canonicalize_virtual_equipment_keys(obj, &resource_meta);
                 continue;
             }
             let Some(profile) =
@@ -1490,6 +1614,7 @@ impl Db {
                     },
                 );
             }
+            canonicalize_virtual_equipment_keys(obj, &resource_meta);
         }
         self.ephemeral.dirty();
         Ok(())
@@ -2115,6 +2240,8 @@ impl Db {
                         if let Err(e) = self.maybe_do_spawnable_logi_repairs(ts) {
                             error!("spawnable logi auto-repair {e:?}");
                         }
+                        self.update_supply_status()
+                            .context("supply status after logistics sync-to")?;
                         self.ephemeral.logistics_stage = LogiStage::Complete { last_tick: ts };
                     }
                     Some(oid) => {
@@ -2701,14 +2828,20 @@ impl Db {
     }
 
     fn update_supply_status(&mut self) -> Result<()> {
-        for (_, obj) in self.persisted.objectives.iter_mut_cow() {
+        for (id, obj) in self.persisted.objectives.iter_mut_cow() {
             let current_supply = obj.supply;
             let current_fuel = obj.fuel;
+            let dcs_tracked = self.ephemeral.warehouse_dcs_equipment_names.get(id);
             let mut n = 0;
             let mut sum: u32 = 0;
-            for (_, inv) in &obj.warehouse.equipment {
+            for (name, inv) in &obj.warehouse.equipment {
                 if inv.capacity == 0 {
                     continue;
+                }
+                if let Some(tracked) = dcs_tracked {
+                    if !tracked.contains(name.as_str()) {
+                        continue;
+                    }
                 }
                 if let Some(pct) = inv.percent() {
                     sum += pct as u32;
@@ -2779,6 +2912,7 @@ impl Db {
             .map(Arc::clone);
         let skip_dep_hydrate = self.dep_farp_skip_dcs_hydrate(oid);
         let obj = objective_mut!(self, oid)?;
+        canonicalize_virtual_equipment_keys(obj, resource_meta.as_ref());
         if objective_is_ground_dep_farp_export(export.as_ref(), obj) {
             let keep_virtual = skip_dep_hydrate || dep_farp_has_persisted_virtual_stock(obj);
             reconcile_dcs_warehouse_to_virtual(obj, &warehouse)
@@ -2788,6 +2922,9 @@ impl Db {
                 sync_warehouse_to_obj(obj, &warehouse, true)
                     .context("syncing ground DEP FARP warehouse from DCS (tracked rows only)")?;
             }
+            canonicalize_virtual_equipment_keys(obj, resource_meta.as_ref());
+            record_objective_dcs_equipment_names(&mut self.ephemeral, oid, &warehouse)
+                .context("recording DCS warehouse equipment for supply")?;
             return Ok((obj, warehouse));
         }
         sync_warehouse_to_obj(obj, &warehouse, false)
@@ -2802,6 +2939,14 @@ impl Db {
             on_water,
         )
         .context("hydrating virtual warehouse from DCS inventory")?;
+        reconcile_objective_stock_aircraft_capacity_to_dcs(
+            obj,
+            export.as_ref(),
+            resource_meta.as_ref(),
+        );
+        canonicalize_virtual_equipment_keys(obj, resource_meta.as_ref());
+        record_objective_dcs_equipment_names(&mut self.ephemeral, oid, &warehouse)
+            .context("recording DCS warehouse equipment for supply")?;
         Ok((obj, warehouse))
     }
 
