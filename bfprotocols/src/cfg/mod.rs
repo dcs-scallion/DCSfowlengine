@@ -1119,6 +1119,14 @@ fn default_ewr_aspect_hysteresis_deg() -> f64 {
     5.
 }
 
+fn default_jtac_default_code_blue() -> u16 {
+    1688
+}
+
+fn default_jtac_default_code_red() -> u16 {
+    1113
+}
+
 fn default_calcm_mission() -> bool {
     true
 }
@@ -1318,6 +1326,12 @@ pub struct Cfg {
     pub airborne_jtacs: FxHashMap<Vehicle, DeployableJtac>,
     /// The jtac target priority list
     pub jtac_priority: Vec<UnitTags>,
+    /// Default laser code for new Blue-coalition JTACs (DCS range 1111–1788).
+    #[serde(default = "default_jtac_default_code_blue")]
+    pub jtac_default_code_blue: u16,
+    /// Default laser code for new Red-coalition JTACs (DCS range 1111–1788).
+    #[serde(default = "default_jtac_default_code_red")]
+    pub jtac_default_code_red: u16,
     /// Objectives that can host fixed wing even though they aren't
     /// airbases. Used by actions to choose a spawn point. E.G. You
     /// want to make an airbase a logistics hub because it's close to
@@ -1410,6 +1424,7 @@ impl Cfg {
         if has_deprecated {
             fs::write(path, serde_json::to_string_pretty(&cfg)?)?
         }
+        cfg.validate_jtac_default_codes()?;
         Ok(cfg)
     }
 
@@ -1451,6 +1466,26 @@ impl Cfg {
                     )
                 }
             },
+        }
+        Ok(())
+    }
+
+    pub fn jtac_default_code(&self, side: Side) -> u16 {
+        match side {
+            Side::Blue => self.jtac_default_code_blue,
+            Side::Red => self.jtac_default_code_red,
+            Side::Neutral => self.jtac_default_code_blue,
+        }
+    }
+
+    fn validate_jtac_default_codes(&self) -> Result<()> {
+        for (label, code) in [
+            ("blue", self.jtac_default_code_blue),
+            ("red", self.jtac_default_code_red),
+        ] {
+            if !(1111..=1788).contains(&code) {
+                bail!("jtac_default_code_{label} {code} out of range 1111-1788");
+            }
         }
         Ok(())
     }

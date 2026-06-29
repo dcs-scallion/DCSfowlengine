@@ -2117,6 +2117,8 @@ impl Default for Cfg {
                 ),
             ]),
             jtac_priority: default_jtac_priority(),
+            jtac_default_code_blue: 1688,
+            jtac_default_code_red: 1113,
             extra_fixed_wing_objectives: FxHashSet::default(),
             ewr_mode: EwrMode::Original,
             ewr_delay: 60,

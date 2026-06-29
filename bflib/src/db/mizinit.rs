@@ -58,6 +58,9 @@ use log::{debug, error, info, warn};
 use smallvec::{smallvec, SmallVec};
 use tokio::sync::mpsc::UnboundedSender;
 
+/// Wall-clock `-action` lock after a fresh round (no persisted save).
+pub const NEW_ROUND_ACTION_LOCK_SECS: i64 = 90;
+
 impl Db {
     /// objectives are just trigger zones named according to type codes
     /// the first caracter is the type of the zone
@@ -993,11 +996,91 @@ impl Db {
         self.ephemeral.tisp_initial_after = Some(at);
     }
 
+    pub fn schedule_new_round_action_lock(&mut self, unlock_at: DateTime<Utc>) {
+        self.ephemeral.actions_unlock_after = Some(unlock_at);
+        self.ephemeral.actions_unlock_announced = false;
+    }
+
+    pub fn announce_new_round_action_lock(&mut self) {
+        self.ephemeral.msgs().panel_to_all(
+            15,
+            false,
+            format!(
+                "New campaign round: -action commands disabled for {} seconds while naval assets deploy.",
+                NEW_ROUND_ACTION_LOCK_SECS
+            ),
+        );
+    }
+
+    pub fn check_actions_allowed(&self) -> Result<()> {
+        let now = Utc::now();
+        if let Some(until) = self.ephemeral.actions_unlock_after {
+            if now < until {
+                let secs = (until - now).num_seconds().max(1);
+                bail!(
+                    "-action commands are disabled for {secs} more seconds (new campaign startup)"
+                );
+            }
+        }
+        Ok(())
+    }
+
+    pub fn try_announce_actions_unlocked(&mut self, now: DateTime<Utc>) {
+        if self.ephemeral.actions_unlock_announced {
+            return;
+        }
+        let Some(until) = self.ephemeral.actions_unlock_after else {
+            return;
+        };
+        if now < until {
+            return;
+        }
+        self.ephemeral.actions_unlock_announced = true;
+        self.ephemeral.actions_unlock_after = None;
+        self.ephemeral
+            .msgs()
+            .panel_to_all(15, false, "-action commands are now available.");
+    }
+
+    fn drain_spawn_queue_now(
+        &mut self,
+        lua: MizLua,
+        idx: &MizIndex,
+        perf: &mut PerfInner,
+        shots: &ShotDb,
+        now: DateTime<Utc>,
+    ) -> Result<()> {
+        let spctx = SpawnCtx::new(lua)?;
+        const MAX_ITER: usize = 512;
+        for _ in 0..MAX_ITER {
+            if self.ephemeral.spawnq_len() == 0 {
+                return Ok(());
+            }
+            self.ephemeral.process_spawn_queue(
+                perf,
+                &self.persisted,
+                now,
+                idx,
+                &spctx,
+                shots,
+            )?;
+        }
+        if self.ephemeral.spawnq_len() > 0 {
+            warn!(
+                "spawn queue drain cap hit with {} item(s) remaining",
+                self.ephemeral.spawnq_len()
+            );
+        }
+        Ok(())
+    }
+
     pub fn try_run_deferred_tisp_initial_ships(
         &mut self,
         lua: MizLua,
         idx: &MizIndex,
         now: DateTime<Utc>,
+        perf: &mut PerfInner,
+        shots: &ShotDb,
     ) -> Result<()> {
         match self.ephemeral.tisp_initial_after {
             Some(at) if now >= at => {}
@@ -1016,6 +1099,12 @@ impl Db {
             );
             self.ephemeral.defer_initial_hub_distribute = false;
             return Ok(());
+        }
+        if let Err(e) = self
+            .drain_spawn_queue_now(lua, idx, perf, shots, now)
+            .context("draining TISP spawn queue")
+        {
+            error!("TISP spawn queue drain failed: {e:?}");
         }
         self.build_carrier_slot_maps(&miz)?;
         self.ephemeral.preserve_initial_warehouse_fill = true;

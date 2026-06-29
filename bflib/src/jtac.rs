@@ -259,6 +259,7 @@ impl Jtac {
         priority: Vec<UnitTags>,
         pos: Vector3,
         air: bool,
+        default_code: u16,
     ) -> Self {
         Self {
             gid,
@@ -270,7 +271,7 @@ impl Jtac {
             target: None,
             autoshift: None,
             ir_pointer: false,
-            code: 1688,
+            code: default_code,
             last_smoke: DateTime::<Utc>::default(),
             nearby_artillery: smallvec![],
             nearby_calcm: smallvec![],
@@ -1570,6 +1571,7 @@ impl Jtacs {
             .or_default()
             .entry(id)
             .or_insert_with(|| {
+                let default_code = db.ephemeral.cfg.jtac_default_code(side);
                 let jt = Jtac::new(
                     db,
                     id,
@@ -1577,6 +1579,7 @@ impl Jtacs {
                     db.ephemeral.cfg.jtac_priority.clone(),
                     pos,
                     air,
+                    default_code,
                 );
                 self.menu_dirty
                     .entry(side)

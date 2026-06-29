@@ -37,6 +37,8 @@
   },
   "name_filter": "^[a-zA-Z0-9_<>|= ]+$",
   "max_msgs_per_second": 5,
+  "jtac_default_code_blue": 1688,
+  "jtac_default_code_red": 1113,
   "shutdown": 5,
   "points": {
     "new_player_join": 3000000,

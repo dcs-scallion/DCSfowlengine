@@ -409,6 +409,7 @@ impl Db {
         ucid: Option<Ucid>,
         cmd: ActionCmd,
     ) -> Result<()> {
+        self.check_actions_allowed()?;
         let cost = match &cmd.action.kind {
             ActionKind::Nuke(nc) => {
                 let div = max(1, self.persisted.nukes_used * nc.cost_scale as u32);
