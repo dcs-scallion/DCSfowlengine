@@ -1,0 +1,1020 @@
+﻿cargo :    Compiling bflib v2.0.0 (C:\GitHub\DCSfowlengine\bflib)
+At line:1 char:44
++ ... e\setup-build.ps1; cargo build --release --package=bflib 2>&1 | Out-F ...
++                        ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    + CategoryInfo          : NotSpecified: (   Compiling bf...wlengine\bflib):String) [], RemoteException
+    + FullyQualifiedErrorId : NativeCommandError
+ 
+error[E0106]: missing lifetime specifier
+   --> bflib\src\menu\anchor.rs:111:17
+    |
+111 |     pub mc: &'a MissionCommands,
+    |                 ^^^^^^^^^^^^^^^ expected named lifetime parameter
+    |
+help: consider using the `'a` lifetime
+    |
+111 |     pub mc: &'a MissionCommands<'a>,
+    |                                ++++
+
+error[E0425]: cannot find type `Db` in this scope
+  --> bflib\src\menu\ewr.rs:24:20
+   |
+24 | fn ewr_origin(db: &Db, ucid: &dcso3::net::Ucid) -> Option<Vector2> {
+   |                    ^^ not found in this scope
+   |
+help: consider importing this struct through its public re-export
+   |
+17 + use crate::Db;
+   |
+
+error[E0433]: failed to resolve: use of undeclared type `Context`
+  --> bflib\src\menu\ewr.rs:37:24
+   |
+37 |     let ctx = unsafe { Context::get_mut() };
+   |                        ^^^^^^^ use of undeclared type `Context`
+   |
+help: consider importing one of these items
+   |
+17 + use crate::Context;
+   |
+17 + use std::task::Context;
+   |
+17 + use anyhow::Context;
+   |
+17 + use futures::task::Context;
+   |
+
+error[E0433]: failed to resolve: use of undeclared type `Context`
+  --> bflib\src\menu\ewr.rs:60:24
+   |
+60 |     let ctx = unsafe { Context::get_mut() };
+   |                        ^^^^^^^ use of undeclared type `Context`
+   |
+help: consider importing one of these items
+   |
+17 + use crate::Context;
+   |
+17 + use std::task::Context;
+   |
+17 + use anyhow::Context;
+   |
+17 + use futures::task::Context;
+   |
+
+error[E0433]: failed to resolve: use of unresolved module or unlinked crate `ewr`
+  --> bflib\src\menu\ewr.rs:80:40
+   |
+80 |                 write!(report, "{}\n", ewr::report_header())?;
+   |                                        ^^^ use of unresolved module or unlinked crate `ewr`
+   |
+help: to make use of source file bflib\src\menu\ewr.rs, use `mod ewr` in this file to declare the module
+  --> bflib\src\lib.rs:17:1
+   |
+17 + mod ewr;
+   |
+help: consider importing this module
+   |
+17 + use crate::ewr;
+   |
+
+error[E0433]: failed to resolve: use of unresolved module or unlinked crate `ewr`
+   --> bflib\src\menu\ewr.rs:113:44
+    |
+113 |                     write!(report, "{}\n", ewr::report_header())?;
+    |                                            ^^^ use of unresolved module or unlinked crate `ewr`
+    |
+help: to make use of source file bflib\src\menu\ewr.rs, use `mod ewr` in this file to declare the module
+   --> bflib\src\lib.rs:17:1
+    |
+ 17 + mod ewr;
+    |
+help: consider importing this module
+    |
+ 17 + use crate::ewr;
+    |
+
+error[E0433]: failed to resolve: use of undeclared type `Context`
+   --> bflib\src\menu\ewr.rs:121:24
+    |
+121 |     let ctx = unsafe { Context::get_mut() };
+    |                        ^^^^^^^ use of undeclared type `Context`
+    |
+help: consider importing one of these items
+    |
+ 17 + use crate::Context;
+    |
+ 17 + use std::task::Context;
+    |
+ 17 + use anyhow::Context;
+    |
+ 17 + use futures::task::Context;
+    |
+
+error[E0433]: failed to resolve: use of unresolved module or unlinked crate `ewr`
+   --> bflib\src\menu\ewr.rs:127:32
+    |
+127 |                 .panel_to_side(ewr::EWR_PANEL_DISPLAY_SECS, false, side, report);
+    |                                ^^^ use of unresolved module or unlinked crate `ewr`
+    |
+help: to make use of source file bflib\src\menu\ewr.rs, use `mod ewr` in this file to declare the module
+   --> bflib\src\lib.rs:17:1
+    |
+ 17 + mod ewr;
+    |
+help: consider importing this module
+    |
+ 17 + use crate::ewr;
+    |
+
+error[E0433]: failed to resolve: use of unresolved module or unlinked crate `ewr`
+   --> bflib\src\menu\ewr.rs:131:13
+    |
+131 |             ewr::EWR_PANEL_DISPLAY_SECS,
+    |             ^^^ use of unresolved module or unlinked crate `ewr`
+    |
+help: to make use of source file bflib\src\menu\ewr.rs, use `mod ewr` in this file to declare the module
+   --> bflib\src\lib.rs:17:1
+    |
+ 17 + mod ewr;
+    |
+help: consider importing this module
+    |
+ 17 + use crate::ewr;
+    |
+
+error[E0433]: failed to resolve: use of undeclared type `Context`
+   --> bflib\src\menu\ewr.rs:149:24
+    |
+149 |     let ctx = unsafe { Context::get_mut() };
+    |                        ^^^^^^^ use of undeclared type `Context`
+    |
+help: consider importing one of these items
+    |
+ 17 + use crate::Context;
+    |
+ 17 + use std::task::Context;
+    |
+ 17 + use anyhow::Context;
+    |
+ 17 + use futures::task::Context;
+    |
+
+error[E0433]: failed to resolve: use of undeclared type `EwrUnits`
+   --> bflib\src\menu\ewr.rs:151:33
+    |
+151 |         ctx.ewr.set_units(ucid, EwrUnits::Imperial);
+    |                                 ^^^^^^^^ use of undeclared type `EwrUnits`
+    |
+help: consider importing this enum
+    |
+ 17 + use crate::ewr::EwrUnits;
+    |
+
+error[E0433]: failed to resolve: use of undeclared type `Context`
+   --> bflib\src\menu\ewr.rs:171:24
+    |
+171 |     let ctx = unsafe { Context::get_mut() };
+    |                        ^^^^^^^ use of undeclared type `Context`
+    |
+help: consider importing one of these items
+    |
+ 17 + use crate::Context;
+    |
+ 17 + use std::task::Context;
+    |
+ 17 + use anyhow::Context;
+    |
+ 17 + use futures::task::Context;
+    |
+
+error[E0433]: failed to resolve: use of undeclared type `EwrUnits`
+   --> bflib\src\menu\ewr.rs:173:33
+    |
+173 |         ctx.ewr.set_units(ucid, EwrUnits::Metric);
+    |                                 ^^^^^^^^ use of undeclared type `EwrUnits`
+    |
+help: consider importing this enum
+    |
+ 17 + use crate::ewr::EwrUnits;
+    |
+
+warning: unused import: `AiPlaneKind`
+  --> bflib\src\db\actions.rs:14:57
+   |
+14 |         Action, ActionGeoLimit, ActionKind, AiPlaneCfg, AiPlaneKind, AwacsCfg, BomberCfg,
+   |                                                         ^^^^^^^^^^^
+   |
+   = note: `#[warn(unused_imports)]` (part of `#[warn(unused)]`) on by default
+
+warning: unused import: `Duration`
+  --> bflib\src\db\actions.rs:25:14
+   |
+25 | use chrono::{Duration, prelude::*};
+   |              ^^^^^^^^
+
+warning: unused imports: `GroupCommandItem` and `GroupSubMenu`
+  --> bflib\src\menu\action.rs:21:24
+   |
+21 |     mission_commands::{GroupCommandItem, GroupSubMenu, MissionCommands},
+   |                        ^^^^^^^^^^^^^^^^  ^^^^^^^^^^^^
+
+warning: unused import: `Context as ErrContext`
+  --> bflib\src\menu\ewr.rs:18:14
+   |
+18 | use anyhow::{Context as ErrContext, Result};
+   |              ^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `GroupCommandItem`
+  --> bflib\src\menu\jtac.rs:39:24
+   |
+39 |     mission_commands::{GroupCommandItem, GroupSubMenu, MissionCommands},
+   |                        ^^^^^^^^^^^^^^^^
+
+warning: unused import: `FowlSubMenu`
+  --> bflib\src\menu\mod.rs:38:14
+   |
+38 | use anchor::{FowlSubMenu, MenuAnchor};
+   |              ^^^^^^^^^^^
+
+error[E0308]: mismatched types
+    --> bflib\src\menu\action.rs:431:17
+     |
+ 429 |             anchor.add_command(
+     |                    ----------- arguments to this method are incorrect
+ 430 |                 &mc,
+ 431 |                 text.clone(),
+     |                 ^^^^^^^^^^^^ expected `std::string::String`, found `dcso3::String`
+     |
+     = note: `dcso3::String` and `std::string::String` have similar names, but are actually distinct types
+note: `dcso3::String` is defined in crate `dcso3`
+    --> dcso3\src\lib.rs:1090:1
+     |
+1090 | pub struct String(CompactString);
+     | ^^^^^^^^^^^^^^^^^
+note: `std::string::String` is defined in crate `alloc`
+    --> C:\Users\Robo\.rustup\toolchains\stable-x86_64-pc-windows-msvc\lib/rustlib/src/rust\library\alloc\src\string.rs
+:353:1
+     |
+ 353 | pub struct String {
+     | ^^^^^^^^^^^^^^^^^
+note: method defined here
+    --> bflib\src\menu\anchor.rs:59:12
+     |
+  59 |     pub fn add_command<F, A>(
+     |            ^^^^^^^^^^^
+...
+  62 |         name: String,
+     |         ------------
+help: try using a conversion method
+     |
+ 431 -                 text.clone(),
+ 431 +                 text.to_string(),
+     |
+
+error[E0308]: mismatched types
+    --> bflib\src\menu\action.rs:501:25
+     |
+ 499 |                     anchor.add_command(
+     |                            ----------- arguments to this method are incorrect
+ 500 |                         &mc,
+ 501 |                         text.clone(),
+     |                         ^^^^^^^^^^^^ expected `std::string::String`, found `dcso3::String`
+     |
+     = note: `dcso3::String` and `std::string::String` have similar names, but are actually distinct types
+note: `dcso3::String` is defined in crate `dcso3`
+    --> dcso3\src\lib.rs:1090:1
+     |
+1090 | pub struct String(CompactString);
+     | ^^^^^^^^^^^^^^^^^
+note: `std::string::String` is defined in crate `alloc`
+    --> C:\Users\Robo\.rustup\toolchains\stable-x86_64-pc-windows-msvc\lib/rustlib/src/rust\library\alloc\src\string.rs
+:353:1
+     |
+ 353 | pub struct String {
+     | ^^^^^^^^^^^^^^^^^
+note: method defined here
+    --> bflib\src\menu\anchor.rs:59:12
+     |
+  59 |     pub fn add_command<F, A>(
+     |            ^^^^^^^^^^^
+...
+  62 |         name: String,
+     |         ------------
+help: try using a conversion method
+     |
+ 501 -                         text.clone(),
+ 501 +                         text.to_string(),
+     |
+
+error[E0308]: mismatched types
+    --> bflib\src\menu\action.rs:528:21
+     |
+ 526 |                 anchor.add_command(
+     |                        ----------- arguments to this method are incorrect
+ 527 |                     &mc,
+ 528 |                     obj.name.clone(),
+     |                     ^^^^^^^^^^^^^^^^ expected `std::string::String`, found `dcso3::String`
+     |
+     = note: `dcso3::String` and `std::string::String` have similar names, but are actually distinct types
+note: `dcso3::String` is defined in crate `dcso3`
+    --> dcso3\src\lib.rs:1090:1
+     |
+1090 | pub struct String(CompactString);
+     | ^^^^^^^^^^^^^^^^^
+note: `std::string::String` is defined in crate `alloc`
+    --> C:\Users\Robo\.rustup\toolchains\stable-x86_64-pc-windows-msvc\lib/rustlib/src/rust\library\alloc\src\string.rs
+:353:1
+     |
+ 353 | pub struct String {
+     | ^^^^^^^^^^^^^^^^^
+note: method defined here
+    --> bflib\src\menu\anchor.rs:59:12
+     |
+  59 |     pub fn add_command<F, A>(
+     |            ^^^^^^^^^^^
+...
+  62 |         name: String,
+     |         ------------
+help: try using a conversion method
+     |
+ 528 -                     obj.name.clone(),
+ 528 +                     obj.name.to_string(),
+     |
+
+error[E0308]: mismatched types
+    --> bflib\src\menu\action.rs:567:52
+     |
+ 567 |                 let root = anchor.add_submenu(&mc, title, Some(root.clone()))?;
+     |                                   -----------      ^^^^^ expected `std::string::String`, found `dcso3::String`
+     |                                   |
+     |                                   arguments to this method are incorrect
+     |
+     = note: `dcso3::String` and `std::string::String` have similar names, but are actually distinct types
+note: `dcso3::String` is defined in crate `dcso3`
+    --> dcso3\src\lib.rs:1090:1
+     |
+1090 | pub struct String(CompactString);
+     | ^^^^^^^^^^^^^^^^^
+note: `std::string::String` is defined in crate `alloc`
+    --> C:\Users\Robo\.rustup\toolchains\stable-x86_64-pc-windows-msvc\lib/rustlib/src/rust\library\alloc\src\string.rs
+:353:1
+     |
+ 353 | pub struct String {
+     | ^^^^^^^^^^^^^^^^^
+note: method defined here
+    --> bflib\src\menu\anchor.rs:36:12
+     |
+  36 |     pub fn add_submenu(
+     |            ^^^^^^^^^^^
+...
+  39 |         name: String,
+     |         ------------
+help: try using a conversion method
+     |
+ 567 |                 let root = anchor.add_submenu(&mc, title.to_string(), Some(root.clone()))?;
+     |                                                         ++++++++++++
+
+error[E0308]: mismatched types
+    --> bflib\src\menu\action.rs:571:52
+     |
+ 571 |                 let root = anchor.add_submenu(&mc, title, Some(root.clone()))?;
+     |                                   -----------      ^^^^^ expected `std::string::String`, found `dcso3::String`
+     |                                   |
+     |                                   arguments to this method are incorrect
+     |
+     = note: `dcso3::String` and `std::string::String` have similar names, but are actually distinct types
+note: `dcso3::String` is defined in crate `dcso3`
+    --> dcso3\src\lib.rs:1090:1
+     |
+1090 | pub struct String(CompactString);
+     | ^^^^^^^^^^^^^^^^^
+note: `std::string::String` is defined in crate `alloc`
+    --> C:\Users\Robo\.rustup\toolchains\stable-x86_64-pc-windows-msvc\lib/rustlib/src/rust\library\alloc\src\string.rs
+:353:1
+     |
+ 353 | pub struct String {
+     | ^^^^^^^^^^^^^^^^^
+note: method defined here
+    --> bflib\src\menu\anchor.rs:36:12
+     |
+  36 |     pub fn add_submenu(
+     |            ^^^^^^^^^^^
+...
+  39 |         name: String,
+     |         ------------
+help: try using a conversion method
+     |
+ 571 |                 let root = anchor.add_submenu(&mc, title.to_string(), Some(root.clone()))?;
+     |                                                         ++++++++++++
+
+error[E0308]: mismatched types
+    --> bflib\src\menu\action.rs:584:52
+     |
+ 584 |                 let root = anchor.add_submenu(&mc, title, Some(root.clone()))?;
+     |                                   -----------      ^^^^^ expected `std::string::String`, found `dcso3::String`
+     |                                   |
+     |                                   arguments to this method are incorrect
+     |
+     = note: `dcso3::String` and `std::string::String` have similar names, but are actually distinct types
+note: `dcso3::String` is defined in crate `dcso3`
+    --> dcso3\src\lib.rs:1090:1
+     |
+1090 | pub struct String(CompactString);
+     | ^^^^^^^^^^^^^^^^^
+note: `std::string::String` is defined in crate `alloc`
+    --> C:\Users\Robo\.rustup\toolchains\stable-x86_64-pc-windows-msvc\lib/rustlib/src/rust\library\alloc\src\string.rs
+:353:1
+     |
+ 353 | pub struct String {
+     | ^^^^^^^^^^^^^^^^^
+note: method defined here
+    --> bflib\src\menu\anchor.rs:36:12
+     |
+  36 |     pub fn add_submenu(
+     |            ^^^^^^^^^^^
+...
+  39 |         name: String,
+     |         ------------
+help: try using a conversion method
+     |
+ 584 |                 let root = anchor.add_submenu(&mc, title.to_string(), Some(root.clone()))?;
+     |                                                         ++++++++++++
+
+error[E0308]: mismatched types
+    --> bflib\src\menu\action.rs:588:52
+     |
+ 588 |                 let root = anchor.add_submenu(&mc, title, Some(root.clone()))?;
+     |                                   -----------      ^^^^^ expected `std::string::String`, found `dcso3::String`
+     |                                   |
+     |                                   arguments to this method are incorrect
+     |
+     = note: `dcso3::String` and `std::string::String` have similar names, but are actually distinct types
+note: `dcso3::String` is defined in crate `dcso3`
+    --> dcso3\src\lib.rs:1090:1
+     |
+1090 | pub struct String(CompactString);
+     | ^^^^^^^^^^^^^^^^^
+note: `std::string::String` is defined in crate `alloc`
+    --> C:\Users\Robo\.rustup\toolchains\stable-x86_64-pc-windows-msvc\lib/rustlib/src/rust\library\alloc\src\string.rs
+:353:1
+     |
+ 353 | pub struct String {
+     | ^^^^^^^^^^^^^^^^^
+note: method defined here
+    --> bflib\src\menu\anchor.rs:36:12
+     |
+  36 |     pub fn add_submenu(
+     |            ^^^^^^^^^^^
+...
+  39 |         name: String,
+     |         ------------
+help: try using a conversion method
+     |
+ 588 |                 let root = anchor.add_submenu(&mc, title.to_string(), Some(root.clone()))?;
+     |                                                         ++++++++++++
+
+error[E0308]: mismatched types
+    --> bflib\src\menu\anchor.rs:44:67
+     |
+  44 |                 FowlSubMenu::Group(mc.add_submenu_for_group(*gid, name, None)?)
+     |                                       ---------------------       ^^^^ expected `dcso3::String`, found `std::str
+ing::String`
+     |                                       |
+     |                                       arguments to this method are incorrect
+     |
+     = note: `std::string::String` and `dcso3::String` have similar names, but are actually distinct types
+note: `std::string::String` is defined in crate `alloc`
+    --> C:\Users\Robo\.rustup\toolchains\stable-x86_64-pc-windows-msvc\lib/rustlib/src/rust\library\alloc\src\string.rs
+:353:1
+     |
+ 353 | pub struct String {
+     | ^^^^^^^^^^^^^^^^^
+note: `dcso3::String` is defined in crate `dcso3`
+    --> dcso3\src\lib.rs:1090:1
+     |
+1090 | pub struct String(CompactString);
+     | ^^^^^^^^^^^^^^^^^
+note: method defined here
+    --> dcso3\src\mission_commands.rs:159:12
+     |
+ 159 |     pub fn add_submenu_for_group(
+     |            ^^^^^^^^^^^^^^^^^^^^^
+help: call `Into::into` on this expression to convert `std::string::String` into `dcso3::String`
+     |
+  44 |                 FowlSubMenu::Group(mc.add_submenu_for_group(*gid, name.into(), None)?)
+     |                                                                       +++++++
+
+error[E0308]: mismatched types
+    --> bflib\src\menu\anchor.rs:47:67
+     |
+  47 |                 FowlSubMenu::Group(mc.add_submenu_for_group(*gid, name, Some(p))?)
+     |                                       ---------------------       ^^^^ expected `dcso3::String`, found `std::str
+ing::String`
+     |                                       |
+     |                                       arguments to this method are incorrect
+     |
+     = note: `std::string::String` and `dcso3::String` have similar names, but are actually distinct types
+note: `std::string::String` is defined in crate `alloc`
+    --> C:\Users\Robo\.rustup\toolchains\stable-x86_64-pc-windows-msvc\lib/rustlib/src/rust\library\alloc\src\string.rs
+:353:1
+     |
+ 353 | pub struct String {
+     | ^^^^^^^^^^^^^^^^^
+note: `dcso3::String` is defined in crate `dcso3`
+    --> dcso3\src\lib.rs:1090:1
+     |
+1090 | pub struct String(CompactString);
+     | ^^^^^^^^^^^^^^^^^
+note: method defined here
+    --> dcso3\src\mission_commands.rs:159:12
+     |
+ 159 |     pub fn add_submenu_for_group(
+     |            ^^^^^^^^^^^^^^^^^^^^^
+help: call `Into::into` on this expression to convert `std::string::String` into `dcso3::String`
+     |
+  47 |                 FowlSubMenu::Group(mc.add_submenu_for_group(*gid, name.into(), Some(p))?)
+     |                                                                       +++++++
+
+error[E0308]: mismatched types
+    --> bflib\src\menu\anchor.rs:50:76
+     |
+  50 |                 FowlSubMenu::Coalition(mc.add_submenu_for_coalition(*side, name, None)?)
+     |                                           -------------------------        ^^^^ expected `dcso3::String`, found 
+`std::string::String`
+     |                                           |
+     |                                           arguments to this method are incorrect
+     |
+     = note: `std::string::String` and `dcso3::String` have similar names, but are actually distinct types
+note: `std::string::String` is defined in crate `alloc`
+    --> C:\Users\Robo\.rustup\toolchains\stable-x86_64-pc-windows-msvc\lib/rustlib/src/rust\library\alloc\src\string.rs
+:353:1
+     |
+ 353 | pub struct String {
+     | ^^^^^^^^^^^^^^^^^
+note: `dcso3::String` is defined in crate `dcso3`
+    --> dcso3\src\lib.rs:1090:1
+     |
+1090 | pub struct String(CompactString);
+     | ^^^^^^^^^^^^^^^^^
+note: method defined here
+    --> dcso3\src\mission_commands.rs:123:12
+     |
+ 123 |     pub fn add_submenu_for_coalition(
+     |            ^^^^^^^^^^^^^^^^^^^^^^^^^
+help: call `Into::into` on this expression to convert `std::string::String` into `dcso3::String`
+     |
+  50 |                 FowlSubMenu::Coalition(mc.add_submenu_for_coalition(*side, name.into(), None)?)
+     |                                                                                +++++++
+
+error[E0308]: mismatched types
+    --> bflib\src\menu\anchor.rs:53:76
+     |
+  53 |                 FowlSubMenu::Coalition(mc.add_submenu_for_coalition(*side, name, Some(p))?)
+     |                                           -------------------------        ^^^^ expected `dcso3::String`, found 
+`std::string::String`
+     |                                           |
+     |                                           arguments to this method are incorrect
+     |
+     = note: `std::string::String` and `dcso3::String` have similar names, but are actually distinct types
+note: `std::string::String` is defined in crate `alloc`
+    --> C:\Users\Robo\.rustup\toolchains\stable-x86_64-pc-windows-msvc\lib/rustlib/src/rust\library\alloc\src\string.rs
+:353:1
+     |
+ 353 | pub struct String {
+     | ^^^^^^^^^^^^^^^^^
+note: `dcso3::String` is defined in crate `dcso3`
+    --> dcso3\src\lib.rs:1090:1
+     |
+1090 | pub struct String(CompactString);
+     | ^^^^^^^^^^^^^^^^^
+note: method defined here
+    --> dcso3\src\mission_commands.rs:123:12
+     |
+ 123 |     pub fn add_submenu_for_coalition(
+     |            ^^^^^^^^^^^^^^^^^^^^^^^^^
+help: call `Into::into` on this expression to convert `std::string::String` into `dcso3::String`
+     |
+  53 |                 FowlSubMenu::Coalition(mc.add_submenu_for_coalition(*side, name.into(), Some(p))?)
+     |                                                                                +++++++
+
+error[E0308]: mismatched types
+    --> bflib\src\menu\anchor.rs:77:48
+     |
+  77 |                 mc.add_command_for_group(*gid, name, parent, f, arg)?;
+     |                    ---------------------       ^^^^ expected `dcso3::String`, found `std::string::String`
+     |                    |
+     |                    arguments to this method are incorrect
+     |
+     = note: `std::string::String` and `dcso3::String` have similar names, but are actually distinct types
+note: `std::string::String` is defined in crate `alloc`
+    --> C:\Users\Robo\.rustup\toolchains\stable-x86_64-pc-windows-msvc\lib/rustlib/src/rust\library\alloc\src\string.rs
+:353:1
+     |
+ 353 | pub struct String {
+     | ^^^^^^^^^^^^^^^^^
+note: `dcso3::String` is defined in crate `dcso3`
+    --> dcso3\src\lib.rs:1090:1
+     |
+1090 | pub struct String(CompactString);
+     | ^^^^^^^^^^^^^^^^^
+note: method defined here
+    --> dcso3\src\mission_commands.rs:168:12
+     |
+ 168 |     pub fn add_command_for_group<F, A>(
+     |            ^^^^^^^^^^^^^^^^^^^^^
+help: call `Into::into` on this expression to convert `std::string::String` into `dcso3::String`
+     |
+  77 |                 mc.add_command_for_group(*gid, name.into(), parent, f, arg)?;
+     |                                                    +++++++
+
+error[E0308]: mismatched types
+    --> bflib\src\menu\anchor.rs:84:53
+     |
+  84 |                 mc.add_command_for_coalition(*side, name, parent, f, arg)?;
+     |                    -------------------------        ^^^^ expected `dcso3::String`, found `std::string::String`
+     |                    |
+     |                    arguments to this method are incorrect
+     |
+     = note: `std::string::String` and `dcso3::String` have similar names, but are actually distinct types
+note: `std::string::String` is defined in crate `alloc`
+    --> C:\Users\Robo\.rustup\toolchains\stable-x86_64-pc-windows-msvc\lib/rustlib/src/rust\library\alloc\src\string.rs
+:353:1
+     |
+ 353 | pub struct String {
+     | ^^^^^^^^^^^^^^^^^
+note: `dcso3::String` is defined in crate `dcso3`
+    --> dcso3\src\lib.rs:1090:1
+     |
+1090 | pub struct String(CompactString);
+     | ^^^^^^^^^^^^^^^^^
+note: method defined here
+    --> dcso3\src\mission_commands.rs:132:12
+     |
+ 132 |     pub fn add_command_for_coalition<F, A>(
+     |            ^^^^^^^^^^^^^^^^^^^^^^^^^
+help: call `Into::into` on this expression to convert `std::string::String` into `dcso3::String`
+     |
+  84 |                 mc.add_command_for_coalition(*side, name.into(), parent, f, arg)?;
+     |                                                         +++++++
+
+error[E0277]: the trait bound `GroupCommandItem: std::convert::From<Vec<std::string::String>>` is not satisfied
+  --> bflib\src\menu\anchor.rs:92:67
+   |
+92 |             Self::Group(gid) => mc.remove_command_for_group(*gid, GroupCommandItem::from(path)),
+   |                                                                   ^^^^^^^^^^^^^^^^ the trait `std::convert::From<V
+ec<std::string::String>>` is not implemented for `GroupCommandItem`
+   |
+help: the trait `From<Vec<std::string::String>>` is not implemented for `GroupCommandItem`
+      but trait `From<Vec<dcso3::String>>` is implemented for it
+  --> dcso3\src\mission_commands.rs:65:9
+   |
+65 |         impl From<Vec<String>> for $name {
+   |         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+...
+84 | item!(GroupCommandItem);
+   | ----------------------- in this macro invocation
+   = help: for that trait implementation, expected `dcso3::String`, found `std::string::String`
+   = note: this error originates in the macro `item` (in Nightly builds, run with -Z macro-backtrace for more info)
+
+error[E0277]: the trait bound `CoalitionCommandItem: std::convert::From<Vec<std::string::String>>` is not satisfied
+  --> bflib\src\menu\anchor.rs:94:56
+   |
+94 |                 mc.remove_command_for_coalition(*side, CoalitionCommandItem::from(path))
+   |                                                        ^^^^^^^^^^^^^^^^^^^^ the trait `std::convert::From<Vec<std:
+:string::String>>` is not implemented for `CoalitionCommandItem`
+   |
+help: the trait `From<Vec<std::string::String>>` is not implemented for `CoalitionCommandItem`
+      but trait `From<Vec<dcso3::String>>` is implemented for it
+  --> dcso3\src\mission_commands.rs:65:9
+   |
+65 |         impl From<Vec<String>> for $name {
+   |         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+...
+83 | item!(CoalitionCommandItem);
+   | --------------------------- in this macro invocation
+   = help: for that trait implementation, expected `dcso3::String`, found `std::string::String`
+   = note: this error originates in the macro `item` (in Nightly builds, run with -Z macro-backtrace for more info)
+
+error[E0308]: mismatched types
+   --> bflib\src\menu\ca.rs:15:40
+    |
+ 15 |         let info = net.get_player_info(id)?;
+    |                        --------------- ^^ expected `PlayerId`, found `Result<PlayerId, Error>`
+    |                        |
+    |                        arguments to this method are incorrect
+    |
+    = note: expected struct `PlayerId`
+                 found enum `std::result::Result<PlayerId, mlua::Error>`
+note: method defined here
+   --> dcso3\src\net.rs:471:12
+    |
+471 |     pub fn get_player_info(&self, id: PlayerId) -> Result<PlayerInfo<'_>> {
+    |            ^^^^^^^^^^^^^^^
+help: use the `?` operator to extract the `std::result::Result<PlayerId, mlua::Error>` value, propagating a `Result::Er
+r` value to the caller
+    |
+ 15 |         let info = net.get_player_info(id?)?;
+    |                                          +
+
+error[E0308]: mismatched types
+   --> bflib\src\menu\ca.rs:16:35
+    |
+ 16 |         let (_, s) = net.get_slot(id)?;
+    |                          -------- ^^ expected `PlayerId`, found `Result<PlayerId, Error>`
+    |                          |
+    |                          arguments to this method are incorrect
+    |
+    = note: expected struct `PlayerId`
+                 found enum `std::result::Result<PlayerId, mlua::Error>`
+note: method defined here
+   --> dcso3\src\net.rs:487:12
+    |
+487 |     pub fn get_slot(&self, id: PlayerId) -> Result<(Side, SlotId)> {
+    |            ^^^^^^^^
+help: use the `?` operator to extract the `std::result::Result<PlayerId, mlua::Error>` value, propagating a `Result::Er
+r` value to the caller
+    |
+ 16 |         let (_, s) = net.get_slot(id?)?;
+    |                                     +
+
+error[E0615]: attempted to take value of method `ucid` on type `dcso3::net::PlayerInfo<'_>`
+  --> bflib\src\menu\ca.rs:21:31
+   |
+21 |             found = Some(info.ucid);
+   |                               ^^^^ method, not a field
+   |
+help: use parentheses to call the method
+   |
+21 |             found = Some(info.ucid());
+   |                                   ++
+
+error[E0308]: mismatched types
+    --> bflib\src\menu\ewr.rs:87:36
+     |
+  87 |                         unit_name: String::from("ca"),
+     |                                    ^^^^^^^^^^^^^^^^^^ expected `dcso3::String`, found `std::string::String`
+     |
+     = note: `std::string::String` and `dcso3::String` have similar names, but are actually distinct types
+note: `std::string::String` is defined in crate `alloc`
+    --> C:\Users\Robo\.rustup\toolchains\stable-x86_64-pc-windows-msvc\lib/rustlib/src/rust\library\alloc\src\string.rs
+:353:1
+     |
+ 353 | pub struct String {
+     | ^^^^^^^^^^^^^^^^^
+note: `dcso3::String` is defined in crate `dcso3`
+    --> dcso3\src\lib.rs:1090:1
+     |
+1090 | pub struct String(CompactString);
+     | ^^^^^^^^^^^^^^^^^
+help: call `Into::into` on this expression to convert `std::string::String` into `dcso3::String`
+     |
+  87 |                         unit_name: String::from("ca").into(),
+     |                                                      +++++++
+
+error[E0308]: mismatched types
+  --> bflib\src\menu\ewr.rs:89:32
+   |
+89 | ...                   p: dcso3::Vector3::new(pos.x, 0., pos.y),
+   |                          ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ expected `LuaVec3`, found `Matrix<f64, Const<3>, Co
+nst<1>, ...>`
+   |
+   = note: expected struct `LuaVec3`
+              found struct `Matrix<f64, Const<3>, Const<1>, ArrayStorage<f64, 3, 1>>`
+help: try wrapping the expression in `dcso3::LuaVec3`
+   |
+89 |                             p: dcso3::LuaVec3(dcso3::Vector3::new(pos.x, 0., pos.y)),
+   |                                +++++++++++++++                                     +
+
+error[E0308]: mismatched types
+  --> bflib\src\menu\ewr.rs:90:32
+   |
+90 | ...                   x: dcso3::Vector3::new(1., 0., 0.),
+   |                          ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ expected `LuaVec3`, found `Matrix<f64, Const<3>, Const<1>
+, ...>`
+   |
+   = note: expected struct `LuaVec3`
+              found struct `Matrix<f64, Const<3>, Const<1>, ArrayStorage<f64, 3, 1>>`
+help: try wrapping the expression in `dcso3::LuaVec3`
+   |
+90 |                             x: dcso3::LuaVec3(dcso3::Vector3::new(1., 0., 0.)),
+   |                                +++++++++++++++                               +
+
+error[E0308]: mismatched types
+  --> bflib\src\menu\ewr.rs:91:32
+   |
+91 | ...                   y: dcso3::Vector3::new(0., 1., 0.),
+   |                          ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ expected `LuaVec3`, found `Matrix<f64, Const<3>, Const<1>
+, ...>`
+   |
+   = note: expected struct `LuaVec3`
+              found struct `Matrix<f64, Const<3>, Const<1>, ArrayStorage<f64, 3, 1>>`
+help: try wrapping the expression in `dcso3::LuaVec3`
+   |
+91 |                             y: dcso3::LuaVec3(dcso3::Vector3::new(0., 1., 0.)),
+   |                                +++++++++++++++                               +
+
+error[E0308]: mismatched types
+  --> bflib\src\menu\ewr.rs:92:32
+   |
+92 | ...                   z: dcso3::Vector3::new(0., 0., 1.),
+   |                          ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ expected `LuaVec3`, found `Matrix<f64, Const<3>, Const<1>
+, ...>`
+   |
+   = note: expected struct `LuaVec3`
+              found struct `Matrix<f64, Const<3>, Const<1>, ArrayStorage<f64, 3, 1>>`
+help: try wrapping the expression in `dcso3::LuaVec3`
+   |
+92 |                             z: dcso3::LuaVec3(dcso3::Vector3::new(0., 0., 1.)),
+   |                                +++++++++++++++                               +
+
+error[E0308]: mismatched types
+    --> bflib\src\menu\ewr.rs:96:56
+     |
+  96 |                         typ: bfprotocols::cfg::Vehicle(String::from("")),
+     |                              ------------------------- ^^^^^^^^^^^^^^^^ expected `dcso3::String`, found `std::st
+ring::String`
+     |                              |
+     |                              arguments to this struct are incorrect
+     |
+     = note: `std::string::String` and `dcso3::String` have similar names, but are actually distinct types
+note: `std::string::String` is defined in crate `alloc`
+    --> C:\Users\Robo\.rustup\toolchains\stable-x86_64-pc-windows-msvc\lib/rustlib/src/rust\library\alloc\src\string.rs
+:353:1
+     |
+ 353 | pub struct String {
+     | ^^^^^^^^^^^^^^^^^
+note: `dcso3::String` is defined in crate `dcso3`
+    --> dcso3\src\lib.rs:1090:1
+     |
+1090 | pub struct String(CompactString);
+     | ^^^^^^^^^^^^^^^^^
+note: tuple struct defined here
+    --> bfprotocols\src\cfg\mod.rs:40:12
+     |
+  40 | pub struct Vehicle(pub String);
+     |            ^^^^^^^
+help: call `Into::into` on this expression to convert `std::string::String` into `dcso3::String`
+     |
+  96 |                         typ: bfprotocols::cfg::Vehicle(String::from("").into()),
+     |                                                                        +++++++
+
+error[E0308]: mismatched types
+    --> bflib\src\menu\jtac.rs:1130:31
+     |
+1130 |     let mut root = me.submenu(format_compact!("{name}>>"), None)?;
+     |                       ------- ^^^^^^^^^^^^^^^^^^^^^^^^^^^ expected `String`, found `CompactString`
+     |                       |
+     |                       arguments to this method are incorrect
+     |
+note: method defined here
+    --> bflib\src\menu\anchor.rs:116:12
+     |
+ 116 |     pub fn submenu(
+     |            ^^^^^^^
+ 117 |         &self,
+ 118 |         name: String,
+     |         ------------
+help: try using a conversion method
+    -->  C:\Users\Robo\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\compact_str-0.8.1\src\macros.rs:30:90
+     |
+  30 |         $crate::ToCompactString::to_compact_string(&$crate::core::format_args!($($arg)*)).to_string()
+     |                                                                                          ++++++++++++
+
+error[E0308]: mismatched types
+    --> bflib\src\menu\mod.rs:270:17
+     |
+ 270 |                 format!("Fowl [{slot}]"),
+     |                 ^^^^^^^^^^^^^^^^^^^^^^^^ expected `dcso3::String`, found `std::string::String`
+     |
+     = note: `std::string::String` and `dcso3::String` have similar names, but are actually distinct types
+note: `std::string::String` is defined in crate `alloc`
+    --> C:\Users\Robo\.rustup\toolchains\stable-x86_64-pc-windows-msvc\lib/rustlib/src/rust\library\alloc\src\string.rs
+:353:1
+     |
+ 353 | pub struct String {
+     | ^^^^^^^^^^^^^^^^^
+note: `dcso3::String` is defined in crate `dcso3`
+    --> dcso3\src\lib.rs:1090:1
+     |
+1090 | pub struct String(CompactString);
+     | ^^^^^^^^^^^^^^^^^
+     = note: this error originates in the macro `format` (in Nightly builds, run with -Z macro-backtrace for more info)
+help: call `Into::into` on this expression to convert `std::string::String` into `dcso3::String`
+     |
+ 270 |                 format!("Fowl [{slot}]").into(),
+     |                                         +++++++
+
+warning: unused variable: `now`
+   --> bflib\src\db\actions.rs:648:13
+    |
+648 |         let now = Utc::now();
+    |             ^^^ help: if this is intentional, prefix it with an underscore: `_now`
+    |
+    = note: `#[warn(unused_variables)]` (part of `#[warn(unused)]`) on by default
+
+warning: unused variable: `time`
+   --> bflib\src\db\actions.rs:801:13
+    |
+801 |             time,
+    |             ^^^^ help: try ignoring the field: `time: _`
+
+warning: unused variable: `ai`
+   --> bflib\src\db\actions.rs:811:42
+    |
+811 |                 if let ActionKind::Awacs(ai) = &spec.kind {
+    |                                          ^^ help: if this is intentional, prefix it with an underscore: `_ai`
+
+warning: unused variable: `ai`
+   --> bflib\src\db\actions.rs:827:43
+    |
+827 |                 if let ActionKind::Tanker(ai) = &spec.kind {
+    |                                           ^^ help: if this is intentional, prefix it with an underscore: `_ai`
+
+warning: unused variable: `ai`
+   --> bflib\src\db\actions.rs:843:55
+    |
+843 |                 if let ActionKind::CruiseMissileSpawn(ai) = &spec.kind {
+    |                                                       ^^ help: if this is intentional, prefix it with an undersco
+re: `_ai`
+
+warning: unused variable: `ai`
+   --> bflib\src\db\actions.rs:859:42
+    |
+859 |                 if let ActionKind::Drone(ai) = &spec.kind {
+    |                                          ^^ help: if this is intentional, prefix it with an underscore: `_ai`
+
+warning: unused variable: `ai`
+   --> bflib\src\db\actions.rs:875:45
+    |
+875 |                 if let ActionKind::Fighters(ai) = &spec.kind {
+    |                                             ^^ help: if this is intentional, prefix it with an underscore: `_ai`
+
+warning: unused variable: `ai`
+   --> bflib\src\db\actions.rs:891:46
+    |
+891 |                 if let ActionKind::Attackers(ai) = &spec.kind {
+    |                                              ^^ help: if this is intentional, prefix it with an underscore: `_ai`
+
+warning: unused variable: `ai`
+   --> bflib\src\db\actions.rs:907:41
+    |
+907 |                 if let ActionKind::Sead(ai) = &spec.kind {
+    |                                         ^^ help: if this is intentional, prefix it with an underscore: `_ai`
+
+warning: unused variable: `heading`
+    --> bflib\src\db\actions.rs:2014:9
+     |
+2014 |         heading: f64,
+     |         ^^^^^^^ help: if this is intentional, prefix it with an underscore: `_heading`
+
+warning: unused variable: `spctx`
+    --> bflib\src\db\actions.rs:2553:9
+     |
+2553 |         spctx: &SpawnCtx<'lua>,
+     |         ^^^^^ help: if this is intentional, prefix it with an underscore: `_spctx`
+
+warning: unused variable: `idx`
+    --> bflib\src\db\actions.rs:2554:9
+     |
+2554 |         idx: &MizIndex,
+     |         ^^^ help: if this is intentional, prefix it with an underscore: `_idx`
+
+warning: unused variable: `time`
+    --> bflib\src\db\actions.rs:3054:17
+     |
+3054 |                 time,
+     |                 ^^^^ help: try ignoring the field: `time: _`
+
+warning: unused variable: `slot`
+   --> bflib\src\db\ai_air.rs:759:5
+    |
+759 |     slot: &HubSlot,
+    |     ^^^^ help: if this is intentional, prefix it with an underscore: `_slot`
+
+warning: variable does not need to be mutable
+    --> bflib\src\db\ai_air.rs:4568:13
+     |
+4568 |         let mut out_pylon = pylon.clone();
+     |             ----^^^^^^^^^
+     |             |
+     |             help: remove this `mut`
+     |
+     = note: `#[warn(unused_mut)]` (part of `#[warn(unused)]`) on by default
+
+warning: unused variable: `mission_kind`
+    --> bflib\src\db\ai_air.rs:6258:61
+     |
+6258 |     let (fowl_name, side, cfg_template, existing_dcs_names, mission_kind) = {
+     |                                                             ^^^^^^^^^^^^ help: if this is intentional, prefix it
+ with an underscore: `_mission_kind`
+
+warning: unused variable: `name`
+   --> bflib\src\jtac.rs:840:21
+    |
+840 |                 let name = db.group(gid)?.name.clone();
+    |                     ^^^^ help: if this is intentional, prefix it with an underscore: `_name`
+
+Some errors have detailed explanations: E0106, E0277, E0308, E0425, E0433, E0615.
+For more information about an error, try `rustc --explain E0106`.
+warning: `bflib` (lib) generated 23 warnings
+error: could not compile `bflib` (lib) due to 39 previous errors; 23 warnings emitted

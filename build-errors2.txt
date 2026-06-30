@@ -1,0 +1,1517 @@
+﻿cargo :    Compiling bflib v2.0.0 (C:\GitHub\DCSfowlengine\bflib)
+At line:1 char:44
++ ... e\setup-build.ps1; cargo build --release --package=bflib 2>&1 | Out-F ...
++                        ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    + CategoryInfo          : NotSpecified: (   Compiling bf...wlengine\bflib):String) [], RemoteException
+    + FullyQualifiedErrorId : NativeCommandError
+ 
+warning: unused import: `AiPlaneKind`
+  --> bflib\src\db\actions.rs:14:57
+   |
+14 |         Action, ActionGeoLimit, ActionKind, AiPlaneCfg, AiPlaneKind, AwacsCfg, BomberCfg,
+   |                                                         ^^^^^^^^^^^
+   |
+   = note: `#[warn(unused_imports)]` (part of `#[warn(unused)]`) on by default
+
+warning: unused import: `Duration`
+  --> bflib\src\db\actions.rs:25:14
+   |
+25 | use chrono::{Duration, prelude::*};
+   |              ^^^^^^^^
+
+warning: unused imports: `GroupCommandItem` and `GroupSubMenu`
+  --> bflib\src\menu\action.rs:21:24
+   |
+21 |     mission_commands::{GroupCommandItem, GroupSubMenu, MissionCommands},
+   |                        ^^^^^^^^^^^^^^^^  ^^^^^^^^^^^^
+
+warning: unused import: `GroupCommandItem`
+  --> bflib\src\menu\jtac.rs:39:24
+   |
+39 |     mission_commands::{GroupCommandItem, GroupSubMenu, MissionCommands},
+   |                        ^^^^^^^^^^^^^^^^
+
+warning: unused import: `FowlSubMenu`
+  --> bflib\src\menu\mod.rs:38:14
+   |
+38 | use anchor::{FowlSubMenu, MenuAnchor};
+   |              ^^^^^^^^^^^
+
+error[E0283]: type annotations needed
+   --> bflib\src\menu\action.rs:389:49
+    |
+389 |     anchor.remove_command(&mc, vec!["Actions>>".into()])?;
+    |            --------------                       ^^^^
+    |            |
+    |            type must be known at this point
+    |
+    = note: multiple `impl`s satisfying `_: Into<dcso3::String>` found in the following crates: `bfprotocols`, `core`, 
+`dcso3`:
+            - impl Into<dcso3::String> for NameFilter;
+            - impl Into<dcso3::String> for SlotId;
+            - impl<T, U> Into<U> for T
+              where U: std::convert::From<T>;
+note: required by a bound in `MenuAnchor::remove_command`
+   --> bflib\src\menu\anchor.rs:95:45
+    |
+ 92 |     pub fn remove_command(
+    |            -------------- required by a bound in this associated function
+...
+ 95 |         path: impl IntoIterator<Item = impl Into<String>>,
+    |                                             ^^^^^^^^^^^^ required by this bound in `MenuAnchor::remove_command`
+help: try using a fully qualified path to specify the expected types
+    |
+389 -     anchor.remove_command(&mc, vec!["Actions>>".into()])?;
+389 +     anchor.remove_command(&mc, vec![<&str as Into<T>>::into("Actions>>")])?;
+    |
+
+error[E0283]: type annotations needed
+   --> bflib\src\menu\action.rs:389:49
+    |
+389 |     anchor.remove_command(&mc, vec!["Actions>>".into()])?;
+    |                                                 ^^^^
+    |
+    = note: multiple `impl`s satisfying `_: std::convert::From<&str>` found in the following crates: `bytes`, `derive_b
+uilder`, `netidx_core`, `netidx_netproto`, `reqwest`, `zune_core`, `zune_jpeg`:
+            - impl std::convert::From<&'static str> for bytes::Bytes;
+            - impl std::convert::From<&'static str> for derive_builder::error::UninitializedFieldError;
+            - impl std::convert::From<&'static str> for netidx::chars::Chars;
+            - impl std::convert::From<&'static str> for netidx::path::Path;
+            - impl std::convert::From<&'static str> for netidx::publisher::Value;
+            - impl std::convert::From<&'static str> for reqwest::Body;
+            - impl std::convert::From<&'static str> for zune_core::bytestream::reader::ZByteIoError;
+            - impl std::convert::From<&'static str> for zune_jpeg::errors::DecodeErrors;
+    = note: required for `&str` to implement `Into<_>`
+help: try using a fully qualified path to specify the expected types
+    |
+389 -     anchor.remove_command(&mc, vec!["Actions>>".into()])?;
+389 +     anchor.remove_command(&mc, vec![<&str as Into<T>>::into("Actions>>")])?;
+    |
+
+error[E0283]: type annotations needed
+   --> bflib\src\menu\action.rs:390:54
+    |
+390 |     let mut root = anchor.add_submenu(&mc, "Actions".into(), None)?;
+    |                           -----------                ^^^^
+    |                           |
+    |                           required by a bound introduced by this call
+    |
+    = note: multiple `impl`s satisfying `_: Into<dcso3::String>` found in the following crates: `bfprotocols`, `core`, 
+`dcso3`:
+            - impl Into<dcso3::String> for NameFilter;
+            - impl Into<dcso3::String> for SlotId;
+            - impl<T, U> Into<U> for T
+              where U: std::convert::From<T>;
+note: required by a bound in `MenuAnchor::add_submenu`
+   --> bflib\src\menu\anchor.rs:39:20
+    |
+ 36 |     pub fn add_submenu(
+    |            ----------- required by a bound in this associated function
+...
+ 39 |         name: impl Into<String>,
+    |                    ^^^^^^^^^^^^ required by this bound in `MenuAnchor::add_submenu`
+help: try using a fully qualified path to specify the expected types
+    |
+390 -     let mut root = anchor.add_submenu(&mc, "Actions".into(), None)?;
+390 +     let mut root = anchor.add_submenu(&mc, <&str as Into<T>>::into("Actions"), None)?;
+    |
+help: consider removing this method call, as the receiver has type `&'static str` and `&'static str: Into<dcso3::String
+>` trivially holds
+    |
+390 -     let mut root = anchor.add_submenu(&mc, "Actions".into(), None)?;
+390 +     let mut root = anchor.add_submenu(&mc, "Actions", None)?;
+    |
+
+error[E0283]: type annotations needed
+   --> bflib\src\menu\action.rs:390:54
+    |
+390 |     let mut root = anchor.add_submenu(&mc, "Actions".into(), None)?;
+    |                                                      ^^^^
+    |
+    = note: multiple `impl`s satisfying `_: std::convert::From<&str>` found in the following crates: `bytes`, `derive_b
+uilder`, `netidx_core`, `netidx_netproto`, `reqwest`, `zune_core`, `zune_jpeg`:
+            - impl std::convert::From<&'static str> for bytes::Bytes;
+            - impl std::convert::From<&'static str> for derive_builder::error::UninitializedFieldError;
+            - impl std::convert::From<&'static str> for netidx::chars::Chars;
+            - impl std::convert::From<&'static str> for netidx::path::Path;
+            - impl std::convert::From<&'static str> for netidx::publisher::Value;
+            - impl std::convert::From<&'static str> for reqwest::Body;
+            - impl std::convert::From<&'static str> for zune_core::bytestream::reader::ZByteIoError;
+            - impl std::convert::From<&'static str> for zune_jpeg::errors::DecodeErrors;
+    = note: required for `&str` to implement `Into<_>`
+help: try using a fully qualified path to specify the expected types
+    |
+390 -     let mut root = anchor.add_submenu(&mc, "Actions".into(), None)?;
+390 +     let mut root = anchor.add_submenu(&mc, <&str as Into<T>>::into("Actions"), None)?;
+    |
+
+error[E0283]: type annotations needed
+   --> bflib\src\menu\action.rs:459:57
+    |
+459 |                 root = anchor.add_submenu(&mc, "Next>>".into(), Some(root.clone()))?;
+    |                               -----------               ^^^^
+    |                               |
+    |                               required by a bound introduced by this call
+    |
+    = note: multiple `impl`s satisfying `_: Into<dcso3::String>` found in the following crates: `bfprotocols`, `core`, 
+`dcso3`:
+            - impl Into<dcso3::String> for NameFilter;
+            - impl Into<dcso3::String> for SlotId;
+            - impl<T, U> Into<U> for T
+              where U: std::convert::From<T>;
+note: required by a bound in `MenuAnchor::add_submenu`
+   --> bflib\src\menu\anchor.rs:39:20
+    |
+ 36 |     pub fn add_submenu(
+    |            ----------- required by a bound in this associated function
+...
+ 39 |         name: impl Into<String>,
+    |                    ^^^^^^^^^^^^ required by this bound in `MenuAnchor::add_submenu`
+help: try using a fully qualified path to specify the expected types
+    |
+459 -                 root = anchor.add_submenu(&mc, "Next>>".into(), Some(root.clone()))?;
+459 +                 root = anchor.add_submenu(&mc, <&str as Into<T>>::into("Next>>"), Some(root.clone()))?;
+    |
+help: consider removing this method call, as the receiver has type `&'static str` and `&'static str: Into<dcso3::String
+>` trivially holds
+    |
+459 -                 root = anchor.add_submenu(&mc, "Next>>".into(), Some(root.clone()))?;
+459 +                 root = anchor.add_submenu(&mc, "Next>>", Some(root.clone()))?;
+    |
+
+error[E0283]: type annotations needed
+   --> bflib\src\menu\action.rs:459:57
+    |
+459 |                 root = anchor.add_submenu(&mc, "Next>>".into(), Some(root.clone()))?;
+    |                                                         ^^^^
+    |
+    = note: multiple `impl`s satisfying `_: std::convert::From<&str>` found in the following crates: `bytes`, `derive_b
+uilder`, `netidx_core`, `netidx_netproto`, `reqwest`, `zune_core`, `zune_jpeg`:
+            - impl std::convert::From<&'static str> for bytes::Bytes;
+            - impl std::convert::From<&'static str> for derive_builder::error::UninitializedFieldError;
+            - impl std::convert::From<&'static str> for netidx::chars::Chars;
+            - impl std::convert::From<&'static str> for netidx::path::Path;
+            - impl std::convert::From<&'static str> for netidx::publisher::Value;
+            - impl std::convert::From<&'static str> for reqwest::Body;
+            - impl std::convert::From<&'static str> for zune_core::bytestream::reader::ZByteIoError;
+            - impl std::convert::From<&'static str> for zune_jpeg::errors::DecodeErrors;
+    = note: required for `&str` to implement `Into<_>`
+help: try using a fully qualified path to specify the expected types
+    |
+459 -                 root = anchor.add_submenu(&mc, "Next>>".into(), Some(root.clone()))?;
+459 +                 root = anchor.add_submenu(&mc, <&str as Into<T>>::into("Next>>"), Some(root.clone()))?;
+    |
+
+error[E0283]: type annotations needed
+   --> bflib\src\menu\action.rs:495:21
+    |
+493 |                 let root = anchor.add_submenu(
+    |                                   ----------- required by a bound introduced by this call
+494 |                     &mc,
+495 |                     format_compact!("{gid}({key})").into(),
+    |                     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ cannot infer type for type parameter `impl Into<String
+>` declared on the method `add_submenu`
+    |
+    = note: multiple `impl`s satisfying `_: Into<dcso3::String>` found in the following crates: `bfprotocols`, `core`, 
+`dcso3`:
+            - impl Into<dcso3::String> for NameFilter;
+            - impl Into<dcso3::String> for SlotId;
+            - impl<T, U> Into<U> for T
+              where U: std::convert::From<T>;
+note: required by a bound in `MenuAnchor::add_submenu`
+   --> bflib\src\menu\anchor.rs:39:20
+    |
+ 36 |     pub fn add_submenu(
+    |            ----------- required by a bound in this associated function
+...
+ 39 |         name: impl Into<String>,
+    |                    ^^^^^^^^^^^^ required by this bound in `MenuAnchor::add_submenu`
+
+error[E0283]: type annotations needed
+   --> bflib\src\menu\action.rs:523:61
+    |
+523 |                     root = anchor.add_submenu(&mc, "Next>>".into(), Some(root.clone()))?;
+    |                                   -----------               ^^^^
+    |                                   |
+    |                                   required by a bound introduced by this call
+    |
+    = note: multiple `impl`s satisfying `_: Into<dcso3::String>` found in the following crates: `bfprotocols`, `core`, 
+`dcso3`:
+            - impl Into<dcso3::String> for NameFilter;
+            - impl Into<dcso3::String> for SlotId;
+            - impl<T, U> Into<U> for T
+              where U: std::convert::From<T>;
+note: required by a bound in `MenuAnchor::add_submenu`
+   --> bflib\src\menu\anchor.rs:39:20
+    |
+ 36 |     pub fn add_submenu(
+    |            ----------- required by a bound in this associated function
+...
+ 39 |         name: impl Into<String>,
+    |                    ^^^^^^^^^^^^ required by this bound in `MenuAnchor::add_submenu`
+help: try using a fully qualified path to specify the expected types
+    |
+523 -                     root = anchor.add_submenu(&mc, "Next>>".into(), Some(root.clone()))?;
+523 +                     root = anchor.add_submenu(&mc, <&str as Into<T>>::into("Next>>"), Some(root.clone()))?;
+    |
+help: consider removing this method call, as the receiver has type `&'static str` and `&'static str: Into<dcso3::String
+>` trivially holds
+    |
+523 -                     root = anchor.add_submenu(&mc, "Next>>".into(), Some(root.clone()))?;
+523 +                     root = anchor.add_submenu(&mc, "Next>>", Some(root.clone()))?;
+    |
+
+error[E0283]: type annotations needed
+   --> bflib\src\menu\action.rs:523:61
+    |
+523 |                     root = anchor.add_submenu(&mc, "Next>>".into(), Some(root.clone()))?;
+    |                                                             ^^^^
+    |
+    = note: multiple `impl`s satisfying `_: std::convert::From<&str>` found in the following crates: `bytes`, `derive_b
+uilder`, `netidx_core`, `netidx_netproto`, `reqwest`, `zune_core`, `zune_jpeg`:
+            - impl std::convert::From<&'static str> for bytes::Bytes;
+            - impl std::convert::From<&'static str> for derive_builder::error::UninitializedFieldError;
+            - impl std::convert::From<&'static str> for netidx::chars::Chars;
+            - impl std::convert::From<&'static str> for netidx::path::Path;
+            - impl std::convert::From<&'static str> for netidx::publisher::Value;
+            - impl std::convert::From<&'static str> for reqwest::Body;
+            - impl std::convert::From<&'static str> for zune_core::bytestream::reader::ZByteIoError;
+            - impl std::convert::From<&'static str> for zune_jpeg::errors::DecodeErrors;
+    = note: required for `&str` to implement `Into<_>`
+help: try using a fully qualified path to specify the expected types
+    |
+523 -                     root = anchor.add_submenu(&mc, "Next>>".into(), Some(root.clone()))?;
+523 +                     root = anchor.add_submenu(&mc, <&str as Into<T>>::into("Next>>"), Some(root.clone()))?;
+    |
+
+error[E0283]: type annotations needed
+   --> bflib\src\menu\action.rs:549:53
+    |
+549 |             root = anchor.add_submenu(&mc, "Next>>".into(), Some(root.clone()))?;
+    |                           -----------               ^^^^
+    |                           |
+    |                           required by a bound introduced by this call
+    |
+    = note: multiple `impl`s satisfying `_: Into<dcso3::String>` found in the following crates: `bfprotocols`, `core`, 
+`dcso3`:
+            - impl Into<dcso3::String> for NameFilter;
+            - impl Into<dcso3::String> for SlotId;
+            - impl<T, U> Into<U> for T
+              where U: std::convert::From<T>;
+note: required by a bound in `MenuAnchor::add_submenu`
+   --> bflib\src\menu\anchor.rs:39:20
+    |
+ 36 |     pub fn add_submenu(
+    |            ----------- required by a bound in this associated function
+...
+ 39 |         name: impl Into<String>,
+    |                    ^^^^^^^^^^^^ required by this bound in `MenuAnchor::add_submenu`
+help: try using a fully qualified path to specify the expected types
+    |
+549 -             root = anchor.add_submenu(&mc, "Next>>".into(), Some(root.clone()))?;
+549 +             root = anchor.add_submenu(&mc, <&str as Into<T>>::into("Next>>"), Some(root.clone()))?;
+    |
+help: consider removing this method call, as the receiver has type `&'static str` and `&'static str: Into<dcso3::String
+>` trivially holds
+    |
+549 -             root = anchor.add_submenu(&mc, "Next>>".into(), Some(root.clone()))?;
+549 +             root = anchor.add_submenu(&mc, "Next>>", Some(root.clone()))?;
+    |
+
+error[E0283]: type annotations needed
+   --> bflib\src\menu\action.rs:549:53
+    |
+549 |             root = anchor.add_submenu(&mc, "Next>>".into(), Some(root.clone()))?;
+    |                                                     ^^^^
+    |
+    = note: multiple `impl`s satisfying `_: std::convert::From<&str>` found in the following crates: `bytes`, `derive_b
+uilder`, `netidx_core`, `netidx_netproto`, `reqwest`, `zune_core`, `zune_jpeg`:
+            - impl std::convert::From<&'static str> for bytes::Bytes;
+            - impl std::convert::From<&'static str> for derive_builder::error::UninitializedFieldError;
+            - impl std::convert::From<&'static str> for netidx::chars::Chars;
+            - impl std::convert::From<&'static str> for netidx::path::Path;
+            - impl std::convert::From<&'static str> for netidx::publisher::Value;
+            - impl std::convert::From<&'static str> for reqwest::Body;
+            - impl std::convert::From<&'static str> for zune_core::bytestream::reader::ZByteIoError;
+            - impl std::convert::From<&'static str> for zune_jpeg::errors::DecodeErrors;
+    = note: required for `&str` to implement `Into<_>`
+help: try using a fully qualified path to specify the expected types
+    |
+549 -             root = anchor.add_submenu(&mc, "Next>>".into(), Some(root.clone()))?;
+549 +             root = anchor.add_submenu(&mc, <&str as Into<T>>::into("Next>>"), Some(root.clone()))?;
+    |
+
+error[E0283]: type annotations needed
+   --> bflib\src\menu\action.rs:605:48
+    |
+605 |     anchor.remove_command(mc, vec!["Actions>>".into()])?;
+    |            --------------                      ^^^^
+    |            |
+    |            type must be known at this point
+    |
+    = note: multiple `impl`s satisfying `_: Into<dcso3::String>` found in the following crates: `bfprotocols`, `core`, 
+`dcso3`:
+            - impl Into<dcso3::String> for NameFilter;
+            - impl Into<dcso3::String> for SlotId;
+            - impl<T, U> Into<U> for T
+              where U: std::convert::From<T>;
+note: required by a bound in `MenuAnchor::remove_command`
+   --> bflib\src\menu\anchor.rs:95:45
+    |
+ 92 |     pub fn remove_command(
+    |            -------------- required by a bound in this associated function
+...
+ 95 |         path: impl IntoIterator<Item = impl Into<String>>,
+    |                                             ^^^^^^^^^^^^ required by this bound in `MenuAnchor::remove_command`
+help: try using a fully qualified path to specify the expected types
+    |
+605 -     anchor.remove_command(mc, vec!["Actions>>".into()])?;
+605 +     anchor.remove_command(mc, vec![<&str as Into<T>>::into("Actions>>")])?;
+    |
+
+error[E0283]: type annotations needed
+   --> bflib\src\menu\action.rs:605:48
+    |
+605 |     anchor.remove_command(mc, vec!["Actions>>".into()])?;
+    |                                                ^^^^
+    |
+    = note: multiple `impl`s satisfying `_: std::convert::From<&str>` found in the following crates: `bytes`, `derive_b
+uilder`, `netidx_core`, `netidx_netproto`, `reqwest`, `zune_core`, `zune_jpeg`:
+            - impl std::convert::From<&'static str> for bytes::Bytes;
+            - impl std::convert::From<&'static str> for derive_builder::error::UninitializedFieldError;
+            - impl std::convert::From<&'static str> for netidx::chars::Chars;
+            - impl std::convert::From<&'static str> for netidx::path::Path;
+            - impl std::convert::From<&'static str> for netidx::publisher::Value;
+            - impl std::convert::From<&'static str> for reqwest::Body;
+            - impl std::convert::From<&'static str> for zune_core::bytestream::reader::ZByteIoError;
+            - impl std::convert::From<&'static str> for zune_jpeg::errors::DecodeErrors;
+    = note: required for `&str` to implement `Into<_>`
+help: try using a fully qualified path to specify the expected types
+    |
+605 -     anchor.remove_command(mc, vec!["Actions>>".into()])?;
+605 +     anchor.remove_command(mc, vec![<&str as Into<T>>::into("Actions>>")])?;
+    |
+
+error[E0283]: type annotations needed
+   --> bflib\src\menu\action.rs:608:21
+    |
+606 |     anchor.add_command(
+    |            ----------- required by a bound introduced by this call
+607 |         mc,
+608 |         "Actions>>".into(),
+    |                     ^^^^
+    |
+    = note: multiple `impl`s satisfying `_: Into<dcso3::String>` found in the following crates: `bfprotocols`, `core`, 
+`dcso3`:
+            - impl Into<dcso3::String> for NameFilter;
+            - impl Into<dcso3::String> for SlotId;
+            - impl<T, U> Into<U> for T
+              where U: std::convert::From<T>;
+note: required by a bound in `MenuAnchor::add_command`
+   --> bflib\src\menu\anchor.rs:63:20
+    |
+ 60 |     pub fn add_command<F, A>(
+    |            ----------- required by a bound in this associated function
+...
+ 63 |         name: impl Into<String>,
+    |                    ^^^^^^^^^^^^ required by this bound in `MenuAnchor::add_command`
+help: try using a fully qualified path to specify the expected types
+    |
+608 -         "Actions>>".into(),
+608 +         <&str as Into<T>>::into("Actions>>"),
+    |
+help: consider removing this method call, as the receiver has type `&'static str` and `&'static str: Into<dcso3::String
+>` trivially holds
+    |
+608 -         "Actions>>".into(),
+608 +         "Actions>>",
+    |
+
+error[E0283]: type annotations needed
+   --> bflib\src\menu\action.rs:608:21
+    |
+608 |         "Actions>>".into(),
+    |                     ^^^^
+    |
+    = note: multiple `impl`s satisfying `_: std::convert::From<&str>` found in the following crates: `bytes`, `derive_b
+uilder`, `netidx_core`, `netidx_netproto`, `reqwest`, `zune_core`, `zune_jpeg`:
+            - impl std::convert::From<&'static str> for bytes::Bytes;
+            - impl std::convert::From<&'static str> for derive_builder::error::UninitializedFieldError;
+            - impl std::convert::From<&'static str> for netidx::chars::Chars;
+            - impl std::convert::From<&'static str> for netidx::path::Path;
+            - impl std::convert::From<&'static str> for netidx::publisher::Value;
+            - impl std::convert::From<&'static str> for reqwest::Body;
+            - impl std::convert::From<&'static str> for zune_core::bytestream::reader::ZByteIoError;
+            - impl std::convert::From<&'static str> for zune_jpeg::errors::DecodeErrors;
+    = note: required for `&str` to implement `Into<_>`
+help: try using a fully qualified path to specify the expected types
+    |
+608 -         "Actions>>".into(),
+608 +         <&str as Into<T>>::into("Actions>>"),
+    |
+
+error[E0616]: field `zone` of struct `db::objective::Objective` is private
+  --> bflib\src\menu\ewr.rs:34:25
+   |
+34 |         .map(|(_, o)| o.zone.pos())
+   |                         ^^^^ private field
+   |
+help: a method `zone` also exists, call it with parentheses
+   |
+34 |         .map(|(_, o)| o.zone().pos())
+   |                             ++
+
+error[E0283]: type annotations needed
+   --> bflib\src\menu\ewr.rs:198:45
+    |
+198 |     let root = anchor.add_submenu(mc, "EWR".into(), None)?;
+    |                       -----------           ^^^^
+    |                       |
+    |                       required by a bound introduced by this call
+    |
+    = note: multiple `impl`s satisfying `_: Into<dcso3::String>` found in the following crates: `bfprotocols`, `core`, 
+`dcso3`:
+            - impl Into<dcso3::String> for NameFilter;
+            - impl Into<dcso3::String> for SlotId;
+            - impl<T, U> Into<U> for T
+              where U: std::convert::From<T>;
+note: required by a bound in `MenuAnchor::add_submenu`
+   --> bflib\src\menu\anchor.rs:39:20
+    |
+ 36 |     pub fn add_submenu(
+    |            ----------- required by a bound in this associated function
+...
+ 39 |         name: impl Into<String>,
+    |                    ^^^^^^^^^^^^ required by this bound in `MenuAnchor::add_submenu`
+help: try using a fully qualified path to specify the expected types
+    |
+198 -     let root = anchor.add_submenu(mc, "EWR".into(), None)?;
+198 +     let root = anchor.add_submenu(mc, <&str as Into<T>>::into("EWR"), None)?;
+    |
+help: consider removing this method call, as the receiver has type `&'static str` and `&'static str: Into<dcso3::String
+>` trivially holds
+    |
+198 -     let root = anchor.add_submenu(mc, "EWR".into(), None)?;
+198 +     let root = anchor.add_submenu(mc, "EWR", None)?;
+    |
+
+error[E0283]: type annotations needed
+   --> bflib\src\menu\ewr.rs:198:45
+    |
+198 |     let root = anchor.add_submenu(mc, "EWR".into(), None)?;
+    |                                             ^^^^
+    |
+    = note: multiple `impl`s satisfying `_: std::convert::From<&str>` found in the following crates: `bytes`, `derive_b
+uilder`, `netidx_core`, `netidx_netproto`, `reqwest`, `zune_core`, `zune_jpeg`:
+            - impl std::convert::From<&'static str> for bytes::Bytes;
+            - impl std::convert::From<&'static str> for derive_builder::error::UninitializedFieldError;
+            - impl std::convert::From<&'static str> for netidx::chars::Chars;
+            - impl std::convert::From<&'static str> for netidx::path::Path;
+            - impl std::convert::From<&'static str> for netidx::publisher::Value;
+            - impl std::convert::From<&'static str> for reqwest::Body;
+            - impl std::convert::From<&'static str> for zune_core::bytestream::reader::ZByteIoError;
+            - impl std::convert::From<&'static str> for zune_jpeg::errors::DecodeErrors;
+    = note: required for `&str` to implement `Into<_>`
+help: try using a fully qualified path to specify the expected types
+    |
+198 -     let root = anchor.add_submenu(mc, "EWR".into(), None)?;
+198 +     let root = anchor.add_submenu(mc, <&str as Into<T>>::into("EWR"), None)?;
+    |
+
+error[E0283]: type annotations needed
+   --> bflib\src\menu\ewr.rs:201:18
+    |
+199 |     anchor.add_command(
+    |            ----------- required by a bound introduced by this call
+200 |         mc,
+201 |         "Report".into(),
+    |                  ^^^^
+    |
+    = note: multiple `impl`s satisfying `_: Into<dcso3::String>` found in the following crates: `bfprotocols`, `core`, 
+`dcso3`:
+            - impl Into<dcso3::String> for NameFilter;
+            - impl Into<dcso3::String> for SlotId;
+            - impl<T, U> Into<U> for T
+              where U: std::convert::From<T>;
+note: required by a bound in `MenuAnchor::add_command`
+   --> bflib\src\menu\anchor.rs:63:20
+    |
+ 60 |     pub fn add_command<F, A>(
+    |            ----------- required by a bound in this associated function
+...
+ 63 |         name: impl Into<String>,
+    |                    ^^^^^^^^^^^^ required by this bound in `MenuAnchor::add_command`
+help: try using a fully qualified path to specify the expected types
+    |
+201 -         "Report".into(),
+201 +         <&str as Into<T>>::into("Report"),
+    |
+help: consider removing this method call, as the receiver has type `&'static str` and `&'static str: Into<dcso3::String
+>` trivially holds
+    |
+201 -         "Report".into(),
+201 +         "Report",
+    |
+
+error[E0283]: type annotations needed
+   --> bflib\src\menu\ewr.rs:201:18
+    |
+201 |         "Report".into(),
+    |                  ^^^^
+    |
+    = note: multiple `impl`s satisfying `_: std::convert::From<&str>` found in the following crates: `bytes`, `derive_b
+uilder`, `netidx_core`, `netidx_netproto`, `reqwest`, `zune_core`, `zune_jpeg`:
+            - impl std::convert::From<&'static str> for bytes::Bytes;
+            - impl std::convert::From<&'static str> for derive_builder::error::UninitializedFieldError;
+            - impl std::convert::From<&'static str> for netidx::chars::Chars;
+            - impl std::convert::From<&'static str> for netidx::path::Path;
+            - impl std::convert::From<&'static str> for netidx::publisher::Value;
+            - impl std::convert::From<&'static str> for reqwest::Body;
+            - impl std::convert::From<&'static str> for zune_core::bytestream::reader::ZByteIoError;
+            - impl std::convert::From<&'static str> for zune_jpeg::errors::DecodeErrors;
+    = note: required for `&str` to implement `Into<_>`
+help: try using a fully qualified path to specify the expected types
+    |
+201 -         "Report".into(),
+201 +         <&str as Into<T>>::into("Report"),
+    |
+
+error[E0283]: type annotations needed
+   --> bflib\src\menu\ewr.rs:208:18
+    |
+206 |     anchor.add_command(
+    |            ----------- required by a bound introduced by this call
+207 |         mc,
+208 |         "Toggle".into(),
+    |                  ^^^^
+    |
+    = note: multiple `impl`s satisfying `_: Into<dcso3::String>` found in the following crates: `bfprotocols`, `core`, 
+`dcso3`:
+            - impl Into<dcso3::String> for NameFilter;
+            - impl Into<dcso3::String> for SlotId;
+            - impl<T, U> Into<U> for T
+              where U: std::convert::From<T>;
+note: required by a bound in `MenuAnchor::add_command`
+   --> bflib\src\menu\anchor.rs:63:20
+    |
+ 60 |     pub fn add_command<F, A>(
+    |            ----------- required by a bound in this associated function
+...
+ 63 |         name: impl Into<String>,
+    |                    ^^^^^^^^^^^^ required by this bound in `MenuAnchor::add_command`
+help: try using a fully qualified path to specify the expected types
+    |
+208 -         "Toggle".into(),
+208 +         <&str as Into<T>>::into("Toggle"),
+    |
+help: consider removing this method call, as the receiver has type `&'static str` and `&'static str: Into<dcso3::String
+>` trivially holds
+    |
+208 -         "Toggle".into(),
+208 +         "Toggle",
+    |
+
+error[E0283]: type annotations needed
+   --> bflib\src\menu\ewr.rs:208:18
+    |
+208 |         "Toggle".into(),
+    |                  ^^^^
+    |
+    = note: multiple `impl`s satisfying `_: std::convert::From<&str>` found in the following crates: `bytes`, `derive_b
+uilder`, `netidx_core`, `netidx_netproto`, `reqwest`, `zune_core`, `zune_jpeg`:
+            - impl std::convert::From<&'static str> for bytes::Bytes;
+            - impl std::convert::From<&'static str> for derive_builder::error::UninitializedFieldError;
+            - impl std::convert::From<&'static str> for netidx::chars::Chars;
+            - impl std::convert::From<&'static str> for netidx::path::Path;
+            - impl std::convert::From<&'static str> for netidx::publisher::Value;
+            - impl std::convert::From<&'static str> for reqwest::Body;
+            - impl std::convert::From<&'static str> for zune_core::bytestream::reader::ZByteIoError;
+            - impl std::convert::From<&'static str> for zune_jpeg::errors::DecodeErrors;
+    = note: required for `&str` to implement `Into<_>`
+help: try using a fully qualified path to specify the expected types
+    |
+208 -         "Toggle".into(),
+208 +         <&str as Into<T>>::into("Toggle"),
+    |
+
+error[E0283]: type annotations needed
+   --> bflib\src\menu\ewr.rs:215:27
+    |
+213 |     anchor.add_command(
+    |            ----------- required by a bound introduced by this call
+214 |         mc,
+215 |         "Friendly Report".into(),
+    |                           ^^^^
+    |
+    = note: multiple `impl`s satisfying `_: Into<dcso3::String>` found in the following crates: `bfprotocols`, `core`, 
+`dcso3`:
+            - impl Into<dcso3::String> for NameFilter;
+            - impl Into<dcso3::String> for SlotId;
+            - impl<T, U> Into<U> for T
+              where U: std::convert::From<T>;
+note: required by a bound in `MenuAnchor::add_command`
+   --> bflib\src\menu\anchor.rs:63:20
+    |
+ 60 |     pub fn add_command<F, A>(
+    |            ----------- required by a bound in this associated function
+...
+ 63 |         name: impl Into<String>,
+    |                    ^^^^^^^^^^^^ required by this bound in `MenuAnchor::add_command`
+help: try using a fully qualified path to specify the expected types
+    |
+215 -         "Friendly Report".into(),
+215 +         <&str as Into<T>>::into("Friendly Report"),
+    |
+help: consider removing this method call, as the receiver has type `&'static str` and `&'static str: Into<dcso3::String
+>` trivially holds
+    |
+215 -         "Friendly Report".into(),
+215 +         "Friendly Report",
+    |
+
+error[E0283]: type annotations needed
+   --> bflib\src\menu\ewr.rs:215:27
+    |
+215 |         "Friendly Report".into(),
+    |                           ^^^^
+    |
+    = note: multiple `impl`s satisfying `_: std::convert::From<&str>` found in the following crates: `bytes`, `derive_b
+uilder`, `netidx_core`, `netidx_netproto`, `reqwest`, `zune_core`, `zune_jpeg`:
+            - impl std::convert::From<&'static str> for bytes::Bytes;
+            - impl std::convert::From<&'static str> for derive_builder::error::UninitializedFieldError;
+            - impl std::convert::From<&'static str> for netidx::chars::Chars;
+            - impl std::convert::From<&'static str> for netidx::path::Path;
+            - impl std::convert::From<&'static str> for netidx::publisher::Value;
+            - impl std::convert::From<&'static str> for reqwest::Body;
+            - impl std::convert::From<&'static str> for zune_core::bytestream::reader::ZByteIoError;
+            - impl std::convert::From<&'static str> for zune_jpeg::errors::DecodeErrors;
+    = note: required for `&str` to implement `Into<_>`
+help: try using a fully qualified path to specify the expected types
+    |
+215 -         "Friendly Report".into(),
+215 +         <&str as Into<T>>::into("Friendly Report"),
+    |
+
+error[E0283]: type annotations needed
+   --> bflib\src\menu\ewr.rs:222:29
+    |
+220 |     anchor.add_command(
+    |            ----------- required by a bound introduced by this call
+221 |         mc,
+222 |         "Units to Imperial".into(),
+    |                             ^^^^
+    |
+    = note: multiple `impl`s satisfying `_: Into<dcso3::String>` found in the following crates: `bfprotocols`, `core`, 
+`dcso3`:
+            - impl Into<dcso3::String> for NameFilter;
+            - impl Into<dcso3::String> for SlotId;
+            - impl<T, U> Into<U> for T
+              where U: std::convert::From<T>;
+note: required by a bound in `MenuAnchor::add_command`
+   --> bflib\src\menu\anchor.rs:63:20
+    |
+ 60 |     pub fn add_command<F, A>(
+    |            ----------- required by a bound in this associated function
+...
+ 63 |         name: impl Into<String>,
+    |                    ^^^^^^^^^^^^ required by this bound in `MenuAnchor::add_command`
+help: try using a fully qualified path to specify the expected types
+    |
+222 -         "Units to Imperial".into(),
+222 +         <&str as Into<T>>::into("Units to Imperial"),
+    |
+help: consider removing this method call, as the receiver has type `&'static str` and `&'static str: Into<dcso3::String
+>` trivially holds
+    |
+222 -         "Units to Imperial".into(),
+222 +         "Units to Imperial",
+    |
+
+error[E0283]: type annotations needed
+   --> bflib\src\menu\ewr.rs:222:29
+    |
+222 |         "Units to Imperial".into(),
+    |                             ^^^^
+    |
+    = note: multiple `impl`s satisfying `_: std::convert::From<&str>` found in the following crates: `bytes`, `derive_b
+uilder`, `netidx_core`, `netidx_netproto`, `reqwest`, `zune_core`, `zune_jpeg`:
+            - impl std::convert::From<&'static str> for bytes::Bytes;
+            - impl std::convert::From<&'static str> for derive_builder::error::UninitializedFieldError;
+            - impl std::convert::From<&'static str> for netidx::chars::Chars;
+            - impl std::convert::From<&'static str> for netidx::path::Path;
+            - impl std::convert::From<&'static str> for netidx::publisher::Value;
+            - impl std::convert::From<&'static str> for reqwest::Body;
+            - impl std::convert::From<&'static str> for zune_core::bytestream::reader::ZByteIoError;
+            - impl std::convert::From<&'static str> for zune_jpeg::errors::DecodeErrors;
+    = note: required for `&str` to implement `Into<_>`
+help: try using a fully qualified path to specify the expected types
+    |
+222 -         "Units to Imperial".into(),
+222 +         <&str as Into<T>>::into("Units to Imperial"),
+    |
+
+error[E0283]: type annotations needed
+   --> bflib\src\menu\ewr.rs:229:27
+    |
+227 |     anchor.add_command(
+    |            ----------- required by a bound introduced by this call
+228 |         mc,
+229 |         "Units to Metric".into(),
+    |                           ^^^^
+    |
+    = note: multiple `impl`s satisfying `_: Into<dcso3::String>` found in the following crates: `bfprotocols`, `core`, 
+`dcso3`:
+            - impl Into<dcso3::String> for NameFilter;
+            - impl Into<dcso3::String> for SlotId;
+            - impl<T, U> Into<U> for T
+              where U: std::convert::From<T>;
+note: required by a bound in `MenuAnchor::add_command`
+   --> bflib\src\menu\anchor.rs:63:20
+    |
+ 60 |     pub fn add_command<F, A>(
+    |            ----------- required by a bound in this associated function
+...
+ 63 |         name: impl Into<String>,
+    |                    ^^^^^^^^^^^^ required by this bound in `MenuAnchor::add_command`
+help: try using a fully qualified path to specify the expected types
+    |
+229 -         "Units to Metric".into(),
+229 +         <&str as Into<T>>::into("Units to Metric"),
+    |
+help: consider removing this method call, as the receiver has type `&'static str` and `&'static str: Into<dcso3::String
+>` trivially holds
+    |
+229 -         "Units to Metric".into(),
+229 +         "Units to Metric",
+    |
+
+error[E0283]: type annotations needed
+   --> bflib\src\menu\ewr.rs:229:27
+    |
+229 |         "Units to Metric".into(),
+    |                           ^^^^
+    |
+    = note: multiple `impl`s satisfying `_: std::convert::From<&str>` found in the following crates: `bytes`, `derive_b
+uilder`, `netidx_core`, `netidx_netproto`, `reqwest`, `zune_core`, `zune_jpeg`:
+            - impl std::convert::From<&'static str> for bytes::Bytes;
+            - impl std::convert::From<&'static str> for derive_builder::error::UninitializedFieldError;
+            - impl std::convert::From<&'static str> for netidx::chars::Chars;
+            - impl std::convert::From<&'static str> for netidx::path::Path;
+            - impl std::convert::From<&'static str> for netidx::publisher::Value;
+            - impl std::convert::From<&'static str> for reqwest::Body;
+            - impl std::convert::From<&'static str> for zune_core::bytestream::reader::ZByteIoError;
+            - impl std::convert::From<&'static str> for zune_jpeg::errors::DecodeErrors;
+    = note: required for `&str` to implement `Into<_>`
+help: try using a fully qualified path to specify the expected types
+    |
+229 -         "Units to Metric".into(),
+229 +         <&str as Into<T>>::into("Units to Metric"),
+    |
+
+error[E0283]: type annotations needed
+    --> bflib\src\menu\jtac.rs:1004:33
+     |
+1004 |     me.remove_cmd(vec!["JTAC>>".into()])?;
+     |        ----------               ^^^^
+     |        |
+     |        type must be known at this point
+     |
+     = note: multiple `impl`s satisfying `_: Into<dcso3::String>` found in the following crates: `bfprotocols`, `core`,
+ `dcso3`:
+             - impl Into<dcso3::String> for NameFilter;
+             - impl Into<dcso3::String> for SlotId;
+             - impl<T, U> Into<U> for T
+               where U: std::convert::From<T>;
+note: required by a bound in `MenuExec::<'_>::remove_cmd`
+    --> bflib\src\menu\anchor.rs:147:45
+     |
+ 145 |     pub fn remove_cmd(
+     |            ---------- required by a bound in this associated function
+ 146 |         &self,
+ 147 |         path: impl IntoIterator<Item = impl Into<String>>,
+     |                                             ^^^^^^^^^^^^ required by this bound in `MenuExec::<'_>::remove_cmd`
+help: try using a fully qualified path to specify the expected types
+     |
+1004 -     me.remove_cmd(vec!["JTAC>>".into()])?;
+1004 +     me.remove_cmd(vec![<&str as Into<T>>::into("JTAC>>")])?;
+     |
+
+error[E0283]: type annotations needed
+    --> bflib\src\menu\jtac.rs:1004:33
+     |
+1004 |     me.remove_cmd(vec!["JTAC>>".into()])?;
+     |                                 ^^^^
+     |
+     = note: multiple `impl`s satisfying `_: std::convert::From<&str>` found in the following crates: `bytes`, `derive_
+builder`, `netidx_core`, `netidx_netproto`, `reqwest`, `zune_core`, `zune_jpeg`:
+             - impl std::convert::From<&'static str> for bytes::Bytes;
+             - impl std::convert::From<&'static str> for derive_builder::error::UninitializedFieldError;
+             - impl std::convert::From<&'static str> for netidx::chars::Chars;
+             - impl std::convert::From<&'static str> for netidx::path::Path;
+             - impl std::convert::From<&'static str> for netidx::publisher::Value;
+             - impl std::convert::From<&'static str> for reqwest::Body;
+             - impl std::convert::From<&'static str> for zune_core::bytestream::reader::ZByteIoError;
+             - impl std::convert::From<&'static str> for zune_jpeg::errors::DecodeErrors;
+     = note: required for `&str` to implement `Into<_>`
+help: try using a fully qualified path to specify the expected types
+     |
+1004 -     me.remove_cmd(vec!["JTAC>>".into()])?;
+1004 +     me.remove_cmd(vec![<&str as Into<T>>::into("JTAC>>")])?;
+     |
+
+error[E0283]: type annotations needed
+    --> bflib\src\menu\jtac.rs:1005:38
+     |
+1005 |     let mut root = me.submenu("JTAC".into(), None)?;
+     |                       -------        ^^^^
+     |                       |
+     |                       required by a bound introduced by this call
+     |
+     = note: multiple `impl`s satisfying `_: Into<dcso3::String>` found in the following crates: `bfprotocols`, `core`,
+ `dcso3`:
+             - impl Into<dcso3::String> for NameFilter;
+             - impl Into<dcso3::String> for SlotId;
+             - impl<T, U> Into<U> for T
+               where U: std::convert::From<T>;
+note: required by a bound in `MenuExec::<'_>::submenu`
+    --> bflib\src\menu\anchor.rs:125:20
+     |
+ 123 |     pub fn submenu(
+     |            ------- required by a bound in this associated function
+ 124 |         &self,
+ 125 |         name: impl Into<String>,
+     |                    ^^^^^^^^^^^^ required by this bound in `MenuExec::<'_>::submenu`
+help: try using a fully qualified path to specify the expected types
+     |
+1005 -     let mut root = me.submenu("JTAC".into(), None)?;
+1005 +     let mut root = me.submenu(<&str as Into<T>>::into("JTAC"), None)?;
+     |
+help: consider removing this method call, as the receiver has type `&'static str` and `&'static str: Into<dcso3::String
+>` trivially holds
+     |
+1005 -     let mut root = me.submenu("JTAC".into(), None)?;
+1005 +     let mut root = me.submenu("JTAC", None)?;
+     |
+
+error[E0283]: type annotations needed
+    --> bflib\src\menu\jtac.rs:1005:38
+     |
+1005 |     let mut root = me.submenu("JTAC".into(), None)?;
+     |                                      ^^^^
+     |
+     = note: multiple `impl`s satisfying `_: std::convert::From<&str>` found in the following crates: `bytes`, `derive_
+builder`, `netidx_core`, `netidx_netproto`, `reqwest`, `zune_core`, `zune_jpeg`:
+             - impl std::convert::From<&'static str> for bytes::Bytes;
+             - impl std::convert::From<&'static str> for derive_builder::error::UninitializedFieldError;
+             - impl std::convert::From<&'static str> for netidx::chars::Chars;
+             - impl std::convert::From<&'static str> for netidx::path::Path;
+             - impl std::convert::From<&'static str> for netidx::publisher::Value;
+             - impl std::convert::From<&'static str> for reqwest::Body;
+             - impl std::convert::From<&'static str> for zune_core::bytestream::reader::ZByteIoError;
+             - impl std::convert::From<&'static str> for zune_jpeg::errors::DecodeErrors;
+     = note: required for `&str` to implement `Into<_>`
+help: try using a fully qualified path to specify the expected types
+     |
+1005 -     let mut root = me.submenu("JTAC".into(), None)?;
+1005 +     let mut root = me.submenu(<&str as Into<T>>::into("JTAC"), None)?;
+     |
+
+error[E0283]: type annotations needed
+    --> bflib\src\menu\jtac.rs:1007:29
+     |
+1006 |     me.cmd(
+     |        --- required by a bound introduced by this call
+1007 |         "Refresh Locations".into(),
+     |                             ^^^^
+     |
+     = note: multiple `impl`s satisfying `_: Into<dcso3::String>` found in the following crates: `bfprotocols`, `core`,
+ `dcso3`:
+             - impl Into<dcso3::String> for NameFilter;
+             - impl Into<dcso3::String> for SlotId;
+             - impl<T, U> Into<U> for T
+               where U: std::convert::From<T>;
+note: required by a bound in `MenuExec::<'_>::cmd`
+    --> bflib\src\menu\anchor.rs:133:20
+     |
+ 131 |     pub fn cmd<F, A>(
+     |            --- required by a bound in this associated function
+ 132 |         &self,
+ 133 |         name: impl Into<String>,
+     |                    ^^^^^^^^^^^^ required by this bound in `MenuExec::<'_>::cmd`
+help: try using a fully qualified path to specify the expected types
+     |
+1007 -         "Refresh Locations".into(),
+1007 +         <&str as Into<T>>::into("Refresh Locations"),
+     |
+help: consider removing this method call, as the receiver has type `&'static str` and `&'static str: Into<dcso3::String
+>` trivially holds
+     |
+1007 -         "Refresh Locations".into(),
+1007 +         "Refresh Locations",
+     |
+
+error[E0283]: type annotations needed
+    --> bflib\src\menu\jtac.rs:1007:29
+     |
+1007 |         "Refresh Locations".into(),
+     |                             ^^^^
+     |
+     = note: multiple `impl`s satisfying `_: std::convert::From<&str>` found in the following crates: `bytes`, `derive_
+builder`, `netidx_core`, `netidx_netproto`, `reqwest`, `zune_core`, `zune_jpeg`:
+             - impl std::convert::From<&'static str> for bytes::Bytes;
+             - impl std::convert::From<&'static str> for derive_builder::error::UninitializedFieldError;
+             - impl std::convert::From<&'static str> for netidx::chars::Chars;
+             - impl std::convert::From<&'static str> for netidx::path::Path;
+             - impl std::convert::From<&'static str> for netidx::publisher::Value;
+             - impl std::convert::From<&'static str> for reqwest::Body;
+             - impl std::convert::From<&'static str> for zune_core::bytestream::reader::ZByteIoError;
+             - impl std::convert::From<&'static str> for zune_jpeg::errors::DecodeErrors;
+     = note: required for `&str` to implement `Into<_>`
+help: try using a fully qualified path to specify the expected types
+     |
+1007 -         "Refresh Locations".into(),
+1007 +         <&str as Into<T>>::into("Refresh Locations"),
+     |
+
+error[E0283]: type annotations needed
+    --> bflib\src\menu\jtac.rs:1087:21
+     |
+1086 |                 me.cmd(
+     |                    --- required by a bound introduced by this call
+1087 |                     format_compact!("{}>>", jte.near).into(),
+     |                     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ cannot infer type for type parameter `impl Into<Str
+ing>` declared on the method `cmd`
+     |
+     = note: multiple `impl`s satisfying `_: Into<dcso3::String>` found in the following crates: `bfprotocols`, `core`,
+ `dcso3`:
+             - impl Into<dcso3::String> for NameFilter;
+             - impl Into<dcso3::String> for SlotId;
+             - impl<T, U> Into<U> for T
+               where U: std::convert::From<T>;
+note: required by a bound in `MenuExec::<'_>::cmd`
+    --> bflib\src\menu\anchor.rs:133:20
+     |
+ 131 |     pub fn cmd<F, A>(
+     |            --- required by a bound in this associated function
+ 132 |         &self,
+ 133 |         name: impl Into<String>,
+     |                    ^^^^^^^^^^^^ required by this bound in `MenuExec::<'_>::cmd`
+
+error[E0283]: type annotations needed
+    --> bflib\src\menu\jtac.rs:1016:35
+     |
+1016 |                 root = me.submenu("NEXT>>".into(), Some(root.clone()))?;
+     |                           ------- ^^^^^^^^^^^^^^^ cannot infer type
+     |                           |
+     |                           required by a bound introduced by this call
+...
+1066 |             handle_submenu!();
+     |             ----------------- in this macro invocation
+     |
+     = note: multiple `impl`s satisfying `_: Into<dcso3::String>` found in the following crates: `bfprotocols`, `core`,
+ `dcso3`:
+             - impl Into<dcso3::String> for NameFilter;
+             - impl Into<dcso3::String> for SlotId;
+             - impl<T, U> Into<U> for T
+               where U: std::convert::From<T>;
+note: required by a bound in `MenuExec::<'_>::submenu`
+    --> bflib\src\menu\anchor.rs:125:20
+     |
+ 123 |     pub fn submenu(
+     |            ------- required by a bound in this associated function
+ 124 |         &self,
+ 125 |         name: impl Into<String>,
+     |                    ^^^^^^^^^^^^ required by this bound in `MenuExec::<'_>::submenu`
+     = note: this error originates in the macro `handle_submenu` (in Nightly builds, run with -Z macro-backtrace for mo
+re info)
+help: consider removing this method call, as the receiver has type `&'static str` and `&'static str: Into<dcso3::String
+>` trivially holds
+     |
+1016 -                 root = me.submenu("NEXT>>".into(), Some(root.clone()))?;
+1016 +                 root = me.submenu("NEXT>>", Some(root.clone()))?;
+     |
+
+error[E0283]: type annotations needed
+    --> bflib\src\menu\jtac.rs:1016:44
+     |
+1016 |                 root = me.submenu("NEXT>>".into(), Some(root.clone()))?;
+     |                                            ^^^^ cannot infer type
+...
+1066 |             handle_submenu!();
+     |             ----------------- in this macro invocation
+     |
+     = note: multiple `impl`s satisfying `_: std::convert::From<&str>` found in the following crates: `bytes`, `derive_
+builder`, `netidx_core`, `netidx_netproto`, `reqwest`, `zune_core`, `zune_jpeg`:
+             - impl std::convert::From<&'static str> for bytes::Bytes;
+             - impl std::convert::From<&'static str> for derive_builder::error::UninitializedFieldError;
+             - impl std::convert::From<&'static str> for netidx::chars::Chars;
+             - impl std::convert::From<&'static str> for netidx::path::Path;
+             - impl std::convert::From<&'static str> for netidx::publisher::Value;
+             - impl std::convert::From<&'static str> for reqwest::Body;
+             - impl std::convert::From<&'static str> for zune_core::bytestream::reader::ZByteIoError;
+             - impl std::convert::From<&'static str> for zune_jpeg::errors::DecodeErrors;
+     = note: required for `&str` to implement `Into<_>`
+     = note: this error originates in the macro `handle_submenu` (in Nightly builds, run with -Z macro-backtrace for mo
+re info)
+
+error[E0283]: type annotations needed
+    --> bflib\src\menu\jtac.rs:1016:35
+     |
+1016 |                 root = me.submenu("NEXT>>".into(), Some(root.clone()))?;
+     |                           ------- ^^^^^^^^^^^^^^^ cannot infer type
+     |                           |
+     |                           required by a bound introduced by this call
+...
+1084 |             handle_submenu!();
+     |             ----------------- in this macro invocation
+     |
+     = note: multiple `impl`s satisfying `_: Into<dcso3::String>` found in the following crates: `bfprotocols`, `core`,
+ `dcso3`:
+             - impl Into<dcso3::String> for NameFilter;
+             - impl Into<dcso3::String> for SlotId;
+             - impl<T, U> Into<U> for T
+               where U: std::convert::From<T>;
+note: required by a bound in `MenuExec::<'_>::submenu`
+    --> bflib\src\menu\anchor.rs:125:20
+     |
+ 123 |     pub fn submenu(
+     |            ------- required by a bound in this associated function
+ 124 |         &self,
+ 125 |         name: impl Into<String>,
+     |                    ^^^^^^^^^^^^ required by this bound in `MenuExec::<'_>::submenu`
+     = note: this error originates in the macro `handle_submenu` (in Nightly builds, run with -Z macro-backtrace for mo
+re info)
+help: consider removing this method call, as the receiver has type `&'static str` and `&'static str: Into<dcso3::String
+>` trivially holds
+     |
+1016 -                 root = me.submenu("NEXT>>".into(), Some(root.clone()))?;
+1016 +                 root = me.submenu("NEXT>>", Some(root.clone()))?;
+     |
+
+error[E0283]: type annotations needed
+    --> bflib\src\menu\jtac.rs:1016:44
+     |
+1016 |                 root = me.submenu("NEXT>>".into(), Some(root.clone()))?;
+     |                                            ^^^^ cannot infer type
+...
+1084 |             handle_submenu!();
+     |             ----------------- in this macro invocation
+     |
+     = note: multiple `impl`s satisfying `_: std::convert::From<&str>` found in the following crates: `bytes`, `derive_
+builder`, `netidx_core`, `netidx_netproto`, `reqwest`, `zune_core`, `zune_jpeg`:
+             - impl std::convert::From<&'static str> for bytes::Bytes;
+             - impl std::convert::From<&'static str> for derive_builder::error::UninitializedFieldError;
+             - impl std::convert::From<&'static str> for netidx::chars::Chars;
+             - impl std::convert::From<&'static str> for netidx::path::Path;
+             - impl std::convert::From<&'static str> for netidx::publisher::Value;
+             - impl std::convert::From<&'static str> for reqwest::Body;
+             - impl std::convert::From<&'static str> for zune_core::bytestream::reader::ZByteIoError;
+             - impl std::convert::From<&'static str> for zune_jpeg::errors::DecodeErrors;
+     = note: required for `&str` to implement `Into<_>`
+     = note: this error originates in the macro `handle_submenu` (in Nightly builds, run with -Z macro-backtrace for mo
+re info)
+
+error[E0283]: type annotations needed
+    --> bflib\src\menu\jtac.rs:1137:40
+     |
+1137 |             root = me.submenu("NEXT>>".into(), Some(root.clone()))?;
+     |                       -------          ^^^^
+     |                       |
+     |                       required by a bound introduced by this call
+     |
+     = note: multiple `impl`s satisfying `_: Into<dcso3::String>` found in the following crates: `bfprotocols`, `core`,
+ `dcso3`:
+             - impl Into<dcso3::String> for NameFilter;
+             - impl Into<dcso3::String> for SlotId;
+             - impl<T, U> Into<U> for T
+               where U: std::convert::From<T>;
+note: required by a bound in `MenuExec::<'_>::submenu`
+    --> bflib\src\menu\anchor.rs:125:20
+     |
+ 123 |     pub fn submenu(
+     |            ------- required by a bound in this associated function
+ 124 |         &self,
+ 125 |         name: impl Into<String>,
+     |                    ^^^^^^^^^^^^ required by this bound in `MenuExec::<'_>::submenu`
+help: try using a fully qualified path to specify the expected types
+     |
+1137 -             root = me.submenu("NEXT>>".into(), Some(root.clone()))?;
+1137 +             root = me.submenu(<&str as Into<T>>::into("NEXT>>"), Some(root.clone()))?;
+     |
+help: consider removing this method call, as the receiver has type `&'static str` and `&'static str: Into<dcso3::String
+>` trivially holds
+     |
+1137 -             root = me.submenu("NEXT>>".into(), Some(root.clone()))?;
+1137 +             root = me.submenu("NEXT>>", Some(root.clone()))?;
+     |
+
+error[E0283]: type annotations needed
+    --> bflib\src\menu\jtac.rs:1137:40
+     |
+1137 |             root = me.submenu("NEXT>>".into(), Some(root.clone()))?;
+     |                                        ^^^^
+     |
+     = note: multiple `impl`s satisfying `_: std::convert::From<&str>` found in the following crates: `bytes`, `derive_
+builder`, `netidx_core`, `netidx_netproto`, `reqwest`, `zune_core`, `zune_jpeg`:
+             - impl std::convert::From<&'static str> for bytes::Bytes;
+             - impl std::convert::From<&'static str> for derive_builder::error::UninitializedFieldError;
+             - impl std::convert::From<&'static str> for netidx::chars::Chars;
+             - impl std::convert::From<&'static str> for netidx::path::Path;
+             - impl std::convert::From<&'static str> for netidx::publisher::Value;
+             - impl std::convert::From<&'static str> for reqwest::Body;
+             - impl std::convert::From<&'static str> for zune_core::bytestream::reader::ZByteIoError;
+             - impl std::convert::From<&'static str> for zune_jpeg::errors::DecodeErrors;
+     = note: required for `&str` to implement `Into<_>`
+help: try using a fully qualified path to specify the expected types
+     |
+1137 -             root = me.submenu("NEXT>>".into(), Some(root.clone()))?;
+1137 +             root = me.submenu(<&str as Into<T>>::into("NEXT>>"), Some(root.clone()))?;
+     |
+
+error[E0283]: type annotations needed
+    --> bflib\src\menu\jtac.rs:1142:19
+     |
+1141 |         me.cmd(
+     |            --- required by a bound introduced by this call
+1142 |             label.into(),
+     |                   ^^^^
+     |
+     = note: multiple `impl`s satisfying `_: Into<dcso3::String>` found in the following crates: `bfprotocols`, `core`,
+ `dcso3`:
+             - impl Into<dcso3::String> for NameFilter;
+             - impl Into<dcso3::String> for SlotId;
+             - impl<T, U> Into<U> for T
+               where U: std::convert::From<T>;
+note: required by a bound in `MenuExec::<'_>::cmd`
+    --> bflib\src\menu\anchor.rs:133:20
+     |
+ 131 |     pub fn cmd<F, A>(
+     |            --- required by a bound in this associated function
+ 132 |         &self,
+ 133 |         name: impl Into<String>,
+     |                    ^^^^^^^^^^^^ required by this bound in `MenuExec::<'_>::cmd`
+help: try using a fully qualified path to specify the expected types
+     |
+1142 -             label.into(),
+1142 +             <CompactString as Into<T>>::into(label),
+     |
+help: consider removing this method call, as the receiver has type `CompactString` and `CompactString: Into<dcso3::Stri
+ng>` trivially holds
+     |
+1142 -             label.into(),
+1142 +             label,
+     |
+
+error[E0283]: type annotations needed
+    --> bflib\src\menu\jtac.rs:1161:45
+     |
+1161 |     anchor.remove_command(mc, vec!["JTAC>>".into()])?;
+     |            --------------                   ^^^^
+     |            |
+     |            type must be known at this point
+     |
+     = note: multiple `impl`s satisfying `_: Into<dcso3::String>` found in the following crates: `bfprotocols`, `core`,
+ `dcso3`:
+             - impl Into<dcso3::String> for NameFilter;
+             - impl Into<dcso3::String> for SlotId;
+             - impl<T, U> Into<U> for T
+               where U: std::convert::From<T>;
+note: required by a bound in `MenuAnchor::remove_command`
+    --> bflib\src\menu\anchor.rs:95:45
+     |
+  92 |     pub fn remove_command(
+     |            -------------- required by a bound in this associated function
+...
+  95 |         path: impl IntoIterator<Item = impl Into<String>>,
+     |                                             ^^^^^^^^^^^^ required by this bound in `MenuAnchor::remove_command`
+help: try using a fully qualified path to specify the expected types
+     |
+1161 -     anchor.remove_command(mc, vec!["JTAC>>".into()])?;
+1161 +     anchor.remove_command(mc, vec![<&str as Into<T>>::into("JTAC>>")])?;
+     |
+
+error[E0283]: type annotations needed
+    --> bflib\src\menu\jtac.rs:1161:45
+     |
+1161 |     anchor.remove_command(mc, vec!["JTAC>>".into()])?;
+     |                                             ^^^^
+     |
+     = note: multiple `impl`s satisfying `_: std::convert::From<&str>` found in the following crates: `bytes`, `derive_
+builder`, `netidx_core`, `netidx_netproto`, `reqwest`, `zune_core`, `zune_jpeg`:
+             - impl std::convert::From<&'static str> for bytes::Bytes;
+             - impl std::convert::From<&'static str> for derive_builder::error::UninitializedFieldError;
+             - impl std::convert::From<&'static str> for netidx::chars::Chars;
+             - impl std::convert::From<&'static str> for netidx::path::Path;
+             - impl std::convert::From<&'static str> for netidx::publisher::Value;
+             - impl std::convert::From<&'static str> for reqwest::Body;
+             - impl std::convert::From<&'static str> for zune_core::bytestream::reader::ZByteIoError;
+             - impl std::convert::From<&'static str> for zune_jpeg::errors::DecodeErrors;
+     = note: required for `&str` to implement `Into<_>`
+help: try using a fully qualified path to specify the expected types
+     |
+1161 -     anchor.remove_command(mc, vec!["JTAC>>".into()])?;
+1161 +     anchor.remove_command(mc, vec![<&str as Into<T>>::into("JTAC>>")])?;
+     |
+
+error[E0283]: type annotations needed
+    --> bflib\src\menu\jtac.rs:1164:18
+     |
+1162 |     anchor.add_command(
+     |            ----------- required by a bound introduced by this call
+1163 |         mc,
+1164 |         "JTAC>>".into(),
+     |                  ^^^^
+     |
+     = note: multiple `impl`s satisfying `_: Into<dcso3::String>` found in the following crates: `bfprotocols`, `core`,
+ `dcso3`:
+             - impl Into<dcso3::String> for NameFilter;
+             - impl Into<dcso3::String> for SlotId;
+             - impl<T, U> Into<U> for T
+               where U: std::convert::From<T>;
+note: required by a bound in `MenuAnchor::add_command`
+    --> bflib\src\menu\anchor.rs:63:20
+     |
+  60 |     pub fn add_command<F, A>(
+     |            ----------- required by a bound in this associated function
+...
+  63 |         name: impl Into<String>,
+     |                    ^^^^^^^^^^^^ required by this bound in `MenuAnchor::add_command`
+help: try using a fully qualified path to specify the expected types
+     |
+1164 -         "JTAC>>".into(),
+1164 +         <&str as Into<T>>::into("JTAC>>"),
+     |
+help: consider removing this method call, as the receiver has type `&'static str` and `&'static str: Into<dcso3::String
+>` trivially holds
+     |
+1164 -         "JTAC>>".into(),
+1164 +         "JTAC>>",
+     |
+
+error[E0283]: type annotations needed
+    --> bflib\src\menu\jtac.rs:1164:18
+     |
+1164 |         "JTAC>>".into(),
+     |                  ^^^^
+     |
+     = note: multiple `impl`s satisfying `_: std::convert::From<&str>` found in the following crates: `bytes`, `derive_
+builder`, `netidx_core`, `netidx_netproto`, `reqwest`, `zune_core`, `zune_jpeg`:
+             - impl std::convert::From<&'static str> for bytes::Bytes;
+             - impl std::convert::From<&'static str> for derive_builder::error::UninitializedFieldError;
+             - impl std::convert::From<&'static str> for netidx::chars::Chars;
+             - impl std::convert::From<&'static str> for netidx::path::Path;
+             - impl std::convert::From<&'static str> for netidx::publisher::Value;
+             - impl std::convert::From<&'static str> for reqwest::Body;
+             - impl std::convert::From<&'static str> for zune_core::bytestream::reader::ZByteIoError;
+             - impl std::convert::From<&'static str> for zune_jpeg::errors::DecodeErrors;
+     = note: required for `&str` to implement `Into<_>`
+help: try using a fully qualified path to specify the expected types
+     |
+1164 -         "JTAC>>".into(),
+1164 +         <&str as Into<T>>::into("JTAC>>"),
+     |
+
+error[E0308]: mismatched types
+   --> bflib\src\menu\mod.rs:270:17
+    |
+268 |             let root = mc.add_submenu_for_coalition(
+    |                           ------------------------- arguments to this method are incorrect
+269 |                 side,
+270 |                 format_compact!("Fowl [{slot}]"),
+    |                 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ expected `String`, found `CompactString`
+    |
+note: method defined here
+   --> dcso3\src\mission_commands.rs:123:12
+    |
+123 |     pub fn add_submenu_for_coalition(
+    |            ^^^^^^^^^^^^^^^^^^^^^^^^^
+help: call `Into::into` on this expression to convert `CompactString` into `dcso3::String`
+    |
+270 |                 format_compact!("Fowl [{slot}]").into(),
+    |                                                 +++++++
+
+warning: unused variable: `now`
+   --> bflib\src\db\actions.rs:648:13
+    |
+648 |         let now = Utc::now();
+    |             ^^^ help: if this is intentional, prefix it with an underscore: `_now`
+    |
+    = note: `#[warn(unused_variables)]` (part of `#[warn(unused)]`) on by default
+
+warning: unused variable: `time`
+   --> bflib\src\db\actions.rs:801:13
+    |
+801 |             time,
+    |             ^^^^ help: try ignoring the field: `time: _`
+
+warning: unused variable: `ai`
+   --> bflib\src\db\actions.rs:811:42
+    |
+811 |                 if let ActionKind::Awacs(ai) = &spec.kind {
+    |                                          ^^ help: if this is intentional, prefix it with an underscore: `_ai`
+
+warning: unused variable: `ai`
+   --> bflib\src\db\actions.rs:827:43
+    |
+827 |                 if let ActionKind::Tanker(ai) = &spec.kind {
+    |                                           ^^ help: if this is intentional, prefix it with an underscore: `_ai`
+
+warning: unused variable: `ai`
+   --> bflib\src\db\actions.rs:843:55
+    |
+843 |                 if let ActionKind::CruiseMissileSpawn(ai) = &spec.kind {
+    |                                                       ^^ help: if this is intentional, prefix it with an undersco
+re: `_ai`
+
+warning: unused variable: `ai`
+   --> bflib\src\db\actions.rs:859:42
+    |
+859 |                 if let ActionKind::Drone(ai) = &spec.kind {
+    |                                          ^^ help: if this is intentional, prefix it with an underscore: `_ai`
+
+warning: unused variable: `ai`
+   --> bflib\src\db\actions.rs:875:45
+    |
+875 |                 if let ActionKind::Fighters(ai) = &spec.kind {
+    |                                             ^^ help: if this is intentional, prefix it with an underscore: `_ai`
+
+warning: unused variable: `ai`
+   --> bflib\src\db\actions.rs:891:46
+    |
+891 |                 if let ActionKind::Attackers(ai) = &spec.kind {
+    |                                              ^^ help: if this is intentional, prefix it with an underscore: `_ai`
+
+warning: unused variable: `ai`
+   --> bflib\src\db\actions.rs:907:41
+    |
+907 |                 if let ActionKind::Sead(ai) = &spec.kind {
+    |                                         ^^ help: if this is intentional, prefix it with an underscore: `_ai`
+
+warning: unused variable: `heading`
+    --> bflib\src\db\actions.rs:2014:9
+     |
+2014 |         heading: f64,
+     |         ^^^^^^^ help: if this is intentional, prefix it with an underscore: `_heading`
+
+warning: unused variable: `spctx`
+    --> bflib\src\db\actions.rs:2553:9
+     |
+2553 |         spctx: &SpawnCtx<'lua>,
+     |         ^^^^^ help: if this is intentional, prefix it with an underscore: `_spctx`
+
+warning: unused variable: `idx`
+    --> bflib\src\db\actions.rs:2554:9
+     |
+2554 |         idx: &MizIndex,
+     |         ^^^ help: if this is intentional, prefix it with an underscore: `_idx`
+
+warning: unused variable: `time`
+    --> bflib\src\db\actions.rs:3054:17
+     |
+3054 |                 time,
+     |                 ^^^^ help: try ignoring the field: `time: _`
+
+warning: unused variable: `slot`
+   --> bflib\src\db\ai_air.rs:759:5
+    |
+759 |     slot: &HubSlot,
+    |     ^^^^ help: if this is intentional, prefix it with an underscore: `_slot`
+
+warning: variable does not need to be mutable
+    --> bflib\src\db\ai_air.rs:4568:13
+     |
+4568 |         let mut out_pylon = pylon.clone();
+     |             ----^^^^^^^^^
+     |             |
+     |             help: remove this `mut`
+     |
+     = note: `#[warn(unused_mut)]` (part of `#[warn(unused)]`) on by default
+
+warning: unused variable: `mission_kind`
+    --> bflib\src\db\ai_air.rs:6258:61
+     |
+6258 |     let (fowl_name, side, cfg_template, existing_dcs_names, mission_kind) = {
+     |                                                             ^^^^^^^^^^^^ help: if this is intentional, prefix it
+ with an underscore: `_mission_kind`
+
+warning: unused variable: `name`
+   --> bflib\src\jtac.rs:840:21
+    |
+840 |                 let name = db.group(gid)?.name.clone();
+    |                     ^^^^ help: if this is intentional, prefix it with an underscore: `_name`
+
+error[E0502]: cannot borrow `ctx.db.ephemeral` as mutable because it is also borrowed as immutable
+  --> bflib\src\menu\ewr.rs:51:13
+   |
+50 |           } else if let Some(si) = ctx.db.ephemeral.get_slot_info(&slot) {
+   |                                    ---------------- immutable borrow occurs here
+51 | /             ctx.db
+52 | |                 .ephemeral
+53 | |                 .msgs()
+   | |_______________________^ mutable borrow occurs here
+54 |                   .panel_to_group(5, false, si.miz_gid, msg);
+   |                                             ---------- immutable borrow later used here
+
+warning: unused variable: `lua`
+  --> bflib\src\menu\ewr.rs:37:15
+   |
+37 | fn toggle_ewr(lua: MizLua, slot: SlotId) -> Result<()> {
+   |               ^^^ help: if this is intentional, prefix it with an underscore: `_lua`
+
+error[E0502]: cannot borrow `ctx.db.ephemeral` as mutable because it is also borrowed as immutable
+   --> bflib\src\menu\ewr.rs:131:9
+    |
+130 |     } else if let Some(si) = ctx.db.ephemeral.get_slot_info(&slot) {
+    |                              ---------------- immutable borrow occurs here
+131 |         ctx.db.ephemeral.msgs().panel_to_group(
+    |         ^^^^^^^^^^^^^^^^^^^^^^^ mutable borrow occurs here
+...
+134 |             si.miz_gid,
+    |             ---------- immutable borrow later used here
+
+warning: unused variable: `lua`
+  --> bflib\src\menu\ewr.rs:60:19
+   |
+60 | fn ewr_report_for(lua: MizLua, slot: SlotId, friendly: bool) -> Result<()> {
+   |                   ^^^ help: if this is intentional, prefix it with an underscore: `_lua`
+
+error[E0502]: cannot borrow `ctx.db.ephemeral` as mutable because it is also borrowed as immutable
+   --> bflib\src\menu\ewr.rs:162:13
+    |
+161 |           } else if let Some(si) = ctx.db.ephemeral.get_slot_info(&slot) {
+    |                                    ---------------- immutable borrow occurs here
+162 | /             ctx.db
+163 | |                 .ephemeral
+164 | |                 .msgs()
+    | |_______________________^ mutable borrow occurs here
+165 |                   .panel_to_group(5, false, si.miz_gid, msg);
+    |                                             ---------- immutable borrow later used here
+
+warning: unused variable: `lua`
+   --> bflib\src\menu\ewr.rs:149:23
+    |
+149 | fn ewr_units_imperial(lua: MizLua, slot: SlotId) -> Result<()> {
+    |                       ^^^ help: if this is intentional, prefix it with an underscore: `_lua`
+
+error[E0502]: cannot borrow `ctx.db.ephemeral` as mutable because it is also borrowed as immutable
+   --> bflib\src\menu\ewr.rs:184:13
+    |
+183 |           } else if let Some(si) = ctx.db.ephemeral.get_slot_info(&slot) {
+    |                                    ---------------- immutable borrow occurs here
+184 | /             ctx.db
+185 | |                 .ephemeral
+186 | |                 .msgs()
+    | |_______________________^ mutable borrow occurs here
+187 |                   .panel_to_group(5, false, si.miz_gid, msg);
+    |                                             ---------- immutable borrow later used here
+
+warning: unused variable: `lua`
+   --> bflib\src\menu\ewr.rs:171:21
+    |
+171 | fn ewr_units_metric(lua: MizLua, slot: SlotId) -> Result<()> {
+    |                     ^^^ help: if this is intentional, prefix it with an underscore: `_lua`
+
+Some errors have detailed explanations: E0283, E0308, E0502, E0616.
+For more information about an error, try `rustc --explain E0283`.
+warning: `bflib` (lib) generated 26 warnings
+error: could not compile `bflib` (lib) due to 51 previous errors; 26 warnings emitted

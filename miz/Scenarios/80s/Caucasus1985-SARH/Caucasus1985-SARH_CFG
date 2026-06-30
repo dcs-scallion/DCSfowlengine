@@ -369,7 +369,7 @@
             "kind": "FixedWing",
             "duration": null,
             "template": "RSEAD",
-            "altitude": 410.0,
+            "altitude": 7410.0,
             "altitude_typ": "RADIO",
             "speed": 194.0,
             "freq": 120000000
@@ -485,7 +485,7 @@
               "kind": "Helicopter",
               "duration": null,
               "template": "RCARGOCARRIER",
-              "altitude": 1317.0,
+              "altitude": 317.0,
               "altitude_typ": "RADIO",
               "speed": 82.0,
               "freq": null
@@ -713,7 +713,7 @@
               "kind": "Helicopter",
               "duration": null,
               "template": "RTROOPCARRIER",
-              "altitude": 1256.0,
+              "altitude": 156.0,
               "altitude_typ": "RADIO",
               "speed": 76.0,
               "freq": null
@@ -730,7 +730,7 @@
             "kind": "Helicopter",
             "duration": null,
             "template": "RCARGOCARRIER",
-            "altitude": 1348.0,
+            "altitude": 348.0,
             "altitude_typ": "RADIO",
             "speed": 75.0,
             "freq": null
@@ -769,7 +769,7 @@
             "kind": "Helicopter",
             "duration": null,
             "template": "RCARGOCARRIER",
-            "altitude": 1341.0,
+            "altitude": 341.0,
             "altitude_typ": "RADIO",
             "speed": 76.0,
             "freq": null
@@ -803,7 +803,7 @@
             "kind": "FixedWing",
             "duration": null,
             "template": "BSEAD",
-            "altitude": 420.0,
+            "altitude": 7485.0,
             "altitude_typ": "RADIO",
             "speed": 254.0,
             "freq": 240000000
@@ -940,7 +940,7 @@
               "kind": "Helicopter",
               "duration": null,
               "template": "BCARGOCARRIER",
-              "altitude": 1322.0,
+              "altitude": 322.0,
               "altitude_typ": "RADIO",
               "speed": 79.0,
               "freq": null
@@ -1168,7 +1168,7 @@
               "kind": "Helicopter",
               "duration": null,
               "template": "BTROOPCARRIER",
-              "altitude": 1237.0,
+              "altitude": 147.0,
               "altitude_typ": "RADIO",
               "speed": 75.0,
               "freq": null
@@ -1185,7 +1185,7 @@
             "kind": "Helicopter",
             "duration": null,
             "template": "BCARGOCARRIER",
-            "altitude": 1334.0,
+            "altitude": 334.0,
             "altitude_typ": "RADIO",
             "speed": 78.0,
             "freq": null
@@ -1241,7 +1241,7 @@
             "kind": "Helicopter",
             "duration": null,
             "template": "BCARGOCARRIER",
-            "altitude": 1327.0,
+            "altitude": 327.0,
             "altitude_typ": "RADIO",
             "speed": 78.0,
             "freq": null
