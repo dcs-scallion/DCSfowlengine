@@ -451,6 +451,48 @@ fn objective_has_live_carrier_airbase(lua: MizLua, db: &Db, obj: &Objective) -> 
         .unwrap_or(false)
 }
 
+/// LHAs / amphibs without arresting wires cannot recover fixed-wing AI.
+fn carrier_supports_fixed_wing_traps(lua: MizLua, db: &Db, obj: &Objective) -> bool {
+    if !objective_is_naval_carrier(db, obj) {
+        return true;
+    }
+    let Some(pad) = farp_pad_template(obj) else {
+        return false;
+    };
+    for (_, group) in db.persisted.groups.into_iter() {
+        if group.template_name.as_str() != pad.as_str() {
+            continue;
+        }
+        let Ok(g) = Group::get_by_name(lua, group.name.as_str()) else {
+            continue;
+        };
+        if !g.is_exist().unwrap_or(false) {
+            continue;
+        }
+        let Ok(u) = g.get_unit(1) else {
+            continue;
+        };
+        if !u.is_exist().unwrap_or(false) {
+            continue;
+        }
+        let typ = u.get_type_name().unwrap_or_default().to_ascii_lowercase();
+        if typ.contains("tarawa")
+            || typ.contains("lha")
+            || typ.contains("sanantonio")
+            || typ.contains("amphib")
+        {
+            return false;
+        }
+        return true;
+    }
+    let pad_l = pad.to_ascii_lowercase();
+    let name_l = obj.name.as_str().to_ascii_lowercase();
+    !(pad_l.contains("tarawa")
+        || name_l.contains("tarawa")
+        || pad_l.contains("lha")
+        || name_l.contains("lha"))
+}
+
 fn objective_has_operational_carrier(lua: MizLua, db: &Db, obj: &Objective) -> bool {
     if !objective_is_naval_carrier(db, obj) {
         return false;
@@ -544,7 +586,8 @@ fn hub_supports_ai_air(lua: MizLua, db: &Db, obj: &Objective, kind: AiPlaneKind)
         AiPlaneKind::FixedWing => {
             obj.is_airbase()
                 || objective_has_airfield_hub(db, obj)
-                || objective_has_operational_carrier(lua, db, obj)
+                || (objective_has_operational_carrier(lua, db, obj)
+                    && carrier_supports_fixed_wing_traps(lua, db, obj))
                 || db
                     .ephemeral
                     .cfg
@@ -955,22 +998,32 @@ fn apply_me_template_fuel_kg(unit: &miz::Unit<'_>, fuel_kg: u32) -> Result<()> {
     Ok(())
 }
 
-fn apply_live_dcs_fuel_kg(lua: MizLua, dcs_name: &str, fuel_kg: u32, airframe_type: &str) -> Result<()> {
+fn apply_live_dcs_fuel_kg(
+    lua: MizLua,
+    dcs_name: &str,
+    fuel_kg: u32,
+    airframe_type: &str,
+    full_tank: bool,
+) -> Result<()> {
     let group = Group::get_by_name(lua, dcs_name)?;
     let unit = group.get_unit(1).context("unit 1")?;
     if !unit.is_exist()? {
         return Ok(());
     }
     let cap = spawn_fuel_kg_per_airframe(airframe_type);
-    let frac = if cap > 0 {
+    let frac = if full_tank {
+        1.
+    } else if cap > 0 {
         (f64::from(fuel_kg) / f64::from(cap)).clamp(0., 1.)
     } else {
         1.
     };
     unit.raw_set("fuel", frac)?;
-    if let Ok(payload) = unit.raw_get::<_, Table>("payload") {
-        payload.raw_set("fuel", f64::from(fuel_kg))?;
-        unit.raw_set("payload", payload)?;
+    if !full_tank {
+        if let Ok(payload) = unit.raw_get::<_, Table>("payload") {
+            payload.raw_set("fuel", f64::from(fuel_kg))?;
+            unit.raw_set("payload", payload)?;
+        }
     }
     Ok(())
 }
@@ -1760,10 +1813,11 @@ fn free_slots_at_hub(
         }
         AiPlaneKind::FixedWing
             if objective_has_airfield_hub(db, obj)
-                || objective_has_operational_carrier(lua, db, obj) =>
+                || (objective_has_operational_carrier(lua, db, obj)
+                    && carrier_supports_fixed_wing_traps(lua, db, obj)) =>
         {
             let mut pool = Vec::new();
-            if naval {
+            if naval && carrier_supports_fixed_wing_traps(lua, db, obj) {
                 if let Some(slot) = carrier_fallback_deck_slot(lua, db, obj)? {
                     pool.push(slot);
                 }
@@ -2664,7 +2718,31 @@ fn cas_patrol_offsets(center: Vector2, radius: f64) -> [Vector2; 3] {
 }
 
 /// ME-style CAS enroute combo (test mission `test CAS`).
-pub(super) fn cas_combo_task<'lua>(kind: AiPlaneKind) -> Task<'lua> {
+pub(super) fn cas_combo_task<'lua>(kind: AiPlaneKind, zone: Vector2) -> Task<'lua> {
+    let aa_engage = Task::EngageTargets {
+        target_types: vec![
+            Attribute::AirDefence,
+            Attribute::SAM,
+            Attribute::SAMRelated,
+            Attribute::ArmedAirDefence,
+        ],
+        max_dist: Some(cas_engage_max_dist(kind)),
+        max_dist_enabled: Some(true),
+        no_target_types: None,
+        priority: Some(0),
+        preset_key: None,
+    };
+    let zone_engage = Task::EngageTargetsInZone {
+        point: LuaVec2(zone),
+        zone_radius: CAS_PATROL_RADIUS_M * 1.5,
+        target_types: vec![
+            Attribute::AirDefence,
+            Attribute::GroundVehicles,
+            Attribute::Infantry,
+            Attribute::Helicopters,
+        ],
+        priority: Some(1),
+    };
     let cas_preset = Task::EngageTargets {
         target_types: vec![
             Attribute::Helicopters,
@@ -2674,7 +2752,7 @@ pub(super) fn cas_combo_task<'lua>(kind: AiPlaneKind) -> Task<'lua> {
         max_dist: None,
         max_dist_enabled: None,
         no_target_types: None,
-        priority: Some(0),
+        priority: Some(2),
         preset_key: Some(String::from("CAS")),
     };
     let main_engage = Task::EngageTargets {
@@ -2690,10 +2768,12 @@ pub(super) fn cas_combo_task<'lua>(kind: AiPlaneKind) -> Task<'lua> {
             Attribute::Fortifications,
             Attribute::LightArmedShips,
         ]),
-        priority: Some(1),
+        priority: Some(3),
         preset_key: None,
     };
     let mut tasks: Vec<Task<'lua>> = vec![
+        aa_engage,
+        zone_engage,
         cas_preset,
         main_engage,
         Task::WrappedOption(AiOption::Air(AirOption::Roe(AirRoe::WeaponFree))),
@@ -2756,7 +2836,7 @@ pub(super) fn cas_patrol_mission<'lua>(
     kind: AiPlaneKind,
 ) -> Vec<MissionPoint<'lua>> {
     let patrol = cas_patrol_offsets(mark_pos, CAS_PATROL_RADIUS_M);
-    let cas = cas_combo_task(kind);
+    let cas = cas_combo_task(kind, mark_pos);
     vec![
         cas_mission_point("ingress", spawn_pos, alt, alt_typ.clone(), speed, cas_empty_task()),
         cas_mission_point("cas", mark_pos, alt, alt_typ.clone(), speed, cas.clone()),
@@ -3025,7 +3105,7 @@ pub(super) fn landing_hub_mission_point<'lua>(
     })
 }
 
-/// Inbound RTB: hold mission altitude over the parking slot, then land.
+/// Inbound RTB: descend to pattern altitude, then land (MOOSE-style approach).
 pub(super) fn rtb_inbound_route<'lua>(
     lua: MizLua<'lua>,
     hub: &HubPick,
@@ -3033,31 +3113,66 @@ pub(super) fn rtb_inbound_route<'lua>(
     inbound_alt: f64,
     inbound_alt_typ: AltType,
     mode: HubLandMode,
+    from_pos: Option<Vector2>,
 ) -> Result<Vec<MissionPoint<'lua>>> {
     let land = landing_hub_mission_point(lua, hub, slot, mode)?;
     let land_alt = land.alt;
-    let approach_alt = inbound_alt.max(land_alt + 300.);
-    Ok(vec![
-        MissionPoint {
-            typ: PointType::TurningPoint,
-            airdrome_id: hub.airbase_id,
-            helipad: land.helipad.clone(),
-            time_re_fu_ar: None,
-            link_unit: land.link_unit.clone(),
-            action: Some(ActionTyp::Air(TurnMethod::FlyOverPoint)),
-            pos: land.pos,
-            alt: approach_alt,
-            alt_typ: Some(inbound_alt_typ),
-            speed: land.speed,
-            speed_locked: Some(true),
-            eta: None,
-            eta_locked: Some(true),
-            name: Some(String::from("rtb-approach")),
-            parking: None,
-            task: Box::new(Task::ComboTask(vec![])),
-        },
-        land,
-    ])
+    let is_carrier = slot.link_unit.is_some();
+    let pattern_alt = if is_carrier {
+        land_alt + 120.
+    } else {
+        inbound_alt.min(land_alt + 900.).max(land_alt + 300.)
+    };
+    let mut route = Vec::new();
+    if let Some(from) = from_pos {
+        let dist = na::distance(&from.into(), &slot.pos.into());
+        if dist > 15_000. && inbound_alt > pattern_alt + 400. {
+            let delta = slot.pos - from;
+            let len = (delta.x * delta.x + delta.y * delta.y).sqrt();
+            if len > 1. {
+                let frac = (15_000. / len).min(1.);
+                let descend_pos = slot.pos - na::Vector2::new(delta.x * frac, delta.y * frac);
+                route.push(MissionPoint {
+                    typ: PointType::TurningPoint,
+                    airdrome_id: hub.airbase_id,
+                    helipad: land.helipad.clone(),
+                    time_re_fu_ar: None,
+                    link_unit: land.link_unit.clone(),
+                    action: Some(ActionTyp::Air(TurnMethod::FlyOverPoint)),
+                    pos: LuaVec2(descend_pos),
+                    alt: pattern_alt + if is_carrier { 0. } else { 300. },
+                    alt_typ: Some(inbound_alt_typ.clone()),
+                    speed: land.speed,
+                    speed_locked: Some(true),
+                    eta: None,
+                    eta_locked: Some(true),
+                    name: Some(String::from("rtb-descend")),
+                    parking: None,
+                    task: Box::new(Task::ComboTask(vec![])),
+                });
+            }
+        }
+    }
+    route.push(MissionPoint {
+        typ: PointType::TurningPoint,
+        airdrome_id: hub.airbase_id,
+        helipad: land.helipad.clone(),
+        time_re_fu_ar: None,
+        link_unit: land.link_unit.clone(),
+        action: Some(ActionTyp::Air(TurnMethod::FlyOverPoint)),
+        pos: land.pos,
+        alt: pattern_alt,
+        alt_typ: Some(inbound_alt_typ),
+        speed: land.speed,
+        speed_locked: Some(true),
+        eta: None,
+        eta_locked: Some(true),
+        name: Some(String::from("rtb-approach")),
+        parking: None,
+        task: Box::new(Task::ComboTask(vec![])),
+    });
+    route.push(land);
+    Ok(route)
 }
 
 pub(super) fn land_at_hub_route<'lua>(
@@ -4004,6 +4119,7 @@ fn ensure_rtb_inbound_task(
         .map(|t| now - t >= AIR_TASK_REPUSH_MIN)
         .unwrap_or(true);
     let mut pushed = false;
+    let from_pos = flight_center_pos(lua, dcs_names).ok();
     for (i, dcs_name) in dcs_names.iter().enumerate() {
         if group_on_ground(lua, dcs_name).unwrap_or(false) {
             continue;
@@ -4023,6 +4139,7 @@ fn ensure_rtb_inbound_task(
             inbound_alt,
             inbound_alt_typ.clone(),
             land_mode,
+            from_pos,
         )?;
         db.ai_air_push_mission_to_name(spctx, dcs_name, route, true)?;
         log::info!("ai air {gid}: re-pushed RTB inbound (no active DCS task)");
@@ -4167,6 +4284,16 @@ fn hub_slots_for_cycle_respawn(
     }
     let obj = objective!(db, hub_oid)?;
     let claimed = claimed_hub_slots_excluding(db, Some(gid));
+    if !existing.is_empty() {
+        let refreshed = refresh_hub_slots(lua, db, hub_oid, existing, plane_kind)?;
+        let usable: Vec<HubSlot> = refreshed
+            .into_iter()
+            .filter(|s| !claimed.contains(&(hub_oid, s.kind, s.slot_id)))
+            .collect();
+        if usable.len() >= alive_count {
+            return Ok(usable.into_iter().take(alive_count).collect());
+        }
+    }
     if let Ok(slots) = free_slots_at_hub(lua, db, obj, side, plane_kind, alive_count, &claimed) {
         if slots.len() >= alive_count {
             return Ok(slots.into_iter().take(alive_count).collect());
@@ -4229,7 +4356,7 @@ fn reapply_live_full_hub_fuel(
         }
         let airframe_type = unit.get_type_name()?;
         let cap = spawn_fuel_kg_per_airframe(airframe_type.as_str());
-        apply_live_dcs_fuel_kg(lua, dcs_name, cap, airframe_type.as_str())?;
+        apply_live_dcs_fuel_kg(lua, dcs_name, cap, airframe_type.as_str(), true)?;
     }
     Ok(())
 }
@@ -5745,14 +5872,17 @@ pub(super) fn advance_ai_air(
             if already_handoff {
                 return Ok(());
             }
-            if !flight_all_on_ground_at_hub(lua, &dcs_names, &hub_pick, hub_pos, &hub_pick.slots) {
+            let wait_done = now - phase_since >= servicing_complete_wait();
+            let on_parking = flight_all_on_parking_slots(lua, &dcs_names, &hub_pick.slots);
+            let on_field = flight_all_on_airfield_ground(lua, &dcs_names, &hub_pick, hub_pos);
+            if !on_parking && !(on_field && wait_done) {
                 ensure_ground_parking_task(lua, db, spctx, &hub_pick, &hub_pick.slots, &dcs_names)?;
                 return Ok(());
             }
             if now - phase_since < Duration::seconds(3) {
                 return Ok(());
             }
-            if now - phase_since < servicing_complete_wait() {
+            if !wait_done {
                 ensure_ground_parking_task(lua, db, spctx, &hub_pick, &hub_pick.slots, &dcs_names)?;
                 return Ok(());
             }
@@ -6106,10 +6236,12 @@ fn try_hub_pick_at_objective(
     }
     let claimed = claimed_hub_slots_excluding(db, except);
     let mut slots = free_slots_at_hub(lua, db, obj, side, plane.kind, unit_count, &claimed)?;
-        if slots.len() < unit_count
-            && objective_is_naval_carrier(db, obj)
-            && objective_has_operational_carrier(lua, db, obj)
-        {
+    if slots.len() < unit_count
+        && objective_is_naval_carrier(db, obj)
+        && objective_has_operational_carrier(lua, db, obj)
+        && (matches!(plane.kind, AiPlaneKind::Helicopter)
+            || carrier_supports_fixed_wing_traps(lua, db, obj))
+    {
             if let Some(deck) = carrier_fallback_deck_slot(lua, db, obj)? {
                 slots.clear();
                 for i in 0..unit_count {
@@ -6316,6 +6448,7 @@ pub(super) fn issue_rtb(
         }
         clear_aar_state(ai_air);
         ai_air.calcm_rack_empty_since = None;
+        ai_air.last_airborne_task_push = None;
         set_phase(ai_air, AiAirPhase::RtbInbound);
         if !req.preserve_mission_kind {
             spec.kind = ActionKind::Rtb;
@@ -6335,6 +6468,7 @@ pub(super) fn issue_rtb(
             inbound_alt,
             inbound_alt_typ.clone(),
             land_mode,
+            Some(pos),
         )?;
         log::info!(
             "ai air rtb {} -> {:?} slot {} airdrome {:?} parking {:?}",
@@ -6724,8 +6858,10 @@ pub(super) fn spawn_ai_air_group<'lua>(
                 let _ = panel_stores_report(db, lua, ucid, gid);
             }
             for (dcs_name, fuel_kg, airframe_type) in &cycle_respawn_fuel {
+                let cap = spawn_fuel_kg_per_airframe(airframe_type.as_ref());
+                let full = *fuel_kg >= cap.saturating_sub(100);
                 if let Err(e) =
-                    apply_live_dcs_fuel_kg(lua, dcs_name, *fuel_kg, airframe_type.as_ref())
+                    apply_live_dcs_fuel_kg(lua, dcs_name, *fuel_kg, airframe_type.as_ref(), full)
                 {
                     log::warn!(
                         "ai air {gid} unit {dcs_name}: live fuel apply failed: {e:#}"

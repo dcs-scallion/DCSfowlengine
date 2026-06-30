@@ -720,6 +720,7 @@ impl Db {
                         active_snap.alt,
                         active_snap.alt_typ,
                         mode,
+                        None,
                     )?
                 }
                 ai_air::AiAirPhase::OnMission => {
@@ -2557,11 +2558,17 @@ impl Db {
     ) -> Result<Vec<MissionPoint<'lua>>> {
         let group = group!(self, gid)?;
         let side = group.side;
-        let mission_pos = match &group.origin {
-            DeployKind::Action { ai_air, .. } => ai_air.active_mission.pos,
+        let (mission_pos, mission_kind) = match &group.origin {
+            DeployKind::Action { ai_air, .. } => (ai_air.active_mission.pos, ai_air.mission_kind),
             _ => bail!("not action"),
         };
         let spawn_pos = if resume_airborne {
+            mission_pos
+        } else if matches!(
+            mission_kind,
+            ai_air::AiAirMissionKind::Attackers | ai_air::AiAirMissionKind::Sead
+        ) && mission_pos != Vector2::default()
+        {
             mission_pos
         } else {
             ai_air::flight_center_pos(lua, &ai_air::dcs_spawn_names_for(self, gid)?)?
