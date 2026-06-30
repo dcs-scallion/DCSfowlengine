@@ -51,7 +51,7 @@ use dcso3::{
     world::World,
 };
 use enumflags2::BitFlags;
-use log::warn;
+use log::{error, warn};
 use mlua::Value;
 use netidx::publisher::Value as NetIdxValue;
 use parking_lot::{Condvar, Mutex};
@@ -757,6 +757,9 @@ pub(super) fn admin_shutdown(
     lua: MizLua,
     reset: Option<Option<Side>>,
 ) -> Result<AdminResult> {
+    if let Err(e) = crate::acmi_sanitize::maybe_spawn(&ctx.db.ephemeral.cfg.acmi_sanitize) {
+        error!("acmi_sanitize: {e:?}");
+    }
     let wait = Arc::new((Mutex::new(false), Condvar::new()));
     let se = {
         let perf = unsafe { Perf::get_mut() };

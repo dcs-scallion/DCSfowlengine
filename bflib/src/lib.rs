@@ -14,6 +14,7 @@ FITNESS FOR A PARTICULAR PURPOSE. See the GNU Affero Public License
 for more details.
 */
 
+mod acmi_sanitize;
 mod admin;
 mod bg;
 mod chatcmd;

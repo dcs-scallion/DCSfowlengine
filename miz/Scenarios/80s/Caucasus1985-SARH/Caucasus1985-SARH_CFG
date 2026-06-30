@@ -35,6 +35,10 @@
     "bugs_report_url": "",
     "dowload_acmi_url": ""
   },
+  "acmi_sanitize": {
+    "process_inbox_bat": "C:\\acmi-sanitize\\process_inbox.bat",
+    "post_round_delay_secs": 60
+  },
   "name_filter": "^[a-zA-Z0-9_<>|= ]+$",
   "max_msgs_per_second": 5,
   "jtac_default_code_blue": 1688,

@@ -1090,6 +1090,47 @@ impl DiscordMapCfg {
     }
 }
 
+fn default_acmi_post_round_delay_secs() -> u32 {
+    60
+}
+
+/// Post-round Tacview ACMI sanitization (standalone process_inbox.bat on the DCS host).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AcmiSanitizeCfg {
+    /// Absolute path to process_inbox.bat. Empty or omitted: bflib does not spawn.
+    #[serde(default)]
+    pub process_inbox_bat: Option<String>,
+    /// Seconds to wait before sanitize when spawned from bflib (1..=1800).
+    #[serde(default = "default_acmi_post_round_delay_secs")]
+    pub post_round_delay_secs: u32,
+}
+
+impl Default for AcmiSanitizeCfg {
+    fn default() -> Self {
+        Self {
+            process_inbox_bat: None,
+            post_round_delay_secs: default_acmi_post_round_delay_secs(),
+        }
+    }
+}
+
+impl AcmiSanitizeCfg {
+    pub fn validate(&self) -> Result<()> {
+        if self
+            .process_inbox_bat
+            .as_ref()
+            .is_some_and(|p| !p.trim().is_empty())
+            && !(1..=1800).contains(&self.post_round_delay_secs)
+        {
+            bail!(
+                "acmi_sanitize.post_round_delay_secs {} out of range 1-1800",
+                self.post_round_delay_secs
+            );
+        }
+        Ok(())
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct CsarCfg {
     /// Keep ejected pilots in the world and hide them from JTAC (future CSAR missions).
@@ -1305,6 +1346,8 @@ pub struct Cfg {
     pub airborne_deslot_penalty_points: u32,
     #[serde(default)]
     pub csar: CsarCfg,
+    #[serde(default)]
+    pub acmi_sanitize: AcmiSanitizeCfg,
     /// Available actions per side
     #[serde(default)]
     pub actions: FxHashMap<Side, IndexMap<String, Action, FxBuildHasher>>,
@@ -1425,6 +1468,7 @@ impl Cfg {
             fs::write(path, serde_json::to_string_pretty(&cfg)?)?
         }
         cfg.validate_jtac_default_codes()?;
+        cfg.acmi_sanitize.validate()?;
         Ok(cfg)
     }
 

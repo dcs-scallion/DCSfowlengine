@@ -2070,6 +2070,7 @@ impl Default for Cfg {
             airborne_deslot_penalty_secs: 300,
             airborne_deslot_penalty_points: 0,
             csar: CsarCfg::default(),
+            acmi_sanitize: AcmiSanitizeCfg::default(),
             side_switches: Some(1),
             max_crates: Some(4),
             default_lives: FxHashMap::from_iter([
