@@ -2157,6 +2157,29 @@ fn run_timed_events(
     Ok(AdminResult::Continue)
 }
 
+fn initiate_dcs_shutdown(ctx: &mut Context, lua: MizLua) -> Result<()> {
+    info!("initiating DCS shutdown");
+    if let Some(id) = ctx.event_handler_id.take() {
+        World::singleton(lua)?
+            .remove_event_handler(id)
+            .context("removing event handler")?;
+    }
+    Net::singleton(lua)?.dostring_in(
+        DcsLuaEnvironment::Server,
+        "DCS.setUserCallbacks({}); DCS.exitProcess()".into(),
+    )?;
+    Ok(())
+}
+
+fn external_request_shutdown(lua: MizLua) -> Result<()> {
+    let ctx = unsafe { Context::get_mut() };
+    if !ctx.load_state.init_ok() {
+        bail!("mission not ready for shutdown");
+    }
+    admin::request_shutdown(ctx, lua)?;
+    initiate_dcs_shutdown(ctx, lua)
+}
+
 fn start_timed_events(ctx: &mut Context, lua: MizLua, path: PathBuf) -> Result<()> {
     ctx.last_slow_timed_events = Utc::now();
     let timer = Timer::singleton(lua)?;
@@ -2168,17 +2191,9 @@ fn start_timed_events(ctx: &mut Context, lua: MizLua, path: PathBuf) -> Result<(
                 Ok(Ok(AdminResult::Continue)) => (),
                 Ok(Err(e)) => error!("failed to run timed events {:?}", e),
                 Ok(Ok(AdminResult::Shutdown)) => {
-                    println!("initiating DCS shutdown");
-                    if let Some(id) = ctx.event_handler_id.take() {
-                        World::singleton(lua)?
-                            .remove_event_handler(id)
-                            .context("removing event handler")?
+                    if let Err(e) = initiate_dcs_shutdown(ctx, lua) {
+                        error!("failed to initiate DCS shutdown {e:?}");
                     }
-                    Net::singleton(lua)?.dostring_in(
-                        DcsLuaEnvironment::Server,
-                        "DCS.setUserCallbacks({}); DCS.exitProcess()".into(),
-                    )?;
-                    println!("removing timer event");
                     return Ok(None);
                 }
                 Err(e) => {
@@ -2460,5 +2475,12 @@ fn bflib(lua: &Lua) -> LuaResult<LuaTable<'_>> {
         std::env::set_var("RUST_LIB_BACKTRACE", "0"); // no backtrace for Error
     };
     unsafe { Context::get_mut() }.init_async_bg(lua.inner()).map_err(dcso3::lua_err)?;
-    dcso3::create_root_module(lua, init_hooks, init_miz)
+    let exports = dcso3::create_root_module(lua, init_hooks, init_miz)?;
+    exports.set(
+        "requestShutdown",
+        lua.create_function(|lua, ()| {
+            dcso3::wrap_f("requestShutdown", MizLua::from_env(lua), external_request_shutdown)
+        })?,
+    )?;
+    Ok(exports)
 }

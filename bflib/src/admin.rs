@@ -51,7 +51,7 @@ use dcso3::{
     world::World,
 };
 use enumflags2::BitFlags;
-use log::{error, warn};
+use log::{error, info, warn};
 use mlua::Value;
 use netidx::publisher::Value as NetIdxValue;
 use parking_lot::{Condvar, Mutex};
@@ -791,6 +791,12 @@ pub(super) fn admin_shutdown(
         cvar.wait_for(&mut synced, wait_for - start.elapsed());
     }
     Ok(AdminResult::Shutdown)
+}
+
+/// Graceful round shutdown for DCSServerBot scheduler (`onShutdown` / `lua:require('bflib').requestShutdown()`).
+pub fn request_shutdown(ctx: &mut Context, lua: MizLua) -> Result<()> {
+    info!("requestShutdown: graceful shutdown requested by external caller");
+    admin_shutdown(ctx, lua, None).map(|_| ())
 }
 
 fn add_admin(ctx: &mut Context, player: &String) -> Result<()> {
