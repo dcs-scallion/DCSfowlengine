@@ -46,16 +46,28 @@ fn spawn_detached(bat: &str, delay_secs: u32) -> Result<()> {
     use std::process::Command;
 
     const CREATE_NO_WINDOW: u32 = 0x0800_0000;
-    const DETACHED_PROCESS: u32 = 0x0000_0008;
+    const CREATE_BREAKAWAY_FROM_JOB: u32 = 0x0100_0000;
 
     let delay = delay_secs.to_string();
+    // `start /B` orphans the batch so DCS exit / bot kill does not tear down post_round_delay sleep.
     let child = Command::new("cmd")
-        .args(["/C", bat, "bflib", &delay, "scheduled"])
-        .creation_flags(CREATE_NO_WINDOW | DETACHED_PROCESS)
+        .args([
+            "/C",
+            "start",
+            "/B",
+            "",
+            "cmd",
+            "/C",
+            bat,
+            "bflib",
+            &delay,
+            "scheduled",
+        ])
+        .creation_flags(CREATE_NO_WINDOW | CREATE_BREAKAWAY_FROM_JOB)
         .spawn()
         .map_err(|e| anyhow::anyhow!("spawn {bat}: {e}"))?;
     info!(
-        "acmi_sanitize: spawned {bat} bflib {delay_secs} scheduled (pid {})",
+        "acmi_sanitize: spawned {bat} bflib {delay_secs} scheduled (launcher pid {})",
         child.id()
     );
     Ok(())
