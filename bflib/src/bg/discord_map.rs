@@ -51,6 +51,22 @@ fn map_label_display_h() -> u32 {
     ((MAP_LABEL_SRC_H as u64 * SIDEBAR_WIDTH_PX as u64) / MAP_LABEL_SRC_W as u64) as u32
 }
 
+static MAP_FLY_FIGHT_WIN_B64: Lazy<String> = Lazy::new(|| {
+    B64.encode(include_bytes!(
+        "../../../assets/discord-objective-map/png/map-Fly-Fight-Win.png"
+    ))
+});
+const MAP_FLY_FIGHT_WIN_SRC_W: u32 = 434;
+const MAP_FLY_FIGHT_WIN_SRC_H: u32 = 40;
+
+fn map_fly_fight_win_display_w() -> u32 {
+    SIDEBAR_WIDTH_PX
+}
+
+fn map_fly_fight_win_display_h() -> u32 {
+    ((MAP_FLY_FIGHT_WIN_SRC_H as u64 * SIDEBAR_WIDTH_PX as u64) / MAP_FLY_FIGHT_WIN_SRC_W as u64) as u32
+}
+
 const HDR_LINK_ICON_H: u32 = 38;
 
 fn hdr_link_icon_w(src_w: u32, src_h: u32) -> u32 {
@@ -827,9 +843,21 @@ fn sidebar_pilots_html(bar: &DiscordMapStatusBar) -> String {
     )
 }
 
+fn sidebar_fly_fight_win_html() -> String {
+    let w = map_fly_fight_win_display_w();
+    let h = map_fly_fight_win_display_h();
+    format!(
+        r#"<div class="sidebar-ffw" aria-hidden="true"><img class="sidebar-ffw-img" src="data:image/png;base64,{b64}" width="{w}" height="{h}" alt=""></div>"#,
+        b64 = MAP_FLY_FIGHT_WIN_B64.as_str(),
+        w = w,
+        h = h,
+    )
+}
+
 fn sidebar_pilots_col_html(bar: &DiscordMapStatusBar) -> String {
     format!(
-        r#"<div class="left-col">{pilots}</div>"#,
+        r#"<div class="left-col">{ffw}{pilots}</div>"#,
+        ffw = sidebar_fly_fight_win_html(),
         pilots = sidebar_pilots_html(bar),
     )
 }
@@ -1124,6 +1152,8 @@ body{{margin:0;background:#000;color:#686a6e;font-family:"Roboto Condensed",Robo
 .stat-red{{color:#C43838}}
 .stat-blue{{color:#2E5AAC}}
 .stat-accent{{color:#e8c547}}
+.sidebar-ffw{{flex:0 0 auto;width:100%;line-height:0;margin-bottom:{layout_gap}px}}
+.sidebar-ffw-img{{display:block;width:100%;height:auto;object-fit:contain}}
 .sidebar-pilots{{display:flex;flex-direction:column;gap:{layout_gap}px;box-sizing:border-box;font-size:clamp(12px,calc(100vw*21/{img_w}),21px)}}
 .pilot-block{{box-sizing:border-box;border:1px solid #2e3138}}
 .pilot-block-blue{{border-color:#2E5AAC}}
