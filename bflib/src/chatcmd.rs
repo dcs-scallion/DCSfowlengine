@@ -171,10 +171,19 @@ pub(super) fn format_duration(d: Duration) -> CompactString {
 
 fn time_command(ctx: &mut Context, id: PlayerId, now: DateTime<Utc>) {
     match ctx.shutdown.as_ref() {
-        None => ctx.db.ephemeral.msgs().send(
-            MsgTyp::Chat(Some(id)),
-            "The server isn't configured to restart automatically",
-        ),
+        None => {
+            let msg: CompactString = ctx
+                .db
+                .ephemeral
+                .cfg
+                .chat_time_command
+                .as_deref()
+                .map(|s| s.trim())
+                .filter(|s| !s.is_empty())
+                .unwrap_or("The server isn't configured to restart automatically")
+                .into();
+            ctx.db.ephemeral.msgs().send(MsgTyp::Chat(Some(id)), msg);
+        }
         Some(asd) => {
             let remains = format_duration(asd.when - now);
             ctx.db.ephemeral.msgs().send(

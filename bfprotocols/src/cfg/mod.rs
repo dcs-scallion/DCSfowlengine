@@ -1202,6 +1202,9 @@ pub struct Cfg {
     /// if None.
     #[serde(default)]
     pub shutdown: Option<u32>,
+    /// When `shutdown` is null, `-time` replies with this text (e.g. DCSServerBot `.timeleft`).
+    #[serde(default)]
+    pub chat_time_command: Option<String>,
     /// how many points are various actions worth (if any)
     #[serde(default)]
     pub points: Option<PointsCfg>,
