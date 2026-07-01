@@ -32,6 +32,7 @@ use std::{
     io,
     ops::{Deref, DerefMut},
     path::{Path, PathBuf},
+    str::FromStr,
 };
 
 mod example;
@@ -1131,6 +1132,78 @@ impl AcmiSanitizeCfg {
     }
 }
 
+/// Mirror of DCSServerBot `scheduler.yaml` `action.times` for Discord map countdown.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DcsserverBotScheduledRestartCfg {
+    pub timezone: String,
+    pub times: Vec<String>,
+}
+
+impl DcsserverBotScheduledRestartCfg {
+    pub fn validate(&self) -> Result<()> {
+        if self.timezone.trim().is_empty() {
+            bail!("DCSServerBot_scheduled_restart.timezone must not be empty");
+        }
+        chrono_tz::Tz::from_str(self.timezone.trim())
+            .map_err(|_| anyhow!("DCSServerBot_scheduled_restart.timezone {:?} is invalid", self.timezone))?;
+        if self.times.is_empty() {
+            bail!("DCSServerBot_scheduled_restart.times must not be empty");
+        }
+        for t in &self.times {
+            parse_scheduled_restart_hh_mm(t)
+                .map_err(|_| anyhow!("DCSServerBot_scheduled_restart.times entry {:?} is invalid (use HH:MM)", t))?;
+        }
+        Ok(())
+    }
+
+    /// Next wall-clock restart in UTC (same day-or-next rule as DCSServerBot scheduler `times`).
+    pub fn next_restart_utc(&self, now: DateTime<Utc>) -> Option<DateTime<Utc>> {
+        let tz = chrono_tz::Tz::from_str(self.timezone.trim()).ok()?;
+        let now_local = now.with_timezone(&tz);
+        let today = now_local.date_naive();
+        let check_floor = today.and_hms_opt(
+            now_local.hour(),
+            now_local.minute(),
+            0,
+        )?;
+        let mut best: Option<DateTime<Utc>> = None;
+        for t in &self.times {
+            let (h, m) = parse_scheduled_restart_hh_mm(t).ok()?;
+            let time = chrono::NaiveTime::from_hms_opt(h, m, 0)?;
+            let mut candidate = today.and_time(time);
+            if candidate <= check_floor {
+                candidate += chrono::Duration::days(1);
+            }
+            let local = tz
+                .from_local_datetime(&candidate)
+                .single()
+                .or_else(|| tz.from_local_datetime(&candidate).earliest())?;
+            let utc = local.with_timezone(&Utc);
+            if best.is_none_or(|b| utc < b) {
+                best = Some(utc);
+            }
+        }
+        best
+    }
+}
+
+fn parse_scheduled_restart_hh_mm(s: &str) -> Result<(u32, u32)> {
+    let s = s.trim();
+    let (h, m) = match s.split_once(':') {
+        Some((h, m)) => (h, m),
+        None => bail!("missing ':'"),
+    };
+    let h: u32 = h.parse()?;
+    let m: u32 = m.parse()?;
+    if h > 24 || m > 59 {
+        bail!("hour or minute out of range");
+    }
+    if h == 24 && m != 0 {
+        bail!("24:xx is invalid");
+    }
+    Ok((h % 24, m))
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct CsarCfg {
     /// Keep ejected pilots in the world and hide them from JTAC (future CSAR missions).
@@ -1205,6 +1278,9 @@ pub struct Cfg {
     /// When `shutdown` is null, `-time` replies with this text (e.g. DCSServerBot `.timeleft`).
     #[serde(default)]
     pub chat_time_command: Option<String>,
+    /// DCSServerBot scheduler mirror for map restart countdown; ignored when `shutdown` is set.
+    #[serde(default, rename = "DCSServerBot_scheduled_restart")]
+    pub dcsserver_bot_scheduled_restart: Option<DcsserverBotScheduledRestartCfg>,
     /// how many points are various actions worth (if any)
     #[serde(default)]
     pub points: Option<PointsCfg>,
@@ -1472,7 +1548,24 @@ impl Cfg {
         }
         cfg.validate_jtac_default_codes()?;
         cfg.acmi_sanitize.validate()?;
+        if let Some(ref s) = cfg.dcsserver_bot_scheduled_restart {
+            s.validate()?;
+        }
         Ok(cfg)
+    }
+
+    /// Discord map / countdown: bflib `shutdown` wins; else optional DCSServerBot schedule mirror.
+    pub fn map_restart_when(
+        &self,
+        now: DateTime<Utc>,
+        bflib_auto_shutdown_when: Option<DateTime<Utc>>,
+    ) -> Option<DateTime<Utc>> {
+        if self.shutdown.is_some() {
+            return bflib_auto_shutdown_when;
+        }
+        self.dcsserver_bot_scheduled_restart
+            .as_ref()
+            .and_then(|s| s.next_restart_utc(now))
     }
 
     pub fn save(&self, miz_state_path: &Path) -> Result<()> {

@@ -6,6 +6,7 @@ edition = "2021"
 [dependencies]
 anyhow = { workspace = true }
 chrono = { workspace = true }
+chrono-tz = { workspace = true }
 compact_str = { workspace = true }
 dcso3 = { version = "0.2", path = "../dcso3" }
 enumflags2 = { workspace = true }

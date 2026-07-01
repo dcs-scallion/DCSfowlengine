@@ -162,7 +162,10 @@ fn discord_map_live_ctx(lua: MizLua, ctx: &Context) -> Result<DiscordMapLiveCtx>
     let pilots = collect_discord_map_pilots(lua, ctx)?;
     Ok(DiscordMapLiveCtx {
         generated_at: Utc::now(),
-        shutdown_when: ctx.shutdown.map(|s| s.when),
+        shutdown_when: ctx.db.ephemeral.cfg.map_restart_when(
+            Utc::now(),
+            ctx.shutdown.map(|s| s.when),
+        ),
         online_red,
         online_blue,
         blue_pilots: pilots.blue,

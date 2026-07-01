@@ -45,6 +45,10 @@
   "jtac_default_code_red": 1113,
   "shutdown": null,
   "chat_time_command": "Use the .timeleft command",
+  "DCSServerBot_scheduled_restart": {
+    "timezone": "Europe/Prague",
+    "times": ["01:00", "07:00", "13:00", "19:00"]
+  },
   "points": {
     "new_player_join": 3000000,
     "carrier_kill": 280,

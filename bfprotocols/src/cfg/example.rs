@@ -1993,6 +1993,7 @@ impl Default for Cfg {
             name_filter: Some("^[a-zA-Z0-9<>|= ]+$".try_into().unwrap()),
             shutdown: Some(10),
             chat_time_command: None,
+            dcsserver_bot_scheduled_restart: None,
             rules: Rules {
                 actions: Rule::AlwaysAllowed,
                 cargo: Rule::AlwaysAllowed,
