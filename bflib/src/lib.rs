@@ -1380,6 +1380,10 @@ fn on_event(lua: MizLua, ev: Event) -> Result<()> {
             }
         }
         Event::MissionEnd => unsafe {
+            let ctx = Context::get_mut();
+            if let Err(e) = crate::acmi_sanitize::maybe_spawn(&ctx.db.ephemeral.cfg.acmi_sanitize) {
+                error!("acmi_sanitize: {e:?}");
+            }
             Context::reset();
             Perf::reset();
             Context::get_mut().init_async_bg(lua.inner())?;
@@ -2347,6 +2351,7 @@ fn delayed_init_miz(lua: MizLua) -> Result<()> {
 }
 
 fn on_mission_load_end(_lua: HooksLua) -> Result<()> {
+    crate::acmi_sanitize::reset_spawn_state();
     unsafe {
         Context::get_mut().load_state = LoadState::MissionLoaded { time: Utc::now() }
     };

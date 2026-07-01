@@ -1,10 +1,21 @@
-use anyhow::{bail, Result};
+use anyhow::Result;
 use bfprotocols::cfg::AcmiSanitizeCfg;
 use log::{info, warn};
 use std::path::Path;
+use std::sync::atomic::{AtomicBool, Ordering};
 
-/// Spawn process_inbox.bat after round end (detached; does not block shutdown).
+static SPAWNED_THIS_MISSION: AtomicBool = AtomicBool::new(false);
+
+/// Allow one spawn per loaded mission (reset on mission load).
+pub fn reset_spawn_state() {
+    SPAWNED_THIS_MISSION.store(false, Ordering::Release);
+}
+
+/// Spawn process_inbox.bat after round end or MissionEnd (detached; does not block shutdown).
 pub fn maybe_spawn(cfg: &AcmiSanitizeCfg) -> Result<()> {
+    if SPAWNED_THIS_MISSION.load(Ordering::Acquire) {
+        return Ok(());
+    }
     let Some(bat) = cfg
         .process_inbox_bat
         .as_ref()
@@ -24,7 +35,9 @@ pub fn maybe_spawn(cfg: &AcmiSanitizeCfg) -> Result<()> {
         );
         return Ok(());
     }
-    spawn_detached(bat, cfg.post_round_delay_secs)
+    spawn_detached(bat, cfg.post_round_delay_secs)?;
+    SPAWNED_THIS_MISSION.store(true, Ordering::Release);
+    Ok(())
 }
 
 #[cfg(windows)]
@@ -51,5 +64,5 @@ fn spawn_detached(bat: &str, delay_secs: u32) -> Result<()> {
 #[cfg(not(windows))]
 fn spawn_detached(bat: &str, _delay_secs: u32) -> Result<()> {
     let _ = bat;
-    bail!("acmi_sanitize spawn is only supported on Windows DCS hosts")
+    anyhow::bail!("acmi_sanitize spawn is only supported on Windows DCS hosts")
 }
