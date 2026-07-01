@@ -549,6 +549,39 @@ const INCLUDE_STATIC_SLOT_KEYS: &[&str] = &["include", "include_dyn_slots"];
 /// `include` kept for older missions).
 const INCLUDE_DYNAMIC_SLOT_KEYS: &[&str] = &["include_dyn_slots", "include"];
 
+/// Land/air static slot placement (`TS*`), not template zones (`TTS*` / `TTSN*`).
+fn is_ts_land_air_placement_zone_name(name: &str) -> bool {
+    name.starts_with("TS") && !name.starts_with("TTS")
+}
+
+/// At least one `include` references a `TTS*` template enabled in SETTINGS-static-slots-creation.
+fn ts_land_air_zone_active_from_props(
+    enabled_tts: &HashSet<String>,
+    props: Sequence<Property>,
+) -> Result<bool> {
+    for prop in props {
+        let prop = prop?;
+        if !INCLUDE_STATIC_SLOT_KEYS
+            .iter()
+            .any(|&k| prop.key.as_ref() == k)
+        {
+            continue;
+        }
+        let suffix = prop.value.trim();
+        if suffix.is_empty() {
+            continue;
+        }
+        let full = format!("TTS{suffix}");
+        if full.starts_with("TTSN") {
+            continue;
+        }
+        if enabled_tts.contains(full.as_str()) {
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
+
 /// DEP* dynamic FARP aircraft allowlist (`TTDdynFARP` zone); not part of general land TTD policy merge.
 const TTD_DYN_FARP_POLICY_ZONE: &str = "TTDdynFARP";
 /// Naval warehouse ME `dynamicSpawn` after stock/linkDynTempl (keys `TTDN` + hull name, e.g. `TTDNRKuznecow`).
@@ -1214,6 +1247,16 @@ impl VehicleTemplates {
         // STRICT mode: only zones explicitly listed in SETTINGS-* are considered.
         // Missing/empty settings => nothing enabled.
         settings.get(&String::from(full_zone_name)).copied().unwrap_or(false)
+    }
+
+    fn enabled_tts_templates_from_settings(settings: &HashMap<String, bool>) -> HashSet<String> {
+        settings
+            .iter()
+            .filter(|(name, enabled)| {
+                **enabled && name.starts_with("TTS") && !name.starts_with("TTSN")
+            })
+            .map(|(name, _)| name.clone())
+            .collect()
     }
 
     fn normalize_group_route_to_turning(group: &Group<'static>) -> Result<()> {
@@ -2191,6 +2234,7 @@ impl VehicleTemplates {
         let idx = base.mission.index()?;
         let static_creation_settings =
             Self::load_zone_creation_settings(base, "SETTINGS-static-slots-creation")?;
+        let enabled_tts = Self::enabled_tts_templates_from_settings(&static_creation_settings);
         let mut templates = HashMap::default();
         let mut uid = idx.max_uid();
         let mut gid = idx.max_gid();
@@ -2411,11 +2455,17 @@ impl VehicleTemplates {
             }
             Ok(())
         };
-        // Land/air static placement: TS* (not TTSN* — carriers use the loop below).
+        // Land/air static placement: TS* (not TTS* / TTSN* — carriers use the loop below).
         for zone in base.mission.triggers()? {
             let zone = zone?;
             let name = zone.name()?;
-            if !name.starts_with("TS") || name.starts_with("TTSN") {
+            if !is_ts_land_air_placement_zone_name(name.as_ref()) {
+                continue;
+            }
+            if !ts_land_air_zone_active_from_props(&enabled_tts, zone.properties()?)? {
+                info!(
+                    "skipping disabled TS placement zone {name} (no enabled TTS* in include)"
+                );
                 continue;
             }
             let spec = SlotSpec::new(
@@ -12076,6 +12126,40 @@ fn audit_tisp_initial_ship_zones(
     Ok(())
 }
 
+/// Drops disabled `TS*` placement zones (no enabled `TTS*` in `include`) from the built mission.
+fn remove_disabled_ts_land_air_placement_zones(
+    lua: &'static Lua,
+    base: &LoadedMiz,
+) -> Result<()> {
+    let settings = VehicleTemplates::load_zone_creation_settings(
+        base,
+        "SETTINGS-static-slots-creation",
+    )?;
+    let enabled_tts = VehicleTemplates::enabled_tts_templates_from_settings(&settings);
+    let mut remove: HashSet<StdString> = HashSet::default();
+    for zone in base.mission.triggers()? {
+        let zone = zone?;
+        let name = zone.name()?;
+        if !is_ts_land_air_placement_zone_name(name.as_ref()) {
+            continue;
+        }
+        if !ts_land_air_zone_active_from_props(&enabled_tts, zone.properties()?)? {
+            remove.insert(StdString::from(name.as_ref()));
+        }
+    }
+    if remove.is_empty() {
+        return Ok(());
+    }
+    let mut listed: Vec<StdString> = remove.iter().cloned().collect();
+    listed.sort();
+    info!(
+        "removing {} disabled TS placement zone(s) from built mission (no enabled TTS* in include): {:?}",
+        listed.len(),
+        listed
+    );
+    remove_mission_trigger_zones_named(lua, &base.mission, &remove)
+}
+
 fn validate_base_fowl_trigger_zone_names(mission: &Miz) -> Result<()> {
     for zone in mission.triggers()? {
         let zone = zone?;
@@ -12421,6 +12505,8 @@ pub fn run(cfg: &MizCmd) -> Result<()> {
         None => HashMap::default(),
     };
     vehicle_templates.generate_slots(lua, &mut base).context("generating slots")?;
+    remove_disabled_ts_land_air_placement_zones(lua, &base)
+        .context("removing disabled TS placement zones")?;
     vehicle_templates
         .apply(
             lua,
