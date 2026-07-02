@@ -1,5 +1,6 @@
 use anyhow::Result;
 use bfprotocols::cfg::AcmiSanitizeCfg;
+use chrono::{SecondsFormat, Utc};
 use log::{info, warn};
 use std::path::Path;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -35,13 +36,14 @@ pub fn maybe_spawn(cfg: &AcmiSanitizeCfg) -> Result<()> {
         );
         return Ok(());
     }
-    spawn_detached(bat, cfg.post_round_delay_secs)?;
+    let shutdown_before = Utc::now().to_rfc3339_opts(SecondsFormat::Millis, true);
+    spawn_detached(bat, cfg.post_round_delay_secs, &shutdown_before)?;
     SPAWNED_THIS_MISSION.store(true, Ordering::Release);
     Ok(())
 }
 
 #[cfg(windows)]
-fn spawn_detached(bat: &str, delay_secs: u32) -> Result<()> {
+fn spawn_detached(bat: &str, delay_secs: u32, shutdown_before: &str) -> Result<()> {
     use std::os::windows::process::CommandExt;
     use std::process::Command;
 
@@ -61,20 +63,21 @@ fn spawn_detached(bat: &str, delay_secs: u32) -> Result<()> {
             bat,
             "bflib",
             &delay,
+            shutdown_before,
             "scheduled",
         ])
         .creation_flags(CREATE_NO_WINDOW | CREATE_BREAKAWAY_FROM_JOB)
         .spawn()
         .map_err(|e| anyhow::anyhow!("spawn {bat}: {e}"))?;
     info!(
-        "acmi_sanitize: spawned {bat} bflib {delay_secs} scheduled (launcher pid {})",
+        "acmi_sanitize: spawned {bat} bflib {delay_secs} {shutdown_before} scheduled (launcher pid {})",
         child.id()
     );
     Ok(())
 }
 
 #[cfg(not(windows))]
-fn spawn_detached(bat: &str, _delay_secs: u32) -> Result<()> {
+fn spawn_detached(bat: &str, _delay_secs: u32, _shutdown_before: &str) -> Result<()> {
     let _ = bat;
     anyhow::bail!("acmi_sanitize spawn is only supported on Windows DCS hosts")
 }

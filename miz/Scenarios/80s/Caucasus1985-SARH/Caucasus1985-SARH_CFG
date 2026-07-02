@@ -37,7 +37,7 @@
   },
   "acmi_sanitize": {
     "process_inbox_bat": "C:\\acmi-sanitize\\process_inbox.bat",
-    "post_round_delay_secs": 120
+    "post_round_delay_secs": 30
   },
   "name_filter": "^[a-zA-Z0-9_<>|= ]+$",
   "max_msgs_per_second": 5,
@@ -47,7 +47,7 @@
   "chat_time_command": "Use the .timeleft command",
   "DCSServerBot_scheduled_restart": {
     "timezone": "Europe/Prague",
-    "times": ["01:00", "07:00", "13:00", "19:00"]
+    "times": ["00:00", "06:00", "12:00", "18:00"]
   },
   "points": {
     "new_player_join": 3000000,
