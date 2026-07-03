@@ -856,6 +856,7 @@ impl Db {
                 self.ephemeral.dirty()
             }
         }
+        super::ai_air::extend_active_owner_locks_for_player(self, &ucid);
     }
 
     pub fn register_player(&mut self, ucid: Ucid, name: String, side: Side) -> Result<(), RegErr> {
@@ -1273,6 +1274,7 @@ impl Db {
     }
 
     pub fn player_disconnected(&mut self, ucid: &Ucid) {
+        super::ai_air::extend_active_owner_locks_for_player(self, ucid);
         if let Some((_, Some(inst))) = self
             .persisted
             .players

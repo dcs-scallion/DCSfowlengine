@@ -130,6 +130,9 @@ pub enum DeployKind {
         ammo: i32,
         #[serde(default)]
         ai_air: AiAirState,
+        /// Coalition may command after lock expiry; set at round start, never re-locked.
+        #[serde(default)]
+        owner_lock_released: bool,
     },
 }
 

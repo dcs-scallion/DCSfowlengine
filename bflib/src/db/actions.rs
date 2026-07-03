@@ -1885,6 +1885,7 @@ impl Db {
                 origin: _,
                 ammo: _,
                 ai_air: _,
+                owner_lock_released: _,
             } => match &spec.kind {
                 ActionKind::Tanker(ai_plane_cfg) => (
                     ai_plane_cfg.altitude,
@@ -2087,6 +2088,7 @@ impl Db {
                 last_airborne_task_push: None,
                 calcm_rack_empty_since: None,
             },
+            owner_lock_released: false,
         };
         let gid = self
             .add_group(

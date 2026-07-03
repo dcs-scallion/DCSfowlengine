@@ -2298,6 +2298,7 @@ fn delayed_init_miz(lua: MizLua) -> Result<()> {
             Arc::clone(&fowl_export),
         )
             .context("loading the saved state")?;
+        db::ai_air::sweep_expired_owner_locks_at_round_start(&mut ctx.db);
     }
     if ctx.db.ephemeral.cfg.front_line {
         let theatre = theatre_slug(lua);

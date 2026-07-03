@@ -3343,11 +3343,18 @@ pub(super) fn ensure_player_may_query_ai_air(
     ucid: Option<&Ucid>,
 ) -> Result<()> {
     let group = group!(db, gid)?;
-    let DeployKind::Action { ai_air, player, time, .. } = &group.origin else {
+    let DeployKind::Action {
+        ai_air,
+        player,
+        time,
+        owner_lock_released,
+        ..
+    } = &group.origin
+    else {
         return Ok(());
     };
     let hours = db.ephemeral.cfg.ai_air_action_owner_hours.unwrap_or(24);
-    if hours == 0 {
+    if hours == 0 || *owner_lock_released {
         return Ok(());
     }
     let Some(owner) = player.as_ref() else {
@@ -3367,6 +3374,84 @@ pub(super) fn ensure_player_may_query_ai_air(
     }
     let _ = ai_air;
     Ok(())
+}
+
+fn action_owner_lock_hours(db: &Db) -> i64 {
+    db.ephemeral.cfg.ai_air_action_owner_hours.unwrap_or(24) as i64
+}
+
+/// Persisted campaign round start: expire owner locks that missed the window.
+pub fn sweep_expired_owner_locks_at_round_start(db: &mut Db) {
+    let hours = action_owner_lock_hours(db);
+    if hours == 0 {
+        return;
+    }
+    let now = Utc::now();
+    let limit = Duration::hours(hours);
+    let mut released = 0u32;
+    for gid in db.persisted.actions.into_iter() {
+        let gid = *gid;
+        let Some(group) = db.persisted.groups.get_mut_cow(&gid) else {
+            continue;
+        };
+        let DeployKind::Action {
+            player,
+            time,
+            owner_lock_released,
+            ..
+        } = &mut group.origin
+        else {
+            continue;
+        };
+        if player.is_none() || *owner_lock_released {
+            continue;
+        }
+        if now - *time >= limit {
+            *owner_lock_released = true;
+            released += 1;
+        }
+    }
+    if released > 0 {
+        log::info!("ai air owner lock: permanently released {released} group(s) at round start");
+        db.ephemeral.dirty();
+    }
+}
+
+/// Connect or disconnect: extend active owner locks for this buyer's air AI.
+pub(super) fn extend_active_owner_locks_for_player(db: &mut Db, ucid: &Ucid) {
+    let hours = action_owner_lock_hours(db);
+    if hours == 0 {
+        return;
+    }
+    let now = Utc::now();
+    let limit = Duration::hours(hours);
+    let mut extended = 0u32;
+    for gid in db.persisted.actions.into_iter() {
+        let gid = *gid;
+        let Some(group) = db.persisted.groups.get_mut_cow(&gid) else {
+            continue;
+        };
+        let DeployKind::Action {
+            player,
+            time,
+            owner_lock_released,
+            ..
+        } = &mut group.origin
+        else {
+            continue;
+        };
+        let Some(owner) = player.as_ref() else {
+            continue;
+        };
+        if owner != ucid || *owner_lock_released || now - *time >= limit {
+            continue;
+        }
+        *time = now;
+        extended += 1;
+    }
+    if extended > 0 {
+        db.ephemeral.dirty();
+    }
 }
 
 fn ai_air_phase_label(phase: AiAirPhase) -> &'static str {
