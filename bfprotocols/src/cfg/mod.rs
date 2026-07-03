@@ -686,12 +686,16 @@ pub struct PointsCfg {
     pub production_kill: u32,
     /// Bonus points awarded to heavy sam kills
     pub lr_sam_bonus: u32,
-    /// Points awarded for repairing base logistics
-    pub logistics_repair: u32,
+    /// Points for repairing base logistics (negative deducts from the player)
+    pub logistics_repair: i32,
     /// Points awarded for logistics transfers
     pub logistics_transfer: u32,
-    /// Points awarded for base capture
-    pub capture: u32,
+    /// Capture reward: OFO* FOB and deployable FARP
+    pub capture_fob: u32,
+    /// Capture reward: OAB* airbase
+    pub capture_airbase: u32,
+    /// Capture reward: OLO* logistics hub
+    pub capture_hub: u32,
     /// How many hours before previous team kills are forgotten for
     /// the purposes of computing the penalty of a team kill.
     #[serde(default = "default_tk_window")]
@@ -735,6 +739,17 @@ pub struct PointsCfg {
     /// `periodic_point_gain` pays out (with or without `balancing_point_gain`).
     #[serde(default)]
     pub periodic_award_airborne: bool,
+}
+
+impl PointsCfg {
+    pub fn capture_points_for(&self, kind: &ObjectiveKind) -> u32 {
+        match kind {
+            ObjectiveKind::Fob | ObjectiveKind::Farp { .. } => self.capture_fob,
+            ObjectiveKind::Airbase => self.capture_airbase,
+            ObjectiveKind::Logistics => self.capture_hub,
+            ObjectiveKind::Production => 0,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize)]

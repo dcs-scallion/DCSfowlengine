@@ -2075,9 +2075,16 @@ impl Db {
                     by: ucids.clone(),
                 });
                 if let Some(points) = self.ephemeral.cfg.points.as_ref() {
-                    let ppp = (points.capture as f32 / ucids.len() as f32).ceil() as i32;
+                    let kind = objective!(self, oid)?.kind.clone();
+                    let total = points.capture_points_for(&kind);
+                    let ppp = (total as f32 / ucids.len() as f32).ceil() as i32;
+                    let label = kind.name();
                     for ucid in &ucids {
-                        self.adjust_points(ucid, ppp, &format!("for capturing {name}"));
+                        self.adjust_points(
+                            ucid,
+                            ppp,
+                            &format!("for capturing {name} ({label})"),
+                        );
                     }
                 }
                 let obj = objective!(self, oid)?;

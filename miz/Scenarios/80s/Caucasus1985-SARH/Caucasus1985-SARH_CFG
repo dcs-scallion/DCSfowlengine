@@ -51,16 +51,18 @@
   },
   "points": {
     "new_player_join": 3000000,
-    "carrier_kill": 280,
-    "shipsWithHeliport_kill": 140,
-    "shipsNoHeliport_kill": 70,
-    "capture": 60,
-    "logistics_repair": 40,
+    "carrier_kill": 250,
+    "shipsWithHeliport_kill": 120,
+    "shipsNoHeliport_kill": 60,
+    "capture_hub": 100,
+    "capture_airbase": 70,
+    "capture_fob": 40,
     "air_kill": 30,
     "production_kill": 20,
-    "logistics_transfer": 10,
+    "logistics_transfer": 15,
     "lr_sam_bonus": 5,
     "ground_kill": 5,
+    "logistics_repair": -10,
     "tk_window": 24,
     "provisional": true,
     "strict": false,
@@ -101,9 +103,9 @@
       "max_drop_speed": 50
     }
   },
-  "production_repair_crate_cost": 20,
+  "production_repair_crate_cost": -20,
   "production_repair_rate_seconds": 18000,
-  "static_repair_crate_cost": 20,
+  "static_repair_crate_cost": -30,
   "static_repair_rate_seconds": 36000,
   "production_factory_units": [
     "Building01_PBR",
@@ -116,13 +118,13 @@
     "Workshop A"
   ],
   "objective_static_units": {
-    ".Command Center": {
-      "zones": ["AB", "LO"],
-      "kill_points": 15
-    },
     ".Ammunition depot": {
       "zones": ["AB", "LO"],
       "kill_points": 50
+    },
+    ".Command Center": {
+      "zones": ["AB", "LO"],
+      "kill_points": 25
     },
     "FARP CP Blindage": {
       "zones": ["FO"],
@@ -579,7 +581,7 @@
         "kind": {
           "Drone": {
             "jtac": {
-              "range": 12000,
+              "range": 10000,
               "nolos": true
             },
             "plane": {
@@ -601,7 +603,7 @@
         "kind": {
           "Drone": {
             "jtac": {
-              "range": 12000,
+              "range": 10000,
               "nolos": true
             },
             "plane": {
@@ -623,7 +625,7 @@
         "kind": {
           "Drone": {
             "jtac": {
-              "range": 12000,
+              "range": 10000,
               "nolos": true
             },
             "plane": {
@@ -1034,7 +1036,7 @@
         "kind": {
           "Drone": {
             "jtac": {
-              "range": 12000,
+              "range": 10000,
               "nolos": true
             },
             "plane": {
@@ -1056,7 +1058,7 @@
         "kind": {
           "Drone": {
             "jtac": {
-              "range": 12000,
+              "range": 10000,
               "nolos": true
             },
             "plane": {
@@ -1078,7 +1080,7 @@
         "kind": {
           "Drone": {
             "jtac": {
-              "range": 12000,
+              "range": 10000,
               "nolos": true
             },
             "plane": {
@@ -2842,44 +2844,6 @@
       {
         "path": [
           "Ground Units",
-          "MLRS BM-21 Grad"
-        ],
-        "kind": {
-          "Group": {
-            "template": "DEPGRADG"
-          }
-        },
-        "persist": "Forever",
-        "limit": 4,
-        "limit_enforce": "DeleteOldest",
-        "crates": [
-          {
-            "name": "Grad Crate",
-            "weight": 1500,
-            "required": 4,
-            "pos_unit": null,
-            "max_drop_height_agl": 20,
-            "max_drop_speed": 350
-          }
-        ],
-        "repair_crate": {
-          "name": "Grad Repair/Rearm",
-          "weight": 1500,
-          "required": 1,
-          "pos_unit": null,
-          "max_drop_height_agl": 10,
-          "max_drop_speed": 50
-        },
-        "repair_cost": 20,
-        "cost": 80,
-        "ewr": null,
-        "jtac": null,
-        "template": null,
-        "logistics": null
-      },
-      {
-        "path": [
-          "Ground Units",
           "MBT Chieftain Mk.3"
         ],
         "template": "DEPCHIEF",
@@ -4377,15 +4341,15 @@
   },
   "airborne_jtacs": {
     "MB-339A": {
-      "range": 16000,
+      "range": 12000,
       "nolos": true
     },
     "C-101CC": {
-      "range": 16000,
+      "range": 12000,
       "nolos": true
     },
     "L-39ZA": {
-      "range": 16000,
+      "range": 12000,
       "nolos": true
     }
   },

@@ -823,7 +823,7 @@ impl Db {
                         .as_ref()
                         .map(|p| p.logistics_repair)
                     {
-                        self.adjust_points(&st.ucid, amount as i32, "for logistics repair");
+                        self.adjust_points(&st.ucid, amount, "for logistics repair");
                     }
                     let obj = objective!(self, oid)?;
                     return Ok(Unpakistan::RepairedBase(obj.name.clone(), obj.logi()));
