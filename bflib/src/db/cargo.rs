@@ -779,6 +779,50 @@ impl Db {
             }
             Ok(origin)
         }
+        fn require_repair_cost_points(
+            db: &Db,
+            ucid: &Ucid,
+            oid: ObjectiveId,
+            cost_points: i32,
+            action: &str,
+        ) -> Result<()> {
+            if cost_points >= 0 {
+                return Ok(());
+            }
+            let cost = cost_points.unsigned_abs();
+            let Some(player) = db.persisted.players.get(ucid) else {
+                return Ok(());
+            };
+            let Some(obj) = db.persisted.objectives.get(&oid) else {
+                return Ok(());
+            };
+            let available = max(0, player.points) + obj.points;
+            if available < cost as i32 {
+                bail!(
+                    "there are {} points available, {} costs {} points",
+                    available,
+                    action,
+                    cost
+                );
+            }
+            Ok(())
+        }
+        fn charge_repair_cost(
+            db: &mut Db,
+            ucid: &Ucid,
+            oid: ObjectiveId,
+            cost_points: i32,
+            msg: &str,
+        ) {
+            if cost_points < 0 {
+                db.charge_for_item(ucid, oid, cost_points.unsigned_abs(), msg);
+            }
+        }
+        fn award_repair_points(db: &mut Db, ucid: &Ucid, cost_points: i32, msg: &str) {
+            if cost_points > 0 {
+                db.adjust_points(ucid, cost_points, msg);
+            }
+        }
         let st = SlotStats::get(self, lua, slot)?;
         if st.in_air {
             bail!("you must land to unpack crates")
@@ -810,6 +854,28 @@ impl Db {
                 {
                     reasons.push("objective logistics are completely repaired".into());
                 } else if !obj.spawnable_logi_repaired {
+                    if let Some(amount) = self
+                        .ephemeral
+                        .cfg
+                        .points
+                        .as_ref()
+                        .map(|p| p.logistics_repair)
+                    {
+                        require_repair_cost_points(
+                            self,
+                            &st.ucid,
+                            oid,
+                            amount,
+                            "logistics repair",
+                        )?;
+                        charge_repair_cost(
+                            self,
+                            &st.ucid,
+                            oid,
+                            amount,
+                            "for logistics repair",
+                        );
+                    }
                     self.repair_one_logi_step(st.side, Utc::now(), oid)?;
                     self.delete_group(base_repairs.keys().next().unwrap())?;
                     self.ephemeral.stat(Stat::Repair {
@@ -823,11 +889,26 @@ impl Db {
                         .as_ref()
                         .map(|p| p.logistics_repair)
                     {
-                        self.adjust_points(&st.ucid, amount, "for logistics repair");
+                        award_repair_points(self, &st.ucid, amount, "for logistics repair");
                     }
                     let obj = objective!(self, oid)?;
                     return Ok(Unpakistan::RepairedBase(obj.name.clone(), obj.logi()));
                 } else if obj.can_queue_static_repair_crate() {
+                    let cost = self.ephemeral.cfg.static_repair_crate_cost;
+                    require_repair_cost_points(
+                        self,
+                        &st.ucid,
+                        oid,
+                        cost,
+                        "ME static repair",
+                    )?;
+                    charge_repair_cost(
+                        self,
+                        &st.ucid,
+                        oid,
+                        cost,
+                        "for ME static repair crate queue",
+                    );
                     let rate = self.ephemeral.cfg.static_repair_rate_seconds;
                     let now = Utc::now();
                     let obj = objective_mut!(self, oid)?;
@@ -841,14 +922,12 @@ impl Db {
                         id: oid,
                         by: st.ucid,
                     });
-                    let cost = self.ephemeral.cfg.static_repair_crate_cost;
-                    if cost != 0 {
-                        self.adjust_points(
-                            &st.ucid,
-                            cost,
-                            "for ME static repair crate queue",
-                        );
-                    }
+                    award_repair_points(
+                        self,
+                        &st.ucid,
+                        cost,
+                        "for ME static repair crate queue",
+                    );
                     let obj = objective!(self, oid)?;
                     return Ok(Unpakistan::RepairedStaticQueue(
                         obj.name.clone(),
@@ -881,13 +960,20 @@ impl Db {
                     );
                 } else {
                     let cost = self.ephemeral.cfg.production_repair_crate_cost;
-                    if cost != 0 {
-                        self.adjust_points(
-                            &st.ucid,
-                            cost,
-                            "for OPR production repair crate",
-                        );
-                    }
+                    require_repair_cost_points(
+                        self,
+                        &st.ucid,
+                        oid,
+                        cost,
+                        "OPR production repair",
+                    )?;
+                    charge_repair_cost(
+                        self,
+                        &st.ucid,
+                        oid,
+                        cost,
+                        "for OPR production repair crate",
+                    );
                     let rate = self.ephemeral.cfg.production_repair_rate_seconds;
                     let now = Utc::now();
                     let obj = objective_mut!(self, oid)?;
@@ -901,6 +987,12 @@ impl Db {
                         id: oid,
                         by: st.ucid,
                     });
+                    award_repair_points(
+                        self,
+                        &st.ucid,
+                        cost,
+                        "for OPR production repair crate",
+                    );
                     let obj = objective!(self, oid)?;
                     return Ok(Unpakistan::RepairedProduction(
                         obj.name.clone(),
