@@ -4,9 +4,10 @@
 //! Missile AA vs AG split uses `level3` heuristics (tune against `Warehouse.getResourceMap` if counts look wrong).
 
 use anyhow::{bail, Context, Result};
+use bfprotocols::cfg::ObjectiveStaticUnitCfg;
 use mlua::Table;
 use serde_derive::Deserialize;
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::path::Path;
 
@@ -67,6 +68,8 @@ pub struct CampaignWarehouseOverlay {
     pub campaign_decade: Option<String>,
     /// DCS unit types counted as OPR factories (`production_factory_units` in campaign CFG).
     pub production_factory_units: HashSet<String>,
+    /// ME static types in OAB/OFO/OLO zones (`objective_static_units` in campaign CFG).
+    pub objective_static_units: HashMap<String, ObjectiveStaticUnitCfg>,
     /// Which `default_warehouse_*` keys were missing from the CFG JSON entirely.
     /// This usually indicates a typo in the key name.
     pub missing_default_warehouse_keys: Vec<&'static str>,
@@ -153,11 +156,16 @@ pub fn load_overlay(path: &Path) -> Result<CampaignWarehouseOverlay> {
         .get("production_factory_units")
         .and_then(|n| serde_json::from_value(n.clone()).ok())
         .unwrap_or_default();
+    let objective_static_units = v
+        .get("objective_static_units")
+        .and_then(|n| serde_json::from_value(n.clone()).ok())
+        .unwrap_or_default();
     Ok(CampaignWarehouseOverlay {
         defaults,
         warehouse_multipliers,
         campaign_decade,
         production_factory_units,
+        objective_static_units,
         missing_default_warehouse_keys,
     })
 }

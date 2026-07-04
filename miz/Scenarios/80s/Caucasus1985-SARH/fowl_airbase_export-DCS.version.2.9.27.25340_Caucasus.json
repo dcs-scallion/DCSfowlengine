@@ -67,6 +67,17 @@
       "z": 460901.5
     },
     {
+      "airbase_name": "Krasnodar-Pashkovsky",
+      "category": 0,
+      "id": 19,
+      "name": "Test2",
+      "objective_kind": "Airbase",
+      "trigger_zone_name": "OABBTest2",
+      "warehouse_whid": "Airdrome19",
+      "x": 8706.8,
+      "z": 388985.7
+    },
+    {
       "airbase_name": "Sukhumi-Babushara",
       "category": 0,
       "id": 20,

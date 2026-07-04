@@ -11275,6 +11275,104 @@ fn validate_opr_factory_static_counts(
     Ok(())
 }
 
+/// Each ME static listed in `objective_static_units` must sit only inside OAB/OFO/OLO zones whose
+/// kind letter is listed in that type's CFG `zones` (same rule as `link_objective_statics_from_miz`).
+fn validate_objective_static_units_in_zones(
+    base: &LoadedMiz,
+    objectives: &[TriggerZone],
+    static_cfg: &HashMap<StdString, bfprotocols::cfg::ObjectiveStaticUnitCfg>,
+) -> Result<()> {
+    if static_cfg.is_empty() {
+        return Ok(());
+    }
+    struct Violation {
+        zone_name: StdString,
+        zone_kind: StdString,
+        unit_name: StdString,
+        unit_type: StdString,
+    }
+    let mut violations: Vec<Violation> = Vec::new();
+    for side in Side::ALL {
+        let coa = base.mission.coalition(side)?;
+        for country in coa.countries()? {
+            let country = country?;
+            for group in country.statics()? {
+                let group = group?;
+                for unit in group
+                    .raw_get::<_, Table>("units")?
+                    .pairs::<Value, Table>()
+                {
+                    let unit = unit?.1;
+                    let unit_type: String = unit.raw_get("type")?;
+                    let Some(cfg) = static_cfg.get(unit_type.as_str()) else {
+                        continue;
+                    };
+                    let unit_name: StdString = unit
+                        .raw_get::<_, StdString>("name")
+                        .unwrap_or_else(|_| StdString::from(unit_type.as_str()));
+                    let x: f64 = unit.raw_get("x")?;
+                    let y: f64 = unit.raw_get("y")?;
+                    let pos = Vector2::new(x, y);
+                    for obj in objectives {
+                        let Ok(zone_name) = obj.inner.name() else {
+                            continue;
+                        };
+                        if zone_name.len() < 4 || !zone_name.starts_with('O') {
+                            continue;
+                        }
+                        let zone_kind = &zone_name[1..3];
+                        if !matches!(zone_kind, "AB" | "FO" | "LO") {
+                            continue;
+                        }
+                        if objective_default_owner_from_zone_name(&zone_name) != Some(side) {
+                            continue;
+                        }
+                        if !obj.contains(pos)? {
+                            continue;
+                        }
+                        if cfg.zones.contains(zone_kind) {
+                            continue;
+                        }
+                        violations.push(Violation {
+                            zone_name: StdString::from(zone_name.as_str()),
+                            zone_kind: StdString::from(zone_kind),
+                            unit_name: unit_name.clone(),
+                            unit_type: StdString::from(unit_type.as_str()),
+                        });
+                    }
+                }
+            }
+        }
+    }
+    if violations.is_empty() {
+        return Ok(());
+    }
+    violations.sort_by(|a, b| {
+        (&a.zone_name, &a.unit_type, &a.unit_name)
+            .cmp(&(&b.zone_name, &b.unit_type, &b.unit_name))
+    });
+    const RED: &str = "\x1b[31m";
+    const RESET: &str = "\x1b[0m";
+    eprintln!(
+        "{RED}ERROR objective_static_units zone validation failed:{RESET}"
+    );
+    for v in &violations {
+        eprintln!(
+            "{RED}zone {zone}: static \"{unit}\" (type {typ}) is not allowed in {kind} zones - \
+             CFG objective_static_units[\"{typ}\"].zones does not include \"{kind}\"; \
+             remove the static from the ME or add \"{kind}\" to objective_static_units[\"{typ}\"].zones in the Fowl *_CFG JSON{RESET}",
+            zone = v.zone_name,
+            unit = v.unit_name,
+            typ = v.unit_type,
+            kind = v.zone_kind,
+        );
+    }
+    eprintln!(
+        "{RED}Mission assembly was interrupted: the output .miz was not written and no mission files were copied.{RESET}"
+    );
+    bail!("objective_static_units zone validation failed ({} finding(s))", violations.len());
+}
+
 fn validate_logistics_zones_not_neutral(objectives: &[TriggerZone]) -> Result<()> {
     let mut bad = Vec::new();
     for obj in objectives {
@@ -12330,6 +12428,10 @@ pub fn run(cfg: &MizCmd) -> Result<()> {
         .context("validating OPR* zones use quad (square) geometry in base.miz")?;
     validate_logistics_zones_not_neutral(&objectives)
         .context("validating OLO* zones are OLOB* or OLOR* (not OLON*)")?;
+    if let Some(ref ov) = campaign_overlay {
+        validate_objective_static_units_in_zones(&base, &objectives, &ov.objective_static_units)
+            .context("validating objective_static_units are in CFG-allowed O* zones")?;
+    }
     validate_production_zone_counts(&objectives)
         .context("validating OPR* >= OLO* per coalition in base.miz")?;
     let factory_types: std::collections::HashSet<StdString> = campaign_overlay

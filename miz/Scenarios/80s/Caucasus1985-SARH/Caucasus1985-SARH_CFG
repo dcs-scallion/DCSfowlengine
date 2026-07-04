@@ -127,7 +127,7 @@
       "kill_points": 25
     },
     "FARP CP Blindage": {
-      "zones": ["FO"],
+      "zones": ["FO", "LO"],
       "kill_points": 10
     }
   },
