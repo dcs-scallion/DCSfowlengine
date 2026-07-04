@@ -253,61 +253,80 @@ impl Db {
         target: Either<&Ucid, ObjectiveId>,
         amount: u32,
     ) -> Result<()> {
+        let (source_side, sp_name) = {
+            let sp = self
+                .persisted
+                .players
+                .get(source)
+                .ok_or_else(|| anyhow!("source player not found"))?;
+            if sp.points < amount as i32 {
+                bail!(
+                    "insufficient balance, you have {}, you requested {}",
+                    sp.points,
+                    amount
+                );
+            }
+            (sp.side, sp.name.clone())
+        };
+        match target {
+            Either::Left(target_ucid) => {
+                let tp = self
+                    .persisted
+                    .players
+                    .get(target_ucid)
+                    .ok_or_else(|| anyhow!("target player not found"))?;
+                if tp.side != source_side {
+                    bail!("can't transfer points to a player on the other team");
+                }
+            }
+            Either::Right(oid) => {
+                let obj = self
+                    .persisted
+                    .objectives
+                    .get(&oid)
+                    .ok_or_else(|| anyhow!("target objective not found"))?;
+                if obj.owner != source_side {
+                    bail!("can't transfer points to an enemy objective");
+                }
+            }
+        }
         let sp = self
             .persisted
             .players
             .get_mut_cow(source)
             .ok_or_else(|| anyhow!("source player not found"))?;
-        if sp.points < amount as i32 {
-            bail!(
-                "insufficient balance, you have {}, you requested {}",
-                sp.points,
-                amount
-            )
-        }
         sp.points -= amount as i32;
-        let sp_name = sp.name.clone();
         match target {
-            Either::Left(target) => match self.persisted.players.get_mut_cow(target) {
-                Some(tp) => {
-                    tp.points += amount as i32;
-                    let msg = format_compact!(
-                        "{}(+{}) you received points from {}",
-                        tp.points,
-                        amount,
-                        sp_name
-                    );
-                    self.ephemeral
-                        .panel_to_player(&self.persisted, 10, target, msg);
-                    self.ephemeral.stat(Stat::PointsTransfer {
-                        from: *source,
-                        to: *target,
-                        points: amount,
-                    });
-                    self.ephemeral.dirty();
-                    Ok(())
-                }
-                None => {
-                    self.persisted.players[source].points += amount as i32;
-                    bail!("target player not found")
-                }
-            },
-            Either::Right(target) => match self.persisted.objectives.get_mut_cow(&target) {
-                Some(obj) => {
-                    obj.points += amount as i32;
-                    self.ephemeral.stat(Stat::PointsTransferToObjective {
-                        from: *source,
-                        to: target,
-                        points: amount,
-                    });
-                    self.ephemeral.dirty();
-                    Ok(())
-                }
-                None => {
-                    self.persisted.players[source].points += amount as i32;
-                    bail!("target objective not found")
-                }
-            },
+            Either::Left(target) => {
+                let tp = self.persisted.players.get_mut_cow(target).unwrap();
+                tp.points += amount as i32;
+                let msg = format_compact!(
+                    "{}(+{}) you received points from {}",
+                    tp.points,
+                    amount,
+                    sp_name
+                );
+                self.ephemeral
+                    .panel_to_player(&self.persisted, 10, target, msg);
+                self.ephemeral.stat(Stat::PointsTransfer {
+                    from: *source,
+                    to: *target,
+                    points: amount,
+                });
+                self.ephemeral.dirty();
+                Ok(())
+            }
+            Either::Right(target) => {
+                let obj = self.persisted.objectives.get_mut_cow(&target).unwrap();
+                obj.points += amount as i32;
+                self.ephemeral.stat(Stat::PointsTransferToObjective {
+                    from: *source,
+                    to: target,
+                    points: amount,
+                });
+                self.ephemeral.dirty();
+                Ok(())
+            }
         }
     }
 
