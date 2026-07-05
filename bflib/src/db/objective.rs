@@ -904,6 +904,7 @@ impl Db {
         }
         self.refresh_hub_production_from_opr()
             .context("hub production after OPR refresh")?;
+        self.sync_logistics_hub_production_displays();
         Ok(())
     }
 
@@ -915,6 +916,7 @@ impl Db {
         self.update_objective_status(None, &oid, now)?;
         self.refresh_hub_production_from_opr()
             .context("hub production after factory state change")?;
+        self.sync_logistics_hub_production_displays();
         if let Some(obj) = self.persisted.objectives.get(&oid) {
             self.ephemeral
                 .update_objective_markup(&self.persisted, obj, &[]);

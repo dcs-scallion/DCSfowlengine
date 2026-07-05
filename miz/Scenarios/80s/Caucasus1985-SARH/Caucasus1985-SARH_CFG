@@ -135,6 +135,7 @@
   "front_line": true,
   "front_line_grid_size_meters": 5000,
   "virtual_resupply": true,
+  "virtual_resupply_threatened_without_deliveries": true,
   "virtual_resupply_decay": {
     "reference_distance_km": 150,
     "efficiency_at_reference_pct": 40,

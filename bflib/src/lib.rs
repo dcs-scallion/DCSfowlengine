@@ -1999,8 +1999,11 @@ fn run_slow_timed_events(
         match ctx.db.cull_or_respawn_objectives(lua, &mut ctx.landcache, ts) {
             Err(e) => error!("could not cull or respawn objectives {e}"),
             Ok((threatened, cleared)) => {
-                for oid in threatened {
-                    let obj = ctx.db.objective(&oid)?;
+                let mut threat_changed: SmallVec<[ObjectiveId; 8]> = smallvec![];
+                threat_changed.extend(threatened.iter().copied());
+                threat_changed.extend(cleared.iter().copied());
+                for oid in &threatened {
+                    let obj = ctx.db.objective(oid)?;
                     let owner = obj.owner();
                     let msg = format_compact!(
                         "enemies spotted near {}",
@@ -2008,14 +2011,27 @@ fn run_slow_timed_events(
                     );
                     ctx.db.ephemeral.msgs().panel_to_side(10, false, owner, msg)
                 }
-                for oid in cleared {
-                    let obj = ctx.db.objective(&oid)?;
+                for oid in &cleared {
+                    let obj = ctx.db.objective(oid)?;
                     let owner = obj.owner();
                     let msg = format_compact!(
                         "{} is no longer threatened",
                         ctx.db.objective_f10_map_label(obj)
                     );
                     ctx.db.ephemeral.msgs().panel_to_side(10, false, owner, msg)
+                }
+                if !threat_changed.is_empty() {
+                    if let Err(e) = ctx
+                        .db
+                        .sync_hub_production_for_opr_threat_feeds(&threat_changed)
+                    {
+                        error!("could not sync OLO production after threat change {e}");
+                    }
+                    db::logistics::refresh_virtual_resupply_threat_markups(
+                        &ctx.db.persisted,
+                        &mut ctx.db.ephemeral,
+                        &threat_changed,
+                    );
                 }
             }
         }
@@ -2243,11 +2259,13 @@ fn delayed_init_miz(lua: MizLua) -> Result<()> {
     debug!("sortie is {:?}", ctx.sortie);
     let cfg = Arc::new(Cfg::load(&path)?);
     info!(
-        "campaign cfg: airborne_deslot_block={} airborne_deslot_penalty_secs={} airborne_deslot_penalty_points={} csar={}",
+        "campaign cfg: airborne_deslot_block={} airborne_deslot_penalty_secs={} airborne_deslot_penalty_points={} csar={} virtual_resupply={} virtual_resupply_threatened_without_deliveries={}",
         cfg.airborne_deslot_block,
         cfg.airborne_deslot_penalty_secs,
         cfg.airborne_deslot_penalty_points,
-        cfg.csar.enabled
+        cfg.csar.enabled,
+        cfg.virtual_resupply,
+        cfg.virtual_resupply_threatened_without_deliveries,
     );
     let export_path = FowlMizExport::path(&path);
     let fowl_export = Arc::new(FowlMizExport::load_required(&path)?);

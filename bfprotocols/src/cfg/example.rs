@@ -2042,6 +2042,7 @@ impl Default for Cfg {
                 dynamic_farps_initial_stock_percentage: 100,
             }),
             virtual_resupply: false,
+            virtual_resupply_threatened_without_deliveries: false,
             virtual_resupply_decay: VirtualResupplyDecayConfig::default(),
             supply_transfer_players: true,
             objective_group_marks: false,

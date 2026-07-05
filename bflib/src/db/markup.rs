@@ -17,8 +17,10 @@ for more details.
 use super::{
     aliases::resolve_objective_f10_map_label,
     logistics::{
-        nearest_normal_logistics_hub, objective_warehouse_fuel_infobar_amounts,
-        virtual_resupply_delivery_efficiency_cached,
+        effective_hub_production, nearest_normal_logistics_hub, opr_feed_hub,
+        objective_warehouse_fuel_infobar_amounts, production_feed_line_active,
+        virtual_resupply_delivery_efficiency_cached, virtual_resupply_link_active,
+        virtual_resupply_threatened_blocks, virtual_resupply_threatened_without_deliveries,
     },
     objective::{Objective, Zone},
     persisted::Persisted,
@@ -92,6 +94,8 @@ pub(super) struct ObjectiveMarkup {
     fuel_amounts: CompactString,
     fuel_kind_count: u8,
     production: u8,
+    /// Last Production % shown on F10 stats (may differ from raw when threatened OPR feed is cut).
+    display_production: u8,
     production_hp_sum: u32,
     production_repair_need: u16,
     production_repair: u16,
@@ -198,33 +202,43 @@ fn stat_fuel_infobar_row(bar: &str, amounts: &str, kind_count: u8) -> CompactStr
     format_compact!("{}{}{label} {amounts} t", bar, STAT_BAR_GAP)
 }
 
+fn production_pct_for_display(cfg: &Cfg, persisted: &Persisted, obj: &Objective) -> u8 {
+    match obj.kind {
+        ObjectiveKind::Logistics => effective_hub_production(cfg, persisted, obj),
+        _ => obj.production,
+    }
+}
+
 fn objective_stats_text(
+    cfg: &Cfg,
+    persisted: &Persisted,
     obj: &Objective,
     limited: bool,
     export: &FowlMizExport,
 ) -> CompactString {
     let get_idx = |val: u8| -> usize { (val as usize * 12 / 100).min(12) };
+    let production = production_pct_for_display(cfg, persisted, obj);
     match (&obj.kind, limited) {
         (ObjectiveKind::Production, true) => {
-            format_compact!("\n\n{}", stat_infobar_row(BAR_LOOKUP[get_idx(obj.production)], obj.production, "Production"))
+            format_compact!("\n\n{}", stat_infobar_row(BAR_LOOKUP[get_idx(production)], production, "Production"))
         }
         (ObjectiveKind::Production, false) => {
             format_compact!(
                 "\n\n{}\n{}\n{}",
-                stat_infobar_row(BAR_LOOKUP[get_idx(obj.production)], obj.production, "Production"),
+                stat_infobar_row(BAR_LOOKUP[get_idx(production)], production, "Production"),
                 stat_plain_row("Points", &format_compact!("{}", obj.points)),
                 stat_plain_repair_row(obj.production_repair, obj.production_repair_slots_needed()),
             )
         }
         (ObjectiveKind::Logistics, true) => format_compact!(
             "\n\n{}\n{}\n{}",
-            stat_infobar_row(BAR_LOOKUP[get_idx(obj.production)], obj.production, "Production"),
+            stat_infobar_row(BAR_LOOKUP[get_idx(production)], production, "Production"),
             stat_infobar_row(BAR_LOOKUP[get_idx(obj.health)], obj.health, "Health"),
             stat_infobar_row(BAR_LOOKUP[get_idx(obj.logi)], obj.logi, "Logi"),
         ),
         (ObjectiveKind::Logistics, false) => format_compact!(
             "\n\n{}\n{}\n{}\n{}\n{}\n{}",
-            stat_infobar_row(BAR_LOOKUP[get_idx(obj.production)], obj.production, "Production"),
+            stat_infobar_row(BAR_LOOKUP[get_idx(production)], production, "Production"),
             stat_infobar_row(BAR_LOOKUP[get_idx(obj.health)], obj.health, "Health"),
             stat_infobar_row(BAR_LOOKUP[get_idx(obj.logi)], obj.logi, "Logi"),
             stat_infobar_row(BAR_LOOKUP[get_idx(obj.supply)], obj.supply, "Supply"),
@@ -303,7 +317,27 @@ fn occupied_hub_supply_line_geometry(anchor: &Objective, occ: &Objective) -> Qua
     }
 }
 
+fn sync_supply_connection_checked(
+    cfg: &Cfg,
+    efficiency_cache: &mut FxHashMap<(ObjectiveId, ObjectiveId), u8>,
+    msgq: &mut MsgQ,
+    mark: &mut SupplyConnectionMark,
+    to: SideFilter,
+    hub: &Objective,
+    dest: &Objective,
+) {
+    if !virtual_resupply_link_active(cfg, hub, dest) {
+        msgq.delete_underlay_mark(mark.shaft);
+        msgq.delete_underlay_mark(mark.head);
+        return;
+    }
+    let eff = virtual_resupply_delivery_efficiency_cached(efficiency_cache, cfg, hub, dest);
+    let color = supply_efficiency_color(eff, cfg.virtual_resupply_decay.efficiency_floor_pct);
+    sync_supply_connection(msgq, mark, to, hub, dest, color);
+}
+
 fn sync_production_feed_line(
+    cfg: &Cfg,
     t: &mut ObjectiveMarkup,
     msgq: &mut MsgQ,
     obj: &Objective,
@@ -315,19 +349,22 @@ fn sync_production_feed_line(
     if let Some(id) = t.production_feed_line.take() {
         msgq.delete_underlay_mark(id);
     }
-    let want_hub = if obj.production > 0 {
-        obj.feed_hub
-    } else {
-        None
-    };
-    t.production_feed_hub = want_hub;
-    let Some(hid) = want_hub else {
+    let Some(hid) = opr_feed_hub(persisted, obj) else {
+        t.production_feed_hub = None;
         return;
     };
     let hub = match persisted.objectives.get(&hid) {
         Some(h) => h,
-        None => return,
+        None => {
+            t.production_feed_hub = None;
+            return;
+        }
     };
+    if !production_feed_line_active(cfg, obj, hub) {
+        t.production_feed_hub = None;
+        return;
+    }
+    t.production_feed_hub = Some(hid);
     let mut spec = production_feed_line_geometry(obj, hub);
     let color = production_feed_line_color(obj.production);
     spec.color = color;
@@ -338,6 +375,7 @@ fn sync_production_feed_line(
 }
 
 fn sync_occupied_hub_supply_line(
+    cfg: &Cfg,
     t: &mut ObjectiveMarkup,
     msgq: &mut MsgQ,
     obj: &Objective,
@@ -350,6 +388,9 @@ fn sync_occupied_hub_supply_line(
     if !obj.is_occupied_logistics_hub() {
         return;
     }
+    if virtual_resupply_threatened_blocks(cfg, obj) {
+        return;
+    }
     let Some(aid) = nearest_normal_logistics_hub(persisted, obj.owner, obj.zone.pos()) else {
         return;
     };
@@ -357,6 +398,9 @@ fn sync_occupied_hub_supply_line(
         Some(h) => h,
         None => return,
     };
+    if virtual_resupply_threatened_blocks(cfg, anchor) {
+        return;
+    }
     t.occupied_supply_anchor = Some(aid);
     let mut spec = occupied_hub_supply_line_geometry(anchor, obj);
     let color = text_color(obj.owner, OCCUPIED_HUB_SUPPLY_LINE_ALPHA);
@@ -365,6 +409,113 @@ fn sync_occupied_hub_supply_line(
     let id = MarkId::new();
     msgq.quad_to_underlay(SideFilter::All, id, spec, None);
     t.occupied_supply_line = Some(id);
+}
+
+fn resync_logistics_supply_connections(
+    cfg: &Cfg,
+    efficiency_cache: &mut FxHashMap<(ObjectiveId, ObjectiveId), u8>,
+    t: &mut ObjectiveMarkup,
+    msgq: &mut MsgQ,
+    hub: &Objective,
+    persisted: &Persisted,
+) {
+    if !matches!(hub.kind, ObjectiveKind::Logistics) {
+        return;
+    }
+    for oid in hub.warehouse.destination.into_iter() {
+        let Some(dst) = persisted.objectives.get(oid) else {
+            continue;
+        };
+        let to = if dst.is_farp() {
+            dst.owner.into()
+        } else {
+            SideFilter::All
+        };
+        if !t.supply_connections.contains_key(oid) {
+            t.supply_connections.insert(
+                *oid,
+                SupplyConnectionMark {
+                    shaft: MarkId::new(),
+                    head: MarkId::new(),
+                },
+            );
+        }
+        let mark = t.supply_connections.get_mut(oid).expect("just inserted");
+        sync_supply_connection_checked(cfg, efficiency_cache, msgq, mark, to, hub, dst);
+    }
+}
+
+pub(super) fn sync_logistics_hub_production_displays(
+    cfg: &Cfg,
+    persisted: &Persisted,
+    msgq: &mut MsgQ,
+    markups: &mut FxHashMap<ObjectiveId, ObjectiveMarkup>,
+    export: &FowlMizExport,
+) {
+    if !virtual_resupply_threatened_without_deliveries(cfg) {
+        return;
+    }
+    for hid in persisted.logistics_hubs.into_iter() {
+        let Some(hub) = persisted.objectives.get(hid) else {
+            continue;
+        };
+        if !matches!(hub.kind, ObjectiveKind::Logistics) {
+            continue;
+        }
+        let eff = effective_hub_production(cfg, persisted, hub);
+        let Some(mk) = markups.get_mut(hid) else {
+            continue;
+        };
+        if eff == mk.display_production {
+            continue;
+        }
+        mk.display_production = eff;
+        mk.production = hub.production;
+        refresh_objective_stats_labels(cfg, msgq, mk, hub, persisted, export);
+    }
+}
+
+fn refresh_objective_stats_labels(
+    cfg: &Cfg,
+    msgq: &mut MsgQ,
+    t: &ObjectiveMarkup,
+    obj: &Objective,
+    persisted: &Persisted,
+    export: &FowlMizExport,
+) {
+    if let Some(id) = t.stats_label {
+        msgq.set_overlay_markup_text(
+            id,
+            objective_stats_text(cfg, persisted, obj, false, export).into(),
+        );
+    } else {
+        if let Some(id) = t.stats_label_red {
+            msgq.set_overlay_markup_text(
+                id,
+                objective_stats_text(
+                    cfg,
+                    persisted,
+                    obj,
+                    enemy_objective_view(obj.owner, Side::Red),
+                    export,
+                )
+                .into(),
+            );
+        }
+        if let Some(id) = t.stats_label_blue {
+            msgq.set_overlay_markup_text(
+                id,
+                objective_stats_text(
+                    cfg,
+                    persisted,
+                    obj,
+                    enemy_objective_view(obj.owner, Side::Blue),
+                    export,
+                )
+                .into(),
+            );
+        }
+    }
 }
 
 fn arrow_coords(obj: &Objective, dst: &Objective) -> (Vector2, Vector2) {
@@ -435,6 +586,8 @@ fn sync_supply_connection(
     shaft.fill_color = color;
     msgq.delete_underlay_mark(mark.shaft);
     msgq.delete_underlay_mark(mark.head);
+    mark.shaft = MarkId::new();
+    mark.head = MarkId::new();
     msgq.quad_to_underlay(to, mark.shaft, shaft, None);
     msgq.freeform_to_underlay(
         to,
@@ -491,6 +644,8 @@ fn install_objective_overlay_marks(
     msgq: &mut MsgQ,
     t: &mut ObjectiveMarkup,
     obj: &Objective,
+    cfg: &Cfg,
+    persisted: &Persisted,
     export: &FowlMizExport,
 ) {
     let color_func = |a| text_color(obj.owner, a);
@@ -526,6 +681,8 @@ fn install_objective_overlay_marks(
             SideFilter::Red,
             id_r,
             make_stats_spec(objective_stats_text(
+                cfg,
+                persisted,
                 obj,
                 enemy_objective_view(obj.owner, Side::Red),
                 export,
@@ -535,6 +692,8 @@ fn install_objective_overlay_marks(
             SideFilter::Blue,
             id_b,
             make_stats_spec(objective_stats_text(
+                cfg,
+                persisted,
                 obj,
                 enemy_objective_view(obj.owner, Side::Blue),
                 export,
@@ -548,7 +707,7 @@ fn install_objective_overlay_marks(
         msgq.text_to_overlay(
             all_spec,
             id,
-            make_stats_spec(objective_stats_text(obj, false, export)),
+            make_stats_spec(objective_stats_text(cfg, persisted, obj, false, export)),
         );
         t.stats_label = Some(id);
         t.stats_label_red = None;
@@ -559,6 +718,8 @@ fn install_objective_overlay_marks(
 fn sync_overlay_cache_from_objective(
     t: &mut ObjectiveMarkup,
     obj: &Objective,
+    cfg: &Cfg,
+    persisted: &Persisted,
     export: &FowlMizExport,
 ) {
     t.health = obj.health;
@@ -569,6 +730,7 @@ fn sync_overlay_cache_from_objective(
     t.fuel_amounts = amounts;
     t.fuel_kind_count = kinds;
     t.production = obj.production;
+    t.display_production = production_pct_for_display(cfg, persisted, obj);
     t.production_hp_sum = obj.production_hp_sum;
     t.production_repair_need = obj.production_repair_need;
     t.production_repair = obj.production_repair;
@@ -682,6 +844,25 @@ impl ObjectiveMarkup {
                 self.threatened_ring,
                 Color::yellow(if self.threatened { 0.75 } else { 0. }),
             );
+            underlay_dirty = true;
+            if matches!(obj.kind, ObjectiveKind::Logistics) {
+                resync_logistics_supply_connections(
+                    cfg,
+                    efficiency_cache,
+                    self,
+                    msgq,
+                    obj,
+                    persisted,
+                );
+                sync_occupied_hub_supply_line(cfg, self, msgq, obj, persisted);
+            }
+            if matches!(obj.kind, ObjectiveKind::Production) {
+                sync_production_feed_line(cfg, self, msgq, obj, persisted);
+            }
+            if matches!(obj.kind, ObjectiveKind::Logistics | ObjectiveKind::Production) {
+                self.display_production = production_pct_for_display(cfg, persisted, obj);
+                refresh_objective_stats_labels(cfg, msgq, self, obj, persisted, export);
+            }
         }
         let (fuel_amounts, fuel_kind_count) = objective_warehouse_fuel_infobar_amounts(export, obj);
         if self.health != obj.health
@@ -722,19 +903,22 @@ impl ObjectiveMarkup {
             if let Some(id) = self.stats_label {
                 msgq.set_overlay_markup_text(
                     id,
-                    objective_stats_text(obj, false, export).into(),
+                    objective_stats_text(cfg, persisted, obj, false, export).into(),
                 );
             } else if let (Some(id_r), Some(id_b)) = (self.stats_label_red, self.stats_label_blue) {
                 msgq.set_overlay_markup_text(
                     id_r,
-                    objective_stats_text(obj, enemy_objective_view(obj.owner, Side::Red), export)
+                    objective_stats_text(cfg, persisted, obj, enemy_objective_view(obj.owner, Side::Red), export)
                         .into(),
                 );
                 msgq.set_overlay_markup_text(
                     id_b,
-                    objective_stats_text(obj, enemy_objective_view(obj.owner, Side::Blue), export)
+                    objective_stats_text(cfg, persisted, obj, enemy_objective_view(obj.owner, Side::Blue), export)
                         .into(),
                 );
+            }
+            if matches!(obj.kind, ObjectiveKind::Logistics | ObjectiveKind::Production) {
+                self.display_production = production_pct_for_display(cfg, persisted, obj);
             }
         }
         if let Zone::Circle { pos, .. } = obj.zone {
@@ -761,36 +945,38 @@ impl ObjectiveMarkup {
             if matches!(obj.kind, ObjectiveKind::Production) {
                 underlay_dirty = true;
             }
-            sync_production_feed_line(self, msgq, obj, persisted);
+            sync_production_feed_line(cfg, self, msgq, obj, persisted);
         }
+        let mut supply_resynced = false;
         for oid in moved {
-            if obj.warehouse.destination.contains(oid) {
-                if let Some(mark) = self.supply_connections.get_mut(oid) {
-                    underlay_dirty = true;
-                    let dst = &persisted.objectives[oid];
-                    let to = if dst.is_farp() {
-                        dst.owner.into()
-                    } else {
-                        SideFilter::All
-                    };
-                    let eff = virtual_resupply_delivery_efficiency_cached(
-                        efficiency_cache,
-                        cfg,
-                        obj,
-                        dst,
-                    );
-                    let color = supply_efficiency_color(
-                        eff,
-                        cfg.virtual_resupply_decay.efficiency_floor_pct,
-                    );
-                    sync_supply_connection(msgq, mark, to, obj, dst, color);
-                }
+            if !supply_resynced
+                && matches!(obj.kind, ObjectiveKind::Logistics)
+                && obj.warehouse.destination.contains(oid)
+            {
+                underlay_dirty = true;
+                resync_logistics_supply_connections(
+                    cfg,
+                    efficiency_cache,
+                    self,
+                    msgq,
+                    obj,
+                    persisted,
+                );
+                supply_resynced = true;
             }
-            if obj.feed_hub == Some(*oid) {
-                if matches!(obj.kind, ObjectiveKind::Production) {
-                    underlay_dirty = true;
+            if matches!(obj.kind, ObjectiveKind::Production)
+                && opr_feed_hub(persisted, obj) == Some(*oid)
+            {
+                underlay_dirty = true;
+                sync_production_feed_line(cfg, self, msgq, obj, persisted);
+            }
+            if matches!(obj.kind, ObjectiveKind::Logistics) {
+                if persisted.objectives.get(oid).is_some_and(|opr| {
+                    opr_feed_hub(persisted, opr) == Some(obj.id)
+                }) {
+                    self.display_production = production_pct_for_display(cfg, persisted, obj);
+                    refresh_objective_stats_labels(cfg, msgq, self, obj, persisted, export);
                 }
-                sync_production_feed_line(self, msgq, obj, persisted);
             }
         }
         if let Zone::Circle { pos, .. } = obj.zone {
@@ -798,7 +984,7 @@ impl ObjectiveMarkup {
                 if matches!(obj.kind, ObjectiveKind::Production) {
                     underlay_dirty = true;
                 }
-                sync_production_feed_line(self, msgq, obj, persisted);
+                sync_production_feed_line(cfg, self, msgq, obj, persisted);
             }
         }
         if matches!(obj.kind, ObjectiveKind::Logistics) {
@@ -809,7 +995,16 @@ impl ObjectiveMarkup {
             };
             if want_anchor != self.occupied_supply_anchor || self.pos != obj.zone.pos() {
                 underlay_dirty = true;
-                sync_occupied_hub_supply_line(self, msgq, obj, persisted);
+                sync_occupied_hub_supply_line(cfg, self, msgq, obj, persisted);
+            }
+        }
+        if virtual_resupply_threatened_without_deliveries(cfg)
+            && matches!(obj.kind, ObjectiveKind::Logistics | ObjectiveKind::Production)
+        {
+            let disp = production_pct_for_display(cfg, persisted, obj);
+            if disp != self.display_production {
+                self.display_production = disp;
+                refresh_objective_stats_labels(cfg, msgq, self, obj, persisted, export);
             }
         }
         refresh_objective_overlay_text(msgq, self, obj);
@@ -820,11 +1015,13 @@ impl ObjectiveMarkup {
         &mut self,
         msgq: &mut MsgQ,
         obj: &Objective,
+        cfg: &Cfg,
+        persisted: &Persisted,
         export: &FowlMizExport,
     ) {
         remove_objective_overlay_marks(msgq, self);
-        install_objective_overlay_marks(msgq, self, obj, export);
-        sync_overlay_cache_from_objective(self, obj, export);
+        install_objective_overlay_marks(msgq, self, obj, cfg, persisted, export);
+        sync_overlay_cache_from_objective(self, obj, cfg, persisted, export);
     }
 
     pub(super) fn new(
@@ -855,6 +1052,7 @@ impl ObjectiveMarkup {
         t.fuel_amounts = amounts;
         t.fuel_kind_count = kinds;
         t.production = obj.production;
+        t.display_production = production_pct_for_display(cfg, persisted, obj);
         t.production_hp_sum = obj.production_hp_sum;
         t.production_repair_need = obj.production_repair_need;
         t.production_repair = obj.production_repair;
@@ -947,27 +1145,35 @@ impl ObjectiveMarkup {
         }
 
         if matches!(obj.kind, ObjectiveKind::Production) {
-            sync_production_feed_line(&mut t, msgq, obj, persisted);
+            sync_production_feed_line(cfg, &mut t, msgq, obj, persisted);
         }
         if let ObjectiveKind::Logistics = obj.kind {
-            let floor = cfg.virtual_resupply_decay.efficiency_floor_pct;
             for oid in &obj.warehouse.destination {
                 let dobj = &persisted.objectives[oid];
-                let to = if dobj.is_farp() { dobj.owner.into() } else { all_spec };
-                let eff = virtual_resupply_delivery_efficiency_cached(
-                    efficiency_cache,
+                let to = if dobj.is_farp() {
+                    dobj.owner.into()
+                } else {
+                    all_spec
+                };
+                let mut mark = SupplyConnectionMark {
+                    shaft: MarkId::new(),
+                    head: MarkId::new(),
+                };
+                sync_supply_connection_checked(
                     cfg,
+                    efficiency_cache,
+                    msgq,
+                    &mut mark,
+                    to,
                     obj,
                     dobj,
                 );
-                let color = supply_efficiency_color(eff, floor);
-                let mark = draw_supply_connection(msgq, to, obj, dobj, color);
                 t.supply_connections.insert(*oid, mark);
             }
-            sync_occupied_hub_supply_line(&mut t, msgq, obj, persisted);
+            sync_occupied_hub_supply_line(cfg, &mut t, msgq, obj, persisted);
         }
 
-        install_objective_overlay_marks(msgq, &mut t, obj, export);
+        install_objective_overlay_marks(msgq, &mut t, obj, cfg, persisted, export);
 
         t
     }

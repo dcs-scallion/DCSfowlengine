@@ -645,13 +645,14 @@ fn factory_counts(db: &Db) -> (u32, u32) {
 }
 
 fn avg_logistics_production(db: &Db, side: Side) -> Option<u8> {
+    let cfg = &db.ephemeral.cfg;
     let mut sum = 0u32;
     let mut n = 0u32;
     for (_, obj) in db.persisted.objectives.into_iter() {
         if obj.owner() != side || !matches!(obj.kind, ObjectiveKind::Logistics) {
             continue;
         }
-        sum += obj.production as u32;
+        sum += super::logistics::effective_hub_production(cfg, &db.persisted, obj) as u32;
         n += 1;
     }
     if n == 0 {

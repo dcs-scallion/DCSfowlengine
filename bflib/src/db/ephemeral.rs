@@ -332,6 +332,16 @@ impl Ephemeral {
         }
     }
 
+    pub(super) fn sync_logistics_hub_production_displays(&mut self, persisted: &Persisted) {
+        super::markup::sync_logistics_hub_production_displays(
+            &self.cfg,
+            persisted,
+            &mut self.msgs,
+            &mut self.objective_markup,
+            self.fowl_miz_export.as_ref(),
+        );
+    }
+
     pub fn update_objective_markup(
         &mut self,
         persisted: &Persisted,
@@ -420,7 +430,13 @@ impl Ephemeral {
     pub(super) fn refresh_objective_overlay_layer(&mut self, persisted: &Persisted) {
         for (_, obj) in persisted.objectives.into_iter() {
             if let Some(mk) = self.objective_markup.get_mut(&obj.id) {
-                mk.raise_overlay(&mut self.msgs, obj, self.fowl_miz_export.as_ref());
+                mk.raise_overlay(
+                    &mut self.msgs,
+                    obj,
+                    &self.cfg,
+                    persisted,
+                    self.fowl_miz_export.as_ref(),
+                );
             }
         }
     }

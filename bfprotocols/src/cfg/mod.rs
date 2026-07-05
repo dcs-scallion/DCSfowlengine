@@ -1335,6 +1335,10 @@ pub struct Cfg {
     /// virtual distribution (for future ground/air supply routes).
     #[serde(default)]
     pub virtual_resupply: bool,
+    /// When true with `virtual_resupply`: threatened hubs/objectives skip virtual deliveries;
+    /// threatened OLO shows 0% Production; OPR→OLO feed lines hide while OPR or OLO is threatened.
+    #[serde(default)]
+    pub virtual_resupply_threatened_without_deliveries: bool,
     /// Distance-based hub-to-objective virtual resupply efficiency (ignored when `virtual_resupply` is false).
     #[serde(default)]
     pub virtual_resupply_decay: VirtualResupplyDecayConfig,

@@ -1124,6 +1124,310 @@ pub(super) fn hub_to_objective_distance_km(hub: &Objective, dest: &Objective) ->
     na::distance(&hub.zone.pos().into(), &dest.zone.pos().into()) / 1000.
 }
 
+pub(super) fn virtual_resupply_threatened_without_deliveries(cfg: &bfprotocols::cfg::Cfg) -> bool {
+    cfg.virtual_resupply && cfg.virtual_resupply_threatened_without_deliveries
+}
+
+pub(super) fn virtual_resupply_threatened_blocks(
+    cfg: &bfprotocols::cfg::Cfg,
+    obj: &Objective,
+) -> bool {
+    virtual_resupply_threatened_without_deliveries(cfg) && obj.threatened
+}
+
+pub(super) fn virtual_resupply_link_active(
+    cfg: &bfprotocols::cfg::Cfg,
+    hub: &Objective,
+    dest: &Objective,
+) -> bool {
+    !virtual_resupply_threatened_blocks(cfg, hub)
+        && !virtual_resupply_threatened_blocks(cfg, dest)
+}
+
+pub(super) fn opr_feed_hub(persisted: &Persisted, opr: &Objective) -> Option<ObjectiveId> {
+    if !matches!(opr.kind, ObjectiveKind::Production) {
+        return None;
+    }
+    opr.feed_hub
+        .or_else(|| nearest_logistics_hub(persisted, opr.owner, opr.zone.pos()))
+}
+
+fn hub_production_from_active_oprs(
+    persisted: &Persisted,
+    cfg: &bfprotocols::cfg::Cfg,
+    hub_id: ObjectiveId,
+) -> u8 {
+    let Some(hub) = persisted.objectives.get(&hub_id) else {
+        return 0;
+    };
+    let mut weighted: u32 = 0;
+    let mut cap_sum: u32 = 0;
+    for (_, opr) in persisted.objectives.into_iter() {
+        if !matches!(opr.kind, ObjectiveKind::Production) {
+            continue;
+        }
+        if opr_feed_hub(persisted, opr) != Some(hub_id) {
+            continue;
+        }
+        if !production_feed_line_active(cfg, opr, hub) {
+            continue;
+        }
+        let capacity = opr.production_capacity.max(1);
+        weighted = weighted.saturating_add(u32::from(opr.production) * u32::from(capacity));
+        cap_sum = cap_sum.saturating_add(u32::from(capacity));
+    }
+    if cap_sum == 0 {
+        return 0;
+    }
+    let denom = cap_sum.max(1) as u64;
+    let numer = weighted as u64;
+    ((numer + denom - 1) / denom).min(100) as u8
+}
+
+/// F10 OLO Production: factory damage (OPR `production` %) and threatened feed cuts vs full assigned capacity.
+fn hub_production_display_from_opr_feeds(
+    persisted: &Persisted,
+    cfg: &bfprotocols::cfg::Cfg,
+    hub_id: ObjectiveId,
+) -> u8 {
+    let (active, potential) = hub_opr_feed_weighted_sums(persisted, cfg, hub_id);
+    weighted_production_pct(active, potential)
+}
+
+fn hub_opr_feed_weighted_sums(
+    persisted: &Persisted,
+    cfg: &bfprotocols::cfg::Cfg,
+    hub_id: ObjectiveId,
+) -> (u32, u32) {
+    let Some(hub) = persisted.objectives.get(&hub_id) else {
+        return (0, 0);
+    };
+    let mut active_weighted: u32 = 0;
+    let mut potential_weighted: u32 = 0;
+    for (_, opr) in persisted.objectives.into_iter() {
+        if !matches!(opr.kind, ObjectiveKind::Production) {
+            continue;
+        }
+        if opr_feed_hub(persisted, opr) != Some(hub_id) {
+            continue;
+        }
+        let capacity = opr.production_capacity.max(1);
+        potential_weighted = potential_weighted.saturating_add(
+            100u32.saturating_mul(u32::from(capacity)),
+        );
+        if production_feed_line_active(cfg, opr, hub) {
+            active_weighted = active_weighted.saturating_add(
+                u32::from(opr.production).saturating_mul(u32::from(capacity)),
+            );
+        }
+    }
+    (active_weighted, potential_weighted)
+}
+
+fn weighted_production_pct(active_weighted: u32, potential_weighted: u32) -> u8 {
+    if potential_weighted == 0 {
+        return 0;
+    }
+    let numer = u64::from(active_weighted).saturating_mul(100);
+    let denom = u64::from(potential_weighted);
+    ((numer + denom - 1) / denom).min(100) as u8
+}
+
+fn log_opr_threat_hub_production(
+    db: &Db,
+    opr_id: ObjectiveId,
+    opr: &Objective,
+) {
+    if !virtual_resupply_threatened_without_deliveries(&db.ephemeral.cfg) {
+        return;
+    }
+    if !matches!(opr.kind, ObjectiveKind::Production) {
+        return;
+    }
+    let cfg = &db.ephemeral.cfg;
+    let persisted = &db.persisted;
+    let Some(hid) = opr_feed_hub(persisted, opr) else {
+        info!(
+            "OPR threat feed: opr {} id={:?} threatened={} has no OLO feed hub",
+            db.objective_f10_map_label(opr),
+            opr_id,
+            opr.threatened,
+        );
+        return;
+    };
+    let Some(hub) = persisted.objectives.get(&hid) else {
+        return;
+    };
+    let eff = effective_hub_production(cfg, persisted, hub);
+    let (active, potential) = hub_opr_feed_weighted_sums(persisted, cfg, hid);
+    let mut feeders = CompactString::default();
+    for (_, o) in persisted.objectives.into_iter() {
+        if !matches!(o.kind, ObjectiveKind::Production) {
+            continue;
+        }
+        if opr_feed_hub(persisted, o) != Some(hid) {
+            continue;
+        }
+        if !feeders.is_empty() {
+            feeders.push_str("; ");
+        }
+        feeders.push_str(&format_compact!(
+            "{} th={} prod={}% active={}",
+            db.objective_f10_map_label(o),
+            o.threatened,
+            o.production,
+            production_feed_line_active(cfg, o, hub),
+        ));
+    }
+    info!(
+        "OPR threat feed: opr {} threatened={} -> hub {} stored={}% display={}% active_w={} potential_w={} feeders=[{}]",
+        db.objective_f10_map_label(opr),
+        opr.threatened,
+        db.objective_f10_map_label(hub),
+        hub.production,
+        eff,
+        active,
+        potential,
+        feeders,
+    );
+}
+
+pub(super) fn effective_hub_production(
+    cfg: &bfprotocols::cfg::Cfg,
+    persisted: &Persisted,
+    hub: &Objective,
+) -> u8 {
+    if virtual_resupply_threatened_blocks(cfg, hub) {
+        return 0;
+    }
+    if virtual_resupply_threatened_without_deliveries(cfg) {
+        hub_production_display_from_opr_feeds(persisted, cfg, hub.id)
+    } else {
+        hub.production
+    }
+}
+
+pub(super) fn production_feed_line_active(
+    cfg: &bfprotocols::cfg::Cfg,
+    opr: &Objective,
+    hub: &Objective,
+) -> bool {
+    opr.production > 0
+        && !virtual_resupply_threatened_blocks(cfg, opr)
+        && !virtual_resupply_threatened_blocks(cfg, hub)
+}
+
+pub(crate) fn refresh_virtual_resupply_threat_markups(
+    persisted: &Persisted,
+    ephemeral: &mut super::ephemeral::Ephemeral,
+    changed: &[ObjectiveId],
+) {
+    if !virtual_resupply_threatened_without_deliveries(&ephemeral.cfg) {
+        return;
+    }
+    for oid in changed {
+        let Some(obj) = persisted.objectives.get(oid) else {
+            continue;
+        };
+        ephemeral.update_objective_markup(persisted, obj, &[]);
+        if let Some(sid) = obj.warehouse.supplier {
+            if let Some(hub) = persisted.objectives.get(&sid) {
+                ephemeral.update_objective_markup(persisted, hub, &[*oid]);
+            }
+        }
+        if matches!(obj.kind, ObjectiveKind::Logistics) {
+            for (pid, opr) in &persisted.objectives {
+                if opr_feed_hub(persisted, opr) == Some(*oid) {
+                    if let Some(opr_obj) = persisted.objectives.get(pid) {
+                        ephemeral.update_objective_markup(persisted, opr_obj, &[*oid]);
+                    }
+                }
+            }
+        }
+        if matches!(obj.kind, ObjectiveKind::Production) {
+            if let Some(hid) = opr_feed_hub(persisted, obj) {
+                if let Some(hub) = persisted.objectives.get(&hid) {
+                    ephemeral.update_objective_markup(persisted, hub, &[*oid]);
+                }
+            }
+        }
+    }
+}
+
+impl Db {
+    /// Recompute every OLO `production` from non-threatened OPR feeds (flagged virtual resupply).
+    pub(crate) fn recompute_all_logistics_hub_production_from_opr_feeds(&mut self) -> Result<()> {
+        if !virtual_resupply_threatened_without_deliveries(&self.ephemeral.cfg) {
+            return Ok(());
+        }
+        let cfg = &self.ephemeral.cfg;
+        for hid in self.persisted.logistics_hubs.clone().into_iter() {
+            let new_prod = {
+                let hub_ref = objective!(self, hid)?;
+                if virtual_resupply_threatened_blocks(cfg, hub_ref) {
+                    0
+                } else {
+                    hub_production_from_active_oprs(&self.persisted, cfg, *hid)
+                }
+            };
+            objective_mut!(self, hid)?.production = new_prod;
+        }
+        Ok(())
+    }
+
+    /// Recompute OLO `production` from non-threatened OPR feeds and refresh F10 stats.
+    pub(crate) fn sync_hub_production_for_opr_threat_feeds(
+        &mut self,
+        changed: &[ObjectiveId],
+    ) -> Result<()> {
+        if !virtual_resupply_threatened_without_deliveries(&self.ephemeral.cfg) {
+            return Ok(());
+        }
+        let mut feed_updates: SmallVec<[(ObjectiveId, ObjectiveId); 8]> = smallvec![];
+        for oid in changed {
+            let Some(obj) = self.persisted.objectives.get(oid) else {
+                continue;
+            };
+            if matches!(obj.kind, ObjectiveKind::Production) {
+                if let Some(hid) = opr_feed_hub(&self.persisted, obj) {
+                    if obj.feed_hub != Some(hid) {
+                        feed_updates.push((*oid, hid));
+                    }
+                }
+            }
+        }
+        for (oid, hid) in feed_updates {
+            objective_mut!(self, oid)?.feed_hub = Some(hid);
+        }
+        self.recompute_all_logistics_hub_production_from_opr_feeds()?;
+        for oid in changed {
+            let Some(obj) = self.persisted.objectives.get(oid) else {
+                continue;
+            };
+            if matches!(obj.kind, ObjectiveKind::Production) {
+                log_opr_threat_hub_production(self, *oid, obj);
+            }
+            self.ephemeral
+                .update_objective_markup(&self.persisted, obj, &[]);
+            if matches!(obj.kind, ObjectiveKind::Production) {
+                if let Some(hid) = opr_feed_hub(&self.persisted, obj) {
+                    if let Some(hub) = self.persisted.objectives.get(&hid) {
+                        self.ephemeral
+                            .update_objective_markup(&self.persisted, hub, &[*oid]);
+                    }
+                }
+            }
+        }
+        self.sync_logistics_hub_production_displays();
+        Ok(())
+    }
+
+    pub(super) fn sync_logistics_hub_production_displays(&mut self) {
+        self.ephemeral
+            .sync_logistics_hub_production_displays(&self.persisted);
+    }
+}
+
 pub(super) fn clear_virtual_resupply_efficiency_cache(
     cache: &mut FxHashMap<(ObjectiveId, ObjectiveId), u8>,
 ) {
@@ -1221,6 +1525,8 @@ impl Db {
     }
 
     pub(super) fn refresh_hub_production_from_opr(&mut self) -> Result<()> {
+        let cfg = &self.ephemeral.cfg;
+        let threat_feed_cut = virtual_resupply_threatened_without_deliveries(cfg);
         let mut sums: FxHashMap<ObjectiveId, (u32, u32)> = FxHashMap::default();
         let opr_ids: Vec<ObjectiveId> = self
             .persisted
@@ -1243,23 +1549,31 @@ impl Db {
             let obj = objective_mut!(self, oid)?;
             obj.feed_hub = hub;
             if let Some(hid) = hub {
+                if threat_feed_cut && virtual_resupply_threatened_blocks(cfg, obj) {
+                    continue;
+                }
                 let e = sums.entry(hid).or_insert((0, 0));
                 e.0 = e.0.saturating_add(u32::from(production) * u32::from(capacity));
                 e.1 = e.1.saturating_add(u32::from(capacity));
             }
         }
         for hid in &self.persisted.logistics_hubs {
-            let hub = objective_mut!(self, hid)?;
-            if let Some((weighted, cap_sum)) = sums.get(hid).copied() {
+            let hid = *hid;
+            let new_prod = if threat_feed_cut {
+                let hub_ref = objective!(self, hid)?;
+                if virtual_resupply_threatened_blocks(cfg, hub_ref) {
+                    0
+                } else {
+                    hub_production_from_active_oprs(&self.persisted, cfg, hid)
+                }
+            } else if let Some((weighted, cap_sum)) = sums.get(&hid).copied() {
                 let denom = cap_sum.max(1) as u64;
                 let numer = weighted as u64;
-                // Round up to whole percents, so steps like 79 (floor) don't show
-                // when the "true" ratio is 79.1+.
-                let prod = ((numer + denom - 1) / denom).min(100);
-                hub.production = prod as u8;
+                ((numer + denom - 1) / denom).min(100) as u8
             } else {
-                hub.production = 0;
-            }
+                0
+            };
+            objective_mut!(self, hid)?.production = new_prod;
         }
         Ok(())
     }
@@ -2136,6 +2450,7 @@ impl Db {
         {
             self.refresh_hub_production_from_opr()
                 .context("refreshing hub production before logistics step")?;
+            self.sync_logistics_hub_production_displays();
             let freq = Duration::minutes(tick as i64);
             let start_ts = Utc::now();
             match &mut self.ephemeral.logistics_stage {
@@ -2458,24 +2773,35 @@ impl Db {
             .context("refreshing OPR to OLO production map")?;
         self.setup_supply_lines()
             .context("setting up supply lines")?;
+        let cfg = &self.ephemeral.cfg;
         let mut deliver_produced_supplies = || -> Result<()> {
+            let hub_ids: Vec<ObjectiveId> =
+                self.persisted.logistics_hubs.into_iter().copied().collect();
             for side in Side::ALL {
                 let production = match self.ephemeral.production_by_side.get(&side) {
                     Some(e) => e,
                     None => continue,
                 };
-                for oid in &self.persisted.logistics_hubs {
+                for oid in &hub_ids {
+                    let Some(logi_ref) = self.persisted.objectives.get(oid) else {
+                        continue;
+                    };
+                    if logi_ref.owner != side || !logi_ref.is_normal_logistics_hub() {
+                        continue;
+                    }
+                    if virtual_resupply_threatened_blocks(cfg, logi_ref) {
+                        continue;
+                    }
+                    let hub_prod = effective_hub_production(cfg, &self.persisted, logi_ref);
                     let logi = objective_mut!(self, oid)?;
-                    if logi.owner == side && logi.is_normal_logistics_hub() {
-                        for (name, inv) in logi.warehouse.equipment.iter_mut_cow() {
-                            if let Some(eq) = production.equipment.get(name) {
-                                *inv += Self::scale_production_amount(eq.production, logi.production);
-                            }
+                    for (name, inv) in logi.warehouse.equipment.iter_mut_cow() {
+                        if let Some(eq) = production.equipment.get(name) {
+                            *inv += Self::scale_production_amount(eq.production, hub_prod);
                         }
-                        for (name, inv) in logi.warehouse.liquids.iter_mut_cow() {
-                            if let Some(pr) = production.liquids.get(name) {
-                                *inv += Self::scale_production_amount(*pr, logi.production);
-                            }
+                    }
+                    for (name, inv) in logi.warehouse.liquids.iter_mut_cow() {
+                        if let Some(pr) = production.liquids.get(name) {
+                            *inv += Self::scale_production_amount(*pr, hub_prod);
                         }
                     }
                 }
@@ -2513,15 +2839,20 @@ impl Db {
         }
         self.update_supply_status()
             .context("updating supply status")?;
+        let cfg = &self.ephemeral.cfg;
         let mut transfers: Vec<Transfer> = vec![];
         for lid in &self.persisted.logistics_hubs {
             let logi = objective!(self, lid)?;
+            if virtual_resupply_threatened_blocks(cfg, logi) {
+                continue;
+            }
             let hub_destinations = || {
                 logi.warehouse
                     .destination
                     .into_iter()
                     .filter_map(|oid| Some((oid, self.persisted.objectives.get(oid)?)))
                     .filter(|(_, obj)| logi.owner == obj.owner)
+                    .filter(|(_, obj)| !virtual_resupply_threatened_blocks(cfg, obj))
             };
             let mut needed_equipment: SmallVec<[Needed; 64]> = hub_destinations()
                 .filter(|(_, obj)| obj.supply < 100)
@@ -2623,6 +2954,9 @@ impl Db {
                 if !occ.is_occupied_logistics_hub() {
                     continue;
                 }
+                if virtual_resupply_threatened_blocks(cfg, occ) {
+                    continue;
+                }
                 (
                     occ.owner,
                     occ.zone.pos(),
@@ -2644,6 +2978,9 @@ impl Db {
                 continue;
             }
             let logi = objective!(self, supplier_id)?;
+            if virtual_resupply_threatened_blocks(cfg, logi) {
+                continue;
+            }
             let occ = objective!(self, occ_id)?;
             let mut needed_equipment: SmallVec<[Needed; 1]> = if need_supply {
                 smallvec![Needed {
@@ -2747,6 +3084,7 @@ impl Db {
         }
         for side in Side::ALL {
             let mut transfers: Vec<Transfer> = vec![];
+            let cfg = &self.ephemeral.cfg;
             macro_rules! schedule_transfers {
                 ($typ:expr, $from:ident, $get:ident) => {{
                     let mut needed: SmallVec<[Needed; 16]> = self
@@ -2755,7 +3093,10 @@ impl Db {
                         .into_iter()
                         .filter_map(|lid| {
                             let obj = &self.persisted.objectives[lid];
-                            if obj.owner != side || obj.is_occupied_logistics_hub() {
+                            if obj.owner != side
+                                || obj.is_occupied_logistics_hub()
+                                || virtual_resupply_threatened_blocks(cfg, obj)
+                            {
                                 None
                             } else {
                                 Some(Needed {
