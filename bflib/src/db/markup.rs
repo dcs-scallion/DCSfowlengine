@@ -19,6 +19,7 @@ use super::{
     logistics::{
         effective_hub_production, nearest_normal_logistics_hub, opr_feed_hub,
         objective_warehouse_fuel_infobar_amounts, production_feed_line_active,
+        visible_occupied_supply_anchor, visible_production_feed_hub,
         virtual_resupply_delivery_efficiency_cached, virtual_resupply_link_active,
         virtual_resupply_threatened_blocks, virtual_resupply_threatened_without_deliveries,
     },
@@ -941,7 +942,8 @@ impl ObjectiveMarkup {
                 }
             }
         }
-        if old_production != obj.production || self.production_feed_hub != obj.feed_hub {
+        let visible_feed = visible_production_feed_hub(cfg, persisted, obj);
+        if old_production != obj.production || visible_feed != self.production_feed_hub {
             if matches!(obj.kind, ObjectiveKind::Production) {
                 underlay_dirty = true;
             }
@@ -988,11 +990,7 @@ impl ObjectiveMarkup {
             }
         }
         if matches!(obj.kind, ObjectiveKind::Logistics) {
-            let want_anchor = if obj.is_occupied_logistics_hub() {
-                nearest_normal_logistics_hub(persisted, obj.owner, obj.zone.pos())
-            } else {
-                None
-            };
+            let want_anchor = visible_occupied_supply_anchor(cfg, persisted, obj);
             if want_anchor != self.occupied_supply_anchor || self.pos != obj.zone.pos() {
                 underlay_dirty = true;
                 sync_occupied_hub_supply_line(cfg, self, msgq, obj, persisted);

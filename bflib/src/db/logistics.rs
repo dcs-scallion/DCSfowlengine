@@ -1317,6 +1317,39 @@ pub(super) fn production_feed_line_active(
         && !virtual_resupply_threatened_blocks(cfg, hub)
 }
 
+/// OPR feed line mark target; None when the line is hidden (threat, zero production, no hub).
+pub(super) fn visible_production_feed_hub(
+    cfg: &bfprotocols::cfg::Cfg,
+    persisted: &Persisted,
+    obj: &Objective,
+) -> Option<ObjectiveId> {
+    let hid = opr_feed_hub(persisted, obj)?;
+    let hub = persisted.objectives.get(&hid)?;
+    if production_feed_line_active(cfg, obj, hub) {
+        Some(hid)
+    } else {
+        None
+    }
+}
+
+/// Occupied-hub supply line anchor; None when the line is not drawn.
+pub(super) fn visible_occupied_supply_anchor(
+    cfg: &bfprotocols::cfg::Cfg,
+    persisted: &Persisted,
+    obj: &Objective,
+) -> Option<ObjectiveId> {
+    if !obj.is_occupied_logistics_hub() || virtual_resupply_threatened_blocks(cfg, obj) {
+        return None;
+    }
+    let aid = nearest_normal_logistics_hub(persisted, obj.owner, obj.zone.pos())?;
+    let anchor = persisted.objectives.get(&aid)?;
+    if virtual_resupply_threatened_blocks(cfg, anchor) {
+        None
+    } else {
+        Some(aid)
+    }
+}
+
 pub(crate) fn refresh_virtual_resupply_threat_markups(
     persisted: &Persisted,
     ephemeral: &mut super::ephemeral::Ephemeral,
