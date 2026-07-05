@@ -2324,6 +2324,8 @@ fn delayed_init_miz(lua: MizLua) -> Result<()> {
     info!("spawning units");
     ctx.respawn_groups(lua, &miz).context("setting up the mission after load")?;
     if ctx.db.ephemeral.cfg.discord_map.enabled {
+        db::discord_map::capture_restart_display_skew(lua, &mut ctx.db)
+            .context("discord map restart display skew")?;
         ctx.db
             .bootstrap_discord_map(lua, &discord_map_live_ctx(lua, ctx)?)
             .context("discord map bootstrap")?;

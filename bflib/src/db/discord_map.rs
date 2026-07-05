@@ -548,6 +548,27 @@ fn count_spawned_ship_carriers(lua: MizLua, db: &Db) -> Result<(u32, u32)> {
     Ok((red, blue))
 }
 
+fn dcs_mission_elapsed_secs(lua: MizLua) -> Result<u32> {
+    let timer = Timer::singleton(lua)?;
+    let abs = timer.get_abs_time()?;
+    let t0 = timer.get_time0()?;
+    let elapsed = f64::from(abs - t0);
+    Ok(elapsed.max(0.).min(f64::from(u32::MAX)) as u32)
+}
+
+/// Boot/load skew for HTML Time to restart when CFG `shutdown` is null.
+pub fn capture_restart_display_skew(lua: MizLua, db: &mut Db) -> Result<()> {
+    let cfg = &db.ephemeral.cfg;
+    if cfg.shutdown.is_some() || cfg.dcsserver_bot_scheduled_restart.is_none() {
+        db.ephemeral.restart_display_skew_secs = 0;
+        return Ok(());
+    }
+    let skew = dcs_mission_elapsed_secs(lua)?;
+    db.ephemeral.restart_display_skew_secs = skew;
+    info!("discord map: restart display skew {skew}s");
+    Ok(())
+}
+
 struct MissionClock {
     date: NaiveDate,
     tod_secs: u32,
@@ -786,6 +807,7 @@ pub fn collect_map_status_bar(
         mission_elapsed_days: clock.elapsed_days,
         gen_utc_ms: live.generated_at.timestamp_millis(),
         restart_utc_ms: live.shutdown_when.map(|t| t.timestamp_millis()),
+        restart_display_skew_secs: db.ephemeral.restart_display_skew_secs,
         online_red: live.online_red,
         online_blue: live.online_blue,
         blue_pilots: live.blue_pilots.iter().map(map_pilot).collect(),

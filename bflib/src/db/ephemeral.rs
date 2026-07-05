@@ -191,6 +191,8 @@ pub struct Ephemeral {
     pub(super) discord_map: Option<DiscordMapRuntime>,
     pub(super) discord_map_post_due: Option<DateTime<Utc>>,
     pub(super) discord_map_periodic_due: Option<DateTime<Utc>>,
+    /// DCSServerBot restart countdown skew (DCS elapsed at mission ready); HTML map only.
+    pub(super) restart_display_skew_secs: u32,
     /// PRI_LINE redraw pending; re-queue PRI_OVERLAY before the next markup flush.
     overlay_underlay_dirty: bool,
 }
@@ -257,6 +259,7 @@ impl Default for Ephemeral {
             discord_map: None,
             discord_map_post_due: None,
             discord_map_periodic_due: None,
+            restart_display_skew_secs: 0,
             overlay_underlay_dirty: false,
         }
     }

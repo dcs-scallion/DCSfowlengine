@@ -155,6 +155,8 @@ pub struct DiscordMapStatusBar {
     pub mission_elapsed_days: u32,
     pub gen_utc_ms: i64,
     pub restart_utc_ms: Option<i64>,
+    /// Added to HTML Time to restart when CFG `shutdown` is null (boot/load skew).
+    pub restart_display_skew_secs: u32,
     pub online_red: u32,
     pub online_blue: u32,
     pub blue_pilots: Vec<DiscordMapPilotEntry>,
@@ -862,16 +864,22 @@ fn sidebar_pilots_col_html(bar: &DiscordMapStatusBar) -> String {
     )
 }
 
+fn restart_display_rem_secs(bar: &DiscordMapStatusBar) -> Option<u64> {
+    bar.restart_utc_ms.map(|ms| {
+        (ms - bar.gen_utc_ms).max(0) as u64 / 1000 + u64::from(bar.restart_display_skew_secs)
+    })
+}
+
+fn format_restart_hms(rem_secs: u64) -> String {
+    let h = rem_secs / 3600;
+    let m = (rem_secs % 3600) / 60;
+    let s = rem_secs % 60;
+    format!("{h}:{m:02}:{s:02}")
+}
+
 fn stats_row_html(bar: &DiscordMapStatusBar, top: bool) -> String {
-    let restart_initial = bar
-        .restart_utc_ms
-        .map(|ms| {
-            let rem = (ms - bar.gen_utc_ms).max(0) / 1000;
-            let h = rem / 3600;
-            let m = (rem % 3600) / 60;
-            let s = rem % 60;
-            format!("{h}:{m:02}:{s:02}")
-        })
+    let restart_initial = restart_display_rem_secs(bar)
+        .map(format_restart_hms)
         .unwrap_or_else(|| "—".into());
     let mission_h = bar.mission_tod_secs / 3600;
     let mission_m = (bar.mission_tod_secs % 3600) / 60;
@@ -1325,7 +1333,8 @@ body{{margin:0;background:#000;color:#686a6e;font-family:"Roboto Condensed",Robo
       durationEl.textContent='Day '+dayNum;
     }}
     if(restartEl&&anchor.restart_utc_ms){{
-      var rem=Math.max(0,Math.floor((anchor.restart_utc_ms-now)/1000));
+      var skew=anchor.restart_display_skew_secs||0;
+      var rem=Math.max(0,Math.floor((anchor.restart_utc_ms-now)/1000)+skew);
       var rh=Math.floor(rem/3600);
       var rm=Math.floor((rem%3600)/60);
       var rs=rem%60;
