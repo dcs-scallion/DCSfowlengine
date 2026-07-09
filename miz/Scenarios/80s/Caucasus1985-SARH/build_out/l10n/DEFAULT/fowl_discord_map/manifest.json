@@ -1,0 +1,34 @@
+{
+  "schema_version": 1,
+  "canvas_px": 96,
+  "kinds": {
+    "airbase": {
+      "files": {
+        "red": "airbase_red",
+        "blue": "airbase_blue",
+        "neutral": "airbase_neutral"
+      }
+    },
+    "fob": {
+      "files": {
+        "red": "fob_red",
+        "blue": "fob_blue",
+        "neutral": "fob_neutral"
+      }
+    },
+    "logistics": {
+      "files": {
+        "red": "hub_red",
+        "blue": "hub_blue",
+        "neutral": "hub_neutral"
+      }
+    },
+    "production": {
+      "files": {
+        "red": "production_red",
+        "blue": "production_blue",
+        "neutral": "production_neutral"
+      }
+    }
+  }
+}

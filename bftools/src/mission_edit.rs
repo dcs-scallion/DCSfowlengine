@@ -3172,6 +3172,22 @@ fn coalition_catalog_weapon_ws(row: &Table) -> Result<HashSet<[i32; 4]>> {
     Ok(out)
 }
 
+/// All ordnance wsTypes on B/RDEFAULT (amount may be zero until cfg caps are applied).
+fn coalition_default_weapon_ws_catalog(row: &Table) -> Result<HashSet<[i32; 4]>> {
+    let mut out = HashSet::default();
+    if let Ok(weapons) = row.raw_get::<_, Table>("weapons") {
+        for pair in weapons.clone().pairs::<Value, Table>() {
+            let (_, w) = pair?;
+            if let Some(ws) = read_weapon_ws_type(&w) {
+                if ordnance_ws_type(ws) {
+                    out.insert(ws);
+                }
+            }
+        }
+    }
+    Ok(out)
+}
+
 /// Production inventory plus hub default row (KMGU etc. live on B/RDEFAULT, not B/RINVENTORY).
 fn coalition_stock_export_weapon_catalog(
     built_inventory: &Table,
@@ -3180,6 +3196,7 @@ fn coalition_stock_export_weapon_catalog(
     let mut out = coalition_catalog_weapon_ws(built_inventory)?;
     if let Some(def) = hub_default {
         out.extend(coalition_catalog_weapon_ws(def)?);
+        out.extend(coalition_default_weapon_ws_catalog(def)?);
     }
     Ok(out)
 }
@@ -3200,13 +3217,102 @@ fn copy_weapon_row_display_fields(dst: &Table, src: &Table) {
     }
 }
 
-/// After carrier prune: copy B/RDEFAULT (+ optional B/RDEFAULT+ FARP) ordnance on the TTDN allowlist.
+/// ME/DCS warehouse row label for gun pods etc. (wsType-only rows are invisible in some DCS views).
+fn preferred_ordnance_row_label(
+    br: &weapon_bridge::WeaponBridgeMap,
+    ws: [i32; 4],
+) -> Option<::std::string::String> {
+    let names = br.display_names_for_ws_type(ws, 12);
+    if names.is_empty() {
+        return None;
+    }
+    let score = |s: &str| -> i32 {
+        let u = s.to_ascii_uppercase();
+        if u.contains("GIAT") || u.contains("M621") {
+            return 1000;
+        }
+        if u.contains('{') || u.contains("BYCLSID") || u.contains("CATEGORIES/") {
+            return 500;
+        }
+        if u.starts_with("***") {
+            return 200;
+        }
+        // Generic pod labels (ME warehouse list); avoid aircraft-specific CLSID names on shared wsTypes.
+        if u.contains("MIG-21") || u.contains("MIG21") || u.contains("MIG-29") || u.contains("SU-25") {
+            return 80;
+        }
+        if u.contains("UPK") || u.contains("KORD") || u.contains("PKT") || u.contains("SPPU") {
+            if u.contains(" - ") || u.contains("GUN POD") {
+                return -10;
+            }
+            return 0;
+        }
+        s.len() as i32
+    };
+    names
+        .into_iter()
+        .min_by_key(|s| (score(s), s.len()))
+}
+
+fn stamp_weapon_row_bridge_labels(dst: &Table, br: Option<&weapon_bridge::WeaponBridgeMap>, ws: [i32; 4]) {
+    let Some(br) = br else {
+        return;
+    };
+    let Some(label) = preferred_ordnance_row_label(br, ws) else {
+        return;
+    };
+    let existing = warehouse_weapon_display_name(dst);
+    let trim = existing.as_str().trim();
+    let replace = trim.is_empty()
+        || trim.eq_ignore_ascii_case("nil")
+        || trim.chars().all(|c| c.is_ascii_digit());
+    if !replace {
+        let u = trim.to_ascii_uppercase();
+        if (ws == [4, 6, 10, 134] || ws == [4, 6, 10, 183] || ws == [4, 6, 10, 184]
+            || ws == [4, 6, 6, 134])
+            && (u.contains("MIG-21") || u.contains("MIG21"))
+        {
+            // Overwrite aircraft-specific alias on shared gun-pod wsTypes.
+        } else {
+            return;
+        }
+    }
+    let _ = dst.raw_set("name", label.as_str());
+    let _ = dst.raw_set("displayName", label.as_str());
+}
+
+fn stamp_positive_ordnance_row_labels(
+    wh: &Table,
+    br: Option<&weapon_bridge::WeaponBridgeMap>,
+) -> Result<()> {
+    let Ok(weapons) = wh.raw_get::<_, Table>("weapons") else {
+        return Ok(());
+    };
+    for pair in weapons.clone().pairs::<Value, Table>() {
+        let (_, w) = pair?;
+        let Some(ws) = read_weapon_ws_type(&w) else {
+            continue;
+        };
+        if !is_inventory_cap_ordnance_ws(ws) {
+            continue;
+        }
+        if w.raw_get::<_, u32>("initialAmount").unwrap_or(0) == 0 {
+            continue;
+        }
+        stamp_weapon_row_bridge_labels(&w, br, ws);
+    }
+    Ok(())
+}
+
+/// After policy prune: restore ordnance rows from coalition B/RINVENTORY / B/RDEFAULT templates (+ plus rows).
 fn ensure_positive_default_ordnance_for_allowed_ws(
     lua: &Lua,
     wh: &Table,
     def_sources: &[&Table<'static>],
     allowed_ws: &HashSet<[i32; 4]>,
+    caps: Option<&campaign_cfg::WarehouseDefaultsFromCfg>,
     mult: u32,
+    br: Option<&weapon_bridge::WeaponBridgeMap>,
 ) -> Result<()> {
     for def_tpl in def_sources {
         let Ok(weapons) = def_tpl.raw_get::<_, Table>("weapons") else {
@@ -3224,12 +3330,13 @@ fn ensure_positive_default_ordnance_for_allowed_ws(
             if amt == 0 {
                 continue;
             }
-            apply_zone_ws_weapon_stock(lua, wh, ws, amt, mult)?;
+            apply_zone_ws_weapon_stock(lua, wh, ws, amt, mult, br)?;
             if let Ok(dst_weapons) = wh.raw_get::<_, Table>("weapons") {
                 for dst_pair in dst_weapons.clone().pairs::<Value, Table>() {
                     let (_, dst_w) = dst_pair?;
                     if read_weapon_ws_type(&dst_w) == Some(ws) {
                         copy_weapon_row_display_fields(&dst_w, &w);
+                        stamp_weapon_row_bridge_labels(&dst_w, br, ws);
                         break;
                     }
                 }
@@ -3256,6 +3363,29 @@ fn objective_weapon_allowset(
     Some(list.iter().copied().collect())
 }
 
+/// Client slot allowlist ∪ TTD policy ordnance (payload-gated, no `aircraft_by_ws` union).
+fn objective_export_weapon_allowset(
+    defaults: &HashMap<StdString, ObjectiveWarehouseDefaults>,
+    objective_name: &str,
+    side: Side,
+    ttd_aircraft: Option<&HashSet<StdString>>,
+    br: Option<&weapon_bridge::WeaponBridgeMap>,
+    vt: Option<&VehicleTemplates>,
+) -> Option<HashSet<[i32; 4]>> {
+    let mut out: HashSet<[i32; 4]> = HashSet::default();
+    if let Some(set) = objective_weapon_allowset(defaults, objective_name, side) {
+        out.extend(set);
+    }
+    if let (Some(types), Some(br), Some(vt)) = (ttd_aircraft, br, vt) {
+        out.extend(objective_policy_weapon_allowlist(br, vt, side, types));
+    }
+    if out.is_empty() {
+        None
+    } else {
+        Some(out)
+    }
+}
+
 fn weapon_allowed_for_objective_stock(
     ws: [i32; 4],
     catalog: &HashSet<[i32; 4]>,
@@ -3280,9 +3410,13 @@ fn extract_objective_coalition_stock(
     catalog: &HashSet<[i32; 4]>,
     defaults: &HashMap<StdString, ObjectiveWarehouseDefaults>,
     objective_name: &str,
+    ttd_aircraft: Option<&HashSet<StdString>>,
+    br: Option<&weapon_bridge::WeaponBridgeMap>,
+    vt: Option<&VehicleTemplates>,
 ) -> Result<ObjectiveCoalitionStock> {
     let prod = build_inventory_production_maps(inv_tpl)?;
-    let allow = objective_weapon_allowset(defaults, objective_name, side);
+    let allow =
+        objective_export_weapon_allowset(defaults, objective_name, side, ttd_aircraft, br, vt);
     let mut out = ObjectiveCoalitionStock::default();
     if let Ok(weapons) = row.raw_get::<_, Table>("weapons") {
         for pair in weapons.clone().pairs::<Value, Table>() {
@@ -3490,17 +3624,23 @@ fn stock_mult_for_objective(
     Ok(mult_cfg.airbase_max.max(1))
 }
 
-/// Opposite-coalition baseline for export: BINVENTORY catalog × mult (same items Fowl tracks after capture).
+/// Opposite-coalition baseline for export: RINVENTORY production × mult plus RDEFAULT ordnance on TTD allowlist.
 fn synthesize_virtual_coalition_stock(
     inv_tpl: &Table<'static>,
+    def_tpl: &Table<'static>,
     mult: u32,
     catalog: &HashSet<[i32; 4]>,
     defaults: &HashMap<StdString, ObjectiveWarehouseDefaults>,
     objective_name: &str,
     side: Side,
+    ttd_aircraft: Option<&HashSet<StdString>>,
+    br: Option<&weapon_bridge::WeaponBridgeMap>,
+    vt: Option<&VehicleTemplates>,
+    caps: Option<&campaign_cfg::WarehouseDefaultsFromCfg>,
 ) -> Result<ObjectiveCoalitionStock> {
     let prod = build_inventory_production_maps(inv_tpl)?;
-    let allow = objective_weapon_allowset(defaults, objective_name, side);
+    let allow =
+        objective_export_weapon_allowset(defaults, objective_name, side, ttd_aircraft, br, vt);
     let mult = mult.max(1);
     let mut out = ObjectiveCoalitionStock::default();
     if let Ok(weapons) = inv_tpl.raw_get::<_, Table>("weapons") {
@@ -3528,6 +3668,46 @@ fn synthesize_virtual_coalition_stock(
                     production,
                 },
             );
+        }
+    }
+    if let Some(allow_set) = allow.as_ref() {
+        if let Ok(weapons) = def_tpl.raw_get::<_, Table>("weapons") {
+            for pair in weapons.clone().pairs::<Value, Table>() {
+                let (_, w) = pair?;
+                let Some(ws) = read_weapon_ws_type(&w) else {
+                    continue;
+                };
+                if !ordnance_ws_type(ws) || !allow_set.contains(&ws) {
+                    continue;
+                }
+                if !catalog.contains(&ws) {
+                    continue;
+                }
+                let Some(name) = weapon_row_export_key(&w) else {
+                    continue;
+                };
+                if out.equipment.contains_key(&name) {
+                    continue;
+                }
+                let mut unit_amt = w.raw_get::<_, u32>("initialAmount").unwrap_or(0);
+                if unit_amt == 0 {
+                    if let Some(caps) = caps {
+                        unit_amt = campaign_cfg::default_cap_for_weapon_ws(ws, caps).unwrap_or(0);
+                    }
+                }
+                if unit_amt == 0 {
+                    continue;
+                }
+                let baseline = unit_amt.saturating_mul(mult);
+                out.equipment.insert(
+                    name,
+                    ObjectiveStockItem {
+                        baseline,
+                        ws_type: Some(ws),
+                        production: prod.weapon_by_ws.get(&ws).copied().unwrap_or(0),
+                    },
+                );
+            }
         }
     }
     if let Ok(aircrafts) = inv_tpl.raw_get::<_, Table>("aircrafts") {
@@ -3575,19 +3755,29 @@ fn synthesize_virtual_coalition_stock(
 
 fn compute_virtual_objective_coalition_stock(
     inv_tpl: &Table<'static>,
+    def_tpl: &Table<'static>,
     mult: u32,
     catalog: &HashSet<[i32; 4]>,
     defaults: &HashMap<StdString, ObjectiveWarehouseDefaults>,
     objective_name: &str,
     side: Side,
+    ttd_aircraft: Option<&HashSet<StdString>>,
+    br: Option<&weapon_bridge::WeaponBridgeMap>,
+    vt: Option<&VehicleTemplates>,
+    caps: Option<&campaign_cfg::WarehouseDefaultsFromCfg>,
 ) -> Result<ObjectiveCoalitionStock> {
     synthesize_virtual_coalition_stock(
         inv_tpl,
+        def_tpl,
         mult,
         catalog,
         defaults,
         objective_name,
         side,
+        ttd_aircraft,
+        br,
+        vt,
+        caps,
     )
 }
 
@@ -3601,9 +3791,14 @@ pub fn build_objective_stock_export(
     built_blue: &Table,
     built_red: &Table,
     objective_defaults: &HashMap<StdString, ObjectiveWarehouseDefaults>,
+    br: Option<&weapon_bridge::WeaponBridgeMap>,
+    vt: Option<&VehicleTemplates>,
+    caps: Option<&campaign_cfg::WarehouseDefaultsFromCfg>,
 ) -> Result<HashMap<StdString, ObjectiveStockByCoalition>> {
-    let blue_catalog = coalition_catalog_weapon_ws(built_blue)?;
-    let red_catalog = coalition_catalog_weapon_ws(built_red)?;
+    let blue_catalog =
+        coalition_stock_export_weapon_catalog(built_blue, Some(&tpl.blue_default))?;
+    let red_catalog =
+        coalition_stock_export_weapon_catalog(built_red, Some(&tpl.red_default))?;
     let mut out: HashMap<StdString, ObjectiveStockByCoalition> = HashMap::default();
     let mut seen: HashSet<StdString> = HashSet::default();
     for allow in obj_dyn_allow {
@@ -3638,6 +3833,8 @@ pub fn build_objective_stock_export(
                 Side::Red => &red_catalog,
                 Side::Neutral => unreachable!(),
             };
+            let ttd_red = allow.per_side.get(&Side::Red);
+            let ttd_blue = allow.per_side.get(&Side::Blue);
             let stock = extract_objective_coalition_stock(
                 &resolved.row,
                 side,
@@ -3645,6 +3842,13 @@ pub fn build_objective_stock_export(
                 catalog,
                 objective_defaults,
                 objective_name,
+                match side {
+                    Side::Blue => ttd_blue,
+                    Side::Red => ttd_red,
+                    Side::Neutral => None,
+                },
+                br,
+                vt,
             )?;
             match side {
                 Side::Blue => entry.blue = stock,
@@ -3652,9 +3856,9 @@ pub fn build_objective_stock_export(
                 Side::Neutral => {}
             }
             let opposite = side.opposite();
-            let (opp_inv, opp_cat) = match opposite {
-                Side::Blue => (&tpl.blue_inventory, &blue_catalog),
-                Side::Red => (&tpl.red_inventory, &red_catalog),
+            let (opp_inv, opp_def, opp_cat) = match opposite {
+                Side::Blue => (&tpl.blue_inventory, &tpl.blue_default, &blue_catalog),
+                Side::Red => (&tpl.red_inventory, &tpl.red_default, &red_catalog),
                 Side::Neutral => {
                     out.insert(objective_name.to_string(), entry);
                     continue;
@@ -3662,11 +3866,20 @@ pub fn build_objective_stock_export(
             };
             let virtual_stock = compute_virtual_objective_coalition_stock(
                 opp_inv,
+                opp_def,
                 mult,
                 opp_cat,
                 objective_defaults,
                 objective_name,
                 opposite,
+                match opposite {
+                    Side::Blue => ttd_blue,
+                    Side::Red => ttd_red,
+                    Side::Neutral => None,
+                },
+                br,
+                vt,
+                caps,
             )?;
             match opposite {
                 Side::Blue => entry.blue = virtual_stock,
@@ -3675,18 +3888,24 @@ pub fn build_objective_stock_export(
             }
         } else {
             for side in [Side::Blue, Side::Red] {
-                let (inv_tpl, catalog) = match side {
-                    Side::Blue => (&tpl.blue_inventory, &blue_catalog),
-                    Side::Red => (&tpl.red_inventory, &red_catalog),
+                let (inv_tpl, def_tpl, catalog) = match side {
+                    Side::Blue => (&tpl.blue_inventory, &tpl.blue_default, &blue_catalog),
+                    Side::Red => (&tpl.red_inventory, &tpl.red_default, &red_catalog),
                     Side::Neutral => continue,
                 };
+                let ttd = allow.per_side.get(&side);
                 let stock = compute_virtual_objective_coalition_stock(
                     inv_tpl,
+                    def_tpl,
                     mult,
                     catalog,
                     objective_defaults,
                     objective_name,
                     side,
+                    ttd,
+                    br,
+                    vt,
+                    caps,
                 )?;
                 match side {
                     Side::Blue => entry.blue = stock,
@@ -3753,6 +3972,9 @@ fn merge_naval_ship_objective_stock_export(
             catalog,
             objective_defaults,
             display_key.as_str(),
+            None,
+            None,
+            None,
         )?;
         let mut entry = ObjectiveStockByCoalition::default();
         match side {
@@ -3761,9 +3983,9 @@ fn merge_naval_ship_objective_stock_export(
             Side::Neutral => {}
         }
         let opposite = side.opposite();
-        let (opp_inv, opp_cat) = match opposite {
-            Side::Blue => (&tpl.blue_inventory, &blue_catalog),
-            Side::Red => (&tpl.red_inventory, &red_catalog),
+        let (opp_inv, opp_def, opp_cat) = match opposite {
+            Side::Blue => (&tpl.blue_inventory, &tpl.blue_default, &blue_catalog),
+            Side::Red => (&tpl.red_inventory, &tpl.red_default, &red_catalog),
             Side::Neutral => {
                 out.insert(display_key, entry);
                 added += 1;
@@ -3772,11 +3994,16 @@ fn merge_naval_ship_objective_stock_export(
         };
         let virtual_stock = compute_virtual_objective_coalition_stock(
             opp_inv,
+            opp_def,
             mult,
             opp_cat,
             objective_defaults,
             display_key.as_str(),
             opposite,
+            None,
+            None,
+            None,
+            None,
         )?;
         match opposite {
             Side::Blue => entry.blue = virtual_stock,
@@ -3881,6 +4108,9 @@ fn merge_dep_farp_objective_stock_export(
             catalog,
             objective_defaults,
             key.as_str(),
+            None,
+            None,
+            None,
         )?;
         let mut entry = ObjectiveStockByCoalition::default();
         match side {
@@ -3889,9 +4119,9 @@ fn merge_dep_farp_objective_stock_export(
             Side::Neutral => {}
         }
         let opposite = side.opposite();
-        let (opp_inv, opp_cat) = match opposite {
-            Side::Blue => (&tpl.blue_inventory, &blue_catalog),
-            Side::Red => (&tpl.red_inventory, &red_catalog),
+        let (opp_inv, opp_def, opp_cat) = match opposite {
+            Side::Blue => (&tpl.blue_inventory, &tpl.blue_default, &blue_catalog),
+            Side::Red => (&tpl.red_inventory, &tpl.red_default, &red_catalog),
             Side::Neutral => {
                 out.insert(key, entry);
                 added += 1;
@@ -3900,11 +4130,16 @@ fn merge_dep_farp_objective_stock_export(
         };
         let virtual_stock = compute_virtual_objective_coalition_stock(
             opp_inv,
+            opp_def,
             mult,
             opp_cat,
             objective_defaults,
             key.as_str(),
             opposite,
+            None,
+            None,
+            None,
+            None,
         )?;
         match opposite {
             Side::Blue => entry.blue = virtual_stock,
@@ -5677,6 +5912,7 @@ fn apply_zone_ws_weapon_stock(
     ws: [i32; 4],
     amount: u32,
     mult: u32,
+    br: Option<&weapon_bridge::WeaponBridgeMap>,
 ) -> Result<()> {
     let scaled = amount.saturating_mul(mult);
     if scaled == 0 {
@@ -5694,6 +5930,7 @@ fn apply_zone_ws_weapon_stock(
         let (_, w) = pair?;
         if read_weapon_ws_type(&w) == Some(ws) {
             w.raw_set("initialAmount", scaled)?;
+            stamp_weapon_row_bridge_labels(&w, br, ws);
             return Ok(());
         }
     }
@@ -5705,6 +5942,7 @@ fn apply_zone_ws_weapon_stock(
     wst.raw_set(4, ws[3])?;
     w.raw_set("wsType", wst)?;
     w.raw_set("initialAmount", scaled)?;
+    stamp_weapon_row_bridge_labels(&w, br, ws);
     let mut new_idx = dst_weapons.raw_len().saturating_add(1);
     if new_idx == 0 {
         new_idx = 1;
@@ -5745,7 +5983,7 @@ fn apply_zone_ws_stock_amounts(
                     continue;
                 }
             }
-            apply_zone_ws_weapon_stock(lua, wh, ws, amt, mult)?;
+            apply_zone_ws_weapon_stock(lua, wh, ws, amt, mult, None)?;
             applied_ws.insert(ws);
         }
     }
@@ -7230,8 +7468,16 @@ impl WarehouseTemplate {
                     by_side.get(&Side::Red).cloned().unwrap_or_else(HashSet::default);
                 let mut blue_weapon_ws: HashSet<[i32; 4]> = HashSet::default();
                 let mut red_weapon_ws: HashSet<[i32; 4]> = HashSet::default();
-                blue_weapon_ws.extend(br.weapon_ws_for_aircrafts(&blue_aircraft));
-                red_weapon_ws.extend(br.weapon_ws_for_aircrafts(&red_aircraft));
+                if !blue_aircraft.is_empty() {
+                    blue_weapon_ws.extend(objective_policy_weapon_allowlist(
+                        br, vt, Side::Blue, &blue_aircraft,
+                    ));
+                }
+                if !red_aircraft.is_empty() {
+                    red_weapon_ws.extend(objective_policy_weapon_allowlist(
+                        br, vt, Side::Red, &red_aircraft,
+                    ));
+                }
                 for unit_type in &blue_aircraft {
                     if let Some(ws) = blue_module_ws.get(unit_type) {
                         blue_weapon_ws.extend(ws.iter().copied());
@@ -8865,6 +9111,79 @@ fn build_ship_warehouse_aircraft_allow(
     Ok(out)
 }
 
+/// O* TTD (`include_dyn_slots`) for objectives without client-slot footprint (airbases, FOBs).
+fn extend_objective_defaults_from_dyn_allow(
+    defaults: &mut HashMap<StdString, bfprotocols::fowl_miz_export::ObjectiveWarehouseDefaults>,
+    obj_dyn_allow: &[ObjectiveDynAllow],
+    vt: &VehicleTemplates,
+    br: &weapon_bridge::WeaponBridgeMap,
+) -> usize {
+    let mut added = 0usize;
+    for allow in obj_dyn_allow {
+        if allow.is_logistics_hub {
+            continue;
+        }
+        let Some(objective_name) = allow.zone_name.as_str().get(4..) else {
+            continue;
+        };
+        let key = StdString::from(objective_name);
+        if defaults.contains_key(&key) {
+            continue;
+        }
+        let blue_aircraft = allow
+            .per_side
+            .get(&Side::Blue)
+            .cloned()
+            .unwrap_or_default();
+        let red_aircraft = allow
+            .per_side
+            .get(&Side::Red)
+            .cloned()
+            .unwrap_or_default();
+        if blue_aircraft.is_empty() && red_aircraft.is_empty() {
+            continue;
+        }
+        let blue_weapon_ws = if blue_aircraft.is_empty() {
+            Vec::new()
+        } else {
+            let mut v: Vec<_> = objective_policy_weapon_allowlist(br, vt, Side::Blue, &blue_aircraft)
+                .into_iter()
+                .collect();
+            v.sort_by_key(|w| (w[0], w[1], w[2], w[3]));
+            v
+        };
+        let red_weapon_ws = if red_aircraft.is_empty() {
+            Vec::new()
+        } else {
+            let mut v: Vec<_> = objective_policy_weapon_allowlist(br, vt, Side::Red, &red_aircraft)
+                .into_iter()
+                .collect();
+            v.sort_by_key(|w| (w[0], w[1], w[2], w[3]));
+            v
+        };
+        let mut blue_aircraft_vec: Vec<_> = blue_aircraft.into_iter().collect();
+        blue_aircraft_vec.sort();
+        let mut red_aircraft_vec: Vec<_> = red_aircraft.into_iter().collect();
+        red_aircraft_vec.sort();
+        defaults.insert(
+            key,
+            bfprotocols::fowl_miz_export::ObjectiveWarehouseDefaults {
+                blue_aircraft: blue_aircraft_vec,
+                red_aircraft: red_aircraft_vec,
+                blue_weapon_ws,
+                red_weapon_ws,
+            },
+        );
+        added += 1;
+    }
+    if added > 0 {
+        info!(
+            "objective_defaults: added {added} O* TTD profile(s) (airbases/FOBs without client slots)"
+        );
+    }
+    added
+}
+
 /// Per DEP pad group name (`DEPBFARPPAD0`, …): `objective_defaults` from `TTDdynFARP` (export extract + bflib filters).
 fn extend_objective_defaults_for_dep_farps(
     defaults: &mut HashMap<StdString, bfprotocols::fowl_miz_export::ObjectiveWarehouseDefaults>,
@@ -9815,11 +10134,9 @@ fn warn_airbase_objective_bindings_follow_up_summary(
 ///    (stock caps the air wing). Keep `linkDynTempl` from DT_* emit for other coalition types so landed
 ///    aircraft can be warehoused and slotted later.
 /// 4. `weapons` from B/RINVENTORY: when a weapon bridge is loaded, drop rows whose `wsType` is not allowed
-///    for the same hub policy as A/C (`O*`: `weapon_ws_by_aircraft` keys only; per-hull `TTDN*` **carriers** and
-///    `TTDdynFARP` **DEP dynamic FARPs** (one path per pad coalition): `dep_farp_weapon_allowlist` =
-///    `naval_carrier_policy_weapon_allowlist` + policy-filtered `BINVENTORY+` / `RINVENTORY+` + `BDEFAULT+` / `RDEFAULT+`
-///    (no global zone `All` bleed). Zone label rows require TTDdynFARP `Value` module + bridge ordnance for that type.
-/// If ground bases still misbehave, consider generalising this 3-step pattern to airports / FARPs.
+///    for the same hub policy as A/C (`OLO*`: full coalition stock; `OAB*` / `OFO*` / `TTDdynFARP` DEP:
+///    `objective_zone_weapon_allowlist` = per-airframe `template_ordnance_allow_ws` + policy-filtered
+///    `BINVENTORY+` / `RINVENTORY+` + `BDEFAULT+` / `RDEFAULT+`, intersected with coalition template catalog).
 ///
 /// Carrier naming / zones are validated earlier by `audit_naval_carrier_mission_rules` (build fails if invalid).
 
@@ -9867,8 +10184,82 @@ fn naval_carrier_policy_weapon_allowlist(
     out
 }
 
-/// Single DEP FARP weapon allowlist: `TTDdynFARP` aircraft/pylons + policy-filtered `BINVENTORY+` / `RINVENTORY+` + `BDEFAULT+` / `RDEFAULT+` for that pad coalition (no global zone `All` bleed).
-fn dep_farp_weapon_allowlist(
+/// O* objective prune base: bridge keys + template pylons (ME + sidecar), not `aircraft_by_ws` union.
+fn objective_policy_weapon_allowlist(
+    br: &weapon_bridge::WeaponBridgeMap,
+    vt: &VehicleTemplates,
+    side: Side,
+    policy_types: &HashSet<StdString>,
+) -> HashSet<[i32; 4]> {
+    let side_name = match side {
+        Side::Blue => "blue",
+        Side::Red => "red",
+        Side::Neutral => return HashSet::new(),
+    };
+    let mut out = naval_carrier_policy_weapon_allowlist(br, vt, side, policy_types);
+    let policy_strings: ::std::collections::HashSet<::std::string::String> = policy_types
+        .iter()
+        .map(|s| s.as_str().to_string())
+        .collect();
+    let mut lua_pylon_ws = HashSet::<[i32; 4]>::new();
+    for unit_type in policy_types {
+        lua_pylon_ws.extend(vt.payload_pylon_ws_for_unit_type_exact(br, side, unit_type.as_str()));
+    }
+    out.extend(br.template_ordnance_allow_ws(
+        side_name,
+        &policy_strings,
+        &lua_pylon_ws,
+    ));
+    out
+}
+
+fn coalition_ordnance_ws_catalog(
+    inv: Option<&Table<'static>>,
+    inv_plus: Option<&Table<'static>>,
+    def: Option<&Table<'static>>,
+    def_plus: Option<&Table<'static>>,
+) -> Result<HashSet<[i32; 4]>> {
+    let mut out = HashSet::new();
+    for row in [inv, inv_plus, def, def_plus].into_iter().flatten() {
+        out.extend(collect_inventory_weapon_ws_set(row)?);
+    }
+    Ok(out)
+}
+
+/// OLO reference stock: coalition template rows with `initialAmount > 0` after weapon.miz validation.
+fn coalition_positive_ordnance_ws_catalog(
+    inv: Option<&Table<'static>>,
+    inv_plus: Option<&Table<'static>>,
+    def: Option<&Table<'static>>,
+    def_plus: Option<&Table<'static>>,
+) -> Result<HashSet<[i32; 4]>> {
+    let mut out = HashSet::new();
+    for row in [inv, inv_plus, def, def_plus].into_iter().flatten() {
+        let Ok(weapons) = row.raw_get::<_, Table>("weapons") else {
+            continue;
+        };
+        for pair in weapons.clone().pairs::<Value, Table>() {
+            let (_, w) = pair?;
+            let Some(ws) = read_weapon_ws_type(&w) else {
+                continue;
+            };
+            if w.raw_get::<_, u32>("initialAmount").unwrap_or(0) > 0 {
+                out.insert(ws);
+            }
+        }
+    }
+    Ok(out)
+}
+
+fn retain_ordnance_in_coalition_catalog(
+    allowed_ws: &mut HashSet<[i32; 4]>,
+    catalog: &HashSet<[i32; 4]>,
+) {
+    allowed_ws.retain(|ws| !is_inventory_cap_ordnance_ws(*ws) || catalog.contains(ws));
+}
+
+/// OAB/OFO/DEP: TTD airframes (OLO-positive catalog only) + B/RINVENTORY+ + B/RDEFAULT+ zone links.
+fn objective_zone_weapon_allowlist(
     br: &weapon_bridge::WeaponBridgeMap,
     vt: &VehicleTemplates,
     side: Side,
@@ -9881,14 +10272,15 @@ fn dep_farp_weapon_allowlist(
     def_ws_zone_specs: &HashMap<[i32; 4], WsZoneStockSpec>,
     def_name_to_ws: &HashMap<StdString, [i32; 4]>,
     def_weapon_ws: &HashSet<[i32; 4]>,
+    positive_catalog: &HashSet<[i32; 4]>,
+    full_catalog: &HashSet<[i32; 4]>,
 ) -> HashSet<[i32; 4]> {
     let (inv_label, def_label) = match side {
         Side::Blue => ("BINVENTORY+", "BDEFAULT+"),
         Side::Red => ("RINVENTORY+", "RDEFAULT+"),
         Side::Neutral => ("B/RINVENTORY+", "B/RDEFAULT+"),
     };
-    let mut s = naval_carrier_policy_weapon_allowlist(br, vt, side, policy_types);
-    s.extend(inventory_plus_ordnance_ws_for_policy_modules(
+    let mut zone_ws = inventory_plus_ordnance_ws_for_policy_modules(
         br,
         vt,
         side,
@@ -9898,8 +10290,8 @@ fn dep_farp_weapon_allowlist(
         inv_name_to_ws,
         inv_weapon_ws,
         inv_label,
-    ));
-    s.extend(default_zone_ws_for_policy_modules(
+    );
+    zone_ws.extend(default_zone_ws_for_policy_modules(
         br,
         side,
         def_zone_plus,
@@ -9909,7 +10301,12 @@ fn dep_farp_weapon_allowlist(
         def_weapon_ws,
         def_label,
     ));
-    s
+    retain_ordnance_in_coalition_catalog(&mut zone_ws, full_catalog);
+    let mut policy_ws = objective_policy_weapon_allowlist(br, vt, side, policy_types);
+    policy_ws.retain(|ws| positive_catalog.contains(ws));
+    let mut out = policy_ws;
+    out.extend(zone_ws);
+    out
 }
 
 fn policy_types_include_module(
@@ -10165,7 +10562,7 @@ fn patch_warehouse_dynamic_spawn_links(
         red_inventory: Option<&Table<'static>>,
         mult_cfg: &WarehouseStockMultConfig,
         is_airports_table: bool,
-        _warehouse_caps: Option<&campaign_cfg::WarehouseDefaultsFromCfg>,
+        warehouse_caps: Option<&campaign_cfg::WarehouseDefaultsFromCfg>,
         obj_dyn_allow: &[ObjectiveDynAllow],
         warehouse_positions: &HashMap<i64, Vector2>,
         dyn_farp_aircraft_allow: Option<&HashSet<(Side, StdString)>>,
@@ -10192,6 +10589,8 @@ fn patch_warehouse_dynamic_spawn_links(
         farp_inv_red_pos: &HashSet<[i32; 4]>,
         farp_def_blue_pos: &HashSet<[i32; 4]>,
         farp_def_red_pos: &HashSet<[i32; 4]>,
+        blue_inventory_plus: Option<&Table<'static>>,
+        red_inventory_plus: Option<&Table<'static>>,
         blue_default_plus: Option<&Table<'static>>,
         red_default_plus: Option<&Table<'static>>,
     ) -> Result<()> {
@@ -10572,6 +10971,37 @@ fn patch_warehouse_dynamic_spawn_links(
                             "B/RDEFAULT+",
                         ),
                     };
+                    let (inv_tpl, inv_plus_tpl, def_tpl, def_plus_tpl) = match side {
+                        Side::Blue => (
+                            blue_inventory,
+                            blue_inventory_plus,
+                            blue_default,
+                            blue_default_plus,
+                        ),
+                        Side::Red => (
+                            red_inventory,
+                            red_inventory_plus,
+                            red_default,
+                            red_default_plus,
+                        ),
+                        Side::Neutral => (None, None, None, None),
+                    };
+                    let coalition_full_cat = coalition_ordnance_ws_catalog(
+                        inv_tpl,
+                        inv_plus_tpl,
+                        def_tpl,
+                        def_plus_tpl,
+                    )?;
+                    let coalition_positive_cat = if is_naval {
+                        coalition_full_cat.clone()
+                    } else {
+                        coalition_positive_ordnance_ws_catalog(
+                            inv_tpl,
+                            inv_plus_tpl,
+                            def_tpl,
+                            def_plus_tpl,
+                        )?
+                    };
                     let mut allowed_ws = if is_naval {
                         naval_carrier_policy_weapon_allowlist(
                             br,
@@ -10579,8 +11009,8 @@ fn patch_warehouse_dynamic_spawn_links(
                             side,
                             &names,
                         )
-                    } else if is_dep {
-                        dep_farp_weapon_allowlist(
+                    } else {
+                        objective_zone_weapon_allowlist(
                             br,
                             vehicle_templates,
                             side,
@@ -10593,11 +11023,21 @@ fn patch_warehouse_dynamic_spawn_links(
                             ws_def_zplus,
                             def_nm,
                             def_ws,
+                            &coalition_positive_cat,
+                            &coalition_full_cat,
                         )
-                    } else {
-                        br.weapon_ws_for_aircraft_keys_only(&names)
                     };
                     if is_naval {
+                        let default_restore_ws = default_zone_ws_for_policy_modules(
+                            br,
+                            side,
+                            def_zplus,
+                            ws_def_zplus,
+                            &names,
+                            def_nm,
+                            def_ws,
+                            def_label,
+                        );
                         let zone_label = match side {
                             Side::Blue => "BINVENTORY+",
                             Side::Red => "RINVENTORY+",
@@ -10614,46 +11054,7 @@ fn patch_warehouse_dynamic_spawn_links(
                             ws,
                             zone_label,
                         ));
-                        allowed_ws.extend(default_zone_ws_for_policy_modules(
-                            br,
-                            side,
-                            def_zplus,
-                            ws_def_zplus,
-                            &names,
-                            def_nm,
-                            def_ws,
-                            def_label,
-                        ));
-                    } else if !is_dep {
-                        let zone_label = match side {
-                            Side::Blue => "BINVENTORY+",
-                            Side::Red => "RINVENTORY+",
-                            Side::Neutral => "B/RINVENTORY+",
-                        };
-                        allowed_ws.extend(inventory_plus_ordnance_ws_for_policy_modules(
-                            br,
-                            vehicle_templates,
-                            side,
-                            &names,
-                            zplus,
-                            ws_zplus,
-                            nm,
-                            ws,
-                            zone_label,
-                        ));
-                        allowed_ws.extend(default_zone_ws_for_policy_modules(
-                            br,
-                            side,
-                            def_zplus,
-                            ws_def_zplus,
-                            &names,
-                            def_nm,
-                            def_ws,
-                            def_label,
-                        ));
-                    }
-                    // Naval only: unconditional BINVENTORY+ `All` ws rows. DEP uses TTDdynFARP allowlist only.
-                    if is_naval {
+                        allowed_ws.extend(default_restore_ws.iter().copied());
                         allowed_ws.extend(ws_zone_force_keep_ws(ws_zplus, ws_def_zplus));
                     }
                     apply_zone_ws_stock_amounts(
@@ -10670,11 +11071,15 @@ fn patch_warehouse_dynamic_spawn_links(
                     )?;
                     let wlog = if is_dep {
                         format!(
-                            "warehouse {wid} weapons (DEP FARP {TTD_DYN_FARP_POLICY_ZONE} + policy B/RINVENTORY+ + B/RDEFAULT+)"
+                            "warehouse {wid} weapons (DEP FARP {TTD_DYN_FARP_POLICY_ZONE} + TTD + B/RINVENTORY+ + B/RDEFAULT+)"
+                        )
+                    } else if is_naval {
+                        format!(
+                            "warehouse {wid} weapons (carrier TTDN + B/RINVENTORY+ + B/RDEFAULT+)"
                         )
                     } else {
                         format!(
-                            "warehouse {wid} weapons (B/RINVENTORY filtered to allowed-aircraft wsTypes)"
+                            "warehouse {wid} weapons (O* TTD + B/RINVENTORY+ + B/RDEFAULT+ filtered to coalition catalog)"
                         )
                     };
                     prune_warehouse_weapons_row(
@@ -10685,42 +11090,49 @@ fn patch_warehouse_dynamic_spawn_links(
                         &wlog,
                         None,
                     )?;
-                    if is_naval {
-                        let (def_tpl, def_plus_tpl) = match side {
-                            Side::Blue => (blue_default, blue_default_plus),
-                            Side::Red => (red_default, red_default_plus),
-                            Side::Neutral => (None, None),
-                        };
-                        let mut def_sources: Vec<&Table<'static>> = Vec::new();
-                        if let Some(t) = def_tpl {
-                            def_sources.push(t);
-                        }
-                        if let Some(t) = def_plus_tpl {
-                            def_sources.push(t);
-                        }
-                        if !def_sources.is_empty() {
-                            ensure_positive_default_ordnance_for_allowed_ws(
-                                lua,
-                                &wh,
-                                &def_sources,
-                                &allowed_ws,
-                                mult,
-                            )?;
-                        }
-                        let mut zone_filter_reapply = HashSet::<[i32; 4]>::new();
-                        apply_zone_ws_stock_amounts(
+                    let (def_tpl, def_plus_tpl) = match side {
+                        Side::Blue => (blue_default, blue_default_plus),
+                        Side::Red => (red_default, red_default_plus),
+                        Side::Neutral => (None, None),
+                    };
+                    let mut stock_sources: Vec<&Table<'static>> = Vec::new();
+                    if let Some(t) = inv_tpl {
+                        stock_sources.push(t);
+                    }
+                    if let Some(t) = inv_plus_tpl {
+                        stock_sources.push(t);
+                    }
+                    if let Some(t) = def_tpl {
+                        stock_sources.push(t);
+                    }
+                    if let Some(t) = def_plus_tpl {
+                        stock_sources.push(t);
+                    }
+                    if !stock_sources.is_empty() {
+                        ensure_positive_default_ordnance_for_allowed_ws(
                             lua,
                             &wh,
-                            &empty_ws_zone,
-                            ws_def_zplus,
-                            &empty_farp_pos,
-                            &empty_farp_pos,
+                            &stock_sources,
+                            &allowed_ws,
+                            warehouse_caps,
                             mult,
-                            WsZoneDistributeScope::Filter,
-                            Some(&allowed_ws),
-                            &mut zone_filter_reapply,
+                            Some(br),
                         )?;
                     }
+                    stamp_positive_ordnance_row_labels(&wh, Some(br))?;
+                    let mut zone_filter_reapply = HashSet::<[i32; 4]>::new();
+                    apply_zone_ws_stock_amounts(
+                        lua,
+                        &wh,
+                        &empty_ws_zone,
+                        ws_def_zplus,
+                        &empty_farp_pos,
+                        farp_def,
+                        mult,
+                        WsZoneDistributeScope::Filter,
+                        Some(&allowed_ws),
+                        &mut zone_filter_reapply,
+                    )?;
                 }
             }
         }
@@ -10766,6 +11178,8 @@ fn patch_warehouse_dynamic_spawn_links(
         &farp_inv_red_pos,
         &farp_def_blue_pos,
         &farp_def_red_pos,
+        blue_inventory_plus,
+        red_inventory_plus,
         blue_default_plus,
         red_default_plus,
     )
@@ -10811,6 +11225,8 @@ fn patch_warehouse_dynamic_spawn_links(
         &farp_inv_red_pos,
         &farp_def_blue_pos,
         &farp_def_red_pos,
+        blue_inventory_plus,
+        red_inventory_plus,
         blue_default_plus,
         red_default_plus,
     )
@@ -12976,6 +13392,12 @@ pub fn run(cfg: &MizCmd) -> Result<()> {
             let obj_dyn_allow = build_objective_dyn_allow(&base, &dynamic_emit.dyn_templates)
                 .context("objective zones for stock export after warehouse patch")?;
             if let Some(br) = weapon_bridge_map.as_ref() {
+                extend_objective_defaults_from_dyn_allow(
+                    &mut fowl_from_warehouse.objective_defaults,
+                    &obj_dyn_allow,
+                    &vehicle_templates,
+                    br,
+                );
                 extend_objective_defaults_for_naval_hulls(
                     &mut fowl_from_warehouse.objective_defaults,
                     &base,
@@ -13011,6 +13433,9 @@ pub fn run(cfg: &MizCmd) -> Result<()> {
                 built_blue,
                 built_red,
                 &fowl_from_warehouse.objective_defaults,
+                weapon_bridge_map.as_ref(),
+                Some(&vehicle_templates),
+                warehouse_defaults,
             )
             .context("building per-objective warehouse stock export")?;
             merge_naval_ship_objective_stock_export(

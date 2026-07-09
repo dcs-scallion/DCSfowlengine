@@ -237,6 +237,14 @@ fn read_ws_type4(wst: &Table) -> Result<Option<(i32, i32, i32, i32)>> {
     Ok(Some((l1, l2, l3, l4)))
 }
 
+/// CFG `default_warehouse_*` cap for a weapon `wsType` quad (BDEFAULT/RDEFAULT rows).
+pub fn default_cap_for_weapon_ws(
+    ws: [i32; 4],
+    caps: &WarehouseDefaultsFromCfg,
+) -> Option<u32> {
+    cap_for_weapon_ws_type(ws[0], ws[1], ws[2], caps)
+}
+
 fn cap_for_weapon_ws_type(
     l1: i32,
     l2: i32,
