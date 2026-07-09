@@ -185,6 +185,7 @@
     }
   },
   "logistics_exclusion": 10000,
+  "deployable_unpack_min_base_distance_m": 5000,
   "unit_cull_distance": 55000,
   "ground_vehicle_cull_distance": 10000,
   "cull_after": 600,
