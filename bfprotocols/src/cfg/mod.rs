@@ -961,6 +961,10 @@ fn default_cull_after() -> u32 {
     1800
 }
 
+fn default_deployable_unpack_min_base_distance_m() -> u32 {
+    0
+}
+
 fn default_lock_sides() -> bool {
     true
 }
@@ -1396,6 +1400,10 @@ pub struct Cfg {
     /// how far must you fly from an objective to spawn deployables
     /// without penalty (Meters)
     pub logistics_exclusion: u32,
+    /// Min distance from non-threatened friendly objective centers before group deployable
+    /// unpack or deployable unit repair (0 = disabled).
+    #[serde(default = "default_deployable_unpack_min_base_distance_m")]
+    pub deployable_unpack_min_base_distance_m: u32,
     /// an objective will cull it's units if there are no enemy units
     /// within this distance (Meters)
     pub unit_cull_distance: u32,

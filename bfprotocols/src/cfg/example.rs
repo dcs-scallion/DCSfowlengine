@@ -2059,6 +2059,7 @@ impl Default for Cfg {
             default_warehouse_misc: 0,
             weapon_target_exclusions: FxHashSet::default(),
             logistics_exclusion: 10000,
+            deployable_unpack_min_base_distance_m: 0,
             unit_cull_distance: 37040, // 20 nm
             ground_vehicle_cull_distance: 10000,
             cull_after: 1800,

@@ -20,7 +20,7 @@
   },
   "discord_map": {
     "enabled": false,
-    "refresh_interval_secs":60,
+    "refresh_interval_secs":90,
     "front_line_in_map": true,
     "webhook_url": "",
     "mapbox_access_token": "",

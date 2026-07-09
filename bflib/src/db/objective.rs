@@ -1179,7 +1179,7 @@ impl Db {
             spawnable_logi_repaired: true,
             spawned: true,
             enabled: true,
-            threatened: true,
+            threatened: false,
             warehouse: Warehouse::default(),
             logistics_detached: false,
             points: 0,

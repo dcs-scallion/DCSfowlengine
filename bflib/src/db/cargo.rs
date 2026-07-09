@@ -658,6 +658,53 @@ impl Db {
                 }
             })
         }
+        struct UnpackBaseDistanceViolation {
+            name: CompactString,
+            dist_m: f64,
+            min_m: u32,
+        }
+        fn too_close_to_friendly_base_for_unpack(
+            db: &Db,
+            side: Side,
+            centroid: Vector2,
+        ) -> Option<UnpackBaseDistanceViolation> {
+            let min_m = db.ephemeral.cfg.deployable_unpack_min_base_distance_m;
+            if min_m == 0 {
+                return None;
+            }
+            let min_sq = (min_m as f64).powi(2);
+            let mut nearest: Option<UnpackBaseDistanceViolation> = None;
+            for (_, obj) in db.persisted.objectives.into_iter() {
+                if obj.owner != side || obj.threatened {
+                    continue;
+                }
+                let dist_sq = na::distance_squared(&obj.zone.pos().into(), &centroid.into());
+                if dist_sq >= min_sq {
+                    continue;
+                }
+                let dist_m = dist_sq.sqrt();
+                let replace = match &nearest {
+                    None => true,
+                    Some(cur) => dist_m < cur.dist_m,
+                };
+                if replace {
+                    nearest = Some(UnpackBaseDistanceViolation {
+                        name: CompactString::from(obj.name.as_str()),
+                        dist_m,
+                        min_m,
+                    });
+                }
+            }
+            nearest
+        }
+        fn unpack_base_distance_reason(v: &UnpackBaseDistanceViolation) -> CompactString {
+            format_compact!(
+                "Deployables must be at least {:.1} km from friendly base {} (nearest center {:.1} km)",
+                v.min_m as f64 / 1000.,
+                v.name,
+                v.dist_m / 1000.
+            )
+        }
         fn close_enough_to_repair<'a, I: Iterator<Item = &'a Cifo>, F: Fn() -> I>(
             db: &Db,
             side: Side,
@@ -1055,6 +1102,11 @@ impl Db {
                     } else {
                         reasons.push("can't unpack that here".into())
                     }
+                } else if spec.kind.is_group()
+                    && let Some(v) =
+                        too_close_to_friendly_base_for_unpack(self, st.side, centroid)
+                {
+                    reasons.push(unpack_base_distance_reason(&v));
                 } else {
                     let spctx = SpawnCtx::new(lua)?;
                     let origins = {
@@ -1170,6 +1222,10 @@ impl Db {
                     ));
                 } else if too_close(self, st.side, centroid, false, || have.iter()) {
                     reasons.push("can't repair that here while enemies are close".into())
+                } else if let Some(v) =
+                    too_close_to_friendly_base_for_unpack(self, st.side, centroid)
+                {
+                    reasons.push(unpack_base_distance_reason(&v));
                 } else {
                     let group = group!(self, gid)?;
                     for uid in &group.units {
