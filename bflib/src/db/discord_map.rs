@@ -59,12 +59,11 @@ pub struct DiscordMapLiveCtx {
 }
 
 pub const POST_DEBOUNCE_SECS: i64 = 45;
-pub const PERIODIC_REFRESH_WITH_PLAYERS_SECS: i64 = 300;
 pub const PERIODIC_REFRESH_EMPTY_SECS: i64 = 3600;
 
-fn periodic_refresh_interval_secs(mission_has_players: bool) -> i64 {
+fn periodic_refresh_interval_secs(cfg: &DiscordMapCfg, mission_has_players: bool) -> i64 {
     if mission_has_players {
-        PERIODIC_REFRESH_WITH_PLAYERS_SECS
+        i64::from(cfg.refresh_interval_secs())
     } else {
         PERIODIC_REFRESH_EMPTY_SECS
     }
@@ -901,7 +900,7 @@ impl Db {
         if self.ephemeral.discord_map.is_none() {
             return;
         }
-        let interval = periodic_refresh_interval_secs(mission_has_players);
+        let interval = periodic_refresh_interval_secs(&self.ephemeral.cfg.discord_map, mission_has_players);
         self.ephemeral.discord_map_periodic_due = Some(from + Duration::seconds(interval));
     }
 
@@ -909,7 +908,10 @@ impl Db {
         if self.ephemeral.discord_map.is_none() {
             return;
         }
-        let next = ts + Duration::seconds(periodic_refresh_interval_secs(mission_has_players));
+        let next = ts + Duration::seconds(periodic_refresh_interval_secs(
+            &self.ephemeral.cfg.discord_map,
+            mission_has_players,
+        ));
         match self.ephemeral.discord_map_periodic_due {
             None => self.ephemeral.discord_map_periodic_due = Some(next),
             Some(due) if mission_has_players && due > next => {
@@ -1044,7 +1046,7 @@ pub fn init_discord_map(
     let writedir = PathBuf::from(Lfs::singleton(lua)?.writedir()?.as_str());
     let virtual_resupply_decay_path = virtual_resupply_decay_png_path(&writedir);
     info!(
-        "discord map: viewport {}x{} bbox [{:.4},{:.4},{:.4},{:.4}] icons={} http_port={}",
+        "discord map: viewport {}x{} bbox [{:.4},{:.4},{:.4},{:.4}] icons={} http_port={} refresh_interval_secs={}",
         viewport.width,
         viewport.height,
         viewport.lon_min(),
@@ -1052,7 +1054,8 @@ pub fn init_discord_map(
         viewport.lon_max(),
         viewport.lat_max(),
         icons.pngs.len(),
-        cfg.http_port
+        cfg.http_port,
+        cfg.refresh_interval_secs()
     );
     db.ephemeral.discord_map = Some(DiscordMapRuntime {
         viewport,

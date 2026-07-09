@@ -1001,6 +1001,11 @@ fn default_discord_map_http_port() -> u16 {
     17841
 }
 
+/// Interactive map HTML refresh when the mission has connected players.
+pub const DISCORD_MAP_REFRESH_INTERVAL_MIN_SECS: u32 = 30;
+pub const DISCORD_MAP_REFRESH_INTERVAL_MAX_SECS: u32 = 300;
+pub const DISCORD_MAP_REFRESH_INTERVAL_DEFAULT_SECS: u32 = 120;
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DiscordMapCfg {
     #[serde(default)]
@@ -1041,6 +1046,9 @@ pub struct DiscordMapCfg {
     pub manual_url: String,
     #[serde(default)]
     pub bugs_report_url: String,
+    /// Periodic interactive map refresh while players are connected (30–300 s; else 120).
+    #[serde(default)]
+    pub refresh_interval_secs: Option<u32>,
 }
 
 impl Default for DiscordMapCfg {
@@ -1061,11 +1069,24 @@ impl Default for DiscordMapCfg {
             stats_url: Default::default(),
             manual_url: Default::default(),
             bugs_report_url: Default::default(),
+            refresh_interval_secs: None,
         }
     }
 }
 
 impl DiscordMapCfg {
+    /// Normalized refresh interval for periodic map posts when players are online.
+    pub fn refresh_interval_secs(&self) -> u32 {
+        match self.refresh_interval_secs {
+            Some(v) if (DISCORD_MAP_REFRESH_INTERVAL_MIN_SECS..=DISCORD_MAP_REFRESH_INTERVAL_MAX_SECS)
+                .contains(&v) =>
+            {
+                v
+            }
+            _ => DISCORD_MAP_REFRESH_INTERVAL_DEFAULT_SECS,
+        }
+    }
+
     /// Interactive map front line requires both discord_map and campaign front_line CFG flags.
     pub fn front_line_map_active(&self, front_line: bool) -> bool {
         self.front_line_in_map && front_line

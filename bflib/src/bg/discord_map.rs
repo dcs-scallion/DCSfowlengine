@@ -1194,7 +1194,7 @@ body{{margin:0;background:#000;color:#686a6e;font-family:"Roboto Condensed",Robo
 .map-icon-hover{{display:block;opacity:0;box-sizing:border-box;pointer-events:none;transition:opacity .15s,filter .15s}}
 .m:hover .map-icon-hover{{opacity:1;filter:brightness(1.1)}}
 .stat-bars{{display:flex;flex-direction:column;gap:3px;margin-top:{stat_bars_gap}px;z-index:1;flex-shrink:0}}
-.health-bar{{height:3px;background:#15161a;flex-shrink:0}}
+.health-bar{{height:3px;background:#000;flex-shrink:0}}
 .health-bar-fill{{height:100%;max-width:100%}}
 @keyframes health-blink{{
   0%,100%{{opacity:1}}
