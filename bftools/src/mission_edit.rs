@@ -589,6 +589,8 @@ const SETTINGS_DYNAMIC_SPAWN_TTDN_ZONE: &str = "SETTINGS-dynamic-spawn-TTDN";
 /// Ground hub ME `dynamicSpawn` after `patch_warehouse_dynamic_spawn_links` (O* prefix keys + `DEP*FARPPAD` for DEP template FARPs).
 const SETTINGS_DYNAMIC_SPAWN_GROUND_ZONE: &str = "SETTINGS-dynamic-spawn";
 const SETTINGS_DYNAMIC_SPAWN_DEP_FARP_KEY: &str = "DEP*FARPPAD";
+const SETTINGS_DYNAMIC_CARGO_GROUND_ZONE: &str = "SETTINGS-dynamic-cargo";
+const SETTINGS_DYNAMIC_CARGO_DEP_FARP_KEY: &str = "DEP*FARPPAD";
 
 fn parse_trigger_slot_quantity(value: &str) -> Result<usize> {
     let t = value.trim();
@@ -4985,6 +4987,12 @@ fn warehouse_dynamic_spawn_enabled(row: &Table) -> bool {
         .unwrap_or(false)
 }
 
+fn warehouse_dynamic_cargo_enabled(row: &Table) -> bool {
+    row.raw_get::<_, Value>("dynamicCargo")
+        .map(|v| lua_value_truthy(&v))
+        .unwrap_or(false)
+}
+
 /// Fowl stock fill / `patch_warehouse_dynamic_spawn_links` require finite export (`Unlimited Liquids` → `unlimitedFuel`).
 fn warehouse_all_unlimited_off(row: &Table) -> bool {
     !["unlimitedFuel", "unlimitedMunitions", "unlimitedAircrafts"]
@@ -5085,16 +5093,50 @@ fn resolved_ground_dynamic_spawn_setting(
     obj_dyn_allow: &[ObjectiveDynAllow],
     warehouse_positions: &HashMap<i64, Vector2>,
 ) -> Option<bool> {
+    resolved_ground_dynamic_flag_setting(
+        SETTINGS_DYNAMIC_SPAWN_DEP_FARP_KEY,
+        wid,
+        is_airports_table,
+        settings,
+        mult_cfg,
+        obj_dyn_allow,
+        warehouse_positions,
+    )
+}
+
+fn resolved_ground_dynamic_cargo_setting(
+    wid: i64,
+    is_airports_table: bool,
+    settings: &HashMap<String, bool>,
+    mult_cfg: &WarehouseStockMultConfig,
+    obj_dyn_allow: &[ObjectiveDynAllow],
+    warehouse_positions: &HashMap<i64, Vector2>,
+) -> Option<bool> {
+    resolved_ground_dynamic_flag_setting(
+        SETTINGS_DYNAMIC_CARGO_DEP_FARP_KEY,
+        wid,
+        is_airports_table,
+        settings,
+        mult_cfg,
+        obj_dyn_allow,
+        warehouse_positions,
+    )
+}
+
+fn resolved_ground_dynamic_flag_setting(
+    dep_farp_key: &str,
+    wid: i64,
+    is_airports_table: bool,
+    settings: &HashMap<String, bool>,
+    mult_cfg: &WarehouseStockMultConfig,
+    obj_dyn_allow: &[ObjectiveDynAllow],
+    warehouse_positions: &HashMap<i64, Vector2>,
+) -> Option<bool> {
     if mult_cfg.naval_warehouse_ids.contains(&wid) {
         return None;
     }
     if mult_cfg.dep_farp_warehouse_ids.contains(&wid) {
-        return Some(
-            settings
-                .get(SETTINGS_DYNAMIC_SPAWN_DEP_FARP_KEY)
-                .copied()
-                .unwrap_or(false),
-        );
+        return Some(settings.get(dep_farp_key).copied().unwrap_or(false));
     }
     let obj = objective_dyn_allow_for_spawn(wid, is_airports_table, obj_dyn_allow, warehouse_positions)?;
     let key = spawn_settings_o_zone_prefix(obj.zone_name.as_str());
@@ -5140,6 +5182,50 @@ fn apply_settings_dynamic_spawn_ground_flags(
                 continue;
             }
             wh.raw_set("dynamicSpawn", enabled)?;
+        }
+    }
+    Ok(())
+}
+
+fn apply_settings_dynamic_cargo_ground_flags(
+    base: &LoadedMiz,
+    warehouses_root: &Table<'static>,
+    mult_cfg: &WarehouseStockMultConfig,
+    obj_dyn_allow: &[ObjectiveDynAllow],
+    warehouse_positions: &HashMap<i64, Vector2>,
+) -> Result<()> {
+    let settings =
+        VehicleTemplates::load_zone_creation_settings(base, SETTINGS_DYNAMIC_CARGO_GROUND_ZONE)?;
+    validate_settings_dynamic_spawn_ground_keys(&settings)?;
+    if settings.is_empty() {
+        warn!(
+            "{} zone missing or has no valid bool properties — objective warehouses keep ME dynamicCargo (typically false until zone is added)",
+            SETTINGS_DYNAMIC_CARGO_GROUND_ZONE
+        );
+    }
+    for (is_airports, tbl_name) in [(true, "airports"), (false, "warehouses")] {
+        let Ok(tbl) = warehouses_root.raw_get::<_, Table>(tbl_name) else {
+            continue;
+        };
+        for pair in tbl.clone().pairs::<Value, Table>() {
+            let (k, wh) = pair?;
+            let Some(wid) = warehouse_lua_key_i64(k) else {
+                continue;
+            };
+            let Some(enabled) = resolved_ground_dynamic_cargo_setting(
+                wid,
+                is_airports,
+                &settings,
+                mult_cfg,
+                obj_dyn_allow,
+                warehouse_positions,
+            ) else {
+                continue;
+            };
+            if !warehouse_all_unlimited_off(&wh) {
+                continue;
+            }
+            wh.raw_set("dynamicCargo", enabled)?;
         }
     }
     Ok(())
@@ -10116,6 +10202,79 @@ fn warn_airbase_objective_bindings_follow_up_summary(
     );
 }
 
+fn objective_zone_counts_as_stock_warehouse(zone_name: &str) -> bool {
+    zone_name.starts_with('O')
+        && zone_name.len() >= 4
+        && zone_name.as_bytes().get(1) != Some(&b'P')
+        && zone_name.as_bytes().get(2) != Some(&b'R')
+}
+
+struct ObjectiveWarehouseDynamicAudit {
+    missing_dynamic_spawn: Vec<StdString>,
+    missing_dynamic_cargo: Vec<StdString>,
+}
+
+fn audit_objective_warehouse_dynamic_flags(
+    base: &LoadedMiz,
+    obj_dyn_allow: &[ObjectiveDynAllow],
+) -> Result<ObjectiveWarehouseDynamicAudit> {
+    let mut missing_dynamic_spawn = Vec::new();
+    let mut missing_dynamic_cargo = Vec::new();
+    for allow in obj_dyn_allow {
+        let zone_name = allow.zone_name.as_str();
+        if !objective_zone_counts_as_stock_warehouse(zone_name) {
+            continue;
+        }
+        let Some(resolved) = resolve_objective_warehouse(base, allow)? else {
+            continue;
+        };
+        if !warehouse_all_unlimited_off(&resolved.row) {
+            continue;
+        }
+        if !warehouse_dynamic_spawn_enabled(&resolved.row) {
+            missing_dynamic_spawn.push(allow.zone_name.clone());
+        }
+        if !warehouse_dynamic_cargo_enabled(&resolved.row) {
+            missing_dynamic_cargo.push(allow.zone_name.clone());
+        }
+    }
+    missing_dynamic_spawn.sort_unstable();
+    missing_dynamic_spawn.dedup();
+    missing_dynamic_cargo.sort_unstable();
+    missing_dynamic_cargo.dedup();
+    Ok(ObjectiveWarehouseDynamicAudit {
+        missing_dynamic_spawn,
+        missing_dynamic_cargo,
+    })
+}
+
+fn warn_objective_warehouse_dynamic_flags_summary(
+    spawn_audit: &ObjectiveWarehouseDynamicAudit,
+    cargo_audit: &ObjectiveWarehouseDynamicAudit,
+) {
+    if spawn_audit.missing_dynamic_spawn.is_empty() && cargo_audit.missing_dynamic_cargo.is_empty() {
+        return;
+    }
+    warn!(
+        "======================================================================"
+    );
+    if !spawn_audit.missing_dynamic_spawn.is_empty() {
+        warn!(
+            "FowlTools WARN: objective warehouse(s) without dynamic slotting (ME dynamicSpawn=false before SETTINGS-dynamic-spawn apply): {:?}",
+            spawn_audit.missing_dynamic_spawn
+        );
+    }
+    if !cargo_audit.missing_dynamic_cargo.is_empty() {
+        warn!(
+            "FowlTools WARN: objective warehouse(s) without dynamic cargo (ME dynamicCargo=false; add SETTINGS-dynamic-cargo with OAB/OLO/OFO keys or enable in ME): {:?}",
+            cargo_audit.missing_dynamic_cargo
+        );
+    }
+    warn!(
+        "======================================================================"
+    );
+}
+
 /// Wire `linkDynTempl` to emitted dynamic template group ids (`zzDT-*`, `dynSpawnTemplate`).
 /// Scales BINVENTORY/RINVENTORY `initialAmount` like Fowl `WarehouseConfig::capacity`
 /// (airport hub vs airbase; `warehouses` naval vs FOB vs airbase).
@@ -13159,6 +13318,8 @@ pub fn run(cfg: &MizCmd) -> Result<()> {
 
     let mut warehouse_bundle = warehouse_bundle;
     let mut built_production_inventory: Option<(Table<'static>, Table<'static>)> = None;
+    let mut objective_warehouse_dynamic_spawn_audit: Option<ObjectiveWarehouseDynamicAudit> = None;
+    let mut objective_warehouse_dynamic_cargo_audit: Option<ObjectiveWarehouseDynamicAudit> = None;
     let mut fowl_from_warehouse = if let Some(wb) = warehouse_bundle.as_mut() {
         let bridge_gen = weapon_bridge_map.as_ref().map(|b| (&vehicle_templates, b));
         let (export, inventory_aircraft_orphans_cleared, built_blue, built_red) = wb
@@ -13335,6 +13496,10 @@ pub fn run(cfg: &MizCmd) -> Result<()> {
             &wb.template.red_inventory,
         )
         .context("applying B/REXTRAFUEL objective extra liquid fill")?;
+        objective_warehouse_dynamic_spawn_audit = Some(
+            audit_objective_warehouse_dynamic_flags(&base, &obj_dyn_allow)
+                .context("auditing objective dynamicSpawn before SETTINGS-dynamic-spawn apply")?,
+        );
         apply_settings_dynamic_spawn_ground_flags(
             &base,
             &base.warehouses,
@@ -13343,6 +13508,18 @@ pub fn run(cfg: &MizCmd) -> Result<()> {
             &warehouse_positions,
         )
         .context("applying SETTINGS-dynamic-spawn ground dynamicSpawn flags")?;
+        apply_settings_dynamic_cargo_ground_flags(
+            &base,
+            &base.warehouses,
+            &mult_cfg,
+            &obj_dyn_allow,
+            &warehouse_positions,
+        )
+        .context("applying SETTINGS-dynamic-cargo ground dynamicCargo flags")?;
+        objective_warehouse_dynamic_cargo_audit = Some(
+            audit_objective_warehouse_dynamic_flags(&base, &obj_dyn_allow)
+                .context("auditing objective dynamicCargo after SETTINGS-dynamic-cargo apply")?,
+        );
         apply_settings_dynamic_spawn_ttdn_naval_flags(
             &base,
             &base.warehouses,
@@ -13541,5 +13718,11 @@ pub fn run(cfg: &MizCmd) -> Result<()> {
         invalid_airbase.as_slice(),
         unresolved_surprising.as_slice(),
     );
+    if let (Some(spawn_audit), Some(cargo_audit)) = (
+        objective_warehouse_dynamic_spawn_audit.as_ref(),
+        objective_warehouse_dynamic_cargo_audit.as_ref(),
+    ) {
+        warn_objective_warehouse_dynamic_flags_summary(spawn_audit, cargo_audit);
+    }
     Ok(())
 }
