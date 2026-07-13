@@ -265,7 +265,7 @@
   "crate_load_distance": 50,
   "crate_spread": 500,
   "artillery_mission_range": 70000,
-  "calcm_mission": true,
+  "calcm_mission": false,
   "calcm_mission_range": 600000,
   "lock_sides": false,
   "side_switches": 1,

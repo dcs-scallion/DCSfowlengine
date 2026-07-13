@@ -712,7 +712,12 @@ fn run_jtac_command(
             snd: code,
             trd: ucid,
         };
-        menu::jtac::jtac_set_code(lua, arg)?
+        if let Err(e) = menu::jtac::jtac_set_full_code(lua, arg) {
+            ctx.db
+                .ephemeral
+                .msgs()
+                .send(MsgTyp::Chat(Some(id)), format_compact!("{e:#}"));
+        }
     } else if let Some(arty) = cmd.strip_prefix("arty ") {
         if let Some((aid, n)) = arty.split_once(" ") {
             let aids: SmallVec<[GroupId; 8]> = match aid.parse::<GroupId>() {

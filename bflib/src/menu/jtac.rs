@@ -421,12 +421,25 @@ pub fn jtac_set_code(lua: MizLua, arg: ArgTriple<JtId, u16, Ucid>) -> Result<()>
     ctx.jtac
         .set_code_part(lua, &arg.fst, arg.snd)
         .context("setting jtac laser code")?;
-    let jtac = get_jtac_mut(&mut ctx.jtac, &arg.fst)?;
-    let (near, name) = change_info(jtac, &ctx.db, &arg.trd);
+    jtac_code_changed_panel(lua, arg.fst, arg.trd)
+}
+
+pub fn jtac_set_full_code(lua: MizLua, arg: ArgTriple<JtId, u16, Ucid>) -> Result<()> {
+    let ctx = unsafe { Context::get_mut() };
+    ctx.jtac
+        .set_full_code(lua, &arg.fst, arg.snd)
+        .context("setting jtac laser code")?;
+    jtac_code_changed_panel(lua, arg.fst, arg.trd)
+}
+
+fn jtac_code_changed_panel(_lua: MizLua, jtid: JtId, ucid: Ucid) -> Result<()> {
+    let ctx = unsafe { Context::get_mut() };
+    let jtac = get_jtac_mut(&mut ctx.jtac, &jtid)?;
+    let (near, name) = change_info(jtac, &ctx.db, &ucid);
     let msg = format_compact!(
         "JTAC CODE CHANGED TO {}\njtac {} near {}\nchanged by {}",
         jtac.code(),
-        arg.fst,
+        jtid,
         near,
         name
     );

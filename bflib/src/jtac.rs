@@ -556,6 +556,18 @@ impl Jtac {
             let c = self.code / 10;
             self.code = 10 * c + code_part;
         }
+        self.apply_code(lua)
+    }
+
+    fn set_full_code(&mut self, lua: MizLua, code: u16) -> Result<()> {
+        if !(1111..=1788).contains(&code) {
+            bail!("laser code {code} out of range 1111-1788");
+        }
+        self.code = code;
+        self.apply_code(lua)
+    }
+
+    fn apply_code(&mut self, lua: MizLua) -> Result<()> {
         if let Some(target) = &self.target {
             let spot = Spot::get_instance(lua, &target.spot).context("getting laser spot")?;
             spot.set_code(self.code).context("setting laser code")?;
@@ -1346,6 +1358,18 @@ impl Jtacs {
         let oid = jt.location.oid;
         let side = jt.side;
         jt.set_code(lua, code_part)?;
+        let code = jt.code;
+        Self::remove_code_by_location(&mut self.code_by_location, side, oid, prev_code, *gid);
+        Self::add_code_by_location(&mut self.code_by_location, side, oid, code, *gid);
+        Ok(())
+    }
+
+    pub fn set_full_code(&mut self, lua: MizLua, gid: &JtId, code: u16) -> Result<()> {
+        let jt = self.get_mut(gid)?;
+        let prev_code = jt.code;
+        let oid = jt.location.oid;
+        let side = jt.side;
+        jt.set_full_code(lua, code)?;
         let code = jt.code;
         Self::remove_code_by_location(&mut self.code_by_location, side, oid, prev_code, *gid);
         Self::add_code_by_location(&mut self.code_by_location, side, oid, code, *gid);
