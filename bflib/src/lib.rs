@@ -25,6 +25,7 @@ mod landcache;
 mod menu;
 mod msgq;
 mod shots;
+mod sounds;
 mod spawnctx;
 
 extern crate nalgebra as na;
@@ -1068,7 +1069,9 @@ fn on_event(lua: MizLua, ev: Event) -> Result<()> {
                                 .get_slot_info(&slot)
                                 .and_then(|sifo| ctx.db.ephemeral.cfg.life_types.get(&sifo.typ))
                                 .copied();
-                            if let Err(e) = message_life(ctx, &slot, typ, "life taken\n") {
+                            if let Err(e) =
+                                message_life(ctx, lua, &slot, typ, "life taken\n")
+                            {
                                 error!("could not display life taken message {:?}", e)
                             }
                         }
@@ -1131,6 +1134,7 @@ fn on_event(lua: MizLua, ev: Event) -> Result<()> {
                                 }
                             }
                         }
+                        ctx.db.play_sound_player(lua, "life_return", &slot);
                         if let Some((ucid, slot)) = deslot {
                             ctx.db.player_deslot_slot(&ucid, &slot);
                         }
@@ -1338,7 +1342,7 @@ fn on_event(lua: MizLua, ev: Event) -> Result<()> {
                                 mark_airborne_voluntary_eject(ctx, ucid);
                             }
                             if let Err(e) =
-                                message_life(ctx, &slot, Some(typ), "life taken\n")
+                                message_life(ctx, lua, &slot, Some(typ), "life taken\n")
                             {
                                 error!("could not display life taken message {:?}", e)
                             }
@@ -1543,6 +1547,7 @@ fn lives(
 
 fn message_life(
     ctx: &mut Context,
+    lua: MizLua,
     slot: &SlotId,
     typ: Option<LifeType>,
     msg: &str,
@@ -1558,7 +1563,12 @@ fn message_life(
     if let Ok(lives) = lives(&mut ctx.db, &ucid, typ, true, LivesFormat::Panel) {
         msg.push_str(&lives)
     }
-    ctx.db.ephemeral.msgs().panel_to_unit(10, false, uid, msg);
+    ctx.db.ephemeral.msgs().panel_to_unit(10, false, uid, msg.clone());
+    if msg.starts_with("life taken") {
+        ctx.db.play_sound_player(lua, "life_taken", slot);
+    } else if msg.starts_with("life returned") {
+        ctx.db.play_sound_player(lua, "life_return", slot);
+    }
     Ok(())
 }
 
@@ -1666,6 +1676,7 @@ fn check_auto_shutdown(
                 false,
                 "The server will restart in 30 minutes",
             );
+            ctx.db.play_sound_all(lua, "warning_4");
         }
         if asd.when - now <= Duration::minutes(10) && !asd.ten_minute_warning {
             asd.ten_minute_warning = true;
@@ -1674,6 +1685,7 @@ fn check_auto_shutdown(
                 true,
                 "The server will restart in 10 minutes",
             );
+            ctx.db.play_sound_all(lua, "warning_3");
         }
         if asd.when - now <= Duration::minutes(5) && !asd.five_minute_warning {
             asd.five_minute_warning = true;
@@ -1681,7 +1693,8 @@ fn check_auto_shutdown(
                 60,
                 true,
                 "The server will restart in 5 minutes",
-            )
+            );
+            ctx.db.play_sound_all(lua, "warning_2");
         }
         if asd.when - now <= Duration::minutes(1) && !asd.one_minute_warning {
             asd.one_minute_warning = true;
@@ -1689,7 +1702,8 @@ fn check_auto_shutdown(
                 60,
                 true,
                 "The server will restart in one minute",
-            )
+            );
+            ctx.db.play_sound_all(lua, "warning_1");
         }
         if now > asd.when {
             return admin::admin_shutdown(ctx, lua, None);
@@ -1759,6 +1773,7 @@ fn handle_player_leave_unit_no_initiator(
                         }
                     }
                 }
+                ctx.db.play_sound_player(lua, "life_return", &slot);
                 if let Some((ucid, slot)) = deslot {
                     ctx.db.player_deslot_slot(&ucid, &slot);
                 }

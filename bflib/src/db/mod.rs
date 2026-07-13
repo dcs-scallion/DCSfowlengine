@@ -226,6 +226,14 @@ impl Db {
         )
     }
 
+    pub fn play_sound_player(&self, lua: MizLua, key: &str, slot: &dcso3::net::SlotId) {
+        crate::sounds::play_player_export(&self.ephemeral.fowl_miz_export, lua, key, slot);
+    }
+
+    pub fn play_sound_all(&self, lua: MizLua, key: &str) {
+        crate::sounds::play_all_export(&self.ephemeral.fowl_miz_export, lua, key);
+    }
+
     pub fn objective_matches_chat_name(&self, obj: &objective::Objective, query: &str) -> bool {
         aliases::objective_matches_chat_name(
             obj,

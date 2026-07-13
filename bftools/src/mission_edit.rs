@@ -9375,7 +9375,7 @@ impl WarehouseTemplate {
         }
         Ok((
             bfprotocols::fowl_miz_export::FowlMizExport {
-                schema_version: 6,
+                schema_version: 7,
                 weapon_bridge_used,
                 blue_weapon_ws: blue_weapon_export,
                 red_weapon_ws: red_weapon_export,
@@ -9385,6 +9385,8 @@ impl WarehouseTemplate {
                 objective_stock: HashMap::new(),
                 ai_template_airframes: HashMap::new(),
                 dep_farp_static_slots: DepFarpStaticSlots::default(),
+                sounds_player: HashMap::new(),
+                sounds_all: HashMap::new(),
             },
             inventory_aircraft_orphans_cleared,
             built_production_blue,
@@ -14276,6 +14278,17 @@ pub fn run(cfg: &MizCmd) -> Result<()> {
     }
     crate::discord_map_icons::embed_into_miz(&base.miz.root, &mut base.miz.files, &cfg.base)
         .context("embedding discord map icons into mission")?;
+    if let Some(campaign_cfg) = cfg.campaign_cfg.as_ref() {
+        let (player, all) = crate::sounds::embed_into_miz(
+            &base.miz.root,
+            &mut base.miz.files,
+            &cfg.base,
+            campaign_cfg,
+        )
+        .context("embedding campaign sounds into mission")?;
+        fowl_from_warehouse.sounds_player = player;
+        fowl_from_warehouse.sounds_all = all;
+    }
     info!("saving finalized mission to {:?}", cfg.output);
     base.miz.pack(&cfg.output).context("repacking mission")?;
     fowl_from_warehouse.dep_farp_static_slots = dep_farp_static_slots;

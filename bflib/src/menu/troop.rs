@@ -59,7 +59,8 @@ fn load_troops(lua: MizLua, arg: ArgTuple<GroupId, String>) -> Result<()> {
                 tr.name,
                 enforce
             );
-            ctx.db.ephemeral.msgs().panel_to_side(10, false, side, msg)
+            ctx.db.ephemeral.msgs().panel_to_side(10, false, side, msg);
+            ctx.db.play_sound_player(lua, "troop_load_unload", &slot);
         }
         Err(e) => {
             ctx.db
@@ -84,7 +85,8 @@ fn unload_troops(lua: MizLua, gid: GroupId) -> Result<()> {
             }
             super::jtac::init_jtac_menu_for_slot(ctx, lua, &slot)?;
             let msg = format_compact!("{player} dropped {} troops into the field", tr.name);
-            ctx.db.ephemeral.msgs().panel_to_side(10, false, side, msg)
+            ctx.db.ephemeral.msgs().panel_to_side(10, false, side, msg);
+            ctx.db.play_sound_player(lua, "troop_load_unload", &slot);
         }
         Err(e) => ctx
             .db
@@ -102,7 +104,8 @@ fn extract_troops(lua: MizLua, gid: GroupId) -> Result<()> {
         Ok(tr) => {
             let player = player_name(&ctx.db, &slot);
             let msg = format_compact!("{player} extracted {} troops from the field", tr.name);
-            ctx.db.ephemeral.msgs().panel_to_side(10, false, side, msg)
+            ctx.db.ephemeral.msgs().panel_to_side(10, false, side, msg);
+            ctx.db.play_sound_player(lua, "troop_load_extract", &slot);
         }
         Err(e) => ctx
             .db
@@ -120,7 +123,8 @@ fn return_troops(lua: MizLua, gid: GroupId) -> Result<()> {
         Ok(tr) => {
             let player = player_name(&ctx.db, &slot);
             let msg = format_compact!("{player} returned {} troops", tr.name);
-            ctx.db.ephemeral.msgs().panel_to_side(10, false, side, msg)
+            ctx.db.ephemeral.msgs().panel_to_side(10, false, side, msg);
+            ctx.db.play_sound_player(lua, "troop_load_return", &slot);
         }
         Err(e) => ctx
             .db
@@ -157,7 +161,7 @@ pub(super) fn add_troops_menu_for_group(
             group,
             "List".into(),
             Some(root.clone()),
-            cargo::list_current_cargo,
+            cargo::list_troop_cargo,
             group,
         )?;
         mc.add_command_for_group(

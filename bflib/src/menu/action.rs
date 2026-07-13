@@ -38,6 +38,7 @@ fn run_action(
     cmd: ActionCmd,
 ) -> Result<()> {
     let spctx = SpawnCtx::new(lua)?;
+    let deploy = matches!(cmd.action.kind, ActionKind::Deployable(_));
     ctx.db.start_action(
         lua,
         perf,
@@ -48,6 +49,9 @@ fn run_action(
         Some(ucid),
         cmd,
     )?;
+    if deploy {
+        ctx.db.play_sound_player(lua, "action_confirm", &slot);
+    }
     if let Some(mark) = mark {
         ctx.db.ephemeral.msgs().delete_mark(mark);
     }

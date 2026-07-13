@@ -64,7 +64,7 @@ fn jtac_root_submenu(
     mc.add_submenu_for_group(mizgid, label.into(), Some(root.clone()))
 }
 
-pub fn jtac_status(_: MizLua, arg: ArgTuple<Option<Ucid>, JtId>) -> Result<()> {
+pub fn jtac_status(lua: MizLua, arg: ArgTuple<Option<Ucid>, JtId>) -> Result<()> {
     let ctx = unsafe { Context::get_mut() };
     let jtac = ctx
         .jtac
@@ -79,10 +79,20 @@ pub fn jtac_status(_: MizLua, arg: ArgTuple<Option<Ucid>, JtId>) -> Result<()> {
             .ephemeral
             .msgs()
             .panel_to_side(10, false, jtac.side(), msg),
-        Some(ucid) => ctx
-            .db
-            .ephemeral
-            .panel_to_player(&ctx.db.persisted, 10, ucid, msg),
+        Some(ucid) => {
+            ctx.db
+                .ephemeral
+                .panel_to_player(&ctx.db.persisted, 10, ucid, msg);
+            if let Some((slot, _)) = ctx
+                .db
+                .persisted
+                .players
+                .get(ucid)
+                .and_then(|p| p.current_slot.as_ref())
+            {
+                ctx.db.play_sound_player(lua, "jtac_status", slot);
+            }
+        }
     }
     Ok(())
 }

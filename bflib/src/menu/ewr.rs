@@ -65,6 +65,7 @@ fn ewr_report(lua: MizLua, gid: GroupId) -> Result<()> {
         .ephemeral
         .msgs()
         .panel_to_group(ewr::EWR_PANEL_DISPLAY_SECS, false, gid, report);
+    ctx.db.play_sound_player(lua, "ewr_report", &slot);
     Ok(())
 }
 
@@ -89,6 +90,7 @@ fn friendly_ewr_report(lua: MizLua, gid: GroupId) -> Result<()> {
         .ephemeral
         .msgs()
         .panel_to_group(ewr::EWR_PANEL_DISPLAY_SECS, false, gid, report);
+    ctx.db.play_sound_player(lua, "ewr_report", &slot);
     Ok(())
 }
 

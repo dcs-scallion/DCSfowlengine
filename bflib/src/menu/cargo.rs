@@ -17,7 +17,7 @@ for more details.
 use super::{ArgTuple, player_name, slot_for_group};
 use crate::{
     Context,
-    db::cargo::{Cargo, Oldest, SlotStats},
+    db::cargo::{Cargo, Oldest, SlotStats, Unpakistan},
 };
 use anyhow::{Context as ErrContext, Result, anyhow};
 use bfprotocols::cfg::{Cfg, LimitEnforceTyp};
@@ -37,6 +37,16 @@ fn unpakistan(lua: MizLua, gid: GroupId) -> Result<()> {
     let (side, slot) = slot_for_group(lua, ctx, &gid).context("getting slot for group")?;
     match ctx.db.unpakistan(lua, &ctx.idx, &slot) {
         Ok(unpakistan) => {
+            let sound_key = match &unpakistan {
+                Unpakistan::Unpacked(_)
+                | Unpakistan::UnpackedFarp(_)
+                | Unpakistan::TransferedSupplies(_, _) => "crate_unpack",
+                Unpakistan::Repaired(_)
+                | Unpakistan::RepairedBase(_, _)
+                | Unpakistan::RepairedProduction(_, _)
+                | Unpakistan::RepairedStaticQueue(_, _, _) => "repair",
+            };
+            ctx.db.play_sound_player(lua, sound_key, &slot);
             let player = player_name(&ctx.db, &slot);
             let msg = format_compact!("{player} {unpakistan}");
             ctx.db.ephemeral.msgs().panel_to_side(10, false, side, msg);
@@ -95,7 +105,8 @@ fn load_crate(lua: MizLua, gid: GroupId) -> Result<()> {
                 dep_name,
                 enforce
             );
-            ctx.db.ephemeral.msgs().panel_to_group(10, false, gid, msg)
+            ctx.db.ephemeral.msgs().panel_to_group(10, false, gid, msg);
+            ctx.db.play_sound_player(lua, "crate_load", &slot);
         }
         Err(e) => {
             let msg = format_compact!("crate could not be loaded: {}", e);
@@ -111,7 +122,8 @@ fn unload_crate(lua: MizLua, gid: GroupId) -> Result<()> {
     match ctx.db.unload_crate(lua, &ctx.idx, &slot) {
         Ok(cr) => {
             let msg = format_compact!("{} crate unloaded", cr.name);
-            ctx.db.ephemeral.msgs().panel_to_group(10, false, gid, msg)
+            ctx.db.ephemeral.msgs().panel_to_group(10, false, gid, msg);
+            ctx.db.play_sound_player(lua, "crate_unload", &slot);
         }
         Err(e) => {
             let msg = format_compact!("{}", e);
@@ -178,10 +190,27 @@ pub(crate) fn list_cargo_for_slot(ctx: &mut Context, slot: &SlotId) -> Result<()
     Ok(())
 }
 
+pub(crate) fn list_cargo_for_slot_with_sound(
+    ctx: &mut Context,
+    lua: MizLua,
+    slot: &dcso3::net::SlotId,
+    sound_key: &str,
+) -> Result<()> {
+    list_cargo_for_slot(ctx, slot)?;
+    ctx.db.play_sound_player(lua, sound_key, slot);
+    Ok(())
+}
+
 pub fn list_current_cargo(lua: MizLua, gid: GroupId) -> Result<()> {
     let ctx = unsafe { Context::get_mut() };
     let (_side, slot) = slot_for_group(lua, ctx, &gid).context("getting slot for group")?;
-    list_cargo_for_slot(ctx, &slot)
+    list_cargo_for_slot_with_sound(ctx, lua, &slot, "cargo_list")
+}
+
+pub fn list_troop_cargo(lua: MizLua, gid: GroupId) -> Result<()> {
+    let ctx = unsafe { Context::get_mut() };
+    let (_side, slot) = slot_for_group(lua, ctx, &gid).context("getting slot for group")?;
+    list_cargo_for_slot_with_sound(ctx, lua, &slot, "troop_load_list")
 }
 
 fn list_nearby_crates(lua: MizLua, gid: GroupId) -> Result<()> {
@@ -221,6 +250,8 @@ fn destroy_nearby_crate(lua: MizLua, gid: GroupId) -> Result<()> {
             .ephemeral
             .msgs()
             .panel_to_group(10, false, gid, format_compact!("{}", e))
+    } else {
+        ctx.db.play_sound_player(lua, "crate_destroy", &slot);
     }
     Ok(())
 }
@@ -236,6 +267,7 @@ fn spawn_crate(lua: MizLua, arg: ArgTuple<GroupId, String>) -> Result<()> {
                 .panel_to_group(10, false, arg.fst, format_compact!("{e}"))
         }
         Ok(st) => {
+            ctx.db.play_sound_player(lua, "crate_drop", &slot);
             if let Some(max_crates) = ctx.db.ephemeral.cfg.max_crates {
                 let (n, oldest) = ctx
                     .db

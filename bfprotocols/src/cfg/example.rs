@@ -2133,6 +2133,8 @@ impl Default for Cfg {
             ewr_min_ralt_m: None,
             ewr_antenna_height_m: 10,
             ewr_aspect_hysteresis_deg: 5.,
+            sounds_player: FxHashMap::default(),
+            sounds_all: FxHashMap::default(),
             discord_map: DiscordMapCfg::default(),
             debugging_online_red_players: 0,
             debugging_online_blue_players: 0,

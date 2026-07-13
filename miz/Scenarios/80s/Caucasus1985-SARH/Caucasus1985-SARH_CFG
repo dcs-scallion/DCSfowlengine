@@ -18,6 +18,29 @@
     "jtac": "AlwaysAllowed",
     "ca": "AlwaysAllowed"
   },
+  "sounds_player": {
+    "crate_drop": "assets\\sounds\\crate-drop.ogg",
+    "crate_load": "assets\\sounds\\crate-drop.ogg",
+    "crate_unload": "assets\\sounds\\crate-drop.ogg",
+    "crate_unpack": "assets\\sounds\\crate-drop.ogg",
+    "crate_destroy": "assets\\sounds\\crate-drop.ogg",
+    "cargo_list": "assets\\sounds\\copy-that.ogg",
+    "troop_load_unload": "assets\\sounds\\crate-drop.ogg",
+    "troop_load_extract": "assets\\sounds\\crate-drop.ogg",
+    "troop_load_list": "assets\\sounds\\crate-drop.ogg",
+    "troop_load_return": "assets\\sounds\\crate-drop.ogg",
+    "repair": "assets\\sounds\\crate-drop.ogg",
+    "action_confirm": "assets\\sounds\\crate-drop.ogg",
+    "jtac_status": "assets\\sounds\\crate-drop.ogg",
+    "life_taken": "assets\\sounds\\crate-drop.ogg",
+    "life_return": "assets\\sounds\\crate-drop.ogg"
+  },
+  "sounds_all": {
+    "warning_4": "assets\\sounds\\attention-30.ogg",
+    "warning_3": "assets\\sounds\\attention-10.ogg",
+    "warning_2": "assets\\sounds\\attention-5.ogg",
+    "warning_1": "assets\\sounds\\attention-1.ogg"
+  },
   "discord_map": {
     "enabled": false,
     "refresh_interval_secs":90,

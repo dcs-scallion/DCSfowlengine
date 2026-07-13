@@ -7,6 +7,7 @@ mod campaign_cfg;
 mod discord_map_icons;
 mod mission_edit;
 mod payload_allowlist;
+mod sounds;
 mod weapon_bridge;
 
 #[derive(Args, Clone, Debug, Serialize)]

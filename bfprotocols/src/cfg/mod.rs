@@ -1526,6 +1526,12 @@ pub struct Cfg {
     /// Aspect bucket hysteresis (degrees). Lower = faster HOT/FLANK/BEAM/DRAG/COLD transitions; 0 = off.
     #[serde(default = "default_ewr_aspect_hysteresis_deg")]
     pub ewr_aspect_hysteresis_deg: f64,
+    /// Source paths for per-player UI sounds (embedded into `.miz` by FowlTools).
+    #[serde(default)]
+    pub sounds_player: FxHashMap<String, String>,
+    /// Source paths for sounds played to all players (e.g. restart warnings).
+    #[serde(default)]
+    pub sounds_all: FxHashMap<String, String>,
     #[serde(default)]
     pub discord_map: DiscordMapCfg,
     /// Test-only: extra Red headcount for `balancing_point_gain` (not Discord map).

@@ -142,16 +142,22 @@ pub struct FowlMizExport {
     /// Ground DEP FARP static client slot blueprints (spawn at deploy from hidden templates).
     #[serde(default)]
     pub dep_farp_static_slots: DepFarpStaticSlots,
+    /// Resolved `.miz` paths for [`crate::cfg::Cfg::sounds_player`] (forward slashes).
+    #[serde(default)]
+    pub sounds_player: HashMap<String, String>,
+    /// Resolved `.miz` paths for [`crate::cfg::Cfg::sounds_all`].
+    #[serde(default)]
+    pub sounds_all: HashMap<String, String>,
 }
 
 fn default_schema_version() -> u32 {
-    6
+    7
 }
 
 impl Default for FowlMizExport {
     fn default() -> Self {
         Self {
-            schema_version: 6,
+            schema_version: 7,
             weapon_bridge_used: false,
             blue_weapon_ws: Vec::new(),
             red_weapon_ws: Vec::new(),
@@ -161,6 +167,8 @@ impl Default for FowlMizExport {
             objective_stock: HashMap::new(),
             ai_template_airframes: HashMap::new(),
             dep_farp_static_slots: DepFarpStaticSlots::default(),
+            sounds_player: HashMap::new(),
+            sounds_all: HashMap::new(),
         }
     }
 }
