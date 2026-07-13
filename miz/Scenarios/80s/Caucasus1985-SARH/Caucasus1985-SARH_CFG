@@ -25,15 +25,15 @@
     "crate_unpack": "assets\\sounds\\crate-drop.ogg",
     "crate_destroy": "assets\\sounds\\crate-drop.ogg",
     "cargo_list": "assets\\sounds\\copy-that.ogg",
-    "troop_load_unload": "assets\\sounds\\crate-drop.ogg",
-    "troop_load_extract": "assets\\sounds\\crate-drop.ogg",
-    "troop_load_list": "assets\\sounds\\crate-drop.ogg",
-    "troop_load_return": "assets\\sounds\\crate-drop.ogg",
-    "repair": "assets\\sounds\\crate-drop.ogg",
-    "action_confirm": "assets\\sounds\\crate-drop.ogg",
+    "troop_load_unload": "assets\\sounds\\beep-1.ogg",
+    "troop_load_extract": "assets\\sounds\\beep-1.ogg",
+    "troop_load_list": "assets\\sounds\\beep-1.ogg",
+    "troop_load_return": "assets\\sounds\\beep-1.ogg",
+    "repair": "assets\\sounds\\beep-2.ogg",
+    "action_confirm": "assets\\sounds\\copy-that.ogg",
     "jtac_status": "assets\\sounds\\crate-drop.ogg",
-    "life_taken": "assets\\sounds\\crate-drop.ogg",
-    "life_return": "assets\\sounds\\crate-drop.ogg"
+    "life_taken": "assets\\sounds\\life-taken.ogg",
+    "life_return": "assets\\sounds\\life-return.ogg"
   },
   "sounds_all": {
     "warning_4": "assets\\sounds\\attention-30.ogg",

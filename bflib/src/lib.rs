@@ -1073,6 +1073,8 @@ fn on_event(lua: MizLua, ev: Event) -> Result<()> {
                                 message_life(ctx, lua, &slot, typ, "life taken\n")
                             {
                                 error!("could not display life taken message {:?}", e)
+                            } else if let Err(e) = schedule_life_taken_sound(lua, slot) {
+                                error!("could not schedule life taken sound {:?}", e)
                             }
                         }
                         ctx.menu_init_queue.insert(slot);
@@ -1345,6 +1347,8 @@ fn on_event(lua: MizLua, ev: Event) -> Result<()> {
                                 message_life(ctx, lua, &slot, Some(typ), "life taken\n")
                             {
                                 error!("could not display life taken message {:?}", e)
+                            } else {
+                                ctx.db.play_sound_player(lua, "life_taken", &slot);
                             }
                             let _ = menu::cargo::list_cargo_for_slot(ctx, &slot);
                         }
@@ -1545,6 +1549,19 @@ fn lives(
     Ok(msg)
 }
 
+const LIFE_TAKEN_SOUND_DELAY_SECS: f32 = 4.;
+
+fn schedule_life_taken_sound(lua: MizLua, slot: SlotId) -> Result<()> {
+    let timer = Timer::singleton(lua)?;
+    let when = timer.get_time()? + LIFE_TAKEN_SOUND_DELAY_SECS;
+    timer.schedule_function(when, mlua::Value::Nil, move |lua, _, _| {
+        let ctx = unsafe { Context::get_mut() };
+        ctx.db.play_sound_player(lua, "life_taken", &slot);
+        Ok(None)
+    })?;
+    Ok(())
+}
+
 fn message_life(
     ctx: &mut Context,
     lua: MizLua,
@@ -1563,10 +1580,9 @@ fn message_life(
     if let Ok(lives) = lives(&mut ctx.db, &ucid, typ, true, LivesFormat::Panel) {
         msg.push_str(&lives)
     }
-    ctx.db.ephemeral.msgs().panel_to_unit(10, false, uid, msg.clone());
-    if msg.starts_with("life taken") {
-        ctx.db.play_sound_player(lua, "life_taken", slot);
-    } else if msg.starts_with("life returned") {
+    let play_life_return = msg.starts_with("life returned");
+    ctx.db.ephemeral.msgs().panel_to_unit(10, false, uid, msg);
+    if play_life_return {
         ctx.db.play_sound_player(lua, "life_return", slot);
     }
     Ok(())
