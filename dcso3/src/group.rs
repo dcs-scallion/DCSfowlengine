@@ -84,6 +84,10 @@ impl<'lua> Group<'lua> {
         Ok(self.t.call_method("activate", ())?)
     }
 
+    pub fn deactivate(&self) -> Result<()> {
+        Ok(self.t.call_method("deactivate", ())?)
+    }
+
     pub fn get_category(&self) -> Result<GroupCategory> {
         Ok(self.t.call_method("getCategory", ())?)
     }

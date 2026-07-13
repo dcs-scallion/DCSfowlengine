@@ -198,6 +198,14 @@ impl<'lua> Action<'lua> {
         Ok(self.call_function("setAITask", (group, num))?)
     }
 
+    pub fn activate_group(&self, name: String) -> Result<()> {
+        Ok(self.call_function("activateGroup", name)?)
+    }
+
+    pub fn deactivate_group(&self, name: String) -> Result<()> {
+        Ok(self.call_function("deactivateGroup", name)?)
+    }
+
     pub fn explosion(&self, position: LuaVec3, power: f32) -> Result<()> {
         Ok(self.call_function("explosion", (position, power))?)
     }

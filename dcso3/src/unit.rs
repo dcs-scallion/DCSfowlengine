@@ -114,6 +114,10 @@ impl<'lua> Unit<'lua> {
         ))
     }
 
+    pub fn set_position(&self, pos: Position3) -> Result<()> {
+        Ok(self.t.call_method("setPosition", pos)?)
+    }
+
     pub fn get_ground_position(&self) -> Result<LuaVec2> {
         let pos = self.get_point()?;
         Ok(LuaVec2(Vector2::from(na::Vector2::new(pos.0.x, pos.0.z))))

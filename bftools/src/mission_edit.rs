@@ -20,8 +20,8 @@ use anyhow::{bail, Context, Result};
 use bfprotocols::{
     cfg::{ActionKind, Cfg, Deployable, DeployableKind},
     fowl_miz_export::{
-        ObjectiveCoalitionStock, ObjectiveStockByCoalition, ObjectiveStockItem,
-        ObjectiveStockLiquid, ObjectiveWarehouseDefaults,
+        DepFarpStaticSlots, ObjectiveCoalitionStock, ObjectiveStockByCoalition,
+        ObjectiveStockItem, ObjectiveStockLiquid, ObjectiveWarehouseDefaults,
     },
     miz_trigger::{
         fowl_trigger_zone_name_valid, FOWL_TRIGGER_ZONE_EXPECTED_PREFIXES_DISPLAY,
@@ -548,6 +548,549 @@ const INCLUDE_STATIC_SLOT_KEYS: &[&str] = &["include", "include_dyn_slots"];
 /// Property keys for `TTD*` / `TTDN*` dynamic template references (`include_dyn_slots` is canonical;
 /// `include` kept for older missions).
 const INCLUDE_DYNAMIC_SLOT_KEYS: &[&str] = &["include_dyn_slots", "include"];
+
+/// DEP FARP static slot placement (`TSBDEPFARP` / `TSRDEPFARP`), not template zones (`TTS*`).
+const DEP_FARP_STATIC_TS_BLUE: &str = "TSBDEPFARP";
+const DEP_FARP_STATIC_TS_RED: &str = "TSRDEPFARP";
+const DEP_FARP_STATIC_TTS_BLUE: &str = "TTSBlueDepFARP";
+const DEP_FARP_STATIC_TTS_RED: &str = "TTSRedDepFARP";
+
+fn dep_farp_static_side_label(side: Side) -> &'static str {
+    match side {
+        Side::Blue => "Blue",
+        Side::Red => "Red",
+        Side::Neutral => unreachable!(),
+    }
+}
+
+struct DepFarpStaticTsZone {
+    side: Side,
+    ts_name: StdString,
+    center: Vector2,
+}
+
+fn collect_dep_farp_static_ts_zones(base: &LoadedMiz) -> Result<Vec<DepFarpStaticTsZone>> {
+    let mut out = Vec::new();
+    for zone in base.mission.triggers()? {
+        let zone = zone?;
+        let name = zone.name()?;
+        let (side, ts_name) = if name.as_ref() == DEP_FARP_STATIC_TS_BLUE {
+            (Side::Blue, DEP_FARP_STATIC_TS_BLUE)
+        } else if name.as_ref() == DEP_FARP_STATIC_TS_RED {
+            (Side::Red, DEP_FARP_STATIC_TS_RED)
+        } else {
+            continue;
+        };
+        out.push(DepFarpStaticTsZone {
+            side,
+            ts_name: StdString::from(ts_name),
+            center: zone.pos()?,
+        });
+    }
+    Ok(out)
+}
+
+fn dep_farp_static_zone_for_position<'a>(
+    zones: &'a [DepFarpStaticTsZone],
+    side: Side,
+    pos: Vector2,
+    base: &LoadedMiz,
+) -> Result<Option<&'a DepFarpStaticTsZone>> {
+    for z in zones {
+        if z.side != side {
+            continue;
+        }
+        for zone in base.mission.triggers()? {
+            let zone = zone?;
+            if zone.name()?.as_ref() != z.ts_name.as_str() {
+                continue;
+            }
+            if mission_trigger_zone_contains(&zone, pos)? {
+                return Ok(Some(z));
+            }
+        }
+    }
+    Ok(None)
+}
+
+fn is_dep_farp_static_slot_group_name(name: &str) -> bool {
+    name.starts_with(bfprotocols::fowl_miz_export::DEP_FARP_STATIC_SLOT_GROUP_PREFIX)
+}
+
+fn dep_farp_static_slot_pool_size(base: &LoadedMiz, side: Side) -> Result<usize> {
+    let prefix = match side {
+        Side::Blue => "DEPBFARPPAD",
+        Side::Red => "DEPRFARPPAD",
+        Side::Neutral => return Ok(1),
+    };
+    let mut count = 0usize;
+    let coa = base.mission.coalition(side)?;
+    for country in coa.countries()? {
+        let country = country?;
+        for group in vehicle(&country, "static")?
+            .chain(vehicle(&country, "plane")?)
+            .chain(vehicle(&country, "helicopter")?)
+        {
+            let group = group?;
+            let Ok(name) = group.raw_get::<_, String>("name") else {
+                continue;
+            };
+            if name.starts_with(prefix) {
+                count += 1;
+            }
+        }
+    }
+    Ok(count.max(1))
+}
+
+fn clone_dep_farp_static_slot_group(
+    base: &mut LoadedMiz,
+    side: Side,
+    helicopter: bool,
+    src_name: &str,
+    dst_name: &str,
+) -> Result<()> {
+    let lua = unsafe { &*LUA };
+    let idx = base.mission.index()?;
+    let kind = if helicopter {
+        GroupKind::Helicopter
+    } else {
+        GroupKind::Plane
+    };
+    if base
+        .mission
+        .get_group_by_name(&idx, kind, side, &String::from(dst_name))?
+        .is_some()
+    {
+        return Ok(());
+    }
+    let Some(src) = base
+        .mission
+        .get_group_by_name(&idx, kind, side, &String::from(src_name))?
+    else {
+        bail!("missing DEP FARP static slot group {src_name} to clone");
+    };
+    let tmpl: Group<'static> = src.group.deep_clone(lua)?;
+    tmpl.set_name(String::from(dst_name))?;
+    let mut uid = idx.max_uid();
+    let mut gid = idx.max_gid();
+    uid.next();
+    gid.next();
+    tmpl.set_id(gid)?;
+    let n_units = tmpl.units()?.len();
+    let mut unit_ord = 0u32;
+    for u in tmpl.units()? {
+        let u = u?;
+        unit_ord += 1;
+        u.set_id(uid)?;
+        if n_units == 1 {
+            u.set_name(String::from(format_compact!("{dst_name}-1")))?;
+        } else {
+            u.set_name(String::from(format_compact!("{dst_name}-{unit_ord}")))?;
+        }
+        patch_datalink_mission_unit_ids(&u)
+            .with_context(|| format_compact!("clone DEP FARP slot {dst_name}"))?;
+        uid.next();
+    }
+    gid.next();
+    tmpl.raw_set("depFarpSlotTemplate", true)?;
+    tmpl.raw_set("hidden", true)?;
+    tmpl.raw_set("hiddenOnPlanner", true)?;
+    tmpl.raw_set("hiddenOnMFD", true)?;
+    tmpl.raw_set("lateActivation", true)?;
+    patch_dep_farp_static_slot_helipad_parking_group(&tmpl)?;
+    for unit in tmpl.units()? {
+        let unit = unit?;
+        if unit.skill()? != Skill::Client {
+            continue;
+        }
+        unit.set_alt(0.0)?;
+        unit.raw_set("alt_type", "BARO")?;
+        unit.raw_set("speed", DEP_FARP_HELI_PARKING_SPEED)?;
+        unit.raw_remove("helipadId")?;
+        unit.raw_remove("linkUnit")?;
+        unit.raw_remove("airdromeId")?;
+        unit.raw_remove("parking")?;
+        unit.raw_remove("parking_id")?;
+    }
+    let slot_kind = if helicopter {
+        SlotType::Helicopter
+    } else {
+        SlotType::Plane
+    };
+    push_client_air_group_to_cjtf(lua, &base.mission, side, slot_kind, tmpl)?;
+    Ok(())
+}
+
+/// ME heli parking speed on `TakeOffParking` (~150 km/h).
+const DEP_FARP_HELI_PARKING_SPEED: f64 = 41.666_666_666_667;
+
+fn patch_dep_farp_static_slot_helipad_parking(group: &Table) -> Result<()> {
+    let route: Table = group.raw_get("route")?;
+    let points: Table = route.raw_get("points")?;
+    let mut first = true;
+    for point in points.pairs::<Value, Table>() {
+        let point = point?.1;
+        if first {
+            point.raw_set("type", "TakeOffParking")?;
+            point.raw_set("action", "From Parking Area")?;
+            point.raw_set("alt_type", "BARO")?;
+            point.raw_set("alt", 0.0)?;
+            point.raw_set("speed", DEP_FARP_HELI_PARKING_SPEED)?;
+            point.raw_set("speed_locked", true)?;
+            point.raw_set("airdromId", Value::Nil)?;
+            point.raw_set("helipadId", Value::Nil)?;
+            point.raw_set("linkUnit", Value::Nil)?;
+            point.raw_set("parking", Value::Nil)?;
+            first = false;
+        } else {
+            point.raw_set("type", "TurningPoint")?;
+        }
+    }
+    Ok(())
+}
+
+fn patch_dep_farp_static_slot_helipad_parking_group(group: &Group) -> Result<()> {
+    use dcso3::controller::{ActionTyp, AltType, TurnMethod};
+    let route = group.route()?;
+    let mut points: Vec<MissionPoint> = Vec::new();
+    for point in route.points()? {
+        points.push(point?);
+    }
+    if let Some(first) = points.first_mut() {
+        first.typ = PointType::TakeOffParking;
+        first.action = Some(ActionTyp::Air(TurnMethod::FromParkingArea));
+        first.alt_typ = Some(AltType::BARO);
+        first.alt = 0.0;
+        first.speed = DEP_FARP_HELI_PARKING_SPEED;
+        first.speed_locked = Some(true);
+        first.airdrome_id = None;
+        first.helipad = None;
+        first.link_unit = None;
+        first.parking = None;
+    }
+    for point in points.iter_mut().skip(1) {
+        point.typ = PointType::TurningPoint;
+    }
+    route.set_points(points)?;
+    Ok(())
+}
+
+fn patch_dep_farp_static_slot_client_unit(unit: &Table) -> Result<()> {
+    unit.raw_set("alt", 0.0)?;
+    unit.raw_set("alt_type", "BARO")?;
+    unit.raw_set("speed", DEP_FARP_HELI_PARKING_SPEED)?;
+    unit.raw_set("helipadId", Value::Nil)?;
+    unit.raw_set("linkUnit", Value::Nil)?;
+    unit.raw_set("airdromeId", Value::Nil)?;
+    unit.raw_set("parking", Value::Nil)?;
+    unit.raw_set("parking_id", Value::Nil)?;
+    Ok(())
+}
+
+fn apply_dep_farp_static_slot_group_visibility(group: &Table) -> Result<()> {
+    group.raw_set("depFarpSlotTemplate", true)?;
+    group.raw_set("hidden", true)?;
+    group.raw_set("hiddenOnPlanner", true)?;
+    group.raw_set("hiddenOnMFD", true)?;
+    group.raw_set("lateActivation", true)?;
+    patch_dep_farp_static_slot_helipad_parking(group)?;
+    for unit in group
+        .raw_get::<_, Table>("units")?
+        .pairs::<Value, Table>()
+    {
+        let unit = unit?.1;
+        if unit.raw_get::<_, String>("skill")?.as_str() != "Client" {
+            continue;
+        }
+        patch_dep_farp_static_slot_client_unit(&unit)?;
+    }
+    Ok(())
+}
+
+fn is_dep_farp_pad_anchor_type(typ: &str) -> bool {
+    typ == "Invisible FARP" || typ == "FARP"
+}
+
+fn dep_farp_pad_group_prefix(side: Side) -> &'static str {
+    match side {
+        Side::Blue => "DEPBFARPPAD",
+        Side::Red => "DEPRFARPPAD",
+        Side::Neutral => "DEPNFARPPAD",
+    }
+}
+
+fn inject_dep_farp_pad_helipads(
+    lua: &Lua,
+    base: &mut LoadedMiz,
+    out: &bfprotocols::fowl_miz_export::DepFarpStaticSlots,
+) -> Result<()> {
+    let idx = base.mission.index()?;
+    let mut uid = idx.max_uid();
+    uid.next();
+    let mut added = 0usize;
+    for (side, blueprint_opt) in [
+        (Side::Blue, out.blue.as_ref()),
+        (Side::Red, out.red.as_ref()),
+    ] {
+        let Some(blueprint) = blueprint_opt else {
+            continue;
+        };
+        if blueprint.slots.is_empty() {
+            continue;
+        }
+        let prefix = dep_farp_pad_group_prefix(side);
+        let coa = base.mission.coalition(side)?;
+        for country in coa.countries()? {
+            let country = country?;
+            for group in vehicle(&country, "static")? {
+                let group = group?;
+                let pad_name: String = group.raw_get("name")?;
+                if !pad_name.starts_with(prefix) {
+                    continue;
+                }
+                group.raw_set("hidden", true)?;
+                group.raw_set("hiddenOnPlanner", true)?;
+                group.raw_set("hiddenOnMFD", true)?;
+                group.raw_set("lateActivation", true)?;
+                let units: Table = group.raw_get("units")?;
+                let mut anchor: Option<Table> = None;
+                for unit in units.clone().pairs::<Value, Table>() {
+                    let unit = unit?.1;
+                    let typ: String = unit.raw_get("type")?;
+                    if is_dep_farp_pad_anchor_type(typ.as_str()) {
+                        anchor = Some(unit.clone());
+                        break;
+                    }
+                }
+                let Some(anchor) = anchor else {
+                    warn!("DEP FARP pad {pad_name} has no Invisible FARP anchor; skipping helipad inject");
+                    continue;
+                };
+                let ax: f64 = anchor.get("x")?;
+                let ay: f64 = anchor.get("y")?;
+                for (slot_idx, slot) in blueprint.slots.iter().enumerate() {
+                    let hp_name = format!("{pad_name}-HP-{slot_idx}");
+                    let mut exists = false;
+                    for unit in units.clone().pairs::<Value, Table>() {
+                        let unit = unit?.1;
+                        if unit
+                            .raw_get::<_, String>("name")
+                            .ok()
+                            .is_some_and(|n| n.as_str() == hp_name.as_str())
+                        {
+                            exists = true;
+                            break;
+                        }
+                    }
+                    if exists {
+                        continue;
+                    }
+                    let hp = anchor.deep_clone(lua)?;
+                    hp.raw_set("type", "SINGLE_HELIPAD")?;
+                    hp.raw_set("name", hp_name)?;
+                    hp.raw_set("unitId", uid.inner())?;
+                    hp.raw_set("x", ax + slot.dx)?;
+                    hp.raw_set("y", ay + slot.dy)?;
+                    hp.raw_set("heading", slot.heading)?;
+                    hp.raw_set("skill", "Average")?;
+                    let next_idx = units.clone().pairs::<Value, Table>().count() + 1;
+                    units.raw_set(next_idx, hp)?;
+                    uid.next();
+                    added += 1;
+                }
+            }
+        }
+    }
+    if added > 0 {
+        info!("DEP FARP pad helipads: injected {added} SINGLE_HELIPAD unit(s) on template pads");
+    }
+    Ok(())
+}
+
+fn expand_dep_farp_static_slot_pools(
+    lua: &Lua,
+    base: &mut LoadedMiz,
+    out: &mut bfprotocols::fowl_miz_export::DepFarpStaticSlots,
+) -> Result<()> {
+    for (side, blueprint_opt) in [
+        (Side::Blue, &mut out.blue),
+        (Side::Red, &mut out.red),
+    ] {
+        let Some(blueprint) = blueprint_opt else {
+            continue;
+        };
+        let pool = dep_farp_static_slot_pool_size(base, side)?;
+        for entry in &mut blueprint.slots {
+            if entry.pool_groups.is_empty() {
+                entry.pool_groups = vec![entry.template_group.clone()];
+            }
+            if pool <= 1 {
+                continue;
+            }
+            let primary = entry.template_group.clone();
+            entry.pool_groups = vec![primary.clone()];
+            for p in 2..=pool {
+                let dst = format!("{primary}-P{p}");
+                clone_dep_farp_static_slot_group(
+                    base,
+                    side,
+                    entry.helicopter,
+                    primary.as_str(),
+                    dst.as_str(),
+                )?;
+                entry.pool_groups.push(dst);
+            }
+        }
+        if pool > 1 {
+            info!(
+                "DEP FARP static slot pool: {pool} pad(s) per side for {side:?} ({} slot type(s))",
+                blueprint.slots.len()
+            );
+        }
+    }
+    Ok(())
+}
+
+fn finalize_dep_farp_static_slot_blueprints(
+    lua: &Lua,
+    base: &mut LoadedMiz,
+) -> Result<bfprotocols::fowl_miz_export::DepFarpStaticSlots> {
+    use bfprotocols::fowl_miz_export::{
+        DepFarpStaticSideBlueprint, DepFarpStaticSlotEntry, DepFarpStaticSlots,
+        DepFarpStaticSlotsEnabled,
+    };
+    let settings = VehicleTemplates::load_zone_creation_settings(
+        base,
+        "SETTINGS-static-slots-creation",
+    )?;
+    let mut out = DepFarpStaticSlots {
+        enabled: DepFarpStaticSlotsEnabled {
+            blue: settings
+                .get(DEP_FARP_STATIC_TTS_BLUE)
+                .copied()
+                .unwrap_or(false),
+            red: settings
+                .get(DEP_FARP_STATIC_TTS_RED)
+                .copied()
+                .unwrap_or(false),
+        },
+        ..Default::default()
+    };
+    let ts_zones = collect_dep_farp_static_ts_zones(base)?;
+    if ts_zones.is_empty() {
+        return Ok(out);
+    }
+    let mut side_slots: HashMap<
+        Side,
+        (DepFarpStaticSideBlueprint, HashMap<StdString, Vector2>),
+    > = HashMap::default();
+    for z in &ts_zones {
+        side_slots.entry(z.side).or_insert_with(|| {
+            (
+                DepFarpStaticSideBlueprint {
+                    ts_zone: z.ts_name.clone(),
+                    tts: match z.side {
+                        Side::Blue => StdString::from(DEP_FARP_STATIC_TTS_BLUE),
+                        Side::Red => StdString::from(DEP_FARP_STATIC_TTS_RED),
+                        Side::Neutral => unreachable!(),
+                    },
+                    slots: Vec::new(),
+                },
+                HashMap::default(),
+            )
+        });
+        side_slots.get_mut(&z.side).unwrap().1.insert(z.ts_name.clone(), z.center);
+    }
+    for (side, coa) in
+        Side::ALL.into_iter().map(|side| (side, base.mission.coalition(side)))
+    {
+        let coa = coa?;
+        let side_enabled = match side {
+            Side::Blue => out.enabled.blue,
+            Side::Red => out.enabled.red,
+            Side::Neutral => false,
+        };
+        if !side_enabled {
+            continue;
+        }
+        for country in coa.raw_get::<_, Table>("country")?.pairs::<Value, Table>() {
+            let country = country?.1;
+            if !VehicleTemplates::is_cjtf_country(&country)? {
+                continue;
+            }
+            for (helicopter, groups) in [
+                (false, vehicle(&country, "plane").context("getting planes")?),
+                (true, vehicle(&country, "helicopter").context("getting helicopters")?),
+            ] {
+                for group in groups {
+                    let group = group.context("getting group")?;
+                    let group_name: String = group.raw_get("name")?;
+                    if !is_dep_farp_static_slot_group_name(group_name.as_str()) {
+                        continue;
+                    }
+                    apply_dep_farp_static_slot_group_visibility(&group)?;
+                    for unit in group
+                        .raw_get::<_, Table>("units")?
+                        .pairs::<Value, Table>()
+                    {
+                        let unit = unit?.1;
+                        if unit.raw_get::<_, String>("skill")?.as_str() != "Client" {
+                            continue;
+                        }
+                        let unit_type: String = unit.raw_get("type")?;
+                        let x: f64 = unit.get("x")?;
+                        let y: f64 = unit.get("y")?;
+                        let pos = Vector2::new(x, y);
+                        let Some((blueprint, centers)) = side_slots.get_mut(&side) else {
+                            continue;
+                        };
+                        let Some(center) = centers.get(&blueprint.ts_zone) else {
+                            bail!(
+                                "DEP FARP static slot {group_name} missing TS zone center for {}",
+                                blueprint.ts_zone
+                            );
+                        };
+                        blueprint.slots.push(DepFarpStaticSlotEntry {
+                            unit_type: unit_type.to_string(),
+                            dx: pos.x - center.x,
+                            dy: pos.y - center.y,
+                            heading: unit.get("heading")?,
+                            template_group: group_name.to_string(),
+                            pool_groups: vec![group_name.to_string()],
+                            helicopter,
+                        });
+                    }
+                }
+            }
+        }
+    }
+    for (side, (mut blueprint, _)) in side_slots {
+        if blueprint.slots.is_empty() {
+            continue;
+        }
+        blueprint
+            .slots
+            .sort_by(|a, b| a.template_group.cmp(&b.template_group));
+        match side {
+            Side::Blue => out.blue = Some(blueprint),
+            Side::Red => out.red = Some(blueprint),
+            Side::Neutral => (),
+        }
+    }
+    if out.blue.is_some() || out.red.is_some() {
+        info!(
+            "DEP FARP static slot blueprints: blue={} slot(s) enabled={}, red={} slot(s) enabled={}",
+            out.blue.as_ref().map(|b| b.slots.len()).unwrap_or(0),
+            out.enabled.blue,
+            out.red.as_ref().map(|b| b.slots.len()).unwrap_or(0),
+            out.enabled.red,
+        );
+    }
+    expand_dep_farp_static_slot_pools(lua, base, &mut out)?;
+    inject_dep_farp_pad_helipads(lua, base, &out)?;
+    Ok(out)
+}
 
 /// Land/air static slot placement (`TS*`), not template zones (`TTS*` / `TTSN*`).
 fn is_ts_land_air_placement_zone_name(name: &str) -> bool {
@@ -1415,8 +1958,14 @@ impl VehicleTemplates {
         if group.raw_get::<_, bool>("dynSpawnTemplate").unwrap_or(false) {
             return Ok(false);
         }
+        if group.raw_get::<_, bool>("depFarpSlotTemplate").unwrap_or(false) {
+            return Ok(false);
+        }
         let gname: String = group.raw_get("name").unwrap_or_default();
         if is_dynamic_template_group_name(gname.as_str()) {
+            return Ok(false);
+        }
+        if is_dep_farp_static_slot_group_name(gname.as_str()) {
             return Ok(false);
         }
         Ok(true)
@@ -2874,6 +3423,8 @@ impl VehicleTemplates {
         let mut slots: HashMap<String, HashMap<String, usize>> = HashMap::default();
         let mut replace_count: HashMap<String, isize> = HashMap::new();
         let mut stn = 1u64;
+        let dep_farp_static_zones = collect_dep_farp_static_ts_zones(base)?;
+        let mut dep_farp_static_slot_counts: HashMap<(Side, String), usize> = HashMap::default();
         info!("applying weapon*.miz client profiles (CJTF slots only)");
         for (side, coa) in
             Side::ALL.into_iter().map(|side| (side, base.mission.coalition(side)))
@@ -2988,6 +3539,31 @@ impl VehicleTemplates {
                                 ));
                                 unit.set("name", new_name.clone())?;
                                 group.set("name", new_name)?;
+                            }
+                        }
+                        if !found {
+                            if let Some(_dep_zone) = dep_farp_static_zone_for_position(
+                                &dep_farp_static_zones,
+                                side,
+                                unit_pos,
+                                base,
+                            )? {
+                                let count = dep_farp_static_slot_counts
+                                    .entry((side, unit_type.clone()))
+                                    .or_insert(0);
+                                *count += 1;
+                                let new_name = String::from(format_compact!(
+                                    "{}{}-{}-{}{}",
+                                    bfprotocols::fowl_miz_export::DEP_FARP_STATIC_SLOT_GROUP_PREFIX,
+                                    dep_farp_static_side_label(side),
+                                    unit_type,
+                                    count,
+                                    stn_string
+                                ));
+                                unit.set("name", String::from(format_compact!("{new_name}-1")))?;
+                                group.set("name", new_name)?;
+                                apply_dep_farp_static_slot_group_visibility(&group)?;
+                                found = true;
                             }
                         }
                         if strip_internal_fuel_plane {
@@ -8799,7 +9375,7 @@ impl WarehouseTemplate {
         }
         Ok((
             bfprotocols::fowl_miz_export::FowlMizExport {
-                schema_version: 5,
+                schema_version: 6,
                 weapon_bridge_used,
                 blue_weapon_ws: blue_weapon_export,
                 red_weapon_ws: red_weapon_export,
@@ -8808,6 +9384,7 @@ impl WarehouseTemplate {
                 red_inventory_zone_module_ws,
                 objective_stock: HashMap::new(),
                 ai_template_airframes: HashMap::new(),
+                dep_farp_static_slots: DepFarpStaticSlots::default(),
             },
             inventory_aircraft_orphans_cleared,
             built_production_blue,
@@ -12035,6 +12612,10 @@ fn collect_objective_aircraft_by_side(
                 .chain(vehicle(&country, "helicopter").context("getting helicopters")?)
             {
                 let group = group.context("getting group")?;
+                let group_name: String = group.raw_get("name")?;
+                if is_dep_farp_static_slot_group_name(group_name.as_str()) {
+                    continue;
+                }
                 for unit in group
                     .raw_get::<_, Table>("units")
                     .context("getting units")?
@@ -13193,6 +13774,9 @@ pub fn run(cfg: &MizCmd) -> Result<()> {
             &carrier_pad_objectives,
         )
         .context("applying vehicle templates")?;
+    let dep_farp_static_slots =
+        finalize_dep_farp_static_slot_blueprints(lua, &mut base)
+            .context("finalizing DEP FARP static slot blueprints")?;
     let ship_wh_for_late = collect_ship_warehouse_group_map(&base)?;
     set_warehouse_ships_late_activation(&mut base, &ship_wh_for_late)
         .context("warehouse ship lateActivation")?;
@@ -13694,6 +14278,7 @@ pub fn run(cfg: &MizCmd) -> Result<()> {
         .context("embedding discord map icons into mission")?;
     info!("saving finalized mission to {:?}", cfg.output);
     base.miz.pack(&cfg.output).context("repacking mission")?;
+    fowl_from_warehouse.dep_farp_static_slots = dep_farp_static_slots;
     let export_path = fowl_from_warehouse
         .write_next_to_miz(&cfg.output)
         .context("writing Fowl mission export JSON")?;

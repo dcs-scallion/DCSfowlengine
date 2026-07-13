@@ -741,6 +741,8 @@ impl Db {
             SlotId::Unit(_) | SlotId::MultiCrew(_, _) => {
                 if self.ephemeral.slot_info.contains_key(&slot) {
                     self.try_occupy_slot_deferred(lua, time, ucid, slot)
+                } else if self.ephemeral.dep_farp_pool_slot_ids.contains(&slot) {
+                    SlotAuth::Denied
                 } else {
                     player.changing_slots = true;
                     player.jtac_or_spectators = false;

@@ -146,6 +146,15 @@ pub struct Ephemeral {
     pub(super) naval_slot_zones: FxHashMap<String, Zone>,
     pub(super) slot_info: FxHashMap<SlotId, SlotInfo>,
     used_pad_templates: FxHashSet<String>,
+    /// ME group names from the DEP FARP client slot pool already assigned to a deploy.
+    pub(super) used_dep_farp_static_slot_groups: FxHashSet<String>,
+    /// Build-time home pose for pool groups (`zzDepFarpSlot-*`).
+    pub(super) dep_farp_static_slot_home: FxHashMap<String, (Vector2, f64)>,
+    /// Unassigned DEP FARP pool client slots (blocked until deploy registers them).
+    pub(super) dep_farp_pool_slot_ids: FxHashSet<dcso3::net::SlotId>,
+    /// Runtime static ids for `{pad_template}-HP-{n}` after `move_farp_pad`.
+    pub(super) dep_farp_pad_helipad_ids: FxHashMap<String, i64>,
+    pub(super) pending_dep_farp_static_slot_release: smallvec::SmallVec<[(Side, String); 16]>,
     pub(super) global_pad_templates: FxHashSet<String>,
     force_to_spectators: BTreeMap<DateTime<Utc>, SmallVec<[Ucid; 1]>>,
     /// Ejected pilot DCS unit id -> owning player (CSAR).
@@ -226,6 +235,11 @@ impl Default for Ephemeral {
             naval_slot_zones: FxHashMap::default(),
             slot_info: FxHashMap::default(),
             used_pad_templates: FxHashSet::default(),
+            used_dep_farp_static_slot_groups: FxHashSet::default(),
+            dep_farp_static_slot_home: FxHashMap::default(),
+            dep_farp_pool_slot_ids: FxHashSet::default(),
+            dep_farp_pad_helipad_ids: FxHashMap::default(),
+            pending_dep_farp_static_slot_release: smallvec::smallvec![],
             global_pad_templates: FxHashSet::default(),
             force_to_spectators: BTreeMap::default(),
             csar_pilot_unit: FxHashMap::default(),
@@ -319,6 +333,8 @@ impl Ephemeral {
                 self.fowl_miz_export.as_ref(),
             ),
         );
+        // Recreates PRI_LINE supply arrows; DCS stacks new mark ids above existing overlay.
+        self.request_objective_overlay_refresh();
     }
 
     pub(super) fn request_objective_overlay_refresh(&mut self) {
@@ -330,6 +346,32 @@ impl Ephemeral {
             self.refresh_objective_overlay_layer(persisted);
             self.overlay_underlay_dirty = false;
         }
+    }
+
+    pub(super) fn markup_pending(&self) -> bool {
+        self.overlay_underlay_dirty || self.msgs.len() > 0
+    }
+
+    /// Underlay first, then re-queue objective name/stats overlay (DCS F10 send order).
+    pub(super) fn process_markup_frame(
+        &mut self,
+        persisted: &Persisted,
+        max_rate: usize,
+        net: &dcso3::net::Net,
+        act: &dcso3::trigger::Action,
+    ) {
+        let line_pending = self.msgs.line_pending();
+        if self.overlay_underlay_dirty {
+            self.msgs.drain_line_layer(net, act);
+            self.refresh_objective_overlay_layer(persisted);
+            self.overlay_underlay_dirty = false;
+            self.msgs.drain_overlay_raise(net, act);
+        } else if line_pending {
+            self.msgs.drain_underlay_then_overlay(net, act);
+        } else {
+            self.prepare_objective_overlay_layer(persisted);
+        }
+        self.msgs.process(max_rate, net, act);
     }
 
     pub(super) fn sync_logistics_hub_production_displays(&mut self, persisted: &Persisted) {
@@ -737,14 +779,24 @@ impl Ephemeral {
                     let gifo = miz
                         .get_group_by_name(mizidx, GroupKind::Any, side, pad)?
                         .ok_or_else(|| anyhow!("missing pad template {:?} {:?}", side, pad))?;
+                    let helipad_prefix = format_compact!("{pad}-HP-");
+                    let mut anchor_ok = false;
                     for unit in gifo.group.units()? {
                         let unit = unit?;
                         let uname = unit.name()?;
-                        if &uname != pad {
-                            bail!(
-                                "pad template groups and units must be named the same thing {uname} != {pad}"
-                            )
+                        if &uname == pad {
+                            anchor_ok = true;
+                            continue;
                         }
+                        if uname.starts_with(helipad_prefix.as_str()) {
+                            continue;
+                        }
+                        bail!(
+                            "pad template groups and units must be named the same thing {uname} != {pad}"
+                        )
+                    }
+                    if !anchor_ok {
+                        bail!("pad template {pad} must include anchor unit named {pad}");
                     }
                 }
                 if dep.limit as usize > pad_templates.len() {

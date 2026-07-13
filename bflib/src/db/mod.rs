@@ -47,6 +47,7 @@ pub mod discord_map;
 pub mod ephemeral;
 pub mod front_line;
 pub mod group;
+pub mod dep_farp_slots;
 pub mod logistics;
 pub mod markup;
 pub mod mizinit;
@@ -408,10 +409,26 @@ impl Db {
             }))
     }
 
-    pub fn flush_markup_messages(&mut self, lua: MizLua) -> Result<()> {
+    pub fn process_markup_frame(
+        &mut self,
+        lua: MizLua,
+        max_rate: usize,
+    ) -> Result<()> {
+        if !self.ephemeral.markup_pending() {
+            return Ok(());
+        }
+        let net = dcso3::net::Net::singleton(lua).context("net for markup frame")?;
+        let act = dcso3::trigger::Trigger::singleton(lua)
+            .context("trigger for markup frame")?
+            .action()
+            .context("action for markup frame")?;
         self.ephemeral
-            .prepare_objective_overlay_layer(&self.persisted);
-        if self.ephemeral.msgs().len() == 0 {
+            .process_markup_frame(&self.persisted, max_rate, &net, &act);
+        Ok(())
+    }
+
+    pub fn flush_markup_messages(&mut self, lua: MizLua) -> Result<()> {
+        if !self.ephemeral.markup_pending() {
             return Ok(());
         }
         let net = dcso3::net::Net::singleton(lua).context("net for markup flush")?;
@@ -419,8 +436,9 @@ impl Db {
             .context("trigger for markup flush")?
             .action()
             .context("action for markup flush")?;
-        while self.ephemeral.msgs().len() > 0 {
-            self.ephemeral.msgs().process(100, &net, &act);
+        while self.ephemeral.markup_pending() {
+            self.ephemeral
+                .process_markup_frame(&self.persisted, 100, &net, &act);
         }
         Ok(())
     }

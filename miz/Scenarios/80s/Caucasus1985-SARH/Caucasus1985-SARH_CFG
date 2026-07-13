@@ -44,8 +44,8 @@
   "max_msgs_per_second": 5,
   "jtac_default_code_blue": 1688,
   "jtac_default_code_red": 1113,
-  "shutdown": null,
   "chat_time_command": "Use the .timeleft command",
+  "shutdown": null,
   "DCSServerBot_scheduled_restart": {
     "timezone": "Europe/Prague",
     "times": ["00:00", "06:00", "12:00", "18:00"]
@@ -157,7 +157,7 @@
     "carrier_airbase_max": 3,
     "airbase_max": 4,
     "hub_max": 10,
-    "dynamicFARPs_InitialStockPercentage": 10,
+    "dynamicFARPs_InitialStockPercentage": 50,
     "tick": 20,
     "ticks_per_delivery": 7,
     "supply_transfer_size": 10,

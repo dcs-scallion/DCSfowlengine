@@ -620,9 +620,10 @@ impl Db {
                     });
                     Ok(GroupPosition { positions, by_type: FxHashMap::default() })
                 }
-                SpawnLoc::AtPosWithCenter { pos, center } => {
+                SpawnLoc::AtPosWithCenter { pos, center, heading_add } => {
                     for p in positions.iter_mut() {
                         p.position = p.position - center + pos;
+                        p.heading = change_heading(p.heading, heading_add);
                         p.altitude = None;
                     }
                     Ok(GroupPosition { positions, by_type: FxHashMap::default() })

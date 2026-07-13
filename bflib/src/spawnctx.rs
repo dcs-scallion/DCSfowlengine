@@ -20,23 +20,239 @@ use bfprotocols::{db::group::GroupId, perf::PerfInner};
 use chrono::{DateTime, Duration, Utc};
 use compact_str::format_compact;
 use dcso3::{
-    DeepClone, LuaEnv, LuaVec2, LuaVec3, MizLua, String, Vector2, Vector3,
+    change_heading, DeepClone, LuaEnv, LuaVec2, LuaVec3, MizLua, String, Vector2, Vector3,
+    airbase::Airbase,
     coalition::{Coalition, Side, Static},
-    env::miz::{self, GroupInfo, GroupKind, Miz, MizIndex, TriggerZone},
+    controller::AltType,
+    env::miz::{self, GroupInfo, GroupKind, Miz, MizIndex, Skill, TriggerZone, UnitId},
     group::{ClassGroup, Group, GroupCategory},
     land::Land,
     object::{DcsObject, DcsOid, ObjectCategory},
     perf::record_perf,
     static_object::StaticObject,
+    trigger::Trigger,
+    unit::Unit,
     world::{SearchVolume, World},
 };
 use fxhash::FxHashMap;
 use log::info;
-use mlua::Value;
+use mlua::{prelude::*, Value};
 use serde_derive::{Deserialize, Serialize};
 
 const DESPAWN_COMBAT_ENGAGE: Duration = Duration::seconds(45);
 pub(super) const DESPAWN_COMBAT_RETRY: Duration = Duration::seconds(30);
+const DEP_FARP_HELI_PARKING_SPEED: f64 = 41.666_666_666_667;
+/// ME TakeOffParking: refuel/rearm on pad before takeoff (minutes).
+const ME_PARKING_REFUEL_REARM: i64 = 3;
+
+pub struct FarpPadMove<'lua> {
+    pub spawned: Spawned<'lua>,
+    pub helipad_ids: FxHashMap<String, i64>,
+}
+
+pub fn dep_farp_helipad_unit_name(pad_template: &str, slot_index: usize) -> String {
+    String::from(format_compact!("{pad_template}-HP-{slot_index}"))
+}
+
+fn is_dep_farp_pad_helipad_name(name: &str, pad_template: &str) -> bool {
+    name.starts_with(&format!("{pad_template}-HP-"))
+}
+
+fn me_empty_combo_task(lua: MizLua) -> Result<LuaTable> {
+    let task = lua.inner().create_table()?;
+    task.raw_set("id", "ComboTask")?;
+    let params = lua.inner().create_table()?;
+    params.raw_set("tasks", lua.inner().create_table()?)?;
+    task.raw_set("params", params)?;
+    Ok(task)
+}
+
+/// ME `helipadId` / `linkUnit`: spawned static helipad id (same as ai_air hub slots).
+pub(crate) fn helipad_facility_id(lua: MizLua, name: &str) -> Option<i64> {
+    if let Ok(Static::Static(st)) = StaticObject::get_by_name(lua, name) {
+        if st.is_exist().unwrap_or(false) {
+            if let Ok(id) = st.id() {
+                return Some(i64::from(id.inner()));
+            }
+        }
+    }
+    let u = Unit::get_by_name(lua, name).ok()?;
+    if !u.is_exist().unwrap_or(false) {
+        return None;
+    }
+    u.id().ok().map(|id| i64::from(id.inner()))
+}
+
+fn resolve_dep_farp_helipad_link_id(
+    lua: MizLua,
+    helipad_name: &str,
+    helipad_id_hint: Option<i64>,
+) -> Result<i64> {
+    if let Some(id) = helipad_id_hint {
+        return Ok(id);
+    }
+    helipad_facility_id(lua, helipad_name).with_context(|| {
+        format_compact!("DEP FARP helipad {helipad_name} missing world facility id")
+    })
+}
+
+fn patch_dep_farp_slot_me_helipad_route<'lua>(
+    lua: MizLua<'lua>,
+    group: &miz::Group<'lua>,
+    helipad_pos: Vector2,
+    baro_alt: f64,
+    helipad_id: i64,
+) -> Result<()> {
+    let route: LuaTable = match group.raw_get("route") {
+        Ok(r) => r,
+        Err(_) => {
+            let r = lua.inner().create_table()?;
+            group.raw_set("route", r.clone())?;
+            r
+        }
+    };
+    let points = lua.inner().create_table()?;
+    let p1 = lua.inner().create_table()?;
+    p1.raw_set("type", "TakeOffParking")?;
+    p1.raw_set("x", helipad_pos.x)?;
+    p1.raw_set("y", helipad_pos.y)?;
+    p1.raw_set("alt", baro_alt)?;
+    p1.raw_set("alt_type", "BARO")?;
+    p1.raw_set("action", "From Parking Area")?;
+    p1.raw_set("speed", DEP_FARP_HELI_PARKING_SPEED)?;
+    p1.raw_set("speed_locked", true)?;
+    p1.raw_set("ETA", 0f64)?;
+    p1.raw_set("ETA_locked", true)?;
+    p1.raw_set("formation_template", "")?;
+    p1.raw_set("task", me_empty_combo_task(lua)?)?;
+    let props = lua.inner().create_table()?;
+    props.raw_set("addopt", lua.inner().create_table()?)?;
+    p1.raw_set("properties", props)?;
+    p1.raw_set("airdromeId", Value::Nil)?;
+    p1.raw_set("helipadId", helipad_id)?;
+    p1.raw_set("linkUnit", helipad_id)?;
+    p1.raw_set("parking", Value::Nil)?;
+    p1.raw_set("timeReFuAr", ME_PARKING_REFUEL_REARM)?;
+    points.raw_set(1, p1)?;
+    route.raw_set("points", points)?;
+    group.raw_set("route", route)?;
+    Ok(())
+}
+
+fn destroy_named_pad_unit(lua: MizLua, name: &str) {
+    if let Ok(ab) = Airbase::get_by_name(lua, String::from(name)) {
+        if ab.is_exist().unwrap_or(false) {
+            let _ = ab.destroy();
+            return;
+        }
+    }
+    match StaticObject::get_by_name(lua, name) {
+        Ok(Static::Airbase(ab)) if ab.is_exist().unwrap_or(false) => {
+            let _ = ab.destroy();
+        }
+        Ok(Static::Static(st)) if st.is_exist().unwrap_or(false) => {
+            let _ = st.destroy();
+        }
+        _ => {}
+    }
+}
+
+fn dep_farp_helipad_template_heading(
+    spctx: &SpawnCtx,
+    idx: &MizIndex,
+    side: Side,
+    pad_template: &str,
+    slot_index: usize,
+) -> Result<f64> {
+    let helipad_name = dep_farp_helipad_unit_name(pad_template, slot_index);
+    let pad = spctx.get_template_ref(idx, GroupKind::Any, side, pad_template)?;
+    for unit in pad.group.units()? {
+        let unit = unit?;
+        if unit.name()?.as_str() == helipad_name.as_str() {
+            return unit.heading();
+        }
+    }
+    for unit in pad.group.units()? {
+        let unit = unit?;
+        if unit.name()?.as_str() == pad_template {
+            return unit.heading();
+        }
+    }
+    Ok(0.)
+}
+
+fn dep_farp_helipad_template_pos(
+    spctx: &SpawnCtx,
+    idx: &MizIndex,
+    side: Side,
+    pad_template: &str,
+    slot_index: usize,
+) -> Result<Vector2> {
+    let helipad_name = dep_farp_helipad_unit_name(pad_template, slot_index);
+    let pad = spctx.get_template_ref(idx, GroupKind::Any, side, pad_template)?;
+    for unit in pad.group.units()? {
+        let unit = unit?;
+        if unit.name()?.as_str() == helipad_name.as_str() {
+            let p = unit.pos()?;
+            return Ok(Vector2::new(p.x, p.y));
+        }
+    }
+    bail!("pad template {pad_template} has no helipad unit {helipad_name}")
+}
+
+fn dep_farp_helipad_world_pos(
+    lua: MizLua,
+    side: Side,
+    helipad_name: &str,
+) -> Result<Vector2> {
+    match StaticObject::get_by_name(lua, helipad_name) {
+        Ok(Static::Static(obj)) if obj.is_exist()? => {
+            let pt = obj.as_object()?.get_point()?;
+            return Ok(Vector2::new(pt.0.x, pt.0.z));
+        }
+        Ok(Static::Airbase(ab)) if ab.is_exist()? => {
+            let pt = ab.as_object()?.get_point()?;
+            return Ok(Vector2::new(pt.0.x, pt.0.z));
+        }
+        _ => {}
+    }
+    if let Ok(ab) = Airbase::get_by_name(lua, String::from(helipad_name)) {
+        if ab.is_exist()? {
+            let pt = ab.get_point()?;
+            return Ok(Vector2::new(pt.x, pt.z));
+        }
+    }
+    let world = World::singleton(lua)?;
+    for ab in world.get_airbases()? {
+        let ab = ab?;
+        if !ab.is_exist()? {
+            continue;
+        }
+        let Ok(obj) = ab.as_object() else {
+            continue;
+        };
+        if obj.get_name()?.as_str() == helipad_name {
+            let pt = ab.get_point()?;
+            return Ok(Vector2::new(pt.x, pt.z));
+        }
+    }
+    let coalition = Coalition::singleton(lua)?;
+    for st in coalition.get_static_objects(side)? {
+        let st = st?;
+        if !st.is_exist()? || st.get_name()?.as_str() != helipad_name {
+            continue;
+        }
+        let pt = st.as_object()?.get_point()?;
+        return Ok(Vector2::new(pt.0.x, pt.0.z));
+    }
+    if let Ok(u) = Unit::get_by_name(lua, helipad_name) {
+        if u.is_exist()? {
+            let p = u.get_point()?;
+            return Ok(Vector2::new(p.0.x, p.0.z));
+        }
+    }
+    bail!("DEP FARP helipad {helipad_name} has no world position")
+}
 
 fn default_speed() -> f64 {
     220.
@@ -77,6 +293,8 @@ pub enum SpawnLoc {
         pos: Vector2,
         /// center is the original center of the group
         center: Vector2,
+        /// added to each unit heading after translation (radians)
+        heading_add: f64,
     },
     AtTrigger {
         name: String,
@@ -239,7 +457,7 @@ impl<'lua> SpawnCtx<'lua> {
         side: Side,
         pad_template: &str,
         pos: Vector2,
-    ) -> Result<Spawned<'lua>> {
+    ) -> Result<FarpPadMove<'lua>> {
         let pad = {
             let pad = self
                 .get_template(idx, GroupKind::Any, side, &pad_template)
@@ -262,8 +480,171 @@ impl<'lua> SpawnCtx<'lua> {
             }
             pad
         };
+        let mut helipad_ids = FxHashMap::default();
+        match GroupCategory::from_kind(pad.category) {
+            Some(_) => Ok(FarpPadMove {
+                spawned: self.spawn(pad).context("moving the pad")?,
+                helipad_ids,
+            }),
+            None => {
+                for unit in pad.group.units().context("getting pad units")? {
+                    let unit = unit?;
+                    let unit_name = unit.name()?;
+                    destroy_named_pad_unit(self.lua(), unit_name.as_str());
+                    self.coalition
+                        .add_static_object(pad.country, unit.clone())
+                        .with_context(|| {
+                            format_compact!("spawning pad static {unit_name}")
+                        })?;
+                }
+                for unit in pad.group.units().context("getting pad units")? {
+                    let unit = unit?;
+                    let unit_name = unit.name()?;
+                    if !is_dep_farp_pad_helipad_name(unit_name.as_str(), pad_template) {
+                        continue;
+                    }
+                    let link_id = helipad_facility_id(self.lua(), unit_name.as_str())
+                        .with_context(|| {
+                            format_compact!(
+                                "DEP FARP helipad {unit_name} missing world facility id after spawn"
+                            )
+                        })?;
+                    info!(
+                        "DEP FARP pad helipad {unit_name} linkUnit id {link_id} (world facility)"
+                    );
+                    helipad_ids.insert(unit_name, link_id);
+                }
+                Ok(FarpPadMove {
+                    spawned: Spawned::Static,
+                    helipad_ids,
+                })
+            }
+        }
+    }
+
+    /// Bind a pool client slot to a deployed pad helipad (`TakeOffParking`, late activation).
+    pub fn activate_dep_farp_static_slot(
+        &self,
+        idx: &MizIndex,
+        side: Side,
+        group_name: &str,
+        pad_template: &str,
+        slot_index: usize,
+        pad_heading: f64,
+        helipad_id_hint: Option<i64>,
+    ) -> Result<Spawned<'lua>> {
+        let helipad_name = dep_farp_helipad_unit_name(pad_template, slot_index);
+        let helipad_pos = dep_farp_helipad_template_pos(
+            self,
+            idx,
+            side,
+            pad_template,
+            slot_index,
+        )
+        .or_else(|_| dep_farp_helipad_world_pos(self.lua(), side, helipad_name.as_str()))?;
+        let helipad_id = resolve_dep_farp_helipad_link_id(
+            self.lua(),
+            helipad_name.as_str(),
+            helipad_id_hint,
+        )?;
+        let slot_heading = dep_farp_helipad_template_heading(
+            self,
+            idx,
+            side,
+            pad_template,
+            slot_index,
+        )
+        .unwrap_or(pad_heading);
+        info!(
+            "DEP FARP slot {group_name} -> helipad {helipad_name} linkUnit id {helipad_id} (TakeOffParking)"
+        );
+        let land = Land::singleton(self.lua())?;
+        let baro_alt = land
+            .get_height(LuaVec2(helipad_pos))?
+            .round()
+            .max(0.);
+        {
+            let slot = self
+                .get_template_ref(idx, GroupKind::Any, side, group_name)
+                .with_context(|| format_compact!("getting DEP FARP static slot {group_name}"))?;
+            slot.group.set("hidden", false)?;
+            slot.group.set("lateActivation", false)?;
+            slot.group.set("uncontrolled", false)?;
+            slot.group.raw_set("uncontrollable", false)?;
+            slot.group.raw_set("task", "CAS")?;
+            slot.group.raw_set("taskSelected", true)?;
+            slot.group.raw_set("x", helipad_pos.x)?;
+            slot.group.raw_set("y", helipad_pos.y)?;
+            patch_dep_farp_slot_me_helipad_route(
+                self.lua(),
+                &slot.group,
+                helipad_pos,
+                baro_alt,
+                helipad_id,
+            )?;
+            for unit in slot.group.units()? {
+                let unit = unit?;
+                if unit.skill()? != Skill::Client {
+                    continue;
+                }
+                unit.set_pos(helipad_pos)?;
+                unit.set_alt(baro_alt)?;
+                unit.raw_set("alt_type", AltType::BARO)?;
+                unit.raw_set("speed", DEP_FARP_HELI_PARKING_SPEED)?;
+                unit.raw_set("helipadId", helipad_id)?;
+                unit.raw_set("linkUnit", helipad_id)?;
+                unit.raw_set("ropeLength", 15i64)?;
+                if slot_heading.abs() > 0.01 {
+                    unit.set_heading(slot_heading)?;
+                    unit.raw_set("psi", -slot_heading)?;
+                    unit.raw_set("manualHeading", true)?;
+                } else {
+                    unit.set_heading(0.)?;
+                    unit.raw_set("psi", 0f64)?;
+                    unit.raw_remove("manualHeading")?;
+                }
+                unit.raw_remove("airdromeId")?;
+                unit.raw_remove("parking")?;
+                unit.raw_remove("parking_id")?;
+            }
+        }
+        let trigger = Trigger::singleton(self.lua())?;
+        let action = trigger.action()?;
+        if let Ok(world) = Group::get_by_name(self.lua(), group_name) {
+            if world.is_exist()? {
+                action.deactivate_group(String::from(group_name))?;
+            }
+        }
+        action.activate_group(String::from(group_name))?;
+        let world = Group::get_by_name(self.lua(), group_name).with_context(|| {
+            format_compact!("DEP FARP static slot {group_name} not active after activateGroup")
+        })?;
         let _ = idx;
-        self.spawn(pad).context("moving the pad")
+        Ok(Spawned::Group(world))
+    }
+
+    pub fn deactivate_dep_farp_static_slot_pool(
+        &self,
+        idx: &MizIndex,
+        side: Side,
+        group_name: &str,
+    ) -> Result<()> {
+        {
+            let slot = self
+                .get_template_ref(idx, GroupKind::Any, side, group_name)
+                .with_context(|| format_compact!("getting DEP FARP static slot {group_name}"))?;
+            slot.group.set("hidden", true)?;
+        }
+        let trigger = Trigger::singleton(self.lua())?;
+        if let Ok(world) = Group::get_by_name(self.lua(), group_name) {
+            if world.is_exist()? {
+                trigger
+                    .action()?
+                    .deactivate_group(String::from(group_name))?;
+            }
+        }
+        let _ = idx;
+        Ok(())
     }
 
     pub fn spawn(&self, template: GroupInfo<'lua>) -> Result<Spawned<'lua>> {

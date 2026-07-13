@@ -539,6 +539,10 @@ impl MsgQ {
         self.0[PRI_TEXT].push_back(Cmd::Send(Msg::SetMarkupColor { id, color }))
     }
 
+    pub fn set_underlay_markup_color(&mut self, id: MarkId, color: Color) {
+        self.0[PRI_LINE].push_back(Cmd::Send(Msg::SetMarkupColor { id, color }))
+    }
+
     pub fn set_overlay_markup_color(&mut self, id: MarkId, color: Color) {
         self.0[PRI_OVERLAY].push_back(Cmd::Send(Msg::SetMarkupColor { id, color }))
     }
@@ -546,6 +550,10 @@ impl MsgQ {
     #[allow(dead_code)]
     pub fn set_markup_fill_color(&mut self, id: MarkId, color: Color) {
         self.0[PRI_TEXT].push_back(Cmd::Send(Msg::SetMarkupFillColor { id, color }))
+    }
+
+    pub fn set_underlay_markup_fill_color(&mut self, id: MarkId, color: Color) {
+        self.0[PRI_LINE].push_back(Cmd::Send(Msg::SetMarkupFillColor { id, color }))
     }
 
     pub fn set_overlay_markup_fill_color(&mut self, id: MarkId, color: Color) {
@@ -580,13 +588,34 @@ impl MsgQ {
         self.0.iter().fold(0, |acc, q| acc + q.len())
     }
 
-    pub fn process(&mut self, max_rate: usize, net: &Net, act: &Action) {
-        for _ in 0..max_rate {
-            let cmd = match (0..PRI_COUNT).find_map(|pri| self.0[pri].pop_front()) {
-                Some(cmd) => cmd,
-                None => return,
-            };
-            let res = match cmd {
+    pub fn line_pending(&self) -> bool {
+        !self.0[PRI_LINE].is_empty()
+    }
+
+    pub fn drain_priority(&mut self, pri: usize, net: &Net, act: &Action) {
+        while let Some(cmd) = self.0[pri].pop_front() {
+            Self::dispatch(cmd, net, act);
+        }
+    }
+
+    pub fn drain_line_layer(&mut self, net: &Net, act: &Action) {
+        self.drain_priority(PRI_LINE, net, act);
+    }
+
+    /// PRI_LINE then PRI_OVERLAY (no full overlay re-raise).
+    pub fn drain_underlay_then_overlay(&mut self, net: &Net, act: &Action) {
+        self.drain_priority(PRI_LINE, net, act);
+        self.drain_priority(PRI_OVERLAY, net, act);
+    }
+
+    /// After `refresh_objective_overlay_layer`: overlay deletes (SHAPE) + creates (OVERLAY).
+    pub fn drain_overlay_raise(&mut self, net: &Net, act: &Action) {
+        self.drain_priority(PRI_SHAPE, net, act);
+        self.drain_priority(PRI_OVERLAY, net, act);
+    }
+
+    fn dispatch(cmd: Cmd, net: &Net, act: &Action) {
+        let res = match cmd {
                 Cmd::DeleteMark(id) => act.remove_mark(id),
                 Cmd::Send(Msg::Message { typ, text }) => match typ {
                     MsgTyp::Mark {
@@ -692,9 +721,18 @@ impl MsgQ {
                 Cmd::Send(Msg::SetMarkupEnd { id, pos }) => act.set_markup_position_end(id, pos),
                 Cmd::Send(Msg::SetMarkupText { id, text }) => act.set_markup_text(id, text),
             };
-            if let Err(e) = res {
-                error!("could not send message {:?}", e)
-            }
+        if let Err(e) = res {
+            error!("could not send message {:?}", e)
+        }
+    }
+
+    pub fn process(&mut self, max_rate: usize, net: &Net, act: &Action) {
+        for _ in 0..max_rate {
+            let cmd = match (0..PRI_COUNT).find_map(|pri| self.0[pri].pop_front()) {
+                Some(cmd) => cmd,
+                None => return,
+            };
+            Self::dispatch(cmd, net, act);
         }
     }
 }

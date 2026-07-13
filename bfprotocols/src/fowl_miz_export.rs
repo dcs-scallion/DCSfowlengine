@@ -48,6 +48,52 @@ pub struct ObjectiveStockByCoalition {
     pub red: ObjectiveCoalitionStock,
 }
 
+/// Hidden post-apply client slot template groups in the assembled `.miz` (`zzDepFarpSlot-*`).
+pub const DEP_FARP_STATIC_SLOT_GROUP_PREFIX: &str = "zzDepFarpSlot-";
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct DepFarpStaticSlotsEnabled {
+    #[serde(default)]
+    pub blue: bool,
+    #[serde(default)]
+    pub red: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DepFarpStaticSlotEntry {
+    pub unit_type: String,
+    /// Offset from `TS*DEPFARP` zone center (DCS x/y); rotated by pad heading at deploy.
+    pub dx: f64,
+    pub dy: f64,
+    /// Unit heading at build (radians); adjusted by pad heading at deploy.
+    pub heading: f64,
+    /// ME group name of the primary hidden slot (`zzDepFarpSlot-*`).
+    pub template_group: String,
+    /// One ME group per deployable pad (same layout); empty in old exports → [`Self::template_group`] only.
+    #[serde(default)]
+    pub pool_groups: Vec<String>,
+    #[serde(default)]
+    pub helicopter: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct DepFarpStaticSideBlueprint {
+    pub ts_zone: String,
+    pub tts: String,
+    #[serde(default)]
+    pub slots: Vec<DepFarpStaticSlotEntry>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct DepFarpStaticSlots {
+    #[serde(default)]
+    pub enabled: DepFarpStaticSlotsEnabled,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub blue: Option<DepFarpStaticSideBlueprint>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub red: Option<DepFarpStaticSideBlueprint>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct ObjectiveWarehouseDefaults {
     /// Aircraft module types allowed for blue ownership on this objective/base.
@@ -93,16 +139,19 @@ pub struct FowlMizExport {
     /// AI action template name → DCS warehouse airframe type (`SETTINGS-Ai-*` zones in base.miz).
     #[serde(default)]
     pub ai_template_airframes: HashMap<String, String>,
+    /// Ground DEP FARP static client slot blueprints (spawn at deploy from hidden templates).
+    #[serde(default)]
+    pub dep_farp_static_slots: DepFarpStaticSlots,
 }
 
 fn default_schema_version() -> u32 {
-    5
+    6
 }
 
 impl Default for FowlMizExport {
     fn default() -> Self {
         Self {
-            schema_version: 5,
+            schema_version: 6,
             weapon_bridge_used: false,
             blue_weapon_ws: Vec::new(),
             red_weapon_ws: Vec::new(),
@@ -111,6 +160,7 @@ impl Default for FowlMizExport {
             red_inventory_zone_module_ws: HashMap::new(),
             objective_stock: HashMap::new(),
             ai_template_airframes: HashMap::new(),
+            dep_farp_static_slots: DepFarpStaticSlots::default(),
         }
     }
 }

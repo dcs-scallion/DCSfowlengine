@@ -407,6 +407,7 @@ impl Db {
                 spec,
                 pad_template: _,
                 mobile: _,
+                ..
             } = &obj.kind
             {
                 if let Some(d_name) = spec.path.last() {

@@ -2063,7 +2063,7 @@ fn run_timed_events(
     let ts = Utc::now();
     let perf = Arc::make_mut(&mut unsafe { Perf::get_mut() }.inner);
     let net = Net::singleton(lua)?;
-    let act = Trigger::singleton(lua)?.action()?;
+    let _act = Trigger::singleton(lua)?.action()?;
     force_players_to_spectators(ctx, &net, ts);
     match ctx.db.update_unit_positions_incremental(lua, ts, ctx.last_unit_position) {
         Err(e) => error!("could not update unit positions {e}"),
@@ -2109,6 +2109,9 @@ fn run_timed_events(
     }
     let now = Utc::now();
     let spctx = SpawnCtx::new(lua)?;
+    if let Err(e) = ctx.db.drain_pending_dep_farp_static_slot_releases(&spctx, &ctx.idx) {
+        error!("error releasing DEP FARP static slots {:?}", e)
+    }
     if let Err(e) = ctx.db.ephemeral.process_spawn_queue(
         perf,
         &ctx.db.persisted,
@@ -2152,10 +2155,6 @@ fn run_timed_events(
         }
     }
     record_perf(&mut perf.jtac_target_positions, now);
-    let now = Utc::now();
-    let max_rate = ctx.db.ephemeral.cfg.max_msgs_per_second;
-    ctx.db.ephemeral.msgs().process(max_rate, &net, &act);
-    record_perf(&mut perf.process_messages, now);
     if let Err(e) = ctx.db.logistics_step(lua, perf, ts) {
         error!("error running logistics events {e:?}")
     }
@@ -2170,6 +2169,12 @@ fn run_timed_events(
     if let Err(e) = run_jtac_commands(ctx, lua) {
         error!("failed to run jtac commands {e:?}")
     }
+    let now = Utc::now();
+    let max_rate = ctx.db.ephemeral.cfg.max_msgs_per_second;
+    if let Err(e) = ctx.db.process_markup_frame(lua, max_rate) {
+        error!("could not process markup frame {e:?}");
+    }
+    record_perf(&mut perf.process_messages, now);
     ctx.load_state.step();
     record_perf(&mut perf.timed_events, ts);
     ctx.log_perf(now);

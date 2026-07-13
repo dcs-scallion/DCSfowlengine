@@ -966,12 +966,20 @@ impl Db {
             .slot_info
             .retain(|_, si| &si.objective != oid);
         if let ObjectiveKind::Farp {
-            spec: _,
-            mobile: _,
             pad_template,
-        } = obj.kind
+            mobile,
+            dep_static_slot_groups,
+            ..
+        } = &obj.kind
         {
-            self.ephemeral.return_pad_template(&pad_template);
+            if !mobile && !dep_static_slot_groups.is_empty() {
+                for name in dep_static_slot_groups {
+                    self.ephemeral
+                        .pending_dep_farp_static_slot_release
+                        .push((obj.owner, name.clone()));
+                }
+            }
+            self.ephemeral.return_pad_template(pad_template);
         }
         self.persisted.farps.remove_cow(oid);
         self.ephemeral.airbase_by_oid.remove(oid);
@@ -1034,10 +1042,18 @@ impl Db {
             acc_points!(fuel);
             acc_points!(barracks);
             if points.is_empty() {
-                SpawnLoc::AtPosWithCenter { pos, center: pos }
+                SpawnLoc::AtPosWithCenter {
+                    pos,
+                    center: pos,
+                    heading_add: 0.,
+                }
             } else {
                 let center = centroid2d(points);
-                SpawnLoc::AtPosWithCenter { pos, center }
+                SpawnLoc::AtPosWithCenter {
+                    pos,
+                    center,
+                    heading_add: 0.,
+                }
             }
         };
         let dep_name = spec
@@ -1158,6 +1174,7 @@ impl Db {
                 spec: spec.clone(),
                 mobile,
                 pad_template: pad_template.clone(),
+                dep_static_slot_groups: vec![],
             },
             zone: Zone::Circle { pos, radius: 2000. },
             owner: side,
@@ -1211,9 +1228,13 @@ impl Db {
                 .insert(pad_template.clone(), oid);
         }
         // move the pad to the new location
-        spctx
+        let pad_move = spctx
             .move_farp_pad(idx, side, pad_template.as_str(), pos)
             .context("moving farp pad")?;
+        for (name, id) in pad_move.helipad_ids {
+            self.ephemeral.dep_farp_pad_helipad_ids.insert(name, id);
+        }
+        let _ = pad_move.spawned;
         let airbase = Airbase::get_by_name(spctx.lua(), pad_template.clone())
             .with_context(|| format_compact!("getting airbase {pad_template}"))?;
         airbase.set_coalition(side)?;
@@ -1231,6 +1252,29 @@ impl Db {
             ) {
                 self.finish_dynamic_farp_warehouse(lua, &oid)
                     .context("initializing dynamic FARP warehouse")?;
+            }
+        }
+        if !mobile {
+            let assigned = self
+                .spawn_ground_dep_farp_static_slots(
+                    spctx,
+                    idx,
+                    side,
+                    oid,
+                    pos,
+                    pad_template.as_str(),
+                )
+                .context("linking DEP FARP static client slots to helipads")?;
+            if !assigned.is_empty() {
+                if let Some(obj) = self.persisted.objectives.get_mut_cow(&oid) {
+                    if let ObjectiveKind::Farp {
+                        dep_static_slot_groups,
+                        ..
+                    } = &mut obj.kind
+                    {
+                        *dep_static_slot_groups = assigned;
+                    }
+                }
             }
         }
         self.setup_supply_lines().context("setup supply lines")?;
@@ -1258,6 +1302,8 @@ impl Db {
         }
         self.ephemeral
             .create_objective_markup(&self.persisted, objective!(self, oid)?);
+        self.flush_markup_messages(lua)
+            .context("markup after DEP FARP deploy")?;
         self.ephemeral.dirty();
         Ok(oid)
     }

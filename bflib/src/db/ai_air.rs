@@ -5,7 +5,7 @@ use super::{
 };
 use crate::{
     group, group_mut, objective, objective_mut,
-    spawnctx::SpawnCtx,
+    spawnctx::{helipad_facility_id, SpawnCtx},
 };
 use anyhow::{anyhow, bail, Context, Result};
 use bfprotocols::{
@@ -1593,22 +1593,6 @@ fn is_helipad_facility(typ: &str) -> bool {
         || typ.contains("FARP")
         || typ.contains("Invisible")
         || typ.contains("FARPPAD")
-}
-
-/// ME helipad/FARP statics use `StaticObject`, not `Unit`.
-fn helipad_facility_id(lua: MizLua, name: &str) -> Option<i64> {
-    if let Ok(Static::Static(st)) = StaticObject::get_by_name(lua, name) {
-        if st.is_exist().unwrap_or(false) {
-            if let Ok(id) = st.id() {
-                return Some(i64::from(id.inner()));
-            }
-        }
-    }
-    let u = Unit::get_by_name(lua, name).ok()?;
-    if !u.is_exist().unwrap_or(false) {
-        return None;
-    }
-    u.id().ok().map(|id| i64::from(id.inner()))
 }
 
 fn helipad_heading_from_object(o: &Object<'_>) -> f64 {

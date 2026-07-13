@@ -15,6 +15,9 @@ pub enum ObjectiveKind {
         pad_template: String,
         #[serde(default)]
         mobile: bool,
+        /// ME names of pre-placed client slot groups assigned to this deploy FARP.
+        #[serde(default)]
+        dep_static_slot_groups: Vec<String>,
     },
 }
 
