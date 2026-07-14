@@ -20,8 +20,8 @@
   },
   "sounds_player": {
     "crate_drop": "assets\\sounds\\crate-drop.ogg",
-    "crate_load": "assets\\sounds\\crate-drop.ogg",
-    "crate_unload": "assets\\sounds\\crate-drop.ogg",
+    "crate_load": "assets\\sounds\\crate-load.ogg",
+    "crate_unload": "assets\\sounds\\crate-unload.ogg",
     "crate_unpack": "assets\\sounds\\crate-drop.ogg",
     "crate_destroy": "assets\\sounds\\crate-drop.ogg",
     "cargo_list": "assets\\sounds\\copy-that.ogg",
@@ -4431,7 +4431,9 @@
     ]
   ],
   "extra_fixed_wing_objectives": [
-    "Sukhumi",
-    "Batumi"
+    "Anapa",
+    "Batumi",
+    "Mozdok",
+    "Tbilisi"
   ]
 }

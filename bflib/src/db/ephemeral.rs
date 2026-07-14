@@ -155,7 +155,15 @@ pub struct Ephemeral {
     pub(super) dep_farp_pool_slot_ids: FxHashSet<dcso3::net::SlotId>,
     /// Player ground starts occupying hub parking/helipad slots (blocks AI air spawn).
     pub(super) player_hub_slot_claims: FxHashSet<(ObjectiveId, HubSlotKind, i64)>,
-    pub(super) player_hub_slot_claim_by_slot: FxHashMap<dcso3::net::SlotId, (ObjectiveId, HubSlotKind, i64)>,
+    pub(super) player_hub_slot_claim_by_slot:
+        FxHashMap<dcso3::net::SlotId, smallvec::SmallVec<[(ObjectiveId, HubSlotKind, i64); 4]>>,
+    /// Cached ground position when player claimed a hub parking slot.
+    pub(super) player_hub_blocker_positions:
+        FxHashMap<dcso3::net::SlotId, (ObjectiveId, Vector2)>,
+    /// Birth `subPlace` indices occupied by players (blocks AI by table index).
+    pub(super) player_hub_subplaces: FxHashSet<(ObjectiveId, i64)>,
+    pub(super) player_hub_subplace_by_slot:
+        FxHashMap<dcso3::net::SlotId, (ObjectiveId, i64)>,
     /// Runtime static ids for `{pad_template}-HP-{n}` after `move_farp_pad`.
     pub(super) dep_farp_pad_helipad_ids: FxHashMap<String, i64>,
     pub(super) pending_dep_farp_static_slot_release: smallvec::SmallVec<[(Side, String); 16]>,
@@ -244,6 +252,9 @@ impl Default for Ephemeral {
             dep_farp_pool_slot_ids: FxHashSet::default(),
             player_hub_slot_claims: FxHashSet::default(),
             player_hub_slot_claim_by_slot: FxHashMap::default(),
+            player_hub_blocker_positions: FxHashMap::default(),
+            player_hub_subplaces: FxHashSet::default(),
+            player_hub_subplace_by_slot: FxHashMap::default(),
             dep_farp_pad_helipad_ids: FxHashMap::default(),
             pending_dep_farp_static_slot_release: smallvec::smallvec![],
             global_pad_templates: FxHashSet::default(),
@@ -877,21 +888,51 @@ impl Ephemeral {
             .push(ucid.clone())
     }
 
-    pub(super) fn set_player_hub_slot_claim(
+    pub(super) fn set_player_hub_slot_claims(
         &mut self,
         slot: SlotId,
-        claim: (ObjectiveId, HubSlotKind, i64),
+        claims: &[(ObjectiveId, HubSlotKind, i64)],
+        blocker_pos: Option<(ObjectiveId, Vector2)>,
+        parking_subplace: Option<i64>,
     ) {
-        if let Some(old) = self.player_hub_slot_claim_by_slot.insert(slot, claim) {
-            self.player_hub_slot_claims.remove(&old);
+        if let Some(old) = self.player_hub_slot_claim_by_slot.remove(&slot) {
+            for c in old {
+                self.player_hub_slot_claims.remove(&c);
+            }
         }
-        self.player_hub_slot_claims.insert(claim);
+        if let Some(old) = self.player_hub_subplace_by_slot.remove(&slot) {
+            self.player_hub_subplaces.remove(&old);
+        }
+        let mut stored = smallvec::smallvec![];
+        for claim in claims {
+            self.player_hub_slot_claims.insert(*claim);
+            stored.push(*claim);
+        }
+        if !stored.is_empty() {
+            self.player_hub_slot_claim_by_slot.insert(slot, stored);
+        }
+        if let Some(pos) = blocker_pos {
+            self.player_hub_blocker_positions.insert(slot, pos);
+        }
+        if let Some(sub) = parking_subplace {
+            if let Some((oid, _)) = blocker_pos {
+                let key = (oid, sub);
+                self.player_hub_subplaces.insert(key);
+                self.player_hub_subplace_by_slot.insert(slot, key);
+            }
+        }
     }
 
     pub(super) fn clear_player_hub_slot_claim(&mut self, slot: &SlotId) {
-        if let Some(claim) = self.player_hub_slot_claim_by_slot.remove(slot) {
-            self.player_hub_slot_claims.remove(&claim);
+        if let Some(old) = self.player_hub_slot_claim_by_slot.remove(slot) {
+            for c in old {
+                self.player_hub_slot_claims.remove(&c);
+            }
         }
+        if let Some(old) = self.player_hub_subplace_by_slot.remove(slot) {
+            self.player_hub_subplaces.remove(&old);
+        }
+        self.player_hub_blocker_positions.remove(slot);
     }
 
     pub(super) fn player_deslot(

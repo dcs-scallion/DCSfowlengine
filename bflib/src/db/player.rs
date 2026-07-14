@@ -40,6 +40,7 @@ use dcso3::{
     object::{DcsObject, DcsOid},
     unit::{ClassUnit, Unit},
 };
+use fxhash::FxHashSet;
 use log::{debug, error, info, warn};
 use netidx::utils::Either;
 use serde::Deserialize;
@@ -1083,6 +1084,7 @@ impl Db {
         slot: SlotId,
         oid: ObjectiveId,
         ucid: Ucid,
+        parking_subplace: Option<i64>,
     ) -> Result<()> {
         let stale: SmallVec<[SlotId; 4]> = self
             .ephemeral
@@ -1179,11 +1181,11 @@ impl Db {
                 error!("couldn't adjust warehouse {:?}", e)
             }
         }
-        let hub_claim = if !in_air {
+        let hub_claims = if !in_air {
             let obj = objective!(self, oid)?;
-            ai_air::resolve_player_hub_slot_claim(lua, self, obj, sifo.side, point).ok().flatten()
+            ai_air::resolve_player_parking_claims(lua, self, obj, parking_subplace, point)?
         } else {
-            None
+            FxHashSet::default()
         };
         let player = maybe_mut!(self.persisted.players, ucid, "player")?;
         let landed_at_objective = {
@@ -1200,11 +1202,14 @@ impl Db {
                     .map(|(oid, _)| *oid)
             }
         };
-        if let Some(claim) = hub_claim {
+        if !hub_claims.is_empty() {
             info!(
-                "player hub slot claim {claim:?} for slot {slot} at objective {oid}"
+                "player hub slot claims {hub_claims:?} subplace {parking_subplace:?} for slot {slot} at objective {oid}"
             );
-            self.ephemeral.set_player_hub_slot_claim(slot, claim);
+            let claims: smallvec::SmallVec<[(ObjectiveId, ai_air::HubSlotKind, i64); 4]> =
+                hub_claims.iter().copied().collect();
+            self.ephemeral
+                .set_player_hub_slot_claims(slot, &claims, Some((oid, point)), parking_subplace);
         }
         player.current_slot = Some((
             slot,

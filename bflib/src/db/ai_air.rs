@@ -52,7 +52,7 @@ pub(super) const MIN_MARK_HUB_DIST_SQ: f64 = 100_000_000.;
 /// Min distance² for heli using airfield parking (~1 km).
 const MIN_MARK_HUB_AIRFIELD_HELI_DIST_SQ: f64 = 1_000_000.;
 /// Player on parking/helipad blocks AI spawn within this radius (m).
-const PLAYER_HUB_SLOT_BLOCK_RADIUS_M: f64 = 45.;
+const PLAYER_HUB_SLOT_BLOCK_RADIUS_M: f64 = 120.;
 
 fn objective_is_heli_spawn_hub(db: &Db, obj: &Objective) -> bool {
     match obj.kind {
@@ -109,6 +109,7 @@ fn helipads_near_point(
         out.push(HubSlot {
             kind: HubSlotKind::Helipad,
             slot_id,
+            table_index: None,
             pos: unit.pos,
             heading: unit.heading,
             baro_alt: None,
@@ -250,6 +251,9 @@ pub struct HubSlot {
     pub kind: HubSlotKind,
     /// DCS parking term index or helipad unit id.
     pub slot_id: i64,
+    /// `getParking` table index (Birth `subPlace` uses this namespace).
+    #[serde(default)]
+    pub table_index: Option<i64>,
     pub pos: Vector2,
     pub heading: f64,
     /// BARO MSL from `getParking` `vTerminalPos.y` when known.
@@ -373,6 +377,18 @@ pub(super) fn slot_claim_key(oid: ObjectiveId, slot: &HubSlot) -> (ObjectiveId, 
     (oid, slot.kind, slot.slot_id)
 }
 
+fn hub_slot_claimed(
+    oid: ObjectiveId,
+    slot: &HubSlot,
+    claimed: &FxHashSet<(ObjectiveId, HubSlotKind, i64)>,
+) -> bool {
+    if claimed.contains(&slot_claim_key(oid, slot)) {
+        return true;
+    }
+    slot.table_index
+        .is_some_and(|ti| claimed.contains(&(oid, slot.kind, ti)))
+}
+
 pub(super) fn claimed_hub_slots(db: &Db) -> FxHashSet<(ObjectiveId, HubSlotKind, i64)> {
     claimed_hub_slots_excluding(db, None)
 }
@@ -399,7 +415,7 @@ pub(super) fn claimed_hub_slots_excluding(
             continue;
         }
         for slot in &ai_air.hub_slots {
-            set.insert(slot_claim_key(hub, slot));
+            insert_hub_slot_claims(&mut set, hub, slot);
         }
     }
     set.extend(db.ephemeral.player_hub_slot_claims.iter().copied());
@@ -529,6 +545,7 @@ fn carrier_fallback_deck_slot(lua: MizLua, db: &Db, obj: &Objective) -> Result<O
                 return Ok(Some(HubSlot {
                     kind: HubSlotKind::Parking,
                     slot_id: 1,
+                    table_index: None,
                     pos,
                     heading: 0.,
                     baro_alt: Some(p.y.round()),
@@ -550,6 +567,7 @@ fn carrier_fallback_deck_slot(lua: MizLua, db: &Db, obj: &Objective) -> Result<O
     Ok(Some(HubSlot {
         kind: HubSlotKind::Parking,
         slot_id: 1,
+        table_index: None,
         pos,
         heading: 0.,
         baro_alt: Some(pt.y.round()),
@@ -815,8 +833,13 @@ fn apply_me_airfield_unit<'lua>(
     unit.set_pos(hub.anchor)?;
     let ab_id = resolve_parking_airbase_id(lua, db, hub)?;
     unit.raw_set("airdromeId", ab_id.inner())?;
-    unit.raw_remove("parking")?;
-    unit.raw_remove("parking_id")?;
+    if let Some(parking) = hub_slot_parking_label(slot) {
+        unit.raw_set("parking", parking.as_str())?;
+        unit.raw_set("parking_id", parking.as_str())?;
+    } else {
+        unit.raw_remove("parking")?;
+        unit.raw_remove("parking_id")?;
+    }
     unit.raw_remove("helipadId")?;
     unit.raw_remove("linkUnit")?;
     unit.raw_remove("manualHeading")?;
@@ -1551,6 +1574,7 @@ fn push_parking_spot(out: &mut Vec<HubSlot>, spot: Table, fallback_term: i64) {
     out.push(HubSlot {
         kind: HubSlotKind::Parking,
         slot_id: term,
+        table_index: Some(fallback_term),
         pos,
         heading,
         baro_alt: parking_spot_baro_alt(&spot),
@@ -1630,6 +1654,7 @@ fn helipad_slot_from_dcs_object(
     Some(HubSlot {
         kind: HubSlotKind::Helipad,
         slot_id,
+        table_index: None,
         pos,
         heading: helipad_heading_from_object(&o),
         baro_alt: Some(pt.0.y),
@@ -1708,6 +1733,7 @@ fn helipad_slot_from_unit(lua: MizLua, unit: &SpawnedUnit, obj: &Objective) -> O
     Some(HubSlot {
         kind: HubSlotKind::Helipad,
         slot_id,
+        table_index: None,
         pos: unit.pos,
         heading: unit.heading,
         baro_alt,
@@ -1785,20 +1811,92 @@ fn hub_slots_for_occupancy_check(
     Ok(filter_valid_hub_slots(pool))
 }
 
+fn insert_hub_slot_claims(
+    set: &mut FxHashSet<(ObjectiveId, HubSlotKind, i64)>,
+    oid: ObjectiveId,
+    slot: &HubSlot,
+) {
+    set.insert(slot_claim_key(oid, slot));
+    if let Some(ti) = slot.table_index {
+        set.insert((oid, slot.kind, ti));
+    }
+}
+
 fn closest_hub_slot_claim(
     oid: ObjectiveId,
     pos: Vector2,
     slots: &[HubSlot],
 ) -> Option<(ObjectiveId, HubSlotKind, i64)> {
-    slots
-        .iter()
-        .filter(|s| near_point(pos, s.pos, PLAYER_HUB_SLOT_BLOCK_RADIUS_M))
-        .min_by(|a, b| {
-            na::distance_squared(&a.pos.into(), &pos.into())
-                .partial_cmp(&na::distance_squared(&b.pos.into(), &pos.into()))
-                .unwrap_or(std::cmp::Ordering::Equal)
-        })
-        .map(|s| slot_claim_key(oid, s))
+    let mut best: Option<(f64, &HubSlot)> = None;
+    for s in slots {
+        let d2 = na::distance_squared(&s.pos.into(), &pos.into());
+        match &best {
+            None => best = Some((d2, s)),
+            Some((bd, _)) if d2 < *bd => best = Some((d2, s)),
+            _ => {}
+        }
+    }
+    let (d2, s) = best?;
+    if d2 > PLAYER_HUB_SLOT_BLOCK_RADIUS_M * PLAYER_HUB_SLOT_BLOCK_RADIUS_M {
+        return None;
+    }
+    Some(slot_claim_key(oid, s))
+}
+
+pub(super) fn resolve_player_parking_claims(
+    lua: MizLua,
+    db: &Db,
+    obj: &Objective,
+    parking_subplace: Option<i64>,
+    pos: Vector2,
+) -> Result<FxHashSet<(ObjectiveId, HubSlotKind, i64)>> {
+    let mut set = FxHashSet::default();
+    if !objective_is_heli_spawn_hub(db, obj)
+        && !objective_has_airfield_hub(db, obj)
+        && !objective_is_naval_carrier(db, obj)
+    {
+        return Ok(set);
+    }
+    if let Some(sub) = parking_subplace {
+        set.insert((obj.id, HubSlotKind::Parking, sub));
+    }
+    if let Some(ab_oid) = hub_airbase_oid(lua, db, obj.id)? {
+        let ab = Airbase::get_instance(lua, &ab_oid)?;
+        let parking = ab.get_parking(false)?;
+        let len = parking.raw_len();
+        for i in 1..=len {
+            let Ok(spot) = parking.raw_get::<_, Table>(i) else {
+                continue;
+            };
+            let idx = i as i64;
+            let term: i64 = spot
+                .raw_get("Term_Index")
+                .or_else(|_| spot.raw_get("vTerminalIdx"))
+                .or_else(|_| spot.raw_get("term"))
+                .unwrap_or(idx);
+            let spot_pos = parking_spot_pos(&spot);
+            let matches_sub = parking_subplace.is_some_and(|sub| sub == idx || sub == term);
+            let matches_pos = spot_pos.is_some_and(|p| near_point(pos, p, PLAYER_HUB_SLOT_BLOCK_RADIUS_M));
+            if matches_sub || matches_pos {
+                set.insert((obj.id, HubSlotKind::Parking, idx));
+                set.insert((obj.id, HubSlotKind::Parking, term));
+            }
+        }
+    }
+    if let Some(claim) = closest_hub_slot_claim_from_parking(lua, db, obj, pos)? {
+        set.insert(claim);
+    }
+    Ok(set)
+}
+
+fn closest_hub_slot_claim_from_parking(
+    lua: MizLua,
+    db: &Db,
+    obj: &Objective,
+    pos: Vector2,
+) -> Result<Option<(ObjectiveId, HubSlotKind, i64)>> {
+    let slots = hub_slots_for_occupancy_check(lua, db, obj, obj.owner)?;
+    Ok(closest_hub_slot_claim(obj.id, pos, &slots))
 }
 
 pub(super) fn resolve_player_hub_slot_claim(
@@ -1825,6 +1923,18 @@ fn ground_player_positions_at_hub(
     side: Side,
 ) -> Result<Vec<Vector2>> {
     let mut out = Vec::new();
+    for (slot_id, (oid, pos)) in db.ephemeral.player_hub_blocker_positions.iter() {
+        if *oid != obj.id {
+            continue;
+        }
+        let Some(sifo) = db.ephemeral.slot_info.get(slot_id) else {
+            continue;
+        };
+        if sifo.side != side {
+            continue;
+        }
+        out.push(*pos);
+    }
     for (slot_id, _) in db.ephemeral.players_by_slot.iter() {
         let Some(sifo) = db.ephemeral.slot_info.get(slot_id) else {
             continue;
@@ -1838,7 +1948,7 @@ fn ground_player_positions_at_hub(
         let Ok(unit) = Unit::get_instance(lua, unit_oid) else {
             continue;
         };
-        if unit.in_air().unwrap_or(true) {
+        if unit.in_air().unwrap_or(false) {
             continue;
         }
         let pos = unit
@@ -1923,9 +2033,22 @@ fn ground_occupied_hub_slots(
         return Ok(set);
     }
     for pos in ground_hub_blocker_positions(lua, db, obj, side, except_group)? {
-        if let Some(claim) = closest_hub_slot_claim(obj.id, pos, &slots) {
-            set.insert(claim);
+        let mut best: Option<(f64, &HubSlot)> = None;
+        for s in &slots {
+            let d2 = na::distance_squared(&s.pos.into(), &pos.into());
+            match &best {
+                None => best = Some((d2, s)),
+                Some((bd, _)) if d2 < *bd => best = Some((d2, s)),
+                _ => {}
+            }
         }
+        let Some((d2, s)) = best else {
+            continue;
+        };
+        if d2 > PLAYER_HUB_SLOT_BLOCK_RADIUS_M * PLAYER_HUB_SLOT_BLOCK_RADIUS_M {
+            continue;
+        }
+        insert_hub_slot_claims(&mut set, obj.id, s);
     }
     Ok(set)
 }
@@ -2008,7 +2131,14 @@ fn free_slots_at_hub(
             slot.link_unit = ship_link;
         }
     }
-    pool.retain(|s| !claimed.contains(&(obj.id, s.kind, s.slot_id)));
+    pool.retain(|s| !hub_slot_claimed(obj.id, s, &claimed));
+    pool.retain(|s| {
+        !s.table_index.is_some_and(|ti| {
+            db.ephemeral
+                .player_hub_subplaces
+                .contains(&(obj.id, ti))
+        })
+    });
     pool.retain(|s| {
         !blocker_positions
             .iter()
@@ -7033,9 +7163,10 @@ pub(super) fn spawn_ai_air_group<'lua>(
                         hub_slot_baro_alt(lua, slot, hub.baro_alt).unwrap_or(hub.baro_alt),
                     ),
                     HubSlotKind::Parking => log::info!(
-                        "ai air {gid} unit {}: parking {} baro {:.0}m anchor [{:.0},{:.0}]",
+                        "ai air {gid} unit {}: parking {} idx {:?} baro {:.0}m anchor [{:.0},{:.0}]",
                         su.name,
                         slot.slot_id,
+                        slot.table_index,
                         hub.baro_alt,
                         hub.anchor.x,
                         hub.anchor.y,

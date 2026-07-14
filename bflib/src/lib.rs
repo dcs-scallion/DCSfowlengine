@@ -362,6 +362,8 @@ struct Context {
     event_handler_id: Option<HandlerId>,
     miz_state_path: PathBuf,
     shutdown: Option<AutoShutdown>,
+    /// Restart countdown warnings (panels when CFG `shutdown` is set; sounds always).
+    restart_warnings: Option<AutoShutdown>,
     last_perf_log: DateTime<Utc>,
     load_state: LoadState,
     idx: env::miz::MizIndex,
@@ -1059,7 +1061,7 @@ fn on_event(lua: MizLua, ev: Event) -> Result<()> {
             if let Ok(unit) = b.initiator.as_unit() {
                 ctx.recently_born.insert(unit.object_id()?, Utc::now());
                 let birth_place = b.place.as_ref();
-                match ctx.db.unit_born(lua, &unit, &ctx.connected, birth_place) {
+                match ctx.db.unit_born(lua, &unit, &ctx.connected, birth_place, b.subplace) {
                     Ok(BirthRes::None) => (),
                     Ok(BirthRes::OccupiedSlot(slot)) => {
                         if ctx.db.ephemeral.cfg.limited_lives && ctx.db.ephemeral.cfg.lives_birth {
@@ -1679,51 +1681,51 @@ fn generate_ewr_reports(ctx: &mut Context, now: DateTime<Utc>) -> Result<()> {
     Ok(())
 }
 
+fn sync_restart_warnings(ctx: &mut Context, when: DateTime<Utc>) -> &mut AutoShutdown {
+    let warn = ctx.restart_warnings.get_or_insert_with(|| AutoShutdown::new(when));
+    if warn.when != when {
+        *warn = AutoShutdown::new(when);
+    }
+    warn
+}
+
 fn check_auto_shutdown(
     ctx: &mut Context,
     lua: MizLua,
     now: DateTime<Utc>,
 ) -> Result<AdminResult> {
-    if let Some(asd) = ctx.shutdown.as_mut() {
-        if asd.when - now <= Duration::minutes(30) && !asd.thirty_minute_warning {
-            asd.thirty_minute_warning = true;
-            ctx.db.ephemeral.msgs().panel_to_all(
-                60,
-                false,
-                "The server will restart in 30 minutes",
-            );
-            ctx.db.play_sound_all(lua, "warning_4");
+    let cfg = &ctx.db.ephemeral.cfg;
+    let bflib_panels = cfg.shutdown.is_some();
+    if let Some(when) = cfg.map_restart_when(now, ctx.shutdown.map(|s| s.when)) {
+        let sound_key = {
+            let warn = sync_restart_warnings(ctx, when);
+            if !warn.one_minute_warning && when - now <= Duration::minutes(1) {
+                warn.one_minute_warning = true;
+                Some(("warning_1", true, "The server will restart in one minute"))
+            } else if !warn.five_minute_warning && when - now <= Duration::minutes(5) {
+                warn.five_minute_warning = true;
+                Some(("warning_2", true, "The server will restart in 5 minutes"))
+            } else if !warn.ten_minute_warning && when - now <= Duration::minutes(10) {
+                warn.ten_minute_warning = true;
+                Some(("warning_3", true, "The server will restart in 10 minutes"))
+            } else if !warn.thirty_minute_warning && when - now <= Duration::minutes(30) {
+                warn.thirty_minute_warning = true;
+                Some(("warning_4", false, "The server will restart in 30 minutes"))
+            } else {
+                None
+            }
+        };
+        if let Some((key, clear, panel)) = sound_key {
+            if bflib_panels {
+                ctx.db.ephemeral.msgs().panel_to_all(60, clear, panel);
+            }
+            ctx.db.play_sound_all(lua, key);
         }
-        if asd.when - now <= Duration::minutes(10) && !asd.ten_minute_warning {
-            asd.ten_minute_warning = true;
-            ctx.db.ephemeral.msgs().panel_to_all(
-                60,
-                true,
-                "The server will restart in 10 minutes",
-            );
-            ctx.db.play_sound_all(lua, "warning_3");
-        }
-        if asd.when - now <= Duration::minutes(5) && !asd.five_minute_warning {
-            asd.five_minute_warning = true;
-            ctx.db.ephemeral.msgs().panel_to_all(
-                60,
-                true,
-                "The server will restart in 5 minutes",
-            );
-            ctx.db.play_sound_all(lua, "warning_2");
-        }
-        if asd.when - now <= Duration::minutes(1) && !asd.one_minute_warning {
-            asd.one_minute_warning = true;
-            ctx.db.ephemeral.msgs().panel_to_all(
-                60,
-                true,
-                "The server will restart in one minute",
-            );
-            ctx.db.play_sound_all(lua, "warning_1");
-        }
-        if now > asd.when {
+        if bflib_panels && now > when {
             return admin::admin_shutdown(ctx, lua, None);
         }
+    } else {
+        ctx.restart_warnings = None;
     }
     if let Some(victor) = ctx.db.check_victory(now) {
         return admin::admin_shutdown(ctx, lua, Some(Some(victor)));

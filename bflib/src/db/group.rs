@@ -1029,6 +1029,7 @@ impl Db {
         unit: &Unit,
         connected: &Connected,
         birth_place: Option<&Object<'_>>,
+        parking_subplace: Option<i64>,
     ) -> Result<BirthRes> {
         let id = unit.object_id()?;
         let name = unit.get_name()?;
@@ -1139,7 +1140,7 @@ impl Db {
                 velocity: Vector3::default(),
             },
         });
-        self.player_entered_slot(lua, id, unit, slot, objective, ucid)
+        self.player_entered_slot(lua, id, unit, slot, objective, ucid, parking_subplace)
             .context("entering player into slot")?;
         Ok(BirthRes::OccupiedSlot(slot))
     }

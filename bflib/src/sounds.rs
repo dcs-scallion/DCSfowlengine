@@ -16,7 +16,7 @@ for more details.
 
 use bfprotocols::fowl_miz_export::FowlMizExport;
 use dcso3::{net::SlotId, trigger::Trigger, MizLua};
-use log::debug;
+use log::{debug, warn};
 use std::sync::Arc;
 
 pub fn play_player(export: &FowlMizExport, lua: MizLua, key: &str, slot: &SlotId) {
@@ -39,6 +39,7 @@ pub fn play_player(export: &FowlMizExport, lua: MizLua, key: &str, slot: &SlotId
 
 pub fn play_all(export: &FowlMizExport, lua: MizLua, key: &str) {
     let Some(path) = export.sounds_all.get(key) else {
+        debug!("sound {key} for all skipped: not in fowl export");
         return;
     };
     let Ok(trigger) = Trigger::singleton(lua) else {
@@ -48,7 +49,7 @@ pub fn play_all(export: &FowlMizExport, lua: MizLua, key: &str) {
         return;
     };
     if let Err(e) = action.out_sound(path.clone().into()) {
-        debug!("sound {key} for all skipped: {e:?}");
+        warn!("sound {key} ({path}) for all failed: {e:?}");
     }
 }
 
