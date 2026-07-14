@@ -14,8 +14,11 @@ FITNESS FOR A PARTICULAR PURPOSE. See the GNU Affero Public License
 for more details.
 */
 
-use super::{Db, MapS, SetS, csar::CsarDowned, ephemeral::SlotInfo, group::DeployKind, objective::Objective};
-use crate::{maybe, maybe_mut, objective_mut};
+use super::{
+    ai_air, Db, MapS, SetS, csar::CsarDowned, ephemeral::SlotInfo, group::DeployKind,
+    objective::Objective,
+};
+use crate::{maybe, maybe_mut, objective, objective_mut};
 use anyhow::{Context, Result, anyhow, bail};
 use bfprotocols::{
     cfg::{LifeType, PointsCfg, UnitTag, UnitTags, Vehicle},
@@ -1000,9 +1003,13 @@ impl Db {
                                         inform_cost = Some((*slot, player.points));
                                     }
                                     inst.stopped_at_objective = false;
+                                    let was_in_air = inst.in_air;
                                     inst.position = pos;
                                     inst.velocity = instance.get_velocity()?.0;
                                     inst.in_air = instance.in_air()?;
+                                    if !was_in_air && inst.in_air {
+                                        self.ephemeral.clear_player_hub_slot_claim(slot);
+                                    }
                                     inst.moved = Some(now);
                                 } else if inst.landed_at_objective.is_some() {
                                     inst.stopped_at_objective = true;
@@ -1096,7 +1103,6 @@ impl Db {
                 self.player_deslot(&old_ucid)
             }
         }
-        let obj = objective_mut!(self, oid)?;
         let sifo = maybe!(self.ephemeral.slot_info, slot, "slot")?.clone();
         let player = maybe!(self.persisted.players, ucid, "player")?;
         let life_typ = self.ephemeral.cfg.life_types[&sifo.typ];
@@ -1138,57 +1144,75 @@ impl Db {
         self.ephemeral
             .object_id_by_slot
             .insert(slot.clone(), id.clone());
-        let mut adjust_warehouse = || -> Result<()> {
-            let id = maybe!(self.ephemeral.airbase_by_oid, obj.id, "airbase")?;
-            let wh = Airbase::get_instance(lua, id)
-                .context("getting airbase")?
-                .get_warehouse()
-                .context("getting warehouse")?;
-            if sifo.ground_start {
-                wh.remove_item(sifo.typ.0.clone(), 1)
-                    .with_context(|| format_compact!("removing {} from warehouse", sifo.typ.0))?;
-                for wep in unit.get_ammo()? {
-                    let wep = wep?;
-                    let count = wep.count()?;
-                    let typ = wep.type_name()?;
-                    let whcnt = wh.get_item_count(typ.clone())?;
-                    debug!("removing {count} {typ} from the warehouse which contains {whcnt}");
-                    wh.remove_item(typ.clone(), count)?;
-                    if let Some(inv) = obj.warehouse.equipment.get_mut_cow(&typ) {
-                        inv.stored = whcnt - count;
-                    }
-                }
-            }
-            maybe_mut!(obj.warehouse.equipment, sifo.typ.0, "equip")?.stored = wh
-                .get_item_count(sifo.typ.0.clone())
-                .with_context(|| format_compact!("getting warehouse count for {}", sifo.typ.0))?;
-            Ok(())
-        };
-        if let Err(e) = adjust_warehouse() {
-            error!("couldn't adjust warehouse {:?}", e)
-        }
-        let player = maybe_mut!(self.persisted.players, ucid, "player")?;
         let position = unit.get_position()?;
         let point = Vector2::new(position.p.x, position.p.z);
-        let landed_at_objective = if obj.zone.contains(point) {
-            Some(oid)
-        } else if !sifo.ground_start {
-            // dynamic slot: spawn objective already validated (may be outside O trigger)
-            Some(oid)
+        let in_air = unit.in_air()?;
+        {
+            let obj = objective_mut!(self, oid)?;
+            let mut adjust_warehouse = || -> Result<()> {
+                let id = maybe!(self.ephemeral.airbase_by_oid, obj.id, "airbase")?;
+                let wh = Airbase::get_instance(lua, id)
+                    .context("getting airbase")?
+                    .get_warehouse()
+                    .context("getting warehouse")?;
+                if sifo.ground_start {
+                    wh.remove_item(sifo.typ.0.clone(), 1)
+                        .with_context(|| format_compact!("removing {} from warehouse", sifo.typ.0))?;
+                    for wep in unit.get_ammo()? {
+                        let wep = wep?;
+                        let count = wep.count()?;
+                        let typ = wep.type_name()?;
+                        let whcnt = wh.get_item_count(typ.clone())?;
+                        debug!("removing {count} {typ} from the warehouse which contains {whcnt}");
+                        wh.remove_item(typ.clone(), count)?;
+                        if let Some(inv) = obj.warehouse.equipment.get_mut_cow(&typ) {
+                            inv.stored = whcnt - count;
+                        }
+                    }
+                }
+                maybe_mut!(obj.warehouse.equipment, sifo.typ.0, "equip")?.stored = wh
+                    .get_item_count(sifo.typ.0.clone())
+                    .with_context(|| format_compact!("getting warehouse count for {}", sifo.typ.0))?;
+                Ok(())
+            };
+            if let Err(e) = adjust_warehouse() {
+                error!("couldn't adjust warehouse {:?}", e)
+            }
+        }
+        let hub_claim = if !in_air {
+            let obj = objective!(self, oid)?;
+            ai_air::resolve_player_hub_slot_claim(lua, self, obj, sifo.side, point).ok().flatten()
         } else {
-            self.persisted
-                .objectives
-                .into_iter()
-                .find(|(_, o)| o.zone.contains(point))
-                .map(|(oid, _)| *oid)
+            None
         };
+        let player = maybe_mut!(self.persisted.players, ucid, "player")?;
+        let landed_at_objective = {
+            let obj = objective!(self, oid)?;
+            if obj.zone.contains(point) {
+                Some(oid)
+            } else if !sifo.ground_start {
+                Some(oid)
+            } else {
+                self.persisted
+                    .objectives
+                    .into_iter()
+                    .find(|(_, o)| o.zone.contains(point))
+                    .map(|(oid, _)| *oid)
+            }
+        };
+        if let Some(claim) = hub_claim {
+            info!(
+                "player hub slot claim {claim:?} for slot {slot} at objective {oid}"
+            );
+            self.ephemeral.set_player_hub_slot_claim(slot, claim);
+        }
         player.current_slot = Some((
             slot,
             Some(InstancedPlayer {
                 unit_name: unit.get_name()?,
                 position,
                 velocity: unit.get_velocity()?.0,
-                in_air: unit.in_air()?,
+                in_air,
                 typ: Vehicle::from(unit.get_type_name()?),
                 landed_at_objective,
                 stopped_at_objective: true,

@@ -1549,7 +1549,7 @@ fn lives(
     Ok(msg)
 }
 
-const LIFE_TAKEN_SOUND_DELAY_SECS: f32 = 4.;
+const LIFE_TAKEN_SOUND_DELAY_SECS: f32 = 4.5;
 
 fn schedule_life_taken_sound(lua: MizLua, slot: SlotId) -> Result<()> {
     let timer = Timer::singleton(lua)?;

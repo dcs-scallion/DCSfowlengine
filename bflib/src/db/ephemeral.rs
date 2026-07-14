@@ -15,6 +15,7 @@ for more details.
 */
 
 use super::{
+    ai_air::HubSlotKind,
     cargo::Cargo,
     discord_map::DiscordMapRuntime,
     group::{SpawnedGroup, SpawnedUnit},
@@ -152,6 +153,9 @@ pub struct Ephemeral {
     pub(super) dep_farp_static_slot_home: FxHashMap<String, (Vector2, f64)>,
     /// Unassigned DEP FARP pool client slots (blocked until deploy registers them).
     pub(super) dep_farp_pool_slot_ids: FxHashSet<dcso3::net::SlotId>,
+    /// Player ground starts occupying hub parking/helipad slots (blocks AI air spawn).
+    pub(super) player_hub_slot_claims: FxHashSet<(ObjectiveId, HubSlotKind, i64)>,
+    pub(super) player_hub_slot_claim_by_slot: FxHashMap<dcso3::net::SlotId, (ObjectiveId, HubSlotKind, i64)>,
     /// Runtime static ids for `{pad_template}-HP-{n}` after `move_farp_pad`.
     pub(super) dep_farp_pad_helipad_ids: FxHashMap<String, i64>,
     pub(super) pending_dep_farp_static_slot_release: smallvec::SmallVec<[(Side, String); 16]>,
@@ -238,6 +242,8 @@ impl Default for Ephemeral {
             used_dep_farp_static_slot_groups: FxHashSet::default(),
             dep_farp_static_slot_home: FxHashMap::default(),
             dep_farp_pool_slot_ids: FxHashSet::default(),
+            player_hub_slot_claims: FxHashSet::default(),
+            player_hub_slot_claim_by_slot: FxHashMap::default(),
             dep_farp_pad_helipad_ids: FxHashMap::default(),
             pending_dep_farp_static_slot_release: smallvec::smallvec![],
             global_pad_templates: FxHashSet::default(),
@@ -871,12 +877,30 @@ impl Ephemeral {
             .push(ucid.clone())
     }
 
+    pub(super) fn set_player_hub_slot_claim(
+        &mut self,
+        slot: SlotId,
+        claim: (ObjectiveId, HubSlotKind, i64),
+    ) {
+        if let Some(old) = self.player_hub_slot_claim_by_slot.insert(slot, claim) {
+            self.player_hub_slot_claims.remove(&old);
+        }
+        self.player_hub_slot_claims.insert(claim);
+    }
+
+    pub(super) fn clear_player_hub_slot_claim(&mut self, slot: &SlotId) {
+        if let Some(claim) = self.player_hub_slot_claim_by_slot.remove(slot) {
+            self.player_hub_slot_claims.remove(&claim);
+        }
+    }
+
     pub(super) fn player_deslot(
         &mut self,
         per: &Persisted,
         slot: &SlotId,
         expected_ucid: Option<Ucid>,
     ) -> Option<(UnitId, Ucid)> {
+        self.clear_player_hub_slot_claim(slot);
         if let Some(ucid) = self.players_by_slot.swap_remove(slot) {
             if let Some(expected_ucid) = expected_ucid {
                 if expected_ucid != ucid {

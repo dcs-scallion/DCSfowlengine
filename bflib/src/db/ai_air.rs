@@ -51,6 +51,8 @@ use std::f64;
 pub(super) const MIN_MARK_HUB_DIST_SQ: f64 = 100_000_000.;
 /// Min distance² for heli using airfield parking (~1 km).
 const MIN_MARK_HUB_AIRFIELD_HELI_DIST_SQ: f64 = 1_000_000.;
+/// Player on parking/helipad blocks AI spawn within this radius (m).
+const PLAYER_HUB_SLOT_BLOCK_RADIUS_M: f64 = 45.;
 
 fn objective_is_heli_spawn_hub(db: &Db, obj: &Objective) -> bool {
     match obj.kind {
@@ -400,6 +402,7 @@ pub(super) fn claimed_hub_slots_excluding(
             set.insert(slot_claim_key(hub, slot));
         }
     }
+    set.extend(db.ephemeral.player_hub_slot_claims.iter().copied());
     set
 }
 
@@ -1755,6 +1758,178 @@ fn helipad_slots_in_zone(
     Ok(out)
 }
 
+fn hub_slots_for_occupancy_check(
+    lua: MizLua,
+    db: &Db,
+    obj: &Objective,
+    side: Side,
+) -> Result<Vec<HubSlot>> {
+    let mut pool = helipad_slots_for_heli_hub(lua, db, obj, side)?;
+    if pool.is_empty() && matches!(obj.kind, ObjectiveKind::Farp { .. }) {
+        pool.extend(helipads_near_point(
+            lua,
+            db,
+            side,
+            obj.zone.pos(),
+            FO_HELIPAD_SEARCH_RADIUS_SQ,
+        ));
+    }
+    if let Some(ab) = hub_airbase_oid(lua, db, obj.id)? {
+        pool.extend(parking_spots(lua, &ab)?);
+    }
+    if objective_has_operational_carrier(lua, db, obj) {
+        if let Some(deck) = carrier_fallback_deck_slot(lua, db, obj)? {
+            pool.push(deck);
+        }
+    }
+    Ok(filter_valid_hub_slots(pool))
+}
+
+fn closest_hub_slot_claim(
+    oid: ObjectiveId,
+    pos: Vector2,
+    slots: &[HubSlot],
+) -> Option<(ObjectiveId, HubSlotKind, i64)> {
+    slots
+        .iter()
+        .filter(|s| near_point(pos, s.pos, PLAYER_HUB_SLOT_BLOCK_RADIUS_M))
+        .min_by(|a, b| {
+            na::distance_squared(&a.pos.into(), &pos.into())
+                .partial_cmp(&na::distance_squared(&b.pos.into(), &pos.into()))
+                .unwrap_or(std::cmp::Ordering::Equal)
+        })
+        .map(|s| slot_claim_key(oid, s))
+}
+
+pub(super) fn resolve_player_hub_slot_claim(
+    lua: MizLua,
+    db: &Db,
+    obj: &Objective,
+    side: Side,
+    pos: Vector2,
+) -> Result<Option<(ObjectiveId, HubSlotKind, i64)>> {
+    if !objective_is_heli_spawn_hub(db, obj)
+        && !objective_has_airfield_hub(db, obj)
+        && !objective_is_naval_carrier(db, obj)
+    {
+        return Ok(None);
+    }
+    let slots = hub_slots_for_occupancy_check(lua, db, obj, side)?;
+    Ok(closest_hub_slot_claim(obj.id, pos, &slots))
+}
+
+fn ground_player_positions_at_hub(
+    lua: MizLua,
+    db: &Db,
+    obj: &Objective,
+    side: Side,
+) -> Result<Vec<Vector2>> {
+    let mut out = Vec::new();
+    for (slot_id, _) in db.ephemeral.players_by_slot.iter() {
+        let Some(sifo) = db.ephemeral.slot_info.get(slot_id) else {
+            continue;
+        };
+        if sifo.side != side || sifo.objective != obj.id {
+            continue;
+        }
+        let Some(unit_oid) = db.ephemeral.object_id_by_slot.get(slot_id) else {
+            continue;
+        };
+        let Ok(unit) = Unit::get_instance(lua, unit_oid) else {
+            continue;
+        };
+        if unit.in_air().unwrap_or(true) {
+            continue;
+        }
+        let pos = unit
+            .get_point()
+            .map(|p| Vector2::new(p.0.x, p.0.z))
+            .or_else(|_| {
+                unit.get_position()
+                    .map(|p| Vector2::new(p.p.x, p.p.z))
+            })?;
+        out.push(pos);
+    }
+    Ok(out)
+}
+
+fn ground_ai_air_positions_at_hub(
+    lua: MizLua,
+    db: &Db,
+    obj: &Objective,
+    side: Side,
+    except_group: Option<GroupId>,
+) -> Result<Vec<Vector2>> {
+    let mut out = Vec::new();
+    for gid in db.persisted.actions.into_iter() {
+        if except_group == Some(*gid) {
+            continue;
+        }
+        let Some(group) = db.persisted.groups.get(gid) else {
+            continue;
+        };
+        if group.side != side {
+            continue;
+        }
+        let DeployKind::Action { ai_air, .. } = &group.origin else {
+            continue;
+        };
+        if ai_air.hub != Some(obj.id) {
+            continue;
+        }
+        if ai_air.dcs_spawn_names.is_empty() {
+            continue;
+        }
+        for name in &ai_air.dcs_spawn_names {
+            if !group_on_ground(lua, name).unwrap_or(false) {
+                continue;
+            }
+            if let Ok(pos) = group_center_pos(lua, name) {
+                out.push(pos);
+            }
+        }
+    }
+    Ok(out)
+}
+
+fn ground_hub_blocker_positions(
+    lua: MizLua,
+    db: &Db,
+    obj: &Objective,
+    side: Side,
+    except_group: Option<GroupId>,
+) -> Result<Vec<Vector2>> {
+    let mut out = ground_player_positions_at_hub(lua, db, obj, side)?;
+    out.extend(ground_ai_air_positions_at_hub(
+        lua,
+        db,
+        obj,
+        side,
+        except_group,
+    )?);
+    Ok(out)
+}
+
+fn ground_occupied_hub_slots(
+    lua: MizLua,
+    db: &Db,
+    obj: &Objective,
+    side: Side,
+    except_group: Option<GroupId>,
+) -> Result<FxHashSet<(ObjectiveId, HubSlotKind, i64)>> {
+    let mut set = FxHashSet::default();
+    let slots = hub_slots_for_occupancy_check(lua, db, obj, side)?;
+    if slots.is_empty() {
+        return Ok(set);
+    }
+    for pos in ground_hub_blocker_positions(lua, db, obj, side, except_group)? {
+        if let Some(claim) = closest_hub_slot_claim(obj.id, pos, &slots) {
+            set.insert(claim);
+        }
+    }
+    Ok(set)
+}
+
 fn free_slots_at_hub(
     lua: MizLua,
     db: &Db,
@@ -1763,7 +1938,14 @@ fn free_slots_at_hub(
     kind: AiPlaneKind,
     needed: usize,
     claimed: &FxHashSet<(ObjectiveId, HubSlotKind, i64)>,
+    except_group: Option<GroupId>,
 ) -> Result<Vec<HubSlot>> {
+    let mut claimed = claimed.clone();
+    if let Ok(extra) = ground_occupied_hub_slots(lua, db, obj, side, except_group) {
+        claimed.extend(extra);
+    }
+    let blocker_positions =
+        ground_hub_blocker_positions(lua, db, obj, side, except_group).unwrap_or_default();
     let naval = objective_is_naval_carrier(db, obj);
     let mut pool = match kind {
         AiPlaneKind::Helicopter => {
@@ -1827,6 +2009,11 @@ fn free_slots_at_hub(
         }
     }
     pool.retain(|s| !claimed.contains(&(obj.id, s.kind, s.slot_id)));
+    pool.retain(|s| {
+        !blocker_positions
+            .iter()
+            .any(|p| near_point(*p, s.pos, PLAYER_HUB_SLOT_BLOCK_RADIUS_M))
+    });
     pool.retain(|s| match s.kind {
         HubSlotKind::Helipad => true,
         HubSlotKind::Parking => parking_allowed_for_kind(s.term_type, kind, naval),
@@ -1903,7 +2090,16 @@ pub(super) fn select_hub_for_ai(
                 reason.push("no fuel");
             }
         }
-        let slots = free_slots_at_hub(lua, db, obj, side, plane.kind, unit_count, &claimed)?;
+        let slots = free_slots_at_hub(
+            lua,
+            db,
+            obj,
+            side,
+            plane.kind,
+            unit_count,
+            &claimed,
+            None,
+        )?;
         if slots.len() < unit_count {
             reason.push("no free parking/helipad slots");
         }
@@ -2164,7 +2360,7 @@ fn cyclic_park_hold_wait() -> Duration {
 fn ai_air_occupies_hub_slot(ai_air: &AiAirState) -> bool {
     match ai_air.phase {
         AiAirPhase::OnMission | AiAirPhase::RtbInbound | AiAirPhase::Departing => false,
-        AiAirPhase::Bootstrap => ai_air.bootstrap_grounded || !ai_air.bootstrap_mission_pushed,
+        AiAirPhase::Bootstrap => true,
         AiAirPhase::TaxiToParking
         | AiAirPhase::Servicing
         | AiAirPhase::ShutdownParked
@@ -4363,7 +4559,16 @@ fn hub_slots_for_cycle_respawn(
             return Ok(usable.into_iter().take(alive_count).collect());
         }
     }
-    if let Ok(slots) = free_slots_at_hub(lua, db, obj, side, plane_kind, alive_count, &claimed) {
+    if let Ok(slots) = free_slots_at_hub(
+        lua,
+        db,
+        obj,
+        side,
+        plane_kind,
+        alive_count,
+        &claimed,
+        Some(gid),
+    ) {
         if slots.len() >= alive_count {
             return Ok(slots.into_iter().take(alive_count).collect());
         }
@@ -6304,7 +6509,16 @@ fn try_hub_pick_at_objective(
         bail!("base not owned");
     }
     let claimed = claimed_hub_slots_excluding(db, except);
-    let mut slots = free_slots_at_hub(lua, db, obj, side, plane.kind, unit_count, &claimed)?;
+    let mut slots = free_slots_at_hub(
+        lua,
+        db,
+        obj,
+        side,
+        plane.kind,
+        unit_count,
+        &claimed,
+        except,
+    )?;
     if slots.len() < unit_count
         && objective_is_naval_carrier(db, obj)
         && objective_has_operational_carrier(lua, db, obj)
@@ -6383,8 +6597,16 @@ pub(super) fn issue_rtb(
                     ai_air.hub_slots.clone()
                 } else {
                     let claimed = claimed_hub_slots_excluding(db, Some(req.group));
-                    let picked =
-                        free_slots_at_hub(lua, db, obj, side, plane.kind, n, &claimed)?;
+                    let picked = free_slots_at_hub(
+                        lua,
+                        db,
+                        obj,
+                        side,
+                        plane.kind,
+                        n,
+                        &claimed,
+                        Some(req.group),
+                    )?;
                     if picked.len() < n {
                         bail!("no free slots at {}", obj.name);
                     }
