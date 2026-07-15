@@ -212,8 +212,10 @@ pub struct Ephemeral {
     pub(super) discord_map: Option<DiscordMapRuntime>,
     pub(super) discord_map_post_due: Option<DateTime<Utc>>,
     pub(super) discord_map_periodic_due: Option<DateTime<Utc>>,
-    /// DCSServerBot restart countdown skew (DCS elapsed at mission ready); HTML map only.
+    /// DCSServerBot restart skew (DCS elapsed at mission ready); map + warning timing.
     pub(super) restart_display_skew_secs: u32,
+    /// Wall-clock connect time for campaign stats online hours.
+    pub(super) campaign_online_since: FxHashMap<dcso3::net::Ucid, DateTime<Utc>>,
     /// PRI_LINE redraw pending; re-queue PRI_OVERLAY before the next markup flush.
     overlay_underlay_dirty: bool,
 }
@@ -291,6 +293,7 @@ impl Default for Ephemeral {
             discord_map_post_due: None,
             discord_map_periodic_due: None,
             restart_display_skew_secs: 0,
+            campaign_online_since: FxHashMap::default(),
             overlay_underlay_dirty: false,
         }
     }

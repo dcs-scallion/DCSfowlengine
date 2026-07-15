@@ -423,6 +423,40 @@ fn format_theatre_display(slug: &str) -> String {
     format!("{}{}", first.to_ascii_uppercase(), chars.as_str())
 }
 
+fn mission_theatre_slug(lua: MizLua) -> String {
+    let l = lua.inner();
+    match l
+        .load(
+            r#"local function pick_theatre(src)
+  if type(src) ~= "table" then return nil end
+  local t = src.theatre or src.theater or src.terrain
+  if type(t) == "table" then
+    t = t.name or t.id or t.code
+  end
+  if type(t) == "string" and t ~= "" then
+    return t
+  end
+  return nil
+end
+local function r()
+  local m = rawget(_G, "mission")
+  local t = pick_theatre(m)
+  if t ~= nil then return t end
+  if env ~= nil and type(env) == "table" then
+    t = pick_theatre(env.mission)
+    if t ~= nil then return t end
+  end
+  return "unknown"
+end
+return r()"#,
+        )
+        .eval::<String>()
+    {
+        Ok(s) => s,
+        Err(_) => "unknown".into(),
+    }
+}
+
 /// OAB/FOB/LO held by a coalition (matches map icon: not neutral, not captureable).
 fn count_ground_objectives_by_side(db: &Db) -> (u32, u32) {
     let mut red = 0u32;
@@ -555,7 +589,7 @@ fn dcs_mission_elapsed_secs(lua: MizLua) -> Result<u32> {
     Ok(elapsed.max(0.).min(f64::from(u32::MAX)) as u32)
 }
 
-/// Boot/load skew for HTML Time to restart when CFG `shutdown` is null.
+/// Boot/load skew when CFG `shutdown` is null (DCSServerBot schedule mirror).
 pub fn capture_restart_display_skew(lua: MizLua, db: &mut Db) -> Result<()> {
     let cfg = &db.ephemeral.cfg;
     if cfg.shutdown.is_some() || cfg.dcsserver_bot_scheduled_restart.is_none() {
@@ -564,17 +598,27 @@ pub fn capture_restart_display_skew(lua: MizLua, db: &mut Db) -> Result<()> {
     }
     let skew = dcs_mission_elapsed_secs(lua)?;
     db.ephemeral.restart_display_skew_secs = skew;
-    info!("discord map: restart display skew {skew}s");
+    info!("restart countdown skew {skew}s (mission load/init)");
     Ok(())
 }
 
-struct MissionClock {
-    date: NaiveDate,
-    tod_secs: u32,
-    elapsed_days: u32,
+/// ME mission calendar snapshot (shared with campaign stats).
+pub struct MissionClock {
+    pub date: NaiveDate,
+    pub tod_secs: u32,
+    pub elapsed_days: u32,
 }
 
 fn mission_clock(lua: MizLua) -> Result<MissionClock> {
+    mission_clock_inner(lua)
+}
+
+/// Campaign stats: ME calendar date at mission load.
+pub fn mission_clock_for_stats(lua: MizLua) -> Result<MissionClock> {
+    mission_clock_inner(lua)
+}
+
+fn mission_clock_inner(lua: MizLua) -> Result<MissionClock> {
     let timer = Timer::singleton(lua)?;
     let abs = timer.get_abs_time()?;
     let t0 = timer.get_time0()?;
@@ -799,6 +843,24 @@ pub fn collect_map_status_bar(
         name: p.name.clone(),
         ping: p.ping,
     };
+    let campaign_enabled = cfg.discord_map.campaign_stats;
+    let (campaign_duration_days, campaign_online_hours_blue, campaign_online_hours_red, campaign_stats_sidebar_html) =
+        if campaign_enabled {
+            let slug = mission_theatre_slug(lua);
+            let theatre = format_theatre_display(&slug);
+            if let Some(view) = db.campaign_build_view(&theatre) {
+                (
+                    view.duration_days,
+                    view.online_hours_blue,
+                    view.online_hours_red,
+                    super::campaign_stats::render_sidebar_html(&view),
+                )
+            } else {
+                (1, 0, 0, String::new())
+            }
+        } else {
+            (0, 0, 0, String::new())
+        };
     Ok(bg::discord_map::DiscordMapStatusBar {
         mission_name: mission_name.to_string(),
         status_utc: status_utc.to_string(),
@@ -851,6 +913,11 @@ pub fn collect_map_status_bar(
                 String::new()
             }
         },
+        campaign_stats_enabled: campaign_enabled,
+        campaign_duration_days,
+        campaign_online_hours_blue,
+        campaign_online_hours_red,
+        campaign_stats_sidebar_html,
     })
 }
 

@@ -1,0 +1,391 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Fowl — campaign stats sidebar (prototype)</title>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Roboto+Condensed:wght@400;700&display=swap">
+<style>
+  :root {
+    --sidebar-w: 300px;
+    --layout-gap: 4px;
+    --border: #2e3138;
+    --bg-head: #15161a;
+    --text: #686a6e;
+    --blue: #2E5AAC;
+    --red: #C43838;
+    --accent: #e8c547;
+    --white: #fff;
+  }
+
+  * { box-sizing: border-box; }
+
+  body {
+    margin: 0;
+    min-height: 100vh;
+    background: #000;
+    color: var(--text);
+    font-family: "Roboto Condensed", Roboto, sans-serif;
+    font-size: 24px;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    padding: 24px 16px 40px;
+    gap: 16px;
+  }
+
+  .proto-note {
+    max-width: 960px;
+    width: 100%;
+    color: #8a8d94;
+    font-size: 14px;
+    line-height: 1.45;
+    border: 1px dashed var(--border);
+    padding: 10px 12px;
+    background: rgba(0,0,0,.35);
+  }
+
+  .proto-note strong { color: var(--accent); font-weight: 700; }
+
+  .preview-row {
+    display: flex;
+    flex-direction: row;
+    align-items: flex-start;
+    gap: var(--layout-gap);
+    max-width: 100%;
+  }
+
+  .map-placeholder {
+    width: 640px;
+    max-width: calc(100vw - var(--sidebar-w) - 48px);
+    min-height: 900px;
+    border: 1px solid var(--border);
+    background: linear-gradient(135deg, #12141a 0%, #1a1d26 50%, #0f1116 100%);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    color: #3d4048;
+    font-size: 14px;
+    text-align: center;
+    padding: 24px;
+    flex: 1 1 auto;
+  }
+
+  /* Right column — same width / gap as live map sidebars */
+  .right-col {
+    flex: 0 0 var(--sidebar-w);
+    width: var(--sidebar-w);
+    min-width: var(--sidebar-w);
+    display: flex;
+    flex-direction: column;
+    gap: var(--layout-gap);
+    font-size: clamp(11px, calc(100vw * 14 / 640), 14px);
+  }
+
+  /* Framed panel — matches .stat from discord_map.html */
+  .stat {
+    border: 1px solid var(--border);
+    box-sizing: border-box;
+    display: flex;
+    flex-direction: column;
+    min-height: 0;
+    width: 100%;
+  }
+
+  .stat-h {
+    background: var(--bg-head);
+    color: var(--text);
+    line-height: 1.2;
+    padding: 5px 4px;
+    text-align: center;
+    white-space: normal;
+    word-break: break-word;
+    overflow: hidden;
+    border-bottom: 1px solid var(--border);
+    font-weight: 700;
+    flex: 0 0 auto;
+  }
+
+  .stat-body {
+    background: #000;
+    color: var(--text);
+    padding: 4px 0 6px;
+    flex: 1 1 auto;
+    min-height: 0;
+  }
+
+  .stat-divider {
+    height: 0;
+    border-top: 1px solid var(--border);
+    margin: 4px 6px;
+  }
+
+  .stat-section-hdr {
+    display: grid;
+    grid-template-columns: 1fr 48px 10px 48px;
+    gap: 0 2px;
+    align-items: center;
+    padding: 4px 6px 2px;
+    color: var(--text);
+    font-weight: 700;
+    font-size: .95em;
+  }
+
+  .stat-section-hdr .lbl { grid-column: 1; text-align: left; }
+  .stat-section-hdr .blue-h { grid-column: 2; text-align: right; color: var(--blue); }
+  .stat-section-hdr .sep-h { grid-column: 3; text-align: center; color: var(--text); }
+  .stat-section-hdr .red-h { grid-column: 4; text-align: left; color: var(--red); }
+
+  .stat-row {
+    display: grid;
+    grid-template-columns: 1fr 48px 10px 48px;
+    gap: 0 2px;
+    align-items: baseline;
+    padding: 2px 6px;
+    line-height: 1.3;
+  }
+
+  .stat-row .lbl {
+    text-align: left;
+    padding-right: 2px;
+    word-break: break-word;
+  }
+
+  .stat-blue, .stat-red {
+    font-weight: 700;
+    font-variant-numeric: tabular-nums;
+    white-space: nowrap;
+  }
+
+  .stat-blue { color: var(--blue); text-align: right; }
+  .stat-red { color: var(--red); text-align: left; }
+  .stat-sep { color: var(--text); text-align: center; font-weight: 400; }
+
+  .stat-kv {
+    display: flex;
+    flex-direction: row;
+    justify-content: space-between;
+    gap: 6px;
+    padding: 2px 6px;
+    line-height: 1.3;
+  }
+
+  .stat-kv .lbl { flex: 1 1 auto; text-align: left; }
+  .stat-kv .val {
+    flex: 0 0 auto;
+    font-weight: 700;
+    color: var(--white);
+    font-variant-numeric: tabular-nums;
+    text-align: right;
+  }
+
+  .stat-row.is-total .lbl,
+  .stat-kv.is-total .lbl,
+  .stat-kv.is-total .val {
+    font-weight: 700;
+    color: var(--white);
+  }
+
+  .stat-row.is-total .stat-blue { color: #6b9fff; }
+  .stat-row.is-total .stat-red { color: #e86a6a; }
+
+  @media (max-width: 700px) {
+    .preview-row { flex-direction: column; align-items: center; }
+    .map-placeholder { width: 100%; max-width: 100%; min-height: 240px; }
+    .right-col { width: 100%; max-width: var(--sidebar-w); }
+  }
+</style>
+</head>
+<body>
+
+<p class="proto-note">
+  <strong>Campaign stats — right sidebar prototype</strong><br>
+  Three stacked panels (Campaign, Losses, Points) — no tabs. Framing matches live map
+  <code>.stat</code> boxes (300&nbsp;px column). Online hours remain in the top stat bar on the real map.
+</p>
+
+<div class="preview-row">
+  <div class="map-placeholder" aria-hidden="true">
+    Map area placeholder<br>(left pilots column + map not shown)
+  </div>
+
+  <aside class="right-col" aria-label="Campaign statistics">
+
+    <!-- CAMPAIGN -->
+    <div class="stat">
+      <div class="stat-h">Campaign</div>
+      <div class="stat-body">
+        <div class="stat-kv">
+          <span class="lbl">Theatre</span>
+          <span class="val">Caucasus</span>
+        </div>
+
+        <div class="stat-divider"></div>
+
+        <div class="stat-kv">
+          <span class="lbl">Campaign start</span>
+          <span class="val">4.8.1985</span>
+        </div>
+        <div class="stat-kv">
+          <span class="lbl">Campaign current</span>
+          <span class="val">24.8.1985</span>
+        </div>
+        <div class="stat-kv">
+          <span class="lbl">Duration (days)</span>
+          <span class="val">20</span>
+        </div>
+
+        <div class="stat-divider"></div>
+
+        <div class="stat-section-hdr">
+          <span class="lbl">Objectives taken</span>
+          <span class="blue-h">Blue</span>
+          <span class="sep-h">:</span>
+          <span class="red-h">Red</span>
+        </div>
+        <div class="stat-row is-total">
+          <span class="lbl">Total captures</span>
+          <span class="stat-blue">9</span>
+          <span class="stat-sep">:</span>
+          <span class="stat-red">16</span>
+        </div>
+
+        <div class="stat-divider"></div>
+
+        <div class="stat-section-hdr">
+          <span class="lbl">Players</span>
+          <span class="blue-h">Blue</span>
+          <span class="sep-h">:</span>
+          <span class="red-h">Red</span>
+        </div>
+        <div class="stat-row">
+          <span class="lbl">Registered</span>
+          <span class="stat-blue">245</span>
+          <span class="stat-sep">:</span>
+          <span class="stat-red">156</span>
+        </div>
+        <div class="stat-row">
+          <span class="lbl">Player deaths</span>
+          <span class="stat-blue">248</span>
+          <span class="stat-sep">:</span>
+          <span class="stat-red">194</span>
+        </div>
+      </div>
+    </div>
+
+    <!-- LOSSES -->
+    <div class="stat">
+      <div class="stat-h">War losses</div>
+      <div class="stat-body">
+        <div class="stat-section-hdr">
+          <span class="lbl"></span>
+          <span class="blue-h">Blue</span>
+          <span class="sep-h">:</span>
+          <span class="red-h">Red</span>
+        </div>
+
+        <div class="stat-row"><span class="lbl">Planes standard</span><span class="stat-blue">142</span><span class="stat-sep">:</span><span class="stat-red">205</span></div>
+        <div class="stat-row"><span class="lbl">Planes intercept</span><span class="stat-blue">32</span><span class="stat-sep">:</span><span class="stat-red">19</span></div>
+        <div class="stat-row"><span class="lbl">Planes attack</span><span class="stat-blue">342</span><span class="stat-sep">:</span><span class="stat-red">220</span></div>
+        <div class="stat-row"><span class="lbl">Planes recon</span><span class="stat-blue">77</span><span class="stat-sep">:</span><span class="stat-red">45</span></div>
+        <div class="stat-row"><span class="lbl">Planes bomber</span><span class="stat-blue">14</span><span class="stat-sep">:</span><span class="stat-red">27</span></div>
+        <div class="stat-row"><span class="lbl">Planes tanker</span><span class="stat-blue">6</span><span class="stat-sep">:</span><span class="stat-red">2</span></div>
+        <div class="stat-row"><span class="lbl">Drones</span><span class="stat-blue">85</span><span class="stat-sep">:</span><span class="stat-red">49</span></div>
+
+        <div class="stat-divider"></div>
+
+        <div class="stat-row"><span class="lbl">Helicopters atk</span><span class="stat-blue">98</span><span class="stat-sep">:</span><span class="stat-red">128</span></div>
+        <div class="stat-row"><span class="lbl">Helicopters log</span><span class="stat-blue">37</span><span class="stat-sep">:</span><span class="stat-red">83</span></div>
+
+        <div class="stat-divider"></div>
+
+        <div class="stat-row"><span class="lbl">Armored</span><span class="stat-blue">1584</span><span class="stat-sep">:</span><span class="stat-red">1205</span></div>
+        <div class="stat-row"><span class="lbl">Troops</span><span class="stat-blue">2534</span><span class="stat-sep">:</span><span class="stat-red">1948</span></div>
+        <div class="stat-row"><span class="lbl">AAA</span><span class="stat-blue">1221</span><span class="stat-sep">:</span><span class="stat-red">918</span></div>
+        <div class="stat-row"><span class="lbl">SAM SR</span><span class="stat-blue">859</span><span class="stat-sep">:</span><span class="stat-red">514</span></div>
+        <div class="stat-row"><span class="lbl">SAM MR</span><span class="stat-blue">253</span><span class="stat-sep">:</span><span class="stat-red">310</span></div>
+        <div class="stat-row"><span class="lbl">SAM LR</span><span class="stat-blue">220</span><span class="stat-sep">:</span><span class="stat-red">123</span></div>
+
+        <div class="stat-divider"></div>
+
+        <div class="stat-row"><span class="lbl">Ships small</span><span class="stat-blue">6</span><span class="stat-sep">:</span><span class="stat-red">12</span></div>
+        <div class="stat-row"><span class="lbl">Ships medium</span><span class="stat-blue">1</span><span class="stat-sep">:</span><span class="stat-red">3</span></div>
+        <div class="stat-row"><span class="lbl">Carriers</span><span class="stat-blue">1</span><span class="stat-sep">:</span><span class="stat-red">0</span></div>
+
+        <div class="stat-divider"></div>
+
+        <div class="stat-row"><span class="lbl">Building logi</span><span class="stat-blue">2057</span><span class="stat-sep">:</span><span class="stat-red">1248</span></div>
+        <div class="stat-row"><span class="lbl">Building prod</span><span class="stat-blue">87</span><span class="stat-sep">:</span><span class="stat-red">234</span></div>
+        <div class="stat-row"><span class="lbl">Building static</span><span class="stat-blue">12</span><span class="stat-sep">:</span><span class="stat-red">14</span></div>
+      </div>
+    </div>
+
+    <!-- POINTS -->
+    <div class="stat">
+      <div class="stat-h">Points</div>
+      <div class="stat-body">
+        <div class="stat-section-hdr">
+          <span class="lbl">Gain (p)</span>
+          <span class="blue-h">Blue</span>
+          <span class="sep-h">:</span>
+          <span class="red-h">Red</span>
+        </div>
+        <div class="stat-row">
+          <span class="lbl">Balancing</span>
+          <span class="stat-blue">82421</span>
+          <span class="stat-sep">:</span>
+          <span class="stat-red">88458</span>
+        </div>
+        <div class="stat-row">
+          <span class="lbl">Active</span>
+          <span class="stat-blue">24455</span>
+          <span class="stat-sep">:</span>
+          <span class="stat-red">25030</span>
+        </div>
+        <div class="stat-row is-total">
+          <span class="lbl">Total gain</span>
+          <span class="stat-blue">106876</span>
+          <span class="stat-sep">:</span>
+          <span class="stat-red">113488</span>
+        </div>
+
+        <div class="stat-divider"></div>
+
+        <div class="stat-section-hdr">
+          <span class="lbl">Invested (p)</span>
+          <span class="blue-h">Blue</span>
+          <span class="sep-h">:</span>
+          <span class="red-h">Red</span>
+        </div>
+        <div class="stat-row">
+          <span class="lbl">Air unit</span>
+          <span class="stat-blue">26400</span>
+          <span class="stat-sep">:</span>
+          <span class="stat-red">18050</span>
+        </div>
+        <div class="stat-row">
+          <span class="lbl">Ground unit</span>
+          <span class="stat-blue">246345</span>
+          <span class="stat-sep">:</span>
+          <span class="stat-red">211240</span>
+        </div>
+        <div class="stat-row">
+          <span class="lbl">Navy unit</span>
+          <span class="stat-blue">3500</span>
+          <span class="stat-sep">:</span>
+          <span class="stat-red">1800</span>
+        </div>
+        <div class="stat-row is-total">
+          <span class="lbl">Total invested</span>
+          <span class="stat-blue">276245</span>
+          <span class="stat-sep">:</span>
+          <span class="stat-red">231090</span>
+        </div>
+      </div>
+    </div>
+
+  </aside>
+</div>
+
+</body>
+</html>

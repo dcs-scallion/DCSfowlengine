@@ -44,20 +44,22 @@
   "discord_map": {
     "enabled": false,
     "refresh_interval_secs":90,
-    "front_line_in_map": true,
     "webhook_url": "",
     "mapbox_access_token": "",
-    "style": "mapbox/dark-v11",
+    "style": "",
     "width": 1280,
     "retina": true,
     "padding": 0,
     "http_port": 17842,
-    "dowload_acmi": false,
+    "front_line_in_map": true,
+    "dowload_acmi": true,
+    "dowload_acmi_url": "",
     "discord_url": "",
     "stats_url": "",
     "manual_url": "",
     "bugs_report_url": "",
-    "dowload_acmi_url": ""
+    "campaign_stats": true,
+    "rounds_per_day": 2
   },
   "acmi_sanitize": {
     "process_inbox_bat": "C:\\acmi-sanitize\\process_inbox.bat",
@@ -74,7 +76,7 @@
     "times": ["00:00", "06:00", "12:00", "18:00"]
   },
   "points": {
-    "new_player_join": 3000000,
+    "new_player_join": 30000,
     "carrier_kill": 250,
     "shipsWithHeliport_kill": 120,
     "shipsNoHeliport_kill": 60,
@@ -301,7 +303,7 @@
     "MiG-21Bis": "Intercept",
     "L-39C": "Recon",
     "TF-51D": "Recon",
-    "QF-4E": "Recon",	
+    "QF-4E": "Recon",
     "F-16C_50": "Attack",
     "MiG-19P": "Intercept",
     "M-2000C": "Intercept",
@@ -684,6 +686,12 @@
         "cost": 60,
         "penalty": 30,
         "limit": 2
+      },
+      "interceptors-waypoint": {
+        "kind": "FighersWaypoint",
+        "cost": 5,
+        "penalty": null,
+        "limit": null
       },
       "fighters": {
         "kind": {
@@ -1139,6 +1147,12 @@
         "cost": 60,
         "penalty": 30,
         "limit": 2
+      },
+      "interceptors-waypoint": {
+        "kind": "FighersWaypoint",
+        "cost": 5,
+        "penalty": null,
+        "limit": null
       },
       "fighters": {
         "kind": {

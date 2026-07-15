@@ -18,6 +18,9 @@ use std::path::{Path, PathBuf};
 use tokio::fs;
 
 const SIDEBAR_WIDTH_PX: u32 = 300;
+/// Campaign stats sidebar (wider than left sidebar for 999999 : 999999).
+const CAMPAIGN_STATS_SIDEBAR_WIDTH_PX: u32 = 360;
+const CAMPAIGN_STATS_VALUE_COL_PX: u32 = 84;
 const SIDEBAR_RANK_COL_PX: u32 = 25;
 const LAYOUT_GAP_PX: u32 = 4;
 const STAT_BARS_GAP_PX: i32 = 3;
@@ -155,7 +158,7 @@ pub struct DiscordMapStatusBar {
     pub mission_elapsed_days: u32,
     pub gen_utc_ms: i64,
     pub restart_utc_ms: Option<i64>,
-    /// Added to HTML Time to restart when CFG `shutdown` is null (boot/load skew).
+    /// Added to HTML Time to restart when CFG `shutdown` is null (mission load skew).
     pub restart_display_skew_secs: u32,
     pub online_red: u32,
     pub online_blue: u32,
@@ -193,6 +196,11 @@ pub struct DiscordMapStatusBar {
     pub bugs_report_url: String,
     /// Relative map HTTP path when `virtual_resupply_decay.png` exists beside CFG.
     pub deliveries_url: String,
+    pub campaign_stats_enabled: bool,
+    pub campaign_duration_days: u32,
+    pub campaign_online_hours_blue: u32,
+    pub campaign_online_hours_red: u32,
+    pub campaign_stats_sidebar_html: String,
 }
 
 #[derive(Debug, Clone)]
@@ -889,7 +897,20 @@ fn stats_row_html(bar: &DiscordMapStatusBar, top: bool) -> String {
         h = mission_h,
         m = mission_m,
     );
-    let mission_day_initial = bar.mission_elapsed_days + 1;
+    let mission_day_initial = if bar.campaign_stats_enabled {
+        bar.campaign_duration_days
+    } else {
+        bar.mission_elapsed_days + 1
+    };
+    let online_hours = if bar.campaign_stats_enabled {
+        format!(
+            r#"<span class="stat-blue">{blue}</span> vs <span class="stat-red">{red}</span>"#,
+            blue = bar.campaign_online_hours_blue,
+            red = bar.campaign_online_hours_red,
+        )
+    } else {
+        r#"<span class="stat-blue">?</span> vs <span class="stat-red">?</span>"#.into()
+    };
     if top {
         format!(
             r#"<div class="stats stats-top">
@@ -911,7 +932,7 @@ fn stats_row_html(bar: &DiscordMapStatusBar, top: bool) -> String {
             factories = status_vs_html(bar.factories_blue, bar.factories_red),
             production = status_production_html(bar.production_blue, bar.production_red),
             balancing = status_balancing_html(bar.balancing_blue, bar.balancing_red),
-            online_hours = r#"<span class="stat-blue">?</span> vs <span class="stat-red">?</span>"#,
+            online_hours = online_hours,
         )
     } else {
         format!(
@@ -942,11 +963,16 @@ fn stats_row_html(bar: &DiscordMapStatusBar, top: bool) -> String {
 }
 
 fn map_header_html(bar: &DiscordMapStatusBar) -> String {
+    let status_time = bar
+        .status_utc
+        .rsplit_once(' ')
+        .map(|(_, time)| time)
+        .unwrap_or(bar.status_utc.as_str());
     format!(
-        r#"<div class="map-hdr"><div class="map-hdr-left">{left}</div><div class="map-hdr-right">{links}<span class="map-hdr-status-sep">          </span>Campaign status as of {status_utc} UTC</div></div>"#,
+        r#"<div class="map-hdr"><div class="map-hdr-left">{left}</div><div class="map-hdr-right">{links}<span class="map-hdr-status-sep">          </span>Campaign status as of {status_time} UTC</div></div>"#,
         left = map_header_left_html(bar),
         links = map_header_links_html(bar),
-        status_utc = html_escape(&bar.status_utc),
+        status_time = html_escape(status_time),
     )
 }
 
@@ -1105,13 +1131,48 @@ fn build_interactive_html(
         ));
     }
     let base_b64 = B64.encode(display_png);
-    let panel_w = SIDEBAR_WIDTH_PX + LAYOUT_GAP_PX + img_w;
+    let campaign_w = if status_bar.campaign_stats_enabled {
+        CAMPAIGN_STATS_SIDEBAR_WIDTH_PX + LAYOUT_GAP_PX
+    } else {
+        0
+    };
+    let main_w = SIDEBAR_WIDTH_PX + LAYOUT_GAP_PX + img_w;
+    let panel_w = main_w + campaign_w;
     let map_header = map_header_html(status_bar);
     let online_stat = sidebar_online_stat_html(status_bar);
     let stats_top = stats_row_html(status_bar, true);
     let sidebar_pilots_col = sidebar_pilots_col_html(status_bar);
     let map_clock = map_clock_script_html(status_bar);
     let stats_bottom = stats_row_html(status_bar, false);
+    let campaign_stats_col = &status_bar.campaign_stats_sidebar_html;
+    let map_core_bottom = format!(
+        r#"<div class="map-body-bottom">{sidebar_pilots_col}<div class="main-col">{map_clock}<div class="map-frame"><div id="wrap" data-rw="{img_w}" data-rh="{img_h}" data-health-bar-px="{health_bar_map_px}"><img id="base" src="data:image/png;base64,{base_b64}" width="{img_w}" height="{img_h}" alt="map">{front_svg}<div id="overlay">{body}</div></div></div>{stats_bottom}</div></div>"#,
+        sidebar_pilots_col = sidebar_pilots_col,
+        map_clock = map_clock,
+        img_w = img_w,
+        img_h = img_h,
+        health_bar_map_px = HEALTH_BAR_MAP_PX,
+        base_b64 = base_b64,
+        front_svg = front_svg,
+        body = body,
+        stats_bottom = stats_bottom,
+    );
+    let map_body = if status_bar.campaign_stats_enabled {
+        format!(
+            r#"<div class="map-body-row"><div class="map-core"><div class="map-body-top">{online_stat}{stats_top}</div>{map_core_bottom}</div>{campaign_stats_col}</div>"#,
+            online_stat = online_stat,
+            stats_top = stats_top,
+            map_core_bottom = map_core_bottom,
+            campaign_stats_col = campaign_stats_col,
+        )
+    } else {
+        format!(
+            r#"<div class="map-body"><div class="map-body-top">{online_stat}{stats_top}</div>{map_core_bottom}</div>"#,
+            online_stat = online_stat,
+            stats_top = stats_top,
+            map_core_bottom = map_core_bottom,
+        )
+    };
     format!(
         r#"<!DOCTYPE html>
 <html lang="en"><head>
@@ -1146,14 +1207,38 @@ body{{margin:0;background:#000;color:#686a6e;font-family:"Roboto Condensed",Robo
 .map-hdr-right{{display:flex;flex-direction:row;flex-wrap:nowrap;align-items:center;align-self:stretch;justify-content:flex-end;text-align:right;flex:0 1 auto;white-space:nowrap;padding-top:15px}}
 .map-hdr-status-sep{{white-space:pre}}
 .map-body{{display:flex;flex-direction:column;gap:{layout_gap}px;width:100%}}
+.map-body-row{{display:flex;flex-direction:row;align-items:stretch;gap:{layout_gap}px;width:100%;box-sizing:border-box}}
+.map-core{{display:flex;flex-direction:column;gap:{layout_gap}px;flex:0 0 {main_w}px;width:{main_w}px;min-width:{main_w}px;box-sizing:border-box}}
 .map-body-top{{display:flex;flex-direction:row;align-items:stretch;gap:{layout_gap}px;width:100%;box-sizing:border-box}}
 .map-body-bottom{{display:flex;flex-direction:row;align-items:flex-start;gap:{layout_gap}px;width:100%;box-sizing:border-box}}
 .left-col{{flex:0 0 {sidebar_w}px;width:{sidebar_w}px;min-width:{sidebar_w}px;box-sizing:border-box}}
+.right-col{{flex:0 0 {campaign_sidebar_w}px;width:{campaign_sidebar_w}px;min-width:{campaign_sidebar_w}px;box-sizing:border-box;display:flex;flex-direction:column;gap:{layout_gap}px;align-self:stretch;font-size:clamp(12px,calc(100vw*24/{img_w}),24px)}}
+.campaign-stats-col .stat-section-hdr,.campaign-stats-col .stat-row{{grid-template-columns:1fr {value_col}px 10px {value_col}px}}
+.campaign-stats-col .stat{{flex:0 0 auto;width:100%;min-width:0;border:1px solid #2e3138;box-sizing:border-box;display:flex;flex-direction:column}}
+.campaign-stats-col .stat-body{{background:#000;color:#686a6e;padding:4px 0 6px;flex:0 0 auto;min-height:0}}
+.campaign-stats-col .stat-h{{font-weight:700}}
+.stat-body{{background:#000;color:#686a6e;padding:4px 0 6px;flex:1 1 auto;min-height:0}}
+.stat-divider{{height:0;border-top:1px solid #2e3138;margin:4px 6px}}
+.stat-section-hdr{{display:grid;grid-template-columns:1fr 48px 10px 48px;gap:0 2px;align-items:center;padding:4px 6px 2px;color:#686a6e;font-weight:700;font-size:.95em}}
+.stat-section-hdr .lbl{{grid-column:1;text-align:left}}
+.stat-section-hdr .blue-h{{grid-column:2;text-align:right;color:#2E5AAC}}
+.stat-section-hdr .sep-h{{grid-column:3;text-align:center;color:#686a6e}}
+.stat-section-hdr .red-h{{grid-column:4;text-align:left;color:#C43838}}
+.stat-row{{display:grid;grid-template-columns:1fr 48px 10px 48px;gap:0 2px;align-items:baseline;padding:2px 6px;line-height:1.3}}
+.stat-row .lbl{{text-align:left;padding-right:2px;word-break:break-word}}
+.stat-row.is-total .lbl,.stat-kv.is-total .lbl{{font-weight:700}}
+.stat-blue,.stat-red{{font-weight:700;font-variant-numeric:tabular-nums;white-space:nowrap}}
+.stat-blue{{color:#2E5AAC;text-align:right}}
+.stat-red{{color:#C43838;text-align:left}}
+.stat-sep{{color:#686a6e;text-align:center;font-weight:400}}
+.stat-kv{{display:flex;flex-direction:row;justify-content:space-between;gap:6px;padding:2px 6px;line-height:1.3}}
+.stat-kv .lbl{{flex:1 1 auto;text-align:left}}
+.stat-kv .val{{flex:0 0 auto;font-weight:700;color:#686a6e;font-variant-numeric:tabular-nums;text-align:right}}
 .main-col{{display:flex;flex-direction:column;gap:{layout_gap}px;flex:0 0 {img_w}px;width:{img_w}px;min-width:{img_w}px;box-sizing:border-box}}
 .stats{{display:flex;flex-wrap:nowrap;gap:4px;width:100%;box-sizing:border-box;font-size:clamp(12px,calc(100vw*24/{img_w}),24px)}}
 .stats-top{{flex:1 1 0;min-width:0}}
-.stat{{flex:1 1 0;min-width:0;border:1px solid #2e3138;box-sizing:border-box;display:flex;flex-direction:column;min-height:0}}
-.sidebar-online-stat{{flex:0 0 {sidebar_w}px;width:{sidebar_w}px;min-width:{sidebar_w}px;min-height:0;font-size:clamp(12px,calc(100vw*24/{img_w}),24px)}}
+.stats .stat{{flex:1 1 0;min-width:0;border:1px solid #2e3138;box-sizing:border-box;display:flex;flex-direction:column;min-height:0}}
+.sidebar-online-stat{{flex:0 0 {sidebar_w}px;width:{sidebar_w}px;min-width:{sidebar_w}px;min-height:0;border:1px solid #2e3138;box-sizing:border-box;display:flex;flex-direction:column;font-size:clamp(12px,calc(100vw*24/{img_w}),24px)}}
 .stat-h{{background:#15161a;color:#686a6e;line-height:1.2;padding:5px 2px;text-align:center;white-space:normal;word-break:break-word;overflow:hidden;border-bottom:1px solid #2e3138;font-weight:400;flex:0 0 auto}}
 .stat-v{{background:#000;color:#686a6e;line-height:1.3;padding:6px 4px;text-align:center;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;flex:1 1 auto;min-height:0;font-weight:700}}
 .stat-plain{{color:#686a6e}}
@@ -1217,7 +1302,7 @@ body{{margin:0;background:#000;color:#686a6e;font-family:"Roboto Condensed",Robo
 .tip-neutral{{border-color:#2e3138}}
 .tip-neutral .tip-title{{background:rgba(46,49,56,.9)}}
 </style></head><body>
-<div class="map-panel">{map_header}<div class="map-body"><div class="map-body-top">{online_stat}{stats_top}</div><div class="map-body-bottom">{sidebar_pilots_col}<div class="main-col">{map_clock}<div class="map-frame"><div id="wrap" data-rw="{img_w}" data-rh="{img_h}" data-health-bar-px="{health_bar_map_px}"><img id="base" src="data:image/png;base64,{base_b64}" width="{img_w}" height="{img_h}" alt="map">{front_svg}<div id="overlay">{body}</div></div></div>{stats_bottom}</div></div></div></div>
+<div class="map-panel">{map_header}{map_body}</div>
 <script>
 (function(){{
   var wrap=document.getElementById('wrap');
@@ -1329,8 +1414,12 @@ body{{margin:0;background:#000;color:#686a6e;font-family:"Roboto Condensed",Robo
       datetimeEl.textContent=(dateStr?dateStr+' ':'')+h+':'+pad2(m);
     }}
     if(durationEl){{
-      var dayNum=(anchor.mission_elapsed_days||0)+days+1;
-      durationEl.textContent='Day '+dayNum;
+      if(anchor.campaign_stats_enabled){{
+        durationEl.textContent='Day '+(anchor.campaign_duration_days||1);
+      }}else{{
+        var dayNum=(anchor.mission_elapsed_days||0)+days+1;
+        durationEl.textContent='Day '+dayNum;
+      }}
     }}
     if(restartEl&&anchor.restart_utc_ms){{
       var skew=anchor.restart_display_skew_secs||0;
@@ -1361,23 +1450,18 @@ body{{margin:0;background:#000;color:#686a6e;font-family:"Roboto Condensed",Robo
 </body></html>"#,
         mn = html_escape(mission_name),
         status_utc = html_escape(status_utc),
-        base_b64 = base_b64,
         panel_w = panel_w,
+        main_w = main_w,
         brand_h = map_label_display_h(),
         img_w = img_w,
-        img_h = img_h,
-        body = body,
-        online_stat = online_stat,
-        stats_top = stats_top,
-        sidebar_pilots_col = sidebar_pilots_col,
-        map_clock = map_clock,
         map_header = map_header,
-        stats_bottom = stats_bottom,
+        map_body = map_body,
         layout_gap = LAYOUT_GAP_PX,
         sidebar_w = SIDEBAR_WIDTH_PX,
+        campaign_sidebar_w = CAMPAIGN_STATS_SIDEBAR_WIDTH_PX,
+        value_col = CAMPAIGN_STATS_VALUE_COL_PX,
         rank_col = SIDEBAR_RANK_COL_PX,
         stat_bars_gap = STAT_BARS_GAP_PX,
-        health_bar_map_px = HEALTH_BAR_MAP_PX,
     )
 }
 

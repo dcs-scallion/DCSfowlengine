@@ -362,7 +362,7 @@ struct Context {
     event_handler_id: Option<HandlerId>,
     miz_state_path: PathBuf,
     shutdown: Option<AutoShutdown>,
-    /// Restart countdown warnings (panels when CFG `shutdown` is set; sounds always).
+    /// Restart countdown warnings (panels when CFG `shutdown` or DCSServerBot schedule).
     restart_warnings: Option<AutoShutdown>,
     last_perf_log: DateTime<Utc>,
     load_state: LoadState,
@@ -437,6 +437,8 @@ impl Context {
     }
 
     fn persist_campaign_state(&mut self) {
+        self.db
+            .campaign_flush_online_before_save(Utc::now());
         if let Some(snap) = self.db.maybe_snapshot() {
             self.do_bg_task(bg::Task::SaveState(self.miz_state_path.clone(), snap));
         }
@@ -1689,26 +1691,37 @@ fn sync_restart_warnings(ctx: &mut Context, when: DateTime<Utc>) -> &mut AutoShu
     warn
 }
 
+/// Advance wall clock for restart warnings when bflib became ready after mission load.
+fn restart_warning_effective_now(now: DateTime<Utc>, cfg: &bfprotocols::cfg::Cfg, skew_secs: u32) -> DateTime<Utc> {
+    if cfg.shutdown.is_some() || cfg.dcsserver_bot_scheduled_restart.is_none() {
+        now
+    } else {
+        now + Duration::seconds(i64::from(skew_secs))
+    }
+}
+
 fn check_auto_shutdown(
     ctx: &mut Context,
     lua: MizLua,
     now: DateTime<Utc>,
 ) -> Result<AdminResult> {
     let cfg = &ctx.db.ephemeral.cfg;
-    let bflib_panels = cfg.shutdown.is_some();
+    let bflib_panels = cfg.shutdown.is_some()
+        || cfg.dcsserver_bot_scheduled_restart.is_some();
+    let warn_now = restart_warning_effective_now(now, cfg, ctx.db.restart_display_skew_secs());
     if let Some(when) = cfg.map_restart_when(now, ctx.shutdown.map(|s| s.when)) {
         let sound_key = {
             let warn = sync_restart_warnings(ctx, when);
-            if !warn.one_minute_warning && when - now <= Duration::minutes(1) {
+            if !warn.one_minute_warning && when - warn_now <= Duration::minutes(1) {
                 warn.one_minute_warning = true;
                 Some(("warning_1", true, "The server will restart in one minute"))
-            } else if !warn.five_minute_warning && when - now <= Duration::minutes(5) {
+            } else if !warn.five_minute_warning && when - warn_now <= Duration::minutes(5) {
                 warn.five_minute_warning = true;
                 Some(("warning_2", true, "The server will restart in 5 minutes"))
-            } else if !warn.ten_minute_warning && when - now <= Duration::minutes(10) {
+            } else if !warn.ten_minute_warning && when - warn_now <= Duration::minutes(10) {
                 warn.ten_minute_warning = true;
                 Some(("warning_3", true, "The server will restart in 10 minutes"))
-            } else if !warn.thirty_minute_warning && when - now <= Duration::minutes(30) {
+            } else if !warn.thirty_minute_warning && when - warn_now <= Duration::minutes(30) {
                 warn.thirty_minute_warning = true;
                 Some(("warning_4", false, "The server will restart in 30 minutes"))
             } else {
@@ -1990,6 +2003,7 @@ fn run_slow_timed_events(
             let cfg = Arc::clone(&ctx.db.ephemeral.cfg);
             for dead in ctx.shots_out.bring_out_your_dead(ts) {
                 info!("kill {:?}", dead);
+                ctx.db.campaign_on_victim_killed(&dead);
                 if let Some(points) = cfg.points.as_ref() {
                     ctx.db.award_kill_points(points, &dead)
                 }
@@ -2078,6 +2092,7 @@ fn run_slow_timed_events(
         update_jtac_contacts(ctx, lua);
         record_perf(&mut perf.update_jtac_contacts, ts);
         let now = Utc::now();
+        ctx.db.campaign_flush_online_before_save(now);
         if let Some(snap) = ctx.db.maybe_snapshot() {
             ctx.do_bg_task(bg::Task::SaveState(path.clone(), snap));
         }
@@ -2336,6 +2351,9 @@ fn delayed_init_miz(lua: MizLua) -> Result<()> {
             Arc::clone(&fowl_export),
         )
             .context("initalizing the mission")?;
+        ctx.db
+            .campaign_on_mission_start(lua, false)
+            .context("campaign stats init")?;
         let round_start = Utc::now();
         ctx.db.schedule_new_round_action_lock(
             round_start + Duration::seconds(db::mizinit::NEW_ROUND_ACTION_LOCK_SECS),
@@ -2354,6 +2372,9 @@ fn delayed_init_miz(lua: MizLua) -> Result<()> {
             Arc::clone(&fowl_export),
         )
             .context("loading the saved state")?;
+        ctx.db
+            .campaign_on_mission_start(lua, true)
+            .context("campaign stats round")?;
         db::ai_air::sweep_expired_owner_locks_at_round_start(&mut ctx.db);
     }
     if ctx.db.ephemeral.cfg.front_line {
@@ -2379,9 +2400,9 @@ fn delayed_init_miz(lua: MizLua) -> Result<()> {
     }));
     info!("spawning units");
     ctx.respawn_groups(lua, &miz).context("setting up the mission after load")?;
+    db::discord_map::capture_restart_display_skew(lua, &mut ctx.db)
+        .context("restart countdown skew")?;
     if ctx.db.ephemeral.cfg.discord_map.enabled {
-        db::discord_map::capture_restart_display_skew(lua, &mut ctx.db)
-            .context("discord map restart display skew")?;
         ctx.db
             .bootstrap_discord_map(lua, &discord_map_live_ctx(lua, ctx)?)
             .context("discord map bootstrap")?;
@@ -2407,6 +2428,7 @@ fn delayed_init_miz(lua: MizLua) -> Result<()> {
         let addr = ifo.ip().ok().flatten();
         let _ = ctx.connected.player_connected(id, PlayerInfo { name: name.clone(), addr, ucid });
         ctx.db.player_connected(ucid, name.clone());
+        ctx.db.campaign_on_connect(ucid, Utc::now());
         let welcome = if let Some(player) = ctx.db.player(&ucid) {
             format_compact!(
                 "Welcome back, {}! You are on the {:?} team. Type -help for commands.",

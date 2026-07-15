@@ -1481,8 +1481,10 @@ impl Db {
                 unit.pos = unit.spawn_pos;
                 unit.heading = unit.spawn_heading;
                 unit.position = unit.spawn_position;
-                self.ephemeral.dirty();
                 let gid = unit.group;
+                let typ = unit.typ.clone();
+                self.campaign_record_unit_loss(gid, &typ);
+                self.ephemeral.dirty();
                 if self.persisted.actions.contains(&gid) {
                     crate::db::ai_air::mark_ai_air_attrition(self, gid);
                 }
@@ -1599,6 +1601,7 @@ impl Db {
             (unit.group, unit.typ.clone())
         };
         self.ephemeral.dirty();
+        self.campaign_record_static_loss(gid);
         if let Some(oid) = self.persisted.objectives_by_group.get(&gid).copied() {
             let group = group!(self, gid)?;
             if group.class == super::objective::ObjGroupClass::Production {

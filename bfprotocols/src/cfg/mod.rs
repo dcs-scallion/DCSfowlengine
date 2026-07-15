@@ -1010,6 +1010,10 @@ pub const DISCORD_MAP_REFRESH_INTERVAL_MIN_SECS: u32 = 30;
 pub const DISCORD_MAP_REFRESH_INTERVAL_MAX_SECS: u32 = 300;
 pub const DISCORD_MAP_REFRESH_INTERVAL_DEFAULT_SECS: u32 = 120;
 
+fn default_rounds_per_day() -> u32 {
+    1
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DiscordMapCfg {
     #[serde(default)]
@@ -1053,6 +1057,12 @@ pub struct DiscordMapCfg {
     /// Periodic interactive map refresh while players are connected (30–300 s; else 120).
     #[serde(default)]
     pub refresh_interval_secs: Option<u32>,
+    /// Persisted coalition counters for the interactive map right sidebar.
+    #[serde(default)]
+    pub campaign_stats: bool,
+    /// Campaign day length: `1 + (campaign_rounds - 1) / rounds_per_day`.
+    #[serde(default = "default_rounds_per_day")]
+    pub rounds_per_day: u32,
 }
 
 impl Default for DiscordMapCfg {
@@ -1074,6 +1084,8 @@ impl Default for DiscordMapCfg {
             manual_url: Default::default(),
             bugs_report_url: Default::default(),
             refresh_interval_secs: None,
+            campaign_stats: false,
+            rounds_per_day: default_rounds_per_day(),
         }
     }
 }
@@ -1126,6 +1138,9 @@ impl DiscordMapCfg {
         }
         if self.http_port == 0 {
             bail!("discord_map.http_port must be > 0 when discord_map.enabled");
+        }
+        if self.campaign_stats && self.rounds_per_day == 0 {
+            bail!("discord_map.rounds_per_day must be >= 1 when discord_map.campaign_stats is true");
         }
         Ok(())
     }

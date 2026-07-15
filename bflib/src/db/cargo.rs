@@ -15,6 +15,7 @@ for more details.
 */
 
 use super::{Db, ephemeral::DeployableIndex, group::SpawnedGroup, objective::Objective};
+use super::campaign_stats::{deployable_invest_bucket, InvestBucket};
 use crate::{
     db::group::DeployKind,
     group, maybe, objective, objective_mut,
@@ -863,7 +864,13 @@ impl Db {
             msg: &str,
         ) {
             if cost_points < 0 {
-                db.charge_for_item(ucid, oid, cost_points.unsigned_abs(), msg);
+                db.charge_for_item(
+                    ucid,
+                    oid,
+                    cost_points.unsigned_abs(),
+                    msg,
+                    InvestBucket::Ground,
+                );
             }
         }
         fn award_repair_points(db: &mut Db, ucid: &Ucid, cost_points: i32, msg: &str) {
@@ -1143,6 +1150,7 @@ impl Db {
                                     from_obj,
                                     spec.cost,
                                     "for farp spawn",
+                                    InvestBucket::Ground,
                                 );
                                 let name = objective!(self, oid)?.name.clone();
                                 return Ok(Unpakistan::UnpackedFarp(name));
@@ -1190,11 +1198,13 @@ impl Db {
                                     by: st.ucid,
                                     deployable: dep.clone(),
                                 });
+                                let invest = deployable_invest_bucket(template, &self.ephemeral.cfg);
                                 let frac = self.charge_for_item(
                                     &st.ucid,
                                     from_obj,
                                     spec.cost,
                                     &format_compact!("for {dep} unpack"),
+                                    invest,
                                 );
                                 if let DeployKind::Deployed { cost_fraction, .. } =
                                     &mut self.persisted.groups[&gid].origin
@@ -1429,6 +1439,7 @@ impl Db {
             origin,
             troop_cfg.cost,
             &format_compact!("for {name} troop"),
+            InvestBucket::Ground,
         );
         let cargo = self.ephemeral.cargo.entry(slot.clone()).or_default();
         cargo.troops.push(InternalTroop {
@@ -1575,6 +1586,7 @@ impl Db {
                     it.troop.cost,
                     it.cost_fraction,
                     "for troop return",
+                    InvestBucket::Ground,
                 );
             }
         }

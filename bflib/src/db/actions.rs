@@ -1,6 +1,7 @@
 use super::{Db, MapM, ai_air, objective::Objective};
 use crate::{
     admin,
+    db::campaign_stats::action_invest_bucket,
     db::{cargo::Oldest, group::DeployKind},
     group, group_mut,
     jtac::{JtId, Jtacs},
@@ -510,6 +511,7 @@ impl Db {
             }
         }
         let name = cmd.name.clone();
+        let action_kind = cmd.action.kind.clone();
         let gid = match cmd.args {
             ActionArgs::Awacs(args) => self
                 .awacs(perf, spctx, idx, side, ucid.clone(), name, cmd.action, args)
@@ -622,9 +624,17 @@ impl Db {
                 action: cmd.name.clone(),
                 gid,
             });
+            let invest = action_invest_bucket(&action_kind);
+            let cost_i = cost as i32;
+            self.campaign_on_invested(
+                side,
+                invest,
+                cost,
+                0,
+            );
             self.adjust_points(
                 ucid,
-                -(cost as i32),
+                -cost_i,
                 &format!("perform action {}", cmd.name),
             );
         }

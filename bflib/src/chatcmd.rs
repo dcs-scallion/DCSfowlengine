@@ -310,6 +310,7 @@ fn delete_command(ctx: &mut Context, id: PlayerId, s: &str) {
                                         points as u32,
                                         cost_fraction,
                                         &format_compact!("reclaimed {id}"),
+                                        crate::db::campaign_stats::InvestBucket::Ground,
                                     );
                                 }
                             },
@@ -344,6 +345,7 @@ fn delete_command(ctx: &mut Context, id: PlayerId, s: &str) {
                                         points as u32,
                                         cost_fraction,
                                         &format_compact!("reclaimed {id}"),
+                                        crate::db::campaign_stats::InvestBucket::Ground,
                                     );
                                     reply!("deleted {id}")
                                 }

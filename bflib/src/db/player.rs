@@ -19,6 +19,7 @@ use super::{
     objective::Objective,
 };
 use crate::{maybe, maybe_mut, objective, objective_mut};
+use super::campaign_stats::InvestBucket;
 use anyhow::{Context, Result, anyhow, bail};
 use bfprotocols::{
     cfg::{LifeType, PointsCfg, UnitTag, UnitTags, Vehicle},
@@ -513,7 +514,13 @@ impl Db {
         if cost > 0
             && let Some(oid) = owned_objective.map(|(id, _)| *id)
         {
-            let frac = self.charge_for_item(&ucid, oid, cost, cost_msg.as_str());
+            let frac = self.charge_for_item(
+                &ucid,
+                oid,
+                cost,
+                cost_msg.as_str(),
+                InvestBucket::Air,
+            );
             let player = &mut self.persisted.players[&ucid];
             match &mut player.current_slot {
                 Some((_, Some(inst))) => inst.cost_fraction = frac,
@@ -524,27 +531,47 @@ impl Db {
         res
     }
 
-    pub fn charge_for_item(&mut self, ucid: &Ucid, oid: ObjectiveId, cost: u32, msg: &str) -> f32 {
+    pub fn charge_for_item(
+        &mut self,
+        ucid: &Ucid,
+        oid: ObjectiveId,
+        cost: u32,
+        msg: &str,
+        invest: InvestBucket,
+    ) -> f32 {
         match self.player(ucid) {
             None => 1.,
             Some(player) => {
+                let side = player.side;
                 let player_balance = player.points;
+                let mut from_player = 0u32;
+                let mut from_objective = 0u32;
                 let (adj, frac) = match self.persisted.objectives.get_mut_cow(&oid) {
-                    None => (-(cost as i32), 1.),
+                    None => {
+                        from_player = cost;
+                        (-(cost as i32), 1.)
+                    }
                     Some(obj) => {
                         if player_balance <= 0 {
                             obj.points -= cost as i32;
+                            from_objective = cost;
                             (0, 0.)
                         } else if player_balance < cost as i32 {
                             let frac = player_balance as f32 / cost as f32;
-                            let cost = cost as i32 - player_balance;
-                            obj.points -= cost;
+                            let obj_cost = cost as i32 - player_balance;
+                            obj.points -= obj_cost;
+                            from_player = player_balance as u32;
+                            from_objective = obj_cost as u32;
                             (-player_balance, frac)
                         } else {
+                            from_player = cost;
                             (-(cost as i32), 1.)
                         }
                     }
                 };
+                if from_player > 0 || from_objective > 0 {
+                    self.campaign_on_invested(side, invest, from_player, from_objective);
+                }
                 self.adjust_points(&ucid, adj, msg);
                 self.ephemeral.dirty();
                 frac
@@ -559,12 +586,19 @@ impl Db {
         cost: u32,
         frac: f32,
         msg: &str,
+        invest: InvestBucket,
     ) {
+        let mut from_objective = 0u32;
         if let Some(obj) = self.persisted.objectives.get_mut_cow(&oid) {
             let cost = (cost as f32 * (1. - frac)).round() as i32;
             obj.points += cost;
+            from_objective = cost.max(0) as u32;
         }
         let cost = (cost as f32 * frac).round() as i32;
+        if let Some(player) = self.persisted.players.get(ucid) {
+            let side = player.side;
+            self.campaign_on_refund(side, invest, cost.max(0) as u32, from_objective);
+        }
         self.adjust_points(ucid, cost, msg);
     }
 
@@ -611,7 +645,14 @@ impl Db {
                 let provisional_points = player.provisional_points;
                 player.provisional_points = 0;
                 if cost > 0 {
-                    self.refund_points(&ucid, oid, cost, frac, cost_msg.as_str());
+                    self.refund_points(
+                        &ucid,
+                        oid,
+                        cost,
+                        frac,
+                        cost_msg.as_str(),
+                        InvestBucket::Air,
+                    );
                 }
                 if is_provisional && provisional_points > 0 {
                     self.adjust_points(
@@ -882,6 +923,7 @@ impl Db {
             }
         }
         super::ai_air::extend_active_owner_locks_for_player(self, &ucid);
+        self.campaign_on_connect(ucid, Utc::now());
     }
 
     pub fn register_player(&mut self, ucid: Ucid, name: String, side: Side) -> Result<(), RegErr> {
@@ -923,6 +965,10 @@ impl Db {
                     side,
                     id: ucid,
                 });
+                if points > 0 {
+                    self.campaign_on_active_gain(side, points as i64);
+                }
+                self.campaign_on_register(ucid, side);
                 self.ephemeral.dirty();
                 Ok(())
             }
@@ -933,6 +979,7 @@ impl Db {
         let player = maybe_mut!(self.persisted.players, ucid, "no such player")?;
         player.side = side;
         self.ephemeral.stat(Stat::Sideswitch { id: *ucid, side });
+        self.campaign_on_sideswitch(*ucid, side);
         self.ephemeral.dirty();
         Ok(())
     }
@@ -956,6 +1003,7 @@ impl Db {
                     }
                     player.side = side;
                     self.ephemeral.stat(Stat::Sideswitch { id: *ucid, side });
+                    self.campaign_on_sideswitch(*ucid, side);
                     self.ephemeral.dirty();
                     Ok(())
                 }
@@ -1324,6 +1372,7 @@ impl Db {
     }
 
     pub fn player_disconnected(&mut self, ucid: &Ucid) {
+        self.campaign_on_disconnect(ucid, Utc::now());
         super::ai_air::extend_active_owner_locks_for_player(self, ucid);
         if let Some((_, Some(inst))) = self
             .persisted
@@ -1345,7 +1394,7 @@ impl Db {
         total_points: u32,
         victim_info: &Option<VictimInfo>,
     ) -> CompactString {
-        let player = &mut self.persisted.players[&shooter];
+        let side = self.persisted.players.get(&shooter).map(|p| p.side);
         let window = self
             .ephemeral
             .cfg
@@ -1356,16 +1405,22 @@ impl Db {
         let now = Utc::now();
         match victim_info.as_ref() {
             None => {
-                let penalty: u32 = player
-                    .ai_team_kills
-                    .into_iter()
-                    .map(|ts| total_points >> ((now - *ts).num_hours() / window))
-                    .sum();
-                let total_points = total_points + penalty;
-                player.points -= total_points as i32;
-                player.ai_team_kills.insert_cow(now);
-                let tp = player.points;
-                format_compact!("{tp}(-{total_points}) points, you have killed a friendly unit")
+                let (tp, deducted) = {
+                    let player = &mut self.persisted.players[&shooter];
+                    let penalty: u32 = player
+                        .ai_team_kills
+                        .into_iter()
+                        .map(|ts| total_points >> ((now - *ts).num_hours() / window))
+                        .sum();
+                    let deducted = total_points + penalty;
+                    player.points -= deducted as i32;
+                    player.ai_team_kills.insert_cow(now);
+                    (player.points, deducted)
+                };
+                if let Some(side) = side {
+                    self.campaign_on_active_gain(side, -(deducted as i64));
+                }
+                format_compact!("{tp}(-{deducted}) points, you have killed a friendly unit")
             }
             Some(VictimInfo {
                 name,
@@ -1373,10 +1428,17 @@ impl Db {
                 ai_deployable: false,
                 ucid: _,
             }) => {
-                player.points -= total_points as i32;
+                let tp = {
+                    let player = &mut self.persisted.players[&shooter];
+                    player.points -= total_points as i32;
+                    player.points
+                };
+                if let Some(side) = side {
+                    self.campaign_on_active_gain(side, -(total_points as i64));
+                }
                 format_compact!(
                     "{}(-{total_points})you have team killed {name} on the ground",
-                    player.points
+                    tp
                 )
             }
             Some(VictimInfo {
@@ -1385,10 +1447,17 @@ impl Db {
                 ai_deployable: true,
                 ucid: _,
             }) => {
-                player.points -= total_points as i32;
+                let tp = {
+                    let player = &mut self.persisted.players[&shooter];
+                    player.points -= total_points as i32;
+                    player.points
+                };
+                if let Some(side) = side {
+                    self.campaign_on_active_gain(side, -(total_points as i64));
+                }
                 format_compact!(
                     "{}(-{total_points})you have team killed {name}'s ai unit",
-                    player.points
+                    tp
                 )
             }
             Some(VictimInfo {
@@ -1397,49 +1466,57 @@ impl Db {
                 life_type: Some(life_type),
                 ..
             }) => {
-                let (penalty_points, penalty_lives): (u32, f32) = player
-                    .player_team_kills
-                    .into_iter()
-                    .fold((total_points, 1.), |(pp, pl), (ts, _)| {
-                        let windows = (now - *ts).num_hours() / window;
-                        let pp = pp + (total_points >> windows);
-                        let pl = pl + (1. / (max(1, windows * 2) as f32));
-                        (pp, pl)
-                    });
-                let deplane_possible = penalty_lives > 1.5;
-                let mut penalty_lives = penalty_lives.round() as u32;
-                let mut lost: SmallVec<[(LifeType, u8); 5]> = smallvec![];
-                let mut life_type = *life_type;
-                let deplane = loop {
-                    let (_, player_lives) = player.lives.get_or_insert_cow(life_type, || {
-                        (Utc::now(), self.ephemeral.cfg.default_lives[&life_type].0)
-                    });
-                    if *player_lives as u32 >= penalty_lives {
-                        lost.push((life_type, penalty_lives as u8));
-                        *player_lives -= penalty_lives as u8;
-                        break false;
-                    } else {
-                        if *player_lives > 0 {
-                            lost.push((life_type, *player_lives));
-                        }
-                        penalty_lives -= *player_lives as u32;
-                        *player_lives = 0;
-                        match life_type.up() {
-                            None => break deplane_possible,
-                            Some(lt) => {
-                                life_type = lt;
+                let (tp, penalty_points, lives_snapshot, deplane, lost) = {
+                    let player = &mut self.persisted.players[&shooter];
+                    let (penalty_points, penalty_lives): (u32, f32) = player
+                        .player_team_kills
+                        .into_iter()
+                        .fold((total_points, 1.), |(pp, pl), (ts, _)| {
+                            let windows = (now - *ts).num_hours() / window;
+                            let pp = pp + (total_points >> windows);
+                            let pl = pl + (1. / (max(1, windows * 2) as f32));
+                            (pp, pl)
+                        });
+                    let deplane_possible = penalty_lives > 1.5;
+                    let mut penalty_lives = penalty_lives.round() as u32;
+                    let mut lost: SmallVec<[(LifeType, u8); 5]> = smallvec![];
+                    let mut life_type = *life_type;
+                    let deplane = loop {
+                        let (_, player_lives) = player.lives.get_or_insert_cow(life_type, || {
+                            (Utc::now(), self.ephemeral.cfg.default_lives[&life_type].0)
+                        });
+                        if *player_lives as u32 >= penalty_lives {
+                            lost.push((life_type, penalty_lives as u8));
+                            *player_lives -= penalty_lives as u8;
+                            break false;
+                        } else {
+                            if *player_lives > 0 {
+                                lost.push((life_type, *player_lives));
+                            }
+                            penalty_lives -= *player_lives as u32;
+                            *player_lives = 0;
+                            match life_type.up() {
+                                None => break deplane_possible,
+                                Some(lt) => {
+                                    life_type = lt;
+                                }
                             }
                         }
-                    }
+                    };
+                    let lives_snapshot = player.lives.clone();
+                    player.points -= penalty_points as i32;
+                    player.player_team_kills.insert_cow(now, *ucid);
+                    let tp = player.points;
+                    self.ephemeral.dirty();
+                    (tp, penalty_points, lives_snapshot, deplane, lost)
                 };
                 self.ephemeral.stat(Stat::Life {
                     id: shooter,
-                    lives: player.lives.clone(),
+                    lives: lives_snapshot,
                 });
-                player.points -= penalty_points as i32;
-                player.player_team_kills.insert_cow(now, *ucid);
-                let tp = player.points;
-                self.ephemeral.dirty();
+                if let Some(side) = side {
+                    self.campaign_on_active_gain(side, -(penalty_points as i64));
+                }
                 use std::fmt::Write;
                 let mut msg = CompactString::from("");
                 write!(
@@ -1622,10 +1699,14 @@ impl Db {
                 }
             };
             for (ucid, provisional) in hit_by {
-                if let Some(player) = self.persisted.players.get_mut_cow(&ucid) {
-                    let msg = if player.side == *dead.victim.side() {
-                        self.apply_teamkill_penalty(ucid, total_points, &victim_info)
-                    } else {
+                let side = self.persisted.players.get(&ucid).map(|p| p.side);
+                let msg = if side == Some(*dead.victim.side()) {
+                    self.apply_teamkill_penalty(ucid, total_points, &victim_info)
+                } else {
+                    let (tp, award_pps) = {
+                        let Some(player) = self.persisted.players.get_mut_cow(&ucid) else {
+                            continue;
+                        };
                         let tp = if provisional {
                             player.provisional_points += pps;
                             player.provisional_points
@@ -1633,25 +1714,31 @@ impl Db {
                             player.points += pps;
                             player.points
                         };
-                        let pm = if provisional { " provisional" } else { "" };
-                        match &victim_info {
-                            None => format_compact!("{tp}(+{pps}){pm} points"),
-                            Some(vi) => {
-                                if vi.ai_deployable {
-                                    format_compact!(
-                                        "{tp}(+{pps}){pm} points, killed {}'s deployed ai unit",
-                                        vi.name
-                                    )
-                                } else {
-                                    format_compact!("{tp}(+{pps}){pm} points, killed {}", vi.name)
-                                }
+                        (tp, if provisional { 0 } else { pps })
+                    };
+                    if award_pps != 0 {
+                        if let Some(side) = side {
+                            self.campaign_on_active_gain(side, award_pps as i64);
+                        }
+                    }
+                    let pm = if provisional { " provisional" } else { "" };
+                    match &victim_info {
+                        None => format_compact!("{tp}(+{pps}){pm} points"),
+                        Some(vi) => {
+                            if vi.ai_deployable {
+                                format_compact!(
+                                    "{tp}(+{pps}){pm} points, killed {}'s deployed ai unit",
+                                    vi.name
+                                )
+                            } else {
+                                format_compact!("{tp}(+{pps}){pm} points, killed {}", vi.name)
                             }
                         }
-                    };
-                    debug!("{ucid} kill message: {msg}");
-                    self.ephemeral
-                        .panel_to_player(&self.persisted, 10, &ucid, msg)
-                }
+                    }
+                };
+                debug!("{ucid} kill message: {msg}");
+                self.ephemeral
+                    .panel_to_player(&self.persisted, 10, &ucid, msg)
             }
         }
     }
@@ -1661,6 +1748,7 @@ impl Db {
             player.points += amount;
             let pp = player.points;
             if amount != 0 {
+                self.campaign_on_adjust_points(ucid, amount, why);
                 let m = format_compact!("{}({}) points {}", pp, amount, why);
                 self.ephemeral.stat(Stat::Points {
                     points: amount,

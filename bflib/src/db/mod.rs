@@ -41,6 +41,7 @@ use tokio::sync::mpsc::UnboundedSender;
 pub mod actions;
 pub mod ai_air;
 pub mod aliases;
+pub mod campaign_stats;
 pub mod cargo;
 pub mod csar;
 pub mod discord_map;
@@ -232,6 +233,10 @@ impl Db {
 
     pub fn play_sound_all(&self, lua: MizLua, key: &str) {
         crate::sounds::play_all_export(&self.ephemeral.fowl_miz_export, lua, key);
+    }
+
+    pub fn restart_display_skew_secs(&self) -> u32 {
+        self.ephemeral.restart_display_skew_secs
     }
 
     pub fn objective_matches_chat_name(&self, obj: &objective::Objective, query: &str) -> bool {

@@ -15,6 +15,7 @@ for more details.
 */
 
 use super::{
+    campaign_stats,
     group::{SpawnedGroup, SpawnedUnit},
     objective::Objective,
     player::Player,
@@ -60,6 +61,8 @@ pub struct Persisted {
     pub uid: i64,
     #[serde(default)]
     pub migrated_v0: bool,
+    #[serde(default)]
+    pub campaign_stats: campaign_stats::CampaignStats,
 }
 
 impl Persisted {
