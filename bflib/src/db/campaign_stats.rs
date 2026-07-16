@@ -30,15 +30,23 @@ pub struct CoalitionLossStats {
     pub planes_recon: u32,
     pub planes_bomber: u32,
     pub planes_tanker: u32,
+    #[serde(default)]
+    pub planes_awacs: u32,
     pub drones: u32,
     pub helicopters_atk: u32,
     pub helicopters_log: u32,
     pub armored: u32,
+    #[serde(default)]
+    pub artillery: u32,
     pub troops: u32,
+    #[serde(default)]
+    pub utility: u32,
     pub aaa: u32,
     pub sam_sr: u32,
     pub sam_mr: u32,
     pub sam_lr: u32,
+    #[serde(default)]
+    pub ewr_radars: u32,
     pub ships_small: u32,
     pub ships_medium: u32,
     pub carriers: u32,
@@ -224,17 +232,21 @@ pub fn render_sidebar_html(view: &CampaignStatsView) -> String {
     out.push_str(&vs_row("Planes recon", bl.planes_recon, rl.planes_recon, false));
     out.push_str(&vs_row("Planes bomber", bl.planes_bomber, rl.planes_bomber, false));
     out.push_str(&vs_row("Planes tanker", bl.planes_tanker, rl.planes_tanker, false));
+    out.push_str(&vs_row("Planes awacs", bl.planes_awacs, rl.planes_awacs, false));
     out.push_str(&vs_row("Drones", bl.drones, rl.drones, false));
     out.push_str(divider());
     out.push_str(&vs_row("Helicopters atk", bl.helicopters_atk, rl.helicopters_atk, false));
     out.push_str(&vs_row("Helicopters log", bl.helicopters_log, rl.helicopters_log, false));
     out.push_str(divider());
     out.push_str(&vs_row("Armored", bl.armored, rl.armored, false));
+    out.push_str(&vs_row("Artillery", bl.artillery, rl.artillery, false));
     out.push_str(&vs_row("Troops", bl.troops, rl.troops, false));
+    out.push_str(&vs_row("Utility", bl.utility, rl.utility, false));
     out.push_str(&vs_row("AAA", bl.aaa, rl.aaa, false));
     out.push_str(&vs_row("SAM SR", bl.sam_sr, rl.sam_sr, false));
     out.push_str(&vs_row("SAM MR", bl.sam_mr, rl.sam_mr, false));
     out.push_str(&vs_row("SAM LR", bl.sam_lr, rl.sam_lr, false));
+    out.push_str(&vs_row("EWR radars", bl.ewr_radars, rl.ewr_radars, false));
     out.push_str(divider());
     out.push_str(&vs_row("Ships small", bl.ships_small, rl.ships_small, false));
     out.push_str(&vs_row("Ships medium", bl.ships_medium, rl.ships_medium, false));
@@ -253,7 +265,7 @@ pub fn render_sidebar_html(view: &CampaignStatsView) -> String {
     let total_inv_blue = (bp.invested_air + bp.invested_ground + bp.invested_navy) as u32;
     let total_inv_red = (rp.invested_air + rp.invested_ground + rp.invested_navy) as u32;
     out.push_str(r#"<div class="stat"><div class="stat-h">Points</div><div class="stat-body">"#);
-    out.push_str(&section_hdr("Gain (p)"));
+    out.push_str(&section_hdr("Gain (+p)"));
     out.push_str(&vs_row(
         "Balancing",
         bp.balancing_gain.max(0) as u32,
@@ -269,7 +281,7 @@ pub fn render_sidebar_html(view: &CampaignStatsView) -> String {
     out.push_str(divider());
     out.push_str(&vs_row("Total gain", total_gain_blue, total_gain_red, true));
     out.push_str(divider());
-    out.push_str(&section_hdr("Invested (p)"));
+    out.push_str(&section_hdr("Invested (-p)"));
     out.push_str(&vs_row("Air unit", bp.invested_air as u32, rp.invested_air as u32, false));
     out.push_str(&vs_row(
         "Ground unit",
@@ -301,15 +313,19 @@ impl Db {
             LossBucketField::PlanesRecon => &mut losses.planes_recon,
             LossBucketField::PlanesBomber => &mut losses.planes_bomber,
             LossBucketField::PlanesTanker => &mut losses.planes_tanker,
+            LossBucketField::PlanesAwacs => &mut losses.planes_awacs,
             LossBucketField::Drones => &mut losses.drones,
             LossBucketField::HelicoptersAtk => &mut losses.helicopters_atk,
             LossBucketField::HelicoptersLog => &mut losses.helicopters_log,
             LossBucketField::Armored => &mut losses.armored,
+            LossBucketField::Artillery => &mut losses.artillery,
             LossBucketField::Troops => &mut losses.troops,
+            LossBucketField::Utility => &mut losses.utility,
             LossBucketField::Aaa => &mut losses.aaa,
             LossBucketField::SamSr => &mut losses.sam_sr,
             LossBucketField::SamMr => &mut losses.sam_mr,
             LossBucketField::SamLr => &mut losses.sam_lr,
+            LossBucketField::EwrRadars => &mut losses.ewr_radars,
             LossBucketField::ShipsSmall => &mut losses.ships_small,
             LossBucketField::ShipsMedium => &mut losses.ships_medium,
             LossBucketField::Carriers => &mut losses.carriers,
@@ -371,28 +387,61 @@ impl Db {
             }
             Entry::Occupied(_) => {}
         }
+        // Keep connect-time if already online; otherwise start now (registered mid-session).
+        if matches!(side, Side::Blue | Side::Red) {
+            self.ephemeral
+                .campaign_online_since
+                .entry(ucid)
+                .or_insert_with(Utc::now);
+        }
     }
 
     pub fn campaign_on_sideswitch(&mut self, ucid: Ucid, new_side: Side) {
         if !self.campaign_stats_active() {
             return;
         }
+        let player_points = self
+            .persisted
+            .players
+            .get(&ucid)
+            .map(|p| p.points as i64)
+            .unwrap_or(0);
         let old = self.persisted.campaign_stats.entrants.insert(ucid, new_side);
         let Some(old) = old else {
             if let Some(c) = self.persisted.campaign_stats.coalition_mut(new_side) {
                 c.registered += 1;
                 self.ephemeral.dirty();
             }
+            if matches!(new_side, Side::Blue | Side::Red) {
+                self.ephemeral
+                    .campaign_online_since
+                    .entry(ucid)
+                    .or_insert_with(Utc::now);
+            }
             return;
         };
         if old == new_side {
             return;
         }
+        // Credit pending online time to the side left behind, then restart for the new side.
+        let now = Utc::now();
+        self.campaign_credit_online(ucid, now, old, false);
+        if matches!(new_side, Side::Blue | Side::Red) {
+            self.ephemeral.campaign_online_since.insert(ucid, now);
+        } else {
+            self.ephemeral.campaign_online_since.remove(&ucid);
+        }
         if let Some(c) = self.persisted.campaign_stats.coalition_mut(old) {
             c.registered = c.registered.saturating_sub(1);
+            if player_points != 0 {
+                c.points.active_gain -= player_points;
+            }
         }
         if let Some(c) = self.persisted.campaign_stats.coalition_mut(new_side) {
             c.registered += 1;
+            if player_points != 0 {
+                c.points.active_gain += player_points;
+            }
         }
         self.ephemeral.dirty();
     }
@@ -407,27 +456,31 @@ impl Db {
         }
     }
 
+    /// Server presence only — aircraft / observer / spectator slot is irrelevant.
     pub fn campaign_on_connect(&mut self, ucid: Ucid, now: DateTime<Utc>) {
         if !self.campaign_stats_active() {
             return;
         }
-        let Some(player) = self.persisted.players.get(&ucid) else {
-            return;
-        };
-        if !matches!(player.side, Side::Blue | Side::Red) {
-            return;
-        }
-        self.ephemeral
-            .campaign_online_since
-            .insert(ucid, now);
+        // Stamp connect time even before register so mid-session join still counts
+        // wall-clock from connect once Blue/Red is known.
+        self.ephemeral.campaign_online_since.insert(ucid, now);
     }
 
     pub fn campaign_on_disconnect(&mut self, ucid: &Ucid, now: DateTime<Utc>) {
         if !self.campaign_stats_active() {
             return;
         }
-        self.campaign_flush_online_ucid(ucid, now);
-        self.ephemeral.campaign_online_since.remove(ucid);
+        let side = self
+            .persisted
+            .players
+            .get(ucid)
+            .map(|p| p.side)
+            .filter(|s| matches!(s, Side::Blue | Side::Red));
+        if let Some(side) = side {
+            self.campaign_credit_online(*ucid, now, side, false);
+        } else {
+            self.ephemeral.campaign_online_since.remove(ucid);
+        }
     }
 
     pub fn campaign_flush_online_before_save(&mut self, now: DateTime<Utc>) {
@@ -436,21 +489,35 @@ impl Db {
         }
         let ucids: Vec<Ucid> = self.ephemeral.campaign_online_since.keys().copied().collect();
         for ucid in ucids {
-            self.campaign_flush_online_ucid(&ucid, now);
-            if let Some(since) = self.ephemeral.campaign_online_since.get_mut(&ucid) {
-                *since = now;
+            let side = self
+                .persisted
+                .players
+                .get(&ucid)
+                .map(|p| p.side)
+                .filter(|s| matches!(s, Side::Blue | Side::Red));
+            if let Some(side) = side {
+                self.campaign_credit_online(ucid, now, side, true);
             }
         }
     }
 
-    fn campaign_flush_online_ucid(&mut self, ucid: &Ucid, now: DateTime<Utc>) {
-        let Some(since) = self.ephemeral.campaign_online_since.remove(ucid) else {
+    /// Credit elapsed online seconds to `side`. If `keep_running`, restart the clock at `now`.
+    fn campaign_credit_online(
+        &mut self,
+        ucid: Ucid,
+        now: DateTime<Utc>,
+        side: Side,
+        keep_running: bool,
+    ) {
+        let Some(since) = self.ephemeral.campaign_online_since.remove(&ucid) else {
             return;
         };
-        let Some(player) = self.persisted.players.get(ucid) else {
+        if keep_running {
+            self.ephemeral.campaign_online_since.insert(ucid, now);
+        }
+        if !matches!(side, Side::Blue | Side::Red) {
             return;
-        };
-        let side = player.side;
+        }
         let secs = (now - since).num_seconds().max(0) as u64;
         if secs == 0 {
             return;
@@ -572,7 +639,73 @@ impl Db {
             return;
         };
         let side = group.side;
+        // Still flying to drop WP (destination not yet cleared) and this death wipes the group.
+        let para_troops_lost = match &group.origin {
+            DeployKind::Action {
+                spec,
+                destination: Some(_),
+                ..
+            } if matches!(spec.kind, ActionKind::Paratrooper(_)) => group
+                .units
+                .into_iter()
+                .filter_map(|uid| self.persisted.units.get(uid))
+                .all(|u| u.dead),
+            _ => false,
+        };
         if let Some(bucket) = self.classify_group_loss(&group, vehicle) {
+            self.record_loss(side, bucket);
+        }
+        if para_troops_lost {
+            if let Some(c) = self.persisted.campaign_stats.coalition_mut(side) {
+                c.losses.troops = c.losses.troops.saturating_add(8);
+                self.ephemeral.dirty();
+            }
+        }
+    }
+
+    /// Player airframe loss when `unit_dead` is skipped (airborne_deslot_block).
+    pub fn campaign_record_player_airframe_loss(
+        &mut self,
+        ucid: &Ucid,
+        unit_id: &dcso3::object::DcsOid<dcso3::unit::ClassUnit>,
+    ) {
+        if !self.campaign_stats_active() {
+            return;
+        }
+        if !self
+            .ephemeral
+            .campaign_airframe_loss_ids
+            .insert(unit_id.clone())
+        {
+            return;
+        }
+        let Some(player) = self.persisted.players.get(ucid) else {
+            return;
+        };
+        let side = player.side;
+        let vehicle = player
+            .current_slot
+            .as_ref()
+            .and_then(|(_, inst)| inst.as_ref().map(|i| i.typ.clone()))
+            .or_else(|| {
+                self.ephemeral
+                    .get_slot_by_object_id(unit_id)
+                    .and_then(|slot| self.ephemeral.get_slot_info(slot))
+                    .map(|s| s.typ.clone())
+            });
+        let Some(vehicle) = vehicle else {
+            return;
+        };
+        let helo = vehicle_is_helo(self, &vehicle);
+        let bucket = self
+            .ephemeral
+            .cfg
+            .life_types
+            .get(&vehicle)
+            .copied()
+            .map(|lt| life_type_loss_bucket(lt, helo))
+            .or_else(|| self.classify_tags_loss(&vehicle));
+        if let Some(bucket) = bucket {
             self.record_loss(side, bucket);
         }
     }
@@ -585,7 +718,20 @@ impl Db {
             return;
         };
         let side = group.side;
-        if let Some(bucket) = static_class_loss_bucket(group.class) {
+        let class = group.class;
+        let typ = group
+            .units
+            .into_iter()
+            .next()
+            .and_then(|uid| self.persisted.units.get(&uid).map(|u| u.typ.clone()));
+        if typ
+            .as_ref()
+            .is_some_and(|t| self.ephemeral.cfg.objective_static_units.contains_key(t.as_str()))
+        {
+            self.record_loss(side, LossBucketField::BuildingStatic);
+            return;
+        }
+        if let Some(bucket) = static_class_loss_bucket(class) {
             self.record_loss(side, bucket);
         }
     }
@@ -614,6 +760,14 @@ impl Db {
     }
 
     fn classify_group_loss(&self, group: &SpawnedGroup, vehicle: &Vehicle) -> Option<LossBucketField> {
+        if self
+            .ephemeral
+            .cfg
+            .objective_static_units
+            .contains_key(vehicle.as_str())
+        {
+            return Some(LossBucketField::BuildingStatic);
+        }
         let helo = vehicle_is_helo(self, vehicle);
         if let DeployKind::Action { spec, .. } = &group.origin {
             return Some(action_kind_loss_bucket(&spec.kind, helo));
@@ -646,11 +800,11 @@ impl Db {
         if tags.contains(UnitTag::ShipNoHeliport) | tags.contains(UnitTag::Boat) {
             return Some(LossBucketField::ShipsSmall);
         }
+        if tags.contains(UnitTag::Artillery) {
+            return Some(LossBucketField::Artillery);
+        }
         if tags.contains(UnitTag::Infantry) {
             return Some(LossBucketField::Troops);
-        }
-        if tags.contains(UnitTag::Armor) | tags.contains(UnitTag::APC) {
-            return Some(LossBucketField::Armored);
         }
         if tags.contains(UnitTag::AAA) {
             return Some(LossBucketField::Aaa);
@@ -665,6 +819,22 @@ impl Db {
             if tags.contains(UnitTag::SR) {
                 return Some(LossBucketField::SamSr);
             }
+            return Some(LossBucketField::SamSr);
+        }
+        if tags.contains(UnitTag::EWR) {
+            return Some(LossBucketField::EwrRadars);
+        }
+        if tags.contains(UnitTag::Armor)
+            | tags.contains(UnitTag::APC)
+            | tags.contains(UnitTag::Launcher)
+        {
+            return Some(LossBucketField::Armored);
+        }
+        if tags.contains(UnitTag::Logistics) {
+            return Some(LossBucketField::BuildingLogi);
+        }
+        if tags.contains(UnitTag::Unarmed) {
+            return Some(LossBucketField::Utility);
         }
         if tags.contains(UnitTag::Helicopter) {
             if tags.contains(UnitTag::Logistics) {
@@ -673,6 +843,9 @@ impl Db {
             return Some(LossBucketField::HelicoptersAtk);
         }
         if tags.contains(UnitTag::Aircraft) {
+            if tags.contains(UnitTag::AWACS) {
+                return Some(LossBucketField::PlanesAwacs);
+            }
             return Some(LossBucketField::PlanesStandard);
         }
         None
@@ -687,15 +860,19 @@ enum LossBucketField {
     PlanesRecon,
     PlanesBomber,
     PlanesTanker,
+    PlanesAwacs,
     Drones,
     HelicoptersAtk,
     HelicoptersLog,
     Armored,
+    Artillery,
     Troops,
+    Utility,
     Aaa,
     SamSr,
     SamMr,
     SamLr,
+    EwrRadars,
     ShipsSmall,
     ShipsMedium,
     Carriers,
@@ -739,14 +916,15 @@ fn action_kind_loss_bucket(kind: &ActionKind, helo: bool) -> LossBucketField {
         }
         ActionKind::Bomber(_) => LossBucketField::PlanesBomber,
         ActionKind::Tanker(_) | ActionKind::TankerWaypoint => LossBucketField::PlanesTanker,
+        ActionKind::Awacs(_) | ActionKind::AwacsWaypoint => LossBucketField::PlanesAwacs,
         ActionKind::Drone(_) | ActionKind::DroneWaypoint => LossBucketField::Drones,
-        ActionKind::Awacs(_) | ActionKind::AwacsWaypoint => LossBucketField::PlanesRecon,
         ActionKind::CruiseMissileSpawn(_) | ActionKind::CruiseMissileWaypoint => {
             LossBucketField::Drones
         }
         ActionKind::LogisticsRepair(_) | ActionKind::LogisticsTransfer(_) => {
             LossBucketField::HelicoptersLog
         }
+        ActionKind::Paratrooper(_) => LossBucketField::HelicoptersLog,
         _ => {
             if helo {
                 LossBucketField::HelicoptersAtk

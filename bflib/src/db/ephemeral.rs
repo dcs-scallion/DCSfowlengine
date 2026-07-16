@@ -214,8 +214,10 @@ pub struct Ephemeral {
     pub(super) discord_map_periodic_due: Option<DateTime<Utc>>,
     /// DCSServerBot restart skew (DCS elapsed at mission ready); map + warning timing.
     pub(super) restart_display_skew_secs: u32,
-    /// Wall-clock connect time for campaign stats online hours.
+    /// Wall-clock session start for campaign Online hours (connect → disconnect; slot ignored).
     pub(super) campaign_online_since: FxHashMap<dcso3::net::Ucid, DateTime<Utc>>,
+    /// Player airframe war-loss already counted (PilotDead + UnitLost both hit unit_killed).
+    pub(super) campaign_airframe_loss_ids: FxHashSet<DcsOid<ClassUnit>>,
     /// PRI_LINE redraw pending; re-queue PRI_OVERLAY before the next markup flush.
     overlay_underlay_dirty: bool,
 }
@@ -294,6 +296,7 @@ impl Default for Ephemeral {
             discord_map_periodic_due: None,
             restart_display_skew_secs: 0,
             campaign_online_since: FxHashMap::default(),
+            campaign_airframe_loss_ids: FxHashSet::default(),
             overlay_underlay_dirty: false,
         }
     }

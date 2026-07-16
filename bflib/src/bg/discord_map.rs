@@ -1269,7 +1269,7 @@ body{{margin:0;background:#000;color:#686a6e;font-family:"Roboto Condensed",Robo
 .ping-red{{color:#C43838}}
 .map-frame{{border:1px solid #2e3138;box-sizing:border-box;display:block;line-height:0;width:100%}}
 #wrap{{position:relative;display:block;line-height:0;width:100%}}
-#base{{display:block;width:{img_w}px;height:auto}}
+#base{{display:block;width:100%;height:auto}}
 .front-line{{position:absolute;left:0;top:0;width:100%;height:100%;pointer-events:none;z-index:0}}
 #overlay{{position:absolute;left:0;top:0;width:100%;height:100%;pointer-events:none;z-index:1}}
 .m{{position:absolute;pointer-events:auto}}

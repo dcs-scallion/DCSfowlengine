@@ -1023,6 +1023,9 @@ fn unit_killed(
                 || airborne_deslot_block(ctx, lua, ucid, Some(&id)).is_some()
             {
                 info!("suppressed campaign unit death after airborne exit for {ucid:?}");
+                // Still count war losses / kill bookkeeping; skip persisted unit_dead.
+                ctx.shots_out.dead(id.clone(), now);
+                ctx.db.campaign_record_player_airframe_loss(&ucid, &id);
                 return Ok(());
             }
         }
@@ -2428,7 +2431,6 @@ fn delayed_init_miz(lua: MizLua) -> Result<()> {
         let addr = ifo.ip().ok().flatten();
         let _ = ctx.connected.player_connected(id, PlayerInfo { name: name.clone(), addr, ucid });
         ctx.db.player_connected(ucid, name.clone());
-        ctx.db.campaign_on_connect(ucid, Utc::now());
         let welcome = if let Some(player) = ctx.db.player(&ucid) {
             format_compact!(
                 "Welcome back, {}! You are on the {:?} team. Type -help for commands.",
