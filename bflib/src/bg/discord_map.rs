@@ -677,6 +677,15 @@ fn coalition_tip_class(coalition: &str) -> &'static str {
     }
 }
 
+fn marker_tip_class(kind: &str, tip_coalition: &str) -> String {
+    let base = coalition_tip_class(tip_coalition);
+    if kind == "production" && matches!(tip_coalition, "red" | "blue") {
+        format!("{base} tip-opr")
+    } else {
+        base.to_string()
+    }
+}
+
 fn stat_bar_class(value: u8) -> &'static str {
     match value {
         0..=32 => "health-red",
@@ -1118,7 +1127,7 @@ fn build_interactive_html(
     let front_svg = front_line_svg(viewport, img_w, img_h, front_line);
     let mut body = String::new();
     for m in markers {
-        let tip_class = coalition_tip_class(&m.tip_coalition);
+        let tip_class = marker_tip_class(&m.kind, &m.tip_coalition);
         let rows = tooltip_rows_html(&m.kind, m.health, m.logi, m.production);
         let stat_bars = marker_stat_bars_html(&m.kind, m.health, m.logi, m.production);
         body.push_str(&format!(
@@ -1310,6 +1319,8 @@ body{{margin:0;background:#000;color:#686a6e;font-family:"Roboto Condensed",Robo
 .tip-blue .tip-title{{background:rgba(46,90,172,.9)}}
 .tip-neutral{{border-color:#2e3138}}
 .tip-neutral .tip-title{{background:rgba(46,49,56,.9)}}
+.tip-red.tip-opr .tip-title{{background:#fff;color:#C43838}}
+.tip-blue.tip-opr .tip-title{{background:#fff;color:#2E5AAC}}
 </style></head><body>
 <div class="map-panel">{map_header}{map_body}</div>
 <script>

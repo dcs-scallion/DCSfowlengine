@@ -138,6 +138,29 @@ fn text_color(side: Side, a: f32) -> Color {
     }
 }
 
+/// OPR: coalition ink on white; other objectives: white ink on coalition fill.
+fn objective_name_label_colors(obj: &Objective) -> (Color, Color) {
+    if matches!(obj.kind, ObjectiveKind::Production) {
+        let text = match obj.owner {
+            Side::Red => Color::red(1.0),
+            Side::Blue => Color::blue(1.0),
+            Side::Neutral => Color::white(1.0),
+        };
+        let fill = match obj.owner {
+            Side::Neutral => Color::black(0.8),
+            _ => Color::from_rgba(0.85, 0.85, 0.85, 0.9),
+        };
+        (text, fill)
+    } else {
+        let fill = match obj.owner {
+            Side::Red => Color::red(0.8),
+            Side::Blue => Color::blue(0.8),
+            Side::Neutral => Color::black(0.8),
+        };
+        (Color::white(1.0), fill)
+    }
+}
+
 /// Cross-coalition view: Health/Logi only (no supply, fuel, or points).
 fn enemy_objective_view(obj_owner: Side, viewer: Side) -> bool {
     matches!(
@@ -719,16 +742,12 @@ fn install_objective_overlay_marks(
     let color_func = |a| text_color(obj.owner, a);
     let all_spec = overlay_side_filter(obj);
     let pos3 = Vector3::new(t.pos.x, 0., t.pos.y);
-    let bg_color = match obj.owner {
-        Side::Red => Color::red(0.8),
-        Side::Blue => Color::blue(0.8),
-        _ => Color::black(0.8),
-    };
+    let (name_color, name_fill) = objective_name_label_colors(obj);
     t.label = MarkId::new();
     msgq.text_to_overlay(all_spec, t.label, TextSpec {
         pos: LuaVec3(Vector3::new(pos3.x + 1500., 1., pos3.z + 2500.)),
-        color: Color::white(1.0),
-        fill_color: bg_color,
+        color: name_color,
+        fill_color: name_fill,
         font_size: 11,
         read_only: true,
         text: t.name.clone().into(),
@@ -882,6 +901,9 @@ impl ObjectiveMarkup {
         if obj.owner != self.side {
             let color_func = |a| text_color(obj.owner, a);
             self.side = obj.owner;
+            let (name_color, name_fill) = objective_name_label_colors(obj);
+            msgq.set_overlay_markup_color(self.label, name_color);
+            msgq.set_overlay_markup_fill_color(self.label, name_fill);
             if let Some(id) = self.stats_label {
                 msgq.set_overlay_markup_color(id, color_func(1.));
             }
