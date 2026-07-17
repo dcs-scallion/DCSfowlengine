@@ -1602,6 +1602,11 @@ impl Db {
         };
         self.ephemeral.dirty();
         self.campaign_record_static_loss(gid);
+        if let Some(killer) = killer {
+            if let Ok(group) = self.group(&gid) {
+                self.campaign_top10_on_static_kill(killer, group.side);
+            }
+        }
         if let Some(oid) = self.persisted.objectives_by_group.get(&gid).copied() {
             let group = group!(self, gid)?;
             if group.class == super::objective::ObjGroupClass::Production {

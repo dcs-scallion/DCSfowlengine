@@ -2123,6 +2123,7 @@ impl Db {
                     by: ucids.clone(),
                 });
                 self.campaign_on_capture(new_owner);
+                self.campaign_top10_on_capture(&ucids);
                 if let Some(points) = self.ephemeral.cfg.points.as_ref() {
                     let kind = objective!(self, oid)?.kind.clone();
                     let total = points.capture_points_for(&kind);

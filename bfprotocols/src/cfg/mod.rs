@@ -1060,6 +1060,9 @@ pub struct DiscordMapCfg {
     /// Persisted coalition counters for the interactive map right sidebar.
     #[serde(default)]
     pub campaign_stats: bool,
+    /// Persisted per-player Top 10 boards for the interactive map left sidebar.
+    #[serde(default)]
+    pub campaign_top10: bool,
     /// Campaign day length: `1 + (campaign_rounds - 1) / rounds_per_day`.
     #[serde(default = "default_rounds_per_day")]
     pub rounds_per_day: u32,
@@ -1085,6 +1088,7 @@ impl Default for DiscordMapCfg {
             bugs_report_url: Default::default(),
             refresh_interval_secs: None,
             campaign_stats: false,
+            campaign_top10: false,
             rounds_per_day: default_rounds_per_day(),
         }
     }

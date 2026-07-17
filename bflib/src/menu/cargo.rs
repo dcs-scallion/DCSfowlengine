@@ -37,6 +37,9 @@ fn unpakistan(lua: MizLua, gid: GroupId) -> Result<()> {
     let (side, slot) = slot_for_group(lua, ctx, &gid).context("getting slot for group")?;
     match ctx.db.unpakistan(lua, &ctx.idx, &slot) {
         Ok(unpakistan) => {
+            if let Some(ucid) = ctx.db.ephemeral.player_in_slot(&slot).copied() {
+                ctx.db.campaign_top10_on_logistics(ucid);
+            }
             let sound_key = match &unpakistan {
                 Unpakistan::Unpacked(_)
                 | Unpakistan::UnpackedFarp(_)

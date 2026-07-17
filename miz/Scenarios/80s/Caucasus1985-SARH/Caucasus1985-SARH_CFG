@@ -59,6 +59,7 @@
     "manual_url": "",
     "bugs_report_url": "",
     "campaign_stats": true,
+    "campaign_top10": true,
     "rounds_per_day": 4
   },
   "acmi_sanitize": {

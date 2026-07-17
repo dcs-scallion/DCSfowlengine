@@ -2007,6 +2007,7 @@ fn run_slow_timed_events(
             for dead in ctx.shots_out.bring_out_your_dead(ts) {
                 info!("kill {:?}", dead);
                 ctx.db.campaign_on_victim_killed(&dead);
+                ctx.db.campaign_top10_on_kill(&dead);
                 if let Some(points) = cfg.points.as_ref() {
                     ctx.db.award_kill_points(points, &dead)
                 }

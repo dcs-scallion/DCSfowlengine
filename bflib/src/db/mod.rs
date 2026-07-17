@@ -42,6 +42,7 @@ pub mod actions;
 pub mod ai_air;
 pub mod aliases;
 pub mod campaign_stats;
+pub mod campaign_top10;
 pub mod cargo;
 pub mod csar;
 pub mod discord_map;

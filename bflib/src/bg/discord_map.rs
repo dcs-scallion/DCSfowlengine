@@ -201,6 +201,8 @@ pub struct DiscordMapStatusBar {
     pub campaign_online_hours_blue: u32,
     pub campaign_online_hours_red: u32,
     pub campaign_stats_sidebar_html: String,
+    /// Empty when `campaign_top10` is off.
+    pub campaign_top10_sidebar_html: String,
 }
 
 #[derive(Debug, Clone)]
@@ -828,6 +830,7 @@ fn sidebar_pilots_html(bar: &DiscordMapStatusBar) -> String {
 {pilots_blue}
 {pilots_red}
 {pilots_spec}
+{top10}
 </div>"#,
         pilots_blue = pilot_section(
             "BLUE pilots",
@@ -850,6 +853,7 @@ fn sidebar_pilots_html(bar: &DiscordMapStatusBar) -> String {
             &bar.spectators,
             false,
         ),
+        top10 = bar.campaign_top10_sidebar_html,
     )
 }
 
@@ -969,7 +973,7 @@ fn map_header_html(bar: &DiscordMapStatusBar) -> String {
         .map(|(_, time)| time)
         .unwrap_or(bar.status_utc.as_str());
     format!(
-        r#"<div class="map-hdr"><div class="map-hdr-left">{left}</div><div class="map-hdr-right">{links}<span class="map-hdr-status-sep">          </span>Campaign status as of {status_time} UTC</div></div>"#,
+        r#"<div class="map-hdr"><div class="map-hdr-left">{left}</div><div class="map-hdr-right">{links}<span class="map-hdr-status-sep">          </span>Campaign status as of {status_time} UTC&nbsp;&nbsp;</div></div>"#,
         left = map_header_left_html(bar),
         links = map_header_links_html(bar),
         status_time = html_escape(status_time),
@@ -1256,6 +1260,7 @@ body{{margin:0;background:#000;color:#686a6e;font-family:"Roboto Condensed",Robo
 .pilot-hdr-blue{{background:rgba(46,90,172,.9)}}
 .pilot-hdr-red{{background:rgba(196,56,56,.9)}}
 .pilot-hdr-neutral{{background:rgba(46,49,56,.9)}}
+.pilot-hdr-top10{{background:#15161a;color:#686a6e}}
 .pilot-hdr-row .rank-col,.pilot-row .rank-col{{flex:0 0 {rank_col}px;width:{rank_col}px;min-width:{rank_col}px}}
 .pilot-hdr-title{{flex:1 1 auto;min-width:0;text-align:left;padding:5px 4px;font-weight:400;overflow:hidden;text-overflow:ellipsis}}
 .pilot-hdr-title-bold{{font-weight:700}}
@@ -1267,6 +1272,10 @@ body{{margin:0;background:#000;color:#686a6e;font-family:"Roboto Condensed",Robo
 .ping-yellow{{color:#e8c547}}
 .ping-orange{{color:#e07a2a}}
 .ping-red{{color:#C43838}}
+.sidebar-top10{{display:contents}}
+.top10-blue{{color:#2E5AAC}}
+.top10-red{{color:#C43838}}
+.top10-neutral{{color:#686a6e}}
 .map-frame{{border:1px solid #2e3138;box-sizing:border-box;display:block;line-height:0;width:100%}}
 #wrap{{position:relative;display:block;line-height:0;width:100%}}
 #base{{display:block;width:100%;height:auto}}

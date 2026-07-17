@@ -861,6 +861,13 @@ pub fn collect_map_status_bar(
         } else {
             (0, 0, 0, String::new())
         };
+    let campaign_top10_sidebar_html = if cfg.discord_map.campaign_top10 {
+        db.campaign_top10_build_view()
+            .map(|v| super::campaign_top10::render_top10_sidebar_html(&v))
+            .unwrap_or_default()
+    } else {
+        String::new()
+    };
     Ok(bg::discord_map::DiscordMapStatusBar {
         mission_name: mission_name.to_string(),
         status_utc: status_utc.to_string(),
@@ -918,6 +925,7 @@ pub fn collect_map_status_bar(
         campaign_online_hours_blue,
         campaign_online_hours_red,
         campaign_stats_sidebar_html,
+        campaign_top10_sidebar_html,
     })
 }
 
