@@ -438,7 +438,25 @@ fn objective_is_naval_carrier(db: &Db, obj: &Objective) -> bool {
         .is_some_and(|pad| db.ephemeral.global_pad_templates.contains(pad.as_str()))
 }
 
-fn carrier_ship_unit_id(lua: MizLua, db: &Db, pad_template: &str) -> Result<Option<i64>> {
+pub(super) fn carrier_ship_unit_id(lua: MizLua, db: &Db, pad_template: &str) -> Result<Option<i64>> {
+    Ok(carrier_ship_pose(lua, db, pad_template)?.map(|(id, _, _)| id))
+}
+
+fn carrier_ship_pose(
+    lua: MizLua,
+    db: &Db,
+    pad_template: &str,
+) -> Result<Option<(i64, dcso3::Position3, f64)>> {
+    Ok(
+        carrier_ship_unit(lua, db, pad_template)?.map(|(id, pos, alt, _)| (id, pos, alt)),
+    )
+}
+
+fn carrier_ship_unit<'lua>(
+    lua: MizLua<'lua>,
+    db: &Db,
+    pad_template: &str,
+) -> Result<Option<(i64, dcso3::Position3, f64, Unit<'lua>)>> {
     for (_, group) in db.persisted.groups.into_iter() {
         if group.template_name.as_str() != pad_template {
             continue;
@@ -453,9 +471,186 @@ fn carrier_ship_unit_id(lua: MizLua, db: &Db, pad_template: &str) -> Result<Opti
         if !u.is_exist()? {
             continue;
         }
-        return Ok(Some(u.id()?.inner()));
+        let id = u.id()?.inner();
+        let pos = u.get_position()?;
+        let alt = u.get_point()?.y;
+        return Ok(Some((id, pos, alt, u)));
     }
     Ok(None)
+}
+
+/// World map pos + heading → Hoggit/MOOSE ship-relative static offsets.
+pub(super) fn world_to_ship_crate_offsets(
+    ship_pos: dcso3::Position3,
+    world: Vector2,
+    world_heading: f64,
+) -> super::group::ShipCrateOffsets {
+    let dx = world.x - ship_pos.p.x;
+    let dz = world.y - ship_pos.p.z;
+    let fx = ship_pos.x.x;
+    let fz = ship_pos.x.z;
+    let rx = ship_pos.z.x;
+    let rz = ship_pos.z.z;
+    let ship_hdg = dcso3::azumith3d(ship_pos.x.0);
+    super::group::ShipCrateOffsets {
+        x: dx * fx + dz * fz,
+        y: dx * rx + dz * rz,
+        angle: world_heading - ship_hdg,
+    }
+}
+
+/// Horizontal ship-local limits from `Unit.getDesc().box` (x forward, z lateral), inset.
+fn ship_deck_offset_limits(unit: &Unit) -> Result<(f64, f64, f64, f64)> {
+    const MARGIN_M: f64 = 3.0;
+    let desc = unit.get_desc().context("carrier getDesc for crate deck box")?;
+    let b: dcso3::Box3 = desc
+        .raw_get("box")
+        .context("carrier desc.box missing")?;
+    let mut min_x = b.min.x + MARGIN_M;
+    let mut max_x = b.max.x - MARGIN_M;
+    let mut min_z = b.min.z + MARGIN_M;
+    let mut max_z = b.max.z - MARGIN_M;
+    if min_x >= max_x || min_z >= max_z {
+        min_x = b.min.x;
+        max_x = b.max.x;
+        min_z = b.min.z;
+        max_z = b.max.z;
+    }
+    Ok((min_x, max_x, min_z, max_z))
+}
+
+fn offsets_on_ship_deck(off: &super::group::ShipCrateOffsets, lim: (f64, f64, f64, f64)) -> bool {
+    off.x >= lim.0 && off.x <= lim.1 && off.y >= lim.2 && off.y <= lim.3
+}
+
+/// Live crate altitude still near deck (off-deck link spawns often fall to ~-1200).
+pub(super) fn crate_altitude_on_deck(crate_y: f64, deck_alt: f64) -> bool {
+    const MAX_BELOW_DECK_M: f64 = 40.0;
+    crate_y >= deck_alt - MAX_BELOW_DECK_M && crate_y > -200.0
+}
+
+pub(super) fn crate_spawned_on_deck(lua: MizLua, name: &str, deck_alt: f64) -> bool {
+    match StaticObject::get_by_name(lua, name) {
+        Ok(Static::Static(st)) if st.is_exist().unwrap_or(false) => st
+            .as_object()
+            .and_then(|o| o.get_point())
+            .map(|p| crate_altitude_on_deck(p.y, deck_alt))
+            .unwrap_or(false),
+        _ => false,
+    }
+}
+
+/// Naval hub: pick a nose offset still on the ship box; land hubs return `None`.
+pub(super) fn resolve_ship_crate_deck_spawn(
+    lua: MizLua,
+    db: &Db,
+    oid: ObjectiveId,
+    player_point: Vector2,
+    nose_dir: Vector2,
+    group_heading: f64,
+    deck_alt_hint: f64,
+) -> Result<Option<(Vector2, f64, super::group::ShipCrateOffsets)>> {
+    let obj = objective!(db, oid)?;
+    if !objective_is_naval_carrier(db, obj) {
+        return Ok(None);
+    }
+    let Some(pad) = farp_pad_template(obj) else {
+        return Ok(None);
+    };
+    let Some((_ship_id, ship_pos, ship_alt, ship_unit)) =
+        carrier_ship_unit(lua, db, pad.as_str())?
+    else {
+        return Ok(None);
+    };
+    let lim = ship_deck_offset_limits(&ship_unit)?;
+    let altitude = if (deck_alt_hint - ship_alt).abs() < 80. {
+        deck_alt_hint
+    } else {
+        ship_alt + 18.
+    };
+    let dir_len = nose_dir.norm();
+    let dir = if dir_len > 1e-6 {
+        nose_dir / dir_len
+    } else {
+        Vector2::new(ship_pos.x.x, ship_pos.x.z)
+    };
+    // Prefer nose distances; walk back toward the player (known on-deck).
+    const DISTS_M: &[f64] = &[20., 15., 12., 10., 8., 6., 5., 4., 3.];
+    for &d in DISTS_M {
+        let spawn_pos = player_point + dir * d;
+        let offsets = world_to_ship_crate_offsets(ship_pos, spawn_pos, group_heading);
+        if offsets_on_ship_deck(&offsets, lim) {
+            return Ok(Some((spawn_pos, altitude, offsets)));
+        }
+    }
+    bail!("cannot spawn crate off the deck; move farther onto the flight deck")
+}
+
+    pub(super) fn apply_static_ship_link<'lua>(
+    lua: MizLua<'lua>,
+    unit: &miz::Unit<'lua>,
+    ship_unit_id: i64,
+    offsets: &super::group::ShipCrateOffsets,
+) -> Result<()> {
+    unit.raw_set("linkUnit", ship_unit_id)?;
+    unit.raw_set("linkOffset", true)?;
+    let tbl = lua.inner().create_table()?;
+    tbl.raw_set("x", offsets.x)?;
+    tbl.raw_set("y", offsets.y)?;
+    tbl.raw_set("angle", offsets.angle)?;
+    unit.raw_set("offsets", tbl)?;
+    Ok(())
+}
+
+/// Apply persisted crate→ship link at DCS spawn (resolves current ship `unitId`).
+pub(super) fn apply_persisted_crate_ship_link<'lua>(
+    lua: MizLua<'lua>,
+    persisted: &super::persisted::Persisted,
+    global_pad_templates: &FxHashSet<String>,
+    group: &super::group::SpawnedGroup,
+    unit: &miz::Unit<'lua>,
+) -> Result<()> {
+    let DeployKind::Crate {
+        ship_hub,
+        origin,
+        ship_offsets: Some(off),
+        ..
+    } = &group.origin
+    else {
+        return Ok(());
+    };
+    let hub = ship_hub.unwrap_or(*origin);
+    let Some(obj) = persisted.objectives.get(&hub) else {
+        return Ok(());
+    };
+    let ObjectiveKind::Farp { pad_template, .. } = &obj.kind else {
+        return Ok(());
+    };
+    if !global_pad_templates.contains(pad_template.as_str()) {
+        return Ok(());
+    }
+    for (_, g) in persisted.groups.into_iter() {
+        if g.template_name.as_str() != pad_template.as_str() {
+            continue;
+        }
+        let Ok(dcs_g) = Group::get_by_name(lua, g.name.as_str()) else {
+            continue;
+        };
+        if !dcs_g.is_exist().unwrap_or(false) {
+            continue;
+        }
+        let Ok(ship) = dcs_g.get_unit(1) else {
+            continue;
+        };
+        if !ship.is_exist().unwrap_or(false) {
+            continue;
+        }
+        let Ok(id) = ship.id() else {
+            continue;
+        };
+        return apply_static_ship_link(lua, unit, id.inner(), off);
+    }
+    Ok(())
 }
 
 fn objective_has_live_carrier_airbase(lua: MizLua, db: &Db, obj: &Objective) -> bool {

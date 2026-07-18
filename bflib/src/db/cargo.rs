@@ -35,11 +35,12 @@ use chrono::prelude::*;
 use compact_str::{CompactString, format_compact};
 use dcso3::{
     LuaVec2, MizLua, Position3, String, Vector2, azumith2d, azumith2d_to, azumith3d, centroid2d,
-    coalition::Side,
+    coalition::{Side, Static},
     env::miz::MizIndex,
     land::Land,
     net::{SlotId, Ucid},
     radians_to_degrees,
+    static_object::StaticObject,
     trigger::Trigger,
 };
 use enumflags2::BitFlags;
@@ -212,9 +213,44 @@ impl Db {
             bail!("you must land to spawn crates")
         }
         let dir = Vector2::new(st.pos.x.x, st.pos.x.z);
-        let approx_spawn_pos = st.point + dir * 20.;
+        let group_heading = azumith2d(dir);
+        let (oid, _) = self.point_near_logistics(st.side, st.point)?;
+        // Single-unit crate templates: prefer 20m ahead; on ships walk back onto deck box.
+        let (spawnpos, ship_hub, ship_offsets, deck_alt, near_check) =
+            match crate::db::ai_air::resolve_ship_crate_deck_spawn(
+                lua,
+                self,
+                oid,
+                st.point,
+                dir,
+                group_heading,
+                st.pos.p.y,
+            )? {
+                Some((deck_spawn, altitude, offsets)) => (
+                    SpawnLoc::AtPosOnShip {
+                        pos: deck_spawn,
+                        group_heading,
+                        altitude,
+                    },
+                    Some(oid),
+                    Some(offsets),
+                    Some(altitude),
+                    deck_spawn,
+                ),
+                None => (
+                    SpawnLoc::AtPos {
+                        pos: st.point,
+                        offset_direction: dir,
+                        group_heading,
+                    },
+                    None,
+                    None,
+                    None,
+                    st.point + dir * 20.,
+                ),
+            };
         if !self
-            .list_crates_near_point(approx_spawn_pos, 10.)?
+            .list_crates_near_point(lua, near_check, 10.)?
             .is_empty()
         {
             bail!("move away from other crates or pick up the existing crate")
@@ -227,7 +263,6 @@ impl Db {
                 crates.into_iter().next().map(|id| *id)
             }
         });
-        let (oid, _) = self.point_near_logistics(st.side, st.point)?;
         let dep_idx = self
             .ephemeral
             .deployable_idx
@@ -274,20 +309,17 @@ impl Db {
             .get(&st.side)
             .ok_or_else(|| anyhow!("missing crate template for {:?} side", st.side))?
             .clone();
-        let spawnpos = SpawnLoc::AtPos {
-            pos: st.point,
-            offset_direction: dir,
-            group_heading: azumith2d(dir),
-        };
         let dk = DeployKind::Crate {
             origin: oid,
             player: st.ucid.clone(),
             spec: crate_cfg.clone(),
+            ship_hub,
+            ship_offsets,
         };
         if let Some(gid) = to_delete {
             self.delete_group(&gid)?;
         }
-        self.add_and_queue_group(
+        let gid = self.add_and_queue_group(
             &SpawnCtx::new(lua)?,
             idx,
             st.side,
@@ -299,11 +331,59 @@ impl Db {
             None,
             None,
         )?;
+        if let Some(deck_alt) = deck_alt {
+            self.spawn_and_validate_ship_crate(lua, idx, gid, deck_alt)?;
+        }
         Ok(st)
+    }
+
+    /// Force-spawn a ship-linked crate and delete it if DCS placed it off the deck.
+    fn spawn_and_validate_ship_crate(
+        &mut self,
+        lua: MizLua,
+        idx: &MizIndex,
+        gid: GroupId,
+        deck_alt: f64,
+    ) -> Result<()> {
+        self.ephemeral.cancel_queued_spawn(gid);
+        let spctx = SpawnCtx::new(lua)?;
+        let mut perf = bfprotocols::perf::PerfInner::default();
+        let group = group!(self, gid)?;
+        self.ephemeral
+            .spawn_group(&mut perf, &self.persisted, idx, &spctx, group, vec![])?;
+        let unit_names: SmallVec<[String; 2]> = {
+            let group = group!(self, gid)?;
+            group
+                .units
+                .into_iter()
+                .filter_map(|uid| self.persisted.units.get(uid).map(|u| u.name.clone()))
+                .collect()
+        };
+        let on_deck = unit_names.iter().all(|name| {
+            crate::db::ai_air::crate_spawned_on_deck(lua, name.as_str(), deck_alt)
+        });
+        if !on_deck {
+            let _ = self.delete_group(&gid);
+            bail!("cannot spawn crate off the deck; move farther onto the flight deck");
+        }
+        Ok(())
+    }
+
+    /// Live DCS world pos for a crate static (ship-linked crates move with the carrier).
+    fn crate_world_pos(lua: MizLua, name: &str, fallback: Vector2) -> Vector2 {
+        match StaticObject::get_by_name(lua, name) {
+            Ok(Static::Static(st)) if st.is_exist().unwrap_or(false) => st
+                .as_object()
+                .and_then(|o| o.get_point())
+                .map(|p| Vector2::new(p.x, p.z))
+                .unwrap_or(fallback),
+            _ => fallback,
+        }
     }
 
     fn list_crates_near_point<'a>(
         &'a self,
+        lua: MizLua,
         point: Vector2,
         max_dist: f64,
     ) -> Result<SmallVec<[NearbyCrate<'a>; 4]>> {
@@ -326,14 +406,15 @@ impl Db {
             };
             for uid in &group.units {
                 let unit = &unit!(self, uid)?;
-                let distance = na::distance(&point.into(), &unit.pos.into());
+                let pos = Self::crate_world_pos(lua, unit.name.as_str(), unit.pos);
+                let distance = na::distance(&point.into(), &pos.into());
                 if distance <= max_dist {
-                    let heading = radians_to_degrees(azumith2d_to(point, unit.pos));
+                    let heading = radians_to_degrees(azumith2d_to(point, pos));
                     res.push(NearbyCrate {
                         group,
                         origin: *oid,
                         crate_def,
-                        pos: unit.pos,
+                        pos,
                         heading,
                         distance,
                     })
@@ -346,10 +427,11 @@ impl Db {
 
     pub fn list_nearby_crates<'a>(
         &'a self,
+        lua: MizLua,
         st: &SlotStats,
     ) -> Result<SmallVec<[NearbyCrate<'a>; 4]>> {
         let max_dist = self.ephemeral.cfg.crate_load_distance as f64;
-        self.list_crates_near_point(st.point, max_dist)
+        self.list_crates_near_point(lua, st.point, max_dist)
     }
 
     pub fn destroy_nearby_crate(&mut self, lua: MizLua, slot: &SlotId) -> Result<()> {
@@ -357,7 +439,7 @@ impl Db {
         if st.in_air {
             bail!("you must land to destroy crates")
         }
-        let nearby = self.list_nearby_crates(&st)?;
+        let nearby = self.list_nearby_crates(lua, &st)?;
         let closest = nearby
             .into_iter()
             .next()
@@ -482,9 +564,9 @@ impl Db {
                 }
             }
         }
-        fn nearby(db: &Db, st: &SlotStats) -> Result<SmallVec<[Cifo; 8]>> {
+        fn nearby(db: &Db, lua: MizLua, st: &SlotStats) -> Result<SmallVec<[Cifo; 8]>> {
             let nearby_player = db
-                .list_nearby_crates(st)?
+                .list_nearby_crates(lua, st)?
                 .into_iter()
                 .map(Cifo::from)
                 .collect::<SmallVec<[Cifo; 8]>>();
@@ -495,7 +577,7 @@ impl Db {
                 let mut crates = FxHashMap::default();
                 for cr in &nearby_player {
                     for cr in db
-                        .list_crates_near_point(cr.pos, sp)?
+                        .list_crates_near_point(lua, cr.pos, sp)?
                         .into_iter()
                         .map(Cifo::from)
                     {
@@ -883,7 +965,7 @@ impl Db {
             bail!("you must land to unpack crates")
         }
         let max_dist = self.ephemeral.cfg.crate_spread as f64;
-        let nearby = nearby(self, &st)?;
+        let nearby = nearby(self, lua, &st)?;
         let didx = Arc::clone(
             self.ephemeral
                 .deployable_idx
@@ -1067,6 +1149,7 @@ impl Db {
                     origin: from,
                     player: _,
                     spec: _,
+                    ..
                 } = self.persisted.groups[&gid].origin
                 {
                     self.transfer_supplies(lua, from, to)?;
@@ -1313,18 +1396,63 @@ impl Db {
             .get(&st.side)
             .ok_or_else(|| anyhow!("missing crate template for {:?}", st.side))?
             .clone();
-        let spawnpos = SpawnLoc::AtPos {
-            pos: st.point,
-            offset_direction: Vector2::new(st.pos.x.x, st.pos.x.z),
-            group_heading: azumith3d(st.pos.x.0),
-        };
+        let dir = Vector2::new(st.pos.x.x, st.pos.x.z);
+        let group_heading = azumith3d(st.pos.x.0);
+        let link_oid = self
+            .point_near_logistics(st.side, st.point)
+            .map(|(near, _)| near)
+            .unwrap_or(oid);
+        let (spawnpos, ship_hub, ship_offsets, deck_alt) =
+            match crate::db::ai_air::resolve_ship_crate_deck_spawn(
+                lua,
+                self,
+                link_oid,
+                st.point,
+                dir,
+                group_heading,
+                st.pos.p.y,
+            ) {
+                Ok(v) => match v {
+                    Some((deck_spawn, altitude, offsets)) => (
+                        SpawnLoc::AtPosOnShip {
+                            pos: deck_spawn,
+                            group_heading,
+                            altitude,
+                        },
+                        Some(link_oid),
+                        Some(offsets),
+                        Some(altitude),
+                    ),
+                    None => (
+                        SpawnLoc::AtPos {
+                            pos: st.point,
+                            offset_direction: dir,
+                            group_heading,
+                        },
+                        None,
+                        None,
+                        None,
+                    ),
+                },
+                Err(e) => {
+                    self.ephemeral
+                        .cargo
+                        .get_mut(slot)
+                        .unwrap()
+                        .crates
+                        .push((oid, crate_cfg));
+                    return Err(e);
+                }
+            };
         let dk = DeployKind::Crate {
             origin: oid,
             player: st.ucid,
             spec: crate_cfg.clone(),
+            ship_hub,
+            ship_offsets,
         };
         let spctx = SpawnCtx::new(lua)?;
-        if let Err(e) = self.add_and_queue_group(
+        let gid = match self.add_and_queue_group(
             &spctx,
             idx,
             st.side,
@@ -1336,13 +1464,27 @@ impl Db {
             None,
             None,
         ) {
-            self.ephemeral
-                .cargo
-                .get_mut(slot)
-                .unwrap()
-                .crates
-                .push((oid, crate_cfg));
-            return Err(e);
+            Ok(gid) => gid,
+            Err(e) => {
+                self.ephemeral
+                    .cargo
+                    .get_mut(slot)
+                    .unwrap()
+                    .crates
+                    .push((oid, crate_cfg));
+                return Err(e);
+            }
+        };
+        if let Some(deck_alt) = deck_alt {
+            if let Err(e) = self.spawn_and_validate_ship_crate(lua, idx, gid, deck_alt) {
+                self.ephemeral
+                    .cargo
+                    .get_mut(slot)
+                    .unwrap()
+                    .crates
+                    .push((oid, crate_cfg));
+                return Err(e);
+            }
         }
         Ok(crate_cfg)
     }
@@ -1368,7 +1510,7 @@ impl Db {
             bail!("you already have a full load onboard")
         }
         let (gid, oid, crate_def) = {
-            let mut nearby = self.list_nearby_crates(&st)?;
+            let mut nearby = self.list_nearby_crates(lua, &st)?;
             nearby.retain(|nc| nc.group.side == side);
             if nearby.is_empty() {
                 bail!(

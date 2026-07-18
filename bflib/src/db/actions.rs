@@ -2321,6 +2321,7 @@ impl Db {
                                 }
                             }
                             SpawnLoc::AtPos { .. }
+                            | SpawnLoc::AtPosOnShip { .. }
                             | SpawnLoc::AtPosWithCenter { .. }
                             | SpawnLoc::AtPosWithComponents { .. }
                             | SpawnLoc::AtTrigger { .. } => (),

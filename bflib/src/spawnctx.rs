@@ -278,6 +278,12 @@ pub enum SpawnLoc {
         /// rotate the group to this heading in radians
         group_heading: f64,
     },
+    /// Static on a moving ship deck (MOOSE/Hoggit `linkUnit` + `offsets`).
+    AtPosOnShip {
+        pos: Vector2,
+        group_heading: f64,
+        altitude: f64,
+    },
     AtPosWithComponents {
         pos: Vector2,
         /// the position of sub components of the group by unit type

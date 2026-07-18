@@ -74,6 +74,14 @@ fn default_cost_fraction() -> f32 {
     1.
 }
 
+/// MOOSE/Hoggit static-on-ship offsets (`offsets = { x, y, angle }` in radians).
+#[derive(Debug, Clone, Copy, Deserialize, Serialize)]
+pub struct ShipCrateOffsets {
+    pub x: f64,
+    pub y: f64,
+    pub angle: f64,
+}
+
 fn vehicle_type_for_dynamic_slot(unit: &Unit) -> Result<Vehicle> {
     let desc = unit.get_desc().context("dynamic slot unit getDesc")?;
     match desc.raw_get::<_, String>("typeName") {
@@ -113,6 +121,12 @@ pub enum DeployKind {
         origin: ObjectiveId,
         player: Ucid,
         spec: Crate,
+        /// Naval hub used for deck link (may differ from `origin` on unload).
+        #[serde(default)]
+        ship_hub: Option<ObjectiveId>,
+        /// Ship-relative offsets for carrier-deck crates (Hoggit `addStaticObject` link).
+        #[serde(default)]
+        ship_offsets: Option<ShipCrateOffsets>,
     },
     Action {
         #[serde(skip)]
@@ -664,6 +678,25 @@ impl Db {
                     }
                     Ok(GroupPosition { positions, by_type: FxHashMap::default() })
                 }
+                SpawnLoc::AtPosOnShip {
+                    pos,
+                    group_heading,
+                    altitude,
+                } => {
+                    let group_center = centroid2d(positions.iter().map(|p| p.position));
+                    for p in positions.iter_mut() {
+                        p.position = p.position - group_center + pos;
+                        p.heading = change_heading(p.heading, group_heading);
+                        p.altitude = Some(altitude);
+                    }
+                    rotate2d_gen(group_heading, positions.make_contiguous(), |p| {
+                        &mut p.position
+                    });
+                    Ok(GroupPosition {
+                        positions,
+                        by_type: FxHashMap::default(),
+                    })
+                }
                 SpawnLoc::AtPosWithComponents { pos, group_heading, component_pos } => {
                     let group_center = centroid2d(positions.iter().map(|p| p.position));
                     let center_by_typ: FxHashMap<String, Vector2> = {
@@ -855,6 +888,7 @@ impl Db {
         }
         match &location {
             SpawnLoc::AtPos { .. }
+            | SpawnLoc::AtPosOnShip { .. }
             | SpawnLoc::AtPosWithCenter { .. }
             | SpawnLoc::AtPosWithComponents { .. }
             | SpawnLoc::AtTrigger { .. } => {

@@ -172,16 +172,42 @@ pub struct Transfer {
     item: TransferItem,
 }
 
+fn wh_diag(msg: impl AsRef<str>) {
+    info!("warehouse diag: {}", msg.as_ref());
+}
+
+fn transfer_item_label(item: &TransferItem) -> CompactString {
+    match item {
+        TransferItem::Equipment(name) => format_compact!("eq:{name}"),
+        TransferItem::Liquid(liq) => format_compact!("liq:{liq:?}"),
+    }
+}
+
 impl Transfer {
     pub(super) fn target(&self) -> ObjectiveId {
         self.target
     }
 
     fn execute(&self, db: &mut Persisted, to_bg: &Option<UnboundedSender<Task>>) -> Result<()> {
+        let src_name = db
+            .objectives
+            .get(&self.source)
+            .map(|o| o.name.clone())
+            .unwrap_or_else(|| format_compact!("{:?}", self.source).into());
+        let dst_name = db
+            .objectives
+            .get(&self.target)
+            .map(|o| o.name.clone())
+            .unwrap_or_else(|| format_compact!("{:?}", self.target).into());
+        let item = transfer_item_label(&self.item);
         let src = db
             .objectives
             .get_mut_cow(&self.source)
             .ok_or_else(|| anyhow!("no such objective {:?}", self.source))?;
+        let src_before = match &self.item {
+            TransferItem::Equipment(name) => src.warehouse.equipment[name].stored,
+            TransferItem::Liquid(name) => src.warehouse.liquids[name].stored,
+        };
         match &self.item {
             TransferItem::Equipment(name) => {
                 let d = &mut src.warehouse.equipment[name].stored;
@@ -206,10 +232,28 @@ impl Transfer {
                 }
             }
         }
+        let src_after = match &self.item {
+            TransferItem::Equipment(name) => src.warehouse.equipment[name].stored,
+            TransferItem::Liquid(name) => src.warehouse.liquids[name].stored,
+        };
         let dst = db
             .objectives
             .get_mut_cow(&self.target)
             .ok_or_else(|| anyhow!("no such objective {:?}", self.target))?;
+        let dst_before = match &self.item {
+            TransferItem::Equipment(name) => dst
+                .warehouse
+                .equipment
+                .get(name.as_str())
+                .map(|i| i.stored)
+                .unwrap_or(0),
+            TransferItem::Liquid(name) => dst
+                .warehouse
+                .liquids
+                .get(name)
+                .map(|i| i.stored)
+                .unwrap_or(0),
+        };
         match &self.item {
             TransferItem::Equipment(name) => {
                 let d = &mut dst
@@ -238,6 +282,14 @@ impl Transfer {
                 }
             }
         }
+        let dst_after = match &self.item {
+            TransferItem::Equipment(name) => dst.warehouse.equipment[name].stored,
+            TransferItem::Liquid(name) => dst.warehouse.liquids[name].stored,
+        };
+        wh_diag(format_compact!(
+            "transfer {item} x{amount}: {src_name} {src_before}->{src_after} => {dst_name} {dst_before}->{dst_after}",
+            amount = self.amount,
+        ));
         Ok(())
     }
 }
@@ -265,19 +317,39 @@ fn sync_obj_to_warehouse(
 ) -> Result<()> {
     let perf = unsafe { Perf::get_mut() };
     let perf = Arc::make_mut(&mut perf.inner);
+    let mut eq_deltas = 0u32;
+    let mut liq_deltas = 0u32;
     for (item, inv) in &obj.warehouse.equipment {
         perf.logistics_items.insert((item.clone(), obj.id));
         let current = warehouse
             .get_item_count(item.clone())
             .with_context(|| format_compact!("getting item count for {item}"))?;
         if current < inv.stored {
+            let delta = inv.stored - current;
             warehouse
-                .add_item(item.clone(), inv.stored - current)
+                .add_item(item.clone(), delta)
                 .with_context(|| format_compact!("adding item {item}"))?;
+            if eq_deltas < 12 {
+                wh_diag(format_compact!(
+                    "sync-to {} eq:{item} DCS {current}->{} (+{delta})",
+                    obj.name,
+                    inv.stored
+                ));
+            }
+            eq_deltas += 1;
         } else if current > inv.stored {
+            let delta = current - inv.stored;
             warehouse
-                .remove_item(item.clone(), current - inv.stored)
+                .remove_item(item.clone(), delta)
                 .with_context(|| format_compact!("removing item {item}"))?;
+            if eq_deltas < 12 {
+                wh_diag(format_compact!(
+                    "sync-to {} eq:{item} DCS {current}->{} (-{delta})",
+                    obj.name,
+                    inv.stored
+                ));
+            }
+            eq_deltas += 1;
         }
     }
     for (name, inv) in &obj.warehouse.liquids {
@@ -290,14 +362,36 @@ fn sync_obj_to_warehouse(
             .get_liquid_amount(*name)
             .with_context(|| format_compact!("getting liquid amount for {name:?}"))?;
         if current < target_kg {
+            let delta = target_kg - current;
             warehouse
-                .add_liquid(*name, target_kg - current)
+                .add_liquid(*name, delta)
                 .with_context(|| format_compact!("adding liquid {name:?}"))?;
+            if liq_deltas < 8 {
+                wh_diag(format_compact!(
+                    "sync-to {} liq:{name:?} DCS {current}->{target_kg} (+{delta})",
+                    obj.name
+                ));
+            }
+            liq_deltas += 1;
         } else if current > target_kg {
+            let delta = current - target_kg;
             warehouse
-                .remove_liquid(*name, current - target_kg)
+                .remove_liquid(*name, delta)
                 .with_context(|| format_compact!("removing liquid {name:?}"))?;
+            if liq_deltas < 8 {
+                wh_diag(format_compact!(
+                    "sync-to {} liq:{name:?} DCS {current}->{target_kg} (-{delta})",
+                    obj.name
+                ));
+            }
+            liq_deltas += 1;
         }
+    }
+    if eq_deltas > 0 || liq_deltas > 0 {
+        wh_diag(format_compact!(
+            "sync-to {} summary: {eq_deltas} equipment deltas, {liq_deltas} liquid deltas",
+            obj.name
+        ));
     }
     Ok(())
 }
@@ -307,16 +401,46 @@ fn sync_warehouse_to_obj(
     warehouse: &warehouse::Warehouse,
     export_farp_liquids_tons: bool,
 ) -> Result<()> {
+    let mut eq_deltas = 0u32;
+    let mut liq_deltas = 0u32;
     for (name, inv) in obj.warehouse.equipment.iter_mut_cow() {
+        let prev = inv.stored;
         inv.stored = warehouse.get_item_count(name.clone())?;
+        if prev != inv.stored {
+            if eq_deltas < 12 {
+                wh_diag(format_compact!(
+                    "sync-from {} eq:{name} virtual {prev}->{}",
+                    obj.name,
+                    inv.stored
+                ));
+            }
+            eq_deltas += 1;
+        }
     }
     for (name, inv) in obj.warehouse.liquids.iter_mut_cow() {
+        let prev = inv.stored;
         let kg = warehouse.get_liquid_amount(*name)?;
         inv.stored = if export_farp_liquids_tons {
             dcs_liquid_kg_to_fowl_tons(kg)
         } else {
             kg
         };
+        if prev != inv.stored {
+            if liq_deltas < 8 {
+                wh_diag(format_compact!(
+                    "sync-from {} liq:{name:?} virtual {prev}->{}",
+                    obj.name,
+                    inv.stored
+                ));
+            }
+            liq_deltas += 1;
+        }
+    }
+    if eq_deltas > 0 || liq_deltas > 0 {
+        wh_diag(format_compact!(
+            "sync-from {} summary: {eq_deltas} equipment deltas, {liq_deltas} liquid deltas",
+            obj.name
+        ));
     }
     Ok(())
 }
@@ -2499,8 +2623,15 @@ impl Db {
                     };
                 }
                 LogiStage::Complete { last_tick } if ts - *last_tick >= freq => {
-                    let objectives = self.warehouse_sync_objective_ids().into();
-                    self.ephemeral.logistics_stage = LogiStage::SyncFromWarehouses { objectives };
+                    let objectives = self.warehouse_sync_objective_ids();
+                    wh_diag(format_compact!(
+                        "tick start: sync-from {} objectives; ticks_since_delivery={}/{}",
+                        objectives.len(),
+                        self.persisted.logistics_ticks_since_delivery,
+                        ticks_per_delivery
+                    ));
+                    self.ephemeral.logistics_stage =
+                        LogiStage::SyncFromWarehouses { objectives: objectives.into() };
                 }
                 LogiStage::Complete { last_tick: _ } => (),
                 LogiStage::SyncFromWarehouses { objectives } => match objectives.pop() {
@@ -2519,6 +2650,7 @@ impl Db {
                             >= ticks_per_delivery
                         {
                             self.persisted.logistics_ticks_since_delivery = 0;
+                            wh_diag("phase: deliver_production (+ hub distribute)");
                             let v = match self.deliver_production() {
                                 Ok(v) => v,
                                 Err(e) => {
@@ -2530,6 +2662,10 @@ impl Db {
                             v
                         } else {
                             self.persisted.logistics_ticks_since_delivery += 1;
+                            wh_diag(format_compact!(
+                                "phase: hub distribute (ticks_since_delivery now {})",
+                                self.persisted.logistics_ticks_since_delivery
+                            ));
                             let v = if self.ephemeral.defer_initial_hub_distribute {
                                 info!(
                                     "new campaign: skipping hub-to-objective distribute (bftools warehouse fill)"
@@ -2547,6 +2683,10 @@ impl Db {
                             record_perf(&mut perf.logistics_distribute, sts);
                             v
                         };
+                        wh_diag(format_compact!(
+                            "planned {} transfers this tick",
+                            transfers.len()
+                        ));
                         self.ephemeral.logistics_stage = LogiStage::ExecuteTransfers { transfers };
                     }
                 },
@@ -2564,6 +2704,7 @@ impl Db {
                         }
                         self.ephemeral.logistics_stage = LogiStage::Complete { last_tick: ts };
                     } else {
+                        wh_diag("no transfers; balance hubs then sync-to DCS");
                         self.balance_logistics_hubs()?;
                         let objectives = self.warehouse_sync_objective_ids().into();
                         self.ephemeral.logistics_stage =
@@ -2573,6 +2714,7 @@ impl Db {
                 }
                 LogiStage::ExecuteTransfers { transfers } => {
                     let st = Utc::now();
+                    let before = transfers.len();
                     while let Some(tr) = transfers.pop() {
                         if let Err(e) = tr.execute(&mut self.persisted, &self.ephemeral.to_bg) {
                             error!("executing transfer {:?} {e:?}", tr)
@@ -2581,6 +2723,11 @@ impl Db {
                             break;
                         }
                     }
+                    wh_diag(format_compact!(
+                        "executed {} transfers ({} remaining this stage)",
+                        before.saturating_sub(transfers.len()),
+                        transfers.len()
+                    ));
                     record_perf(&mut perf.logistics_transfer, st);
                 }
                 LogiStage::SyncToWarehouses { objectives } => match objectives.pop() {
@@ -2826,16 +2973,32 @@ impl Db {
                         continue;
                     }
                     let hub_prod = effective_hub_production(cfg, &self.persisted, logi_ref);
+                    let hub_name = logi_ref.name.clone();
                     let logi = objective_mut!(self, oid)?;
+                    let mut added_eq = 0u32;
+                    let mut added_liq = 0u32;
                     for (name, inv) in logi.warehouse.equipment.iter_mut_cow() {
                         if let Some(eq) = production.equipment.get(name) {
-                            *inv += Self::scale_production_amount(eq.production, hub_prod);
+                            let add = Self::scale_production_amount(eq.production, hub_prod);
+                            if add > 0 {
+                                *inv += add;
+                                added_eq = added_eq.saturating_add(add);
+                            }
                         }
                     }
                     for (name, inv) in logi.warehouse.liquids.iter_mut_cow() {
                         if let Some(pr) = production.liquids.get(name) {
-                            *inv += Self::scale_production_amount(*pr, hub_prod);
+                            let add = Self::scale_production_amount(*pr, hub_prod);
+                            if add > 0 {
+                                *inv += add;
+                                added_liq = added_liq.saturating_add(add);
+                            }
                         }
+                    }
+                    if added_eq > 0 || added_liq > 0 {
+                        wh_diag(format_compact!(
+                            "production {hub_name}: hub_prod={hub_prod}% added equipment_units={added_eq} liquid_units={added_liq}"
+                        ));
                     }
                 }
             }
@@ -2868,6 +3031,7 @@ impl Db {
 
     pub fn deliver_supplies_from_logistics_hubs(&mut self) -> Result<Vec<Transfer>> {
         if !self.ephemeral.cfg.virtual_resupply {
+            wh_diag("hub distribute skipped (virtual_resupply=false)");
             return Ok(vec![]);
         }
         self.update_supply_status()
@@ -2877,6 +3041,10 @@ impl Db {
         for lid in &self.persisted.logistics_hubs {
             let logi = objective!(self, lid)?;
             if virtual_resupply_threatened_blocks(cfg, logi) {
+                wh_diag(format_compact!(
+                    "hub {} skipped (threatened blocks deliveries)",
+                    logi.name
+                ));
                 continue;
             }
             let hub_destinations = || {
@@ -2905,6 +3073,44 @@ impl Db {
                     allocated: 0,
                 })
                 .collect();
+            if needed_equipment.is_empty() && needed_liquid.is_empty() {
+                wh_diag(format_compact!(
+                    "hub {} supply/fuel: all destinations at 100% (no outbound demand)",
+                    logi.name
+                ));
+            } else {
+                let mut eq_names = CompactString::new("");
+                for (i, n) in needed_equipment.iter().enumerate() {
+                    if i > 0 {
+                        eq_names.push_str(", ");
+                    }
+                    if i >= 8 {
+                        eq_names.push_str("...");
+                        break;
+                    }
+                    eq_names.push_str(&format_compact!("{} supply={}%", n.obj.name, n.obj.supply));
+                }
+                let mut liq_names = CompactString::new("");
+                for (i, n) in needed_liquid.iter().enumerate() {
+                    if i > 0 {
+                        liq_names.push_str(", ");
+                    }
+                    if i >= 8 {
+                        liq_names.push_str("...");
+                        break;
+                    }
+                    liq_names.push_str(&format_compact!("{} fuel={}%", n.obj.name, n.obj.fuel));
+                }
+                wh_diag(format_compact!(
+                    "hub {} demand: eq_dests={} [{}] liq_dests={} [{}]",
+                    logi.name,
+                    needed_equipment.len(),
+                    eq_names,
+                    needed_liquid.len(),
+                    liq_names
+                ));
+            }
+            let transfers_before = transfers.len();
             macro_rules! schedule_transfers {
                 ($typ:expr, $from:ident, $get:ident, $needed:ident) => {
                     for (name, inv) in &logi.warehouse.$from {
@@ -2974,6 +3180,14 @@ impl Db {
                 needed_equipment
             );
             schedule_transfers!(TransferItem::Liquid, liquids, get_liquids, needed_liquid);
+            let hub_planned = transfers.len() - transfers_before;
+            if hub_planned > 0 {
+                wh_diag(format_compact!(
+                    "hub {} scheduled {} outbound transfers",
+                    logi.name,
+                    hub_planned
+                ));
+            }
         }
         for occ_id in self
             .persisted
@@ -3102,6 +3316,10 @@ impl Db {
                 needed_liquid
             );
         }
+        wh_diag(format_compact!(
+            "hub distribute total planned transfers={}",
+            transfers.len()
+        ));
         Ok(transfers)
     }
 
@@ -3191,6 +3409,12 @@ impl Db {
             }
             schedule_transfers!(TransferItem::Equipment, equipment, get_equipment);
             schedule_transfers!(TransferItem::Liquid, liquids, get_liquids);
+            if !transfers.is_empty() {
+                wh_diag(format_compact!(
+                    "balance hubs side={side:?}: executing {} transfers",
+                    transfers.len()
+                ));
+            }
             for tr in transfers.drain(..) {
                 tr.execute(&mut self.persisted, &self.ephemeral.to_bg)
                     .with_context(|| format_compact!("executing transfer {:?}", tr))?
@@ -3238,6 +3462,15 @@ impl Db {
                 min(100, (fuel_stored * 100 / fuel_capacity) as u32) as u8
             };
             if current_supply != obj.supply || current_fuel != obj.fuel {
+                wh_diag(format_compact!(
+                    "status {} ({:?}): supply {}->{}% fuel {}->{}% (eq_rows={n})",
+                    obj.name,
+                    obj.kind,
+                    current_supply,
+                    obj.supply,
+                    current_fuel,
+                    obj.fuel
+                ));
                 self.ephemeral.stat(Stat::ObjectiveSupply {
                     id: obj.id,
                     supply: obj.supply,

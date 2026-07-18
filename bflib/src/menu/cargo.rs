@@ -222,7 +222,7 @@ fn list_nearby_crates(lua: MizLua, gid: GroupId) -> Result<()> {
     let st = SlotStats::get(&ctx.db, lua, &slot).context("getting slot stats")?;
     let nearby = ctx
         .db
-        .list_nearby_crates(&st)
+        .list_nearby_crates(lua, &st)
         .context("listing nearby crates")?;
     if nearby.len() > 0 {
         let mut msg = CompactString::new("");

@@ -556,6 +556,10 @@ impl Ephemeral {
         }
     }
 
+    pub fn cancel_queued_spawn(&mut self, gid: GroupId) {
+        self.spawnq.retain(|g| *g != gid);
+    }
+
     pub fn spawnq_len(&self) -> usize {
         self.spawnq.len()
     }
@@ -1304,6 +1308,18 @@ impl Ephemeral {
                         unit.set_alt(su.position.p.y)?;
                         unit.set_heading(su.heading)?;
                         unit.set_name(su.name.clone())?;
+                        if let Err(e) = super::ai_air::apply_persisted_crate_ship_link(
+                            spctx.lua(),
+                            persisted,
+                            &self.global_pad_templates,
+                            group,
+                            &unit,
+                        ) {
+                            log::warn!(
+                                "crate ship link for {} skipped: {e:#}",
+                                su.name
+                            );
+                        }
                         i += 1;
                     }
                 }
