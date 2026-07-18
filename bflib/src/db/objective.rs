@@ -87,6 +87,24 @@ fn mobile_farp_anchor_ground2(lua: MizLua<'_>, pad_template: &str) -> Option<Vec
     None
 }
 
+/// Hull / pad speed (m/s); used to pause supply arrows while a carrier is underway.
+fn mobile_farp_speed_mps(lua: MizLua<'_>, pad_template: &str) -> Option<f64> {
+    if let Ok(g) = Group::get_by_name(lua, pad_template) {
+        if g.is_exist().unwrap_or(false) {
+            if let Ok(u) = g.get_unit(1) {
+                if let Ok(v) = u.get_velocity() {
+                    let s = v.0.x * v.0.x + v.0.y * v.0.y + v.0.z * v.0.z;
+                    return Some(s.sqrt());
+                }
+            }
+        }
+    }
+    None
+}
+
+const MOBILE_FARP_UNDERWAY_SPEED_MPS: f64 = 0.5;
+const MOBILE_FARP_UNDERWAY_POS_DELTA_M: f64 = 2.0;
+
 fn default_objective_production() -> u8 {
     100
 }
@@ -2186,17 +2204,35 @@ impl Db {
             let Some(new_pos) = new_pos else {
                 continue;
             };
+            let speed = mobile_farp_speed_mps(lua, pad.as_str()).unwrap_or(0.);
+            let was_underway = self.ephemeral.mobile_farp_underway.contains(&oid);
+            let old_pos = match &objective!(self, oid)?.zone {
+                Zone::Circle { pos, .. } => *pos,
+                Zone::Quad { .. } => continue,
+            };
+            let pos_delta = (new_pos - old_pos).norm();
+            let is_underway =
+                speed >= MOBILE_FARP_UNDERWAY_SPEED_MPS || pos_delta >= MOBILE_FARP_UNDERWAY_POS_DELTA_M;
+            if is_underway {
+                self.ephemeral.mobile_farp_underway.insert(oid);
+            } else {
+                self.ephemeral.mobile_farp_underway.remove(&oid);
+            }
             let obj = objective_mut!(self, oid)?;
-            if let Zone::Circle { pos, .. } = &mut obj.zone {
-                if pos != &new_pos {
-                    *pos = new_pos;
-                    let alt = Land::singleton(lua)
-                        .and_then(|land| land.get_height(LuaVec2(*pos)))
-                        .unwrap_or(0.)
-                        + 50.;
-                    obj.threat_pos3 = Vector3::new(new_pos.x, alt, new_pos.y);
-                    moved.push(oid);
-                }
+            let Zone::Circle { pos, .. } = &mut obj.zone else {
+                continue;
+            };
+            // Keep rings/labels on the ship; only resync supply arrows on start/stop.
+            if pos_delta > 1.0 {
+                *pos = new_pos;
+                let alt = Land::singleton(lua)
+                    .and_then(|land| land.get_height(LuaVec2(*pos)))
+                    .unwrap_or(0.)
+                    + 50.;
+                obj.threat_pos3 = Vector3::new(new_pos.x, alt, new_pos.y);
+            }
+            if was_underway != is_underway || (!is_underway && pos_delta > 1.0) {
+                moved.push(oid);
             }
         }
         let now = Utc::now();

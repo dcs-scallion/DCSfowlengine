@@ -1425,6 +1425,7 @@ fn refuel_drone_by_respawn<'lua>(
     }
     let mut dcs_names = Vec::new();
     let mut oids = SmallVec::<[dcso3::object::DcsOid<dcso3::group::ClassGroup>; 4]>::new();
+    let mut used_onboard_nums: FxHashSet<u8> = FxHashSet::default();
     for slot_i in 0..unit_pool.len() {
         let (su_name, cfg_unit_name) = &unit_pool[slot_i];
         let fuel_kg = fuel_per_unit[slot_i];
@@ -1453,7 +1454,7 @@ fn refuel_drone_by_respawn<'lua>(
         let unit = template.group.units()?.get(1)?;
         unit.raw_remove("unitId")?;
         unit.raw_set("skill", "Excellent")?;
-        unit.raw_set("onboard_num", random_onboard_num())?;
+        unit.raw_set("onboard_num", random_onboard_num(&mut used_onboard_nums))?;
         apply_me_template_fuel_kg(&unit, fuel_kg)?;
         apply_parking_to_template_unit(lua, db, &unit, slot, hub, slot_i)?;
         unit.set_name(String::from(su_name.as_str()))?;
@@ -2612,8 +2613,20 @@ fn patch_me_carrier_deck_route_lua<'lua>(
     Ok(())
 }
 
-fn random_onboard_num() -> String {
-    String::from(format_compact!("{:02}", thread_rng().gen_range(1..=99)))
+fn random_onboard_num(used: &mut FxHashSet<u8>) -> String {
+    let mut rng = thread_rng();
+    for _ in 0..128 {
+        let n = rng.gen_range(1..=99);
+        if used.insert(n) {
+            return String::from(format_compact!("{:02}", n));
+        }
+    }
+    for n in 1u8..=99 {
+        if used.insert(n) {
+            return String::from(format_compact!("{:02}", n));
+        }
+    }
+    String::from(format_compact!("{:02}", rng.gen_range(1..=99)))
 }
 
 fn prepare_me_spawn_group<'lua>(
@@ -7307,6 +7320,7 @@ pub(super) fn spawn_ai_air_group<'lua>(
     let mut dcs_names = Vec::new();
     let mut cycle_respawn_fuel: Vec<(String, u32, String)> = Vec::new();
     let mut oids = SmallVec::<[dcso3::object::DcsOid<dcso3::group::ClassGroup>; 4]>::new();
+    let mut used_onboard_nums: FxHashSet<u8> = FxHashSet::default();
     let flight_anchor = centroid2d(unit_pool.iter().map(|(su, _)| su.pos));
     for (slot_i, (su, cfg_unit_name)) in unit_pool.iter().enumerate() {
         let dcs_name = existing_dcs_names
@@ -7324,7 +7338,7 @@ pub(super) fn spawn_ai_air_group<'lua>(
         let airframe_type = unit.typ()?;
         unit.raw_remove("unitId")?;
         unit.raw_set("skill", "Excellent")?;
-        unit.raw_set("onboard_num", random_onboard_num())?;
+        unit.raw_set("onboard_num", random_onboard_num(&mut used_onboard_nums))?;
         match mode {
             AiAirPersistSpawn::PersistInAir => {
                 prepare_me_in_air_group(&mut template, &dcs_name, flight_anchor)?;

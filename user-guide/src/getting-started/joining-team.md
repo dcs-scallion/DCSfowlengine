@@ -1,22 +1,14 @@
 # Joining a Team
 
-Before you can fly or fight, you must register for either the Blue or Red coalition.
+Before you can fly or fight, you must join either the Blue or Red coalition.
 
-## Registration Commands
+## First-Time Join
 
-### First-Time Registration
+1. In the DCS multiplayer lobby, select **Blue** or **Red**.
+2. Occupy an aircraft (or other) slot for that coalition.
 
-To register for a team, type in chat:
+Fowl registers you automatically when you occupy the slot. The system confirms:
 
-```
-blue
-```
-or
-```
-red
-```
-
-The system will confirm your registration:
 > "Welcome to the Blue team. You may only occupy slots belonging to your team. Good luck!"
 
 ### Important Notes
@@ -24,7 +16,8 @@ The system will confirm your registration:
 - You can only occupy slots for your registered team
 - Registration is **permanent** by default
 - The server announces your team choice to all players
-- You must be in spectator mode to register
+
+Chat commands `blue` / `red` still work as a legacy fallback, but are not required.
 
 ## Side Switching
 
@@ -51,7 +44,7 @@ or
 
 Once registered:
 
-1. **Slot Selection**: You can now occupy any slot for your team
+1. **Slot Selection**: You can occupy any slot for your team
 2. **Team Chat**: Your messages are visible to your coalition
 3. **Points Balance**: You start with an initial points balance
 4. **Lives**: You receive a starting number of lives
@@ -85,4 +78,3 @@ The server doesn't allow side switching, or you've used all your switches.
 ## Next Steps
 
 See [Understanding the Menus](./hud-and-menus.md) for interface documentation.
-

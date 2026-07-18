@@ -526,7 +526,7 @@ fn bind_command(ctx: &mut Context, id: PlayerId, s: &str) {
     match ctx.connected.get(&id) {
         None => ctx.db.ephemeral.msgs().send(
             MsgTyp::Chat(Some(id)),
-            "You must register first. Type red or blue in chat",
+            "You must join a team first. Select Blue or Red in the DCS lobby, then occupy a slot.",
         ),
         Some(ifo) => {
             let rx = RX.get_or_init(|| {
@@ -768,8 +768,7 @@ fn help_command(ctx: &mut Context, id: PlayerId) {
         Some(ifo) => ctx.db.ephemeral.cfg.admins.contains_key(&ifo.ucid),
     };
     for cmd in [
-        " blue: join the blue team",
-        " red: join the red team",
+        " (join: select Blue/Red in the DCS lobby, then occupy a slot)",
         " -switch <color>: side switch to <color>",
         " -lives: display your current lives",
         " -time: how long until server restart",

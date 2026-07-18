@@ -986,7 +986,9 @@ impl Db {
 
     pub fn sideswitch_player(&mut self, ucid: &Ucid, side: Side) -> Result<(), &'static str> {
         match self.persisted.players.get_mut_cow(ucid) {
-            None => Err("You are not registered. Type blue or red to join a side"),
+            None => Err(
+                "You are not registered. Select Blue or Red in the DCS lobby, then occupy a slot.",
+            ),
             Some(player) => {
                 if side == player.side {
                     Err("you are already on the requested side")

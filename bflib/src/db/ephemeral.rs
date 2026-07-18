@@ -220,6 +220,8 @@ pub struct Ephemeral {
     pub(super) campaign_airframe_loss_ids: FxHashSet<DcsOid<ClassUnit>>,
     /// PRI_LINE redraw pending; re-queue PRI_OVERLAY before the next markup flush.
     overlay_underlay_dirty: bool,
+    /// Mobile FARP / carrier pads currently underway (no supply arrow / no virtual deliveries).
+    pub(super) mobile_farp_underway: FxHashSet<ObjectiveId>,
 }
 
 impl Default for Ephemeral {
@@ -298,6 +300,7 @@ impl Default for Ephemeral {
             campaign_online_since: FxHashMap::default(),
             campaign_airframe_loss_ids: FxHashSet::default(),
             overlay_underlay_dirty: false,
+            mobile_farp_underway: FxHashSet::default(),
         }
     }
 }
@@ -354,6 +357,7 @@ impl Ephemeral {
                 persisted,
                 &self.objective_display_aliases,
                 self.fowl_miz_export.as_ref(),
+                &self.mobile_farp_underway,
             ),
         );
         // Recreates PRI_LINE supply arrows; DCS stacks new mark ids above existing overlay.
@@ -434,6 +438,7 @@ impl Ephemeral {
                     obj,
                     moved,
                     self.fowl_miz_export.as_ref(),
+                    &self.mobile_farp_underway,
                 );
             }
             Entry::Vacant(e) => {
@@ -445,6 +450,7 @@ impl Ephemeral {
                     persisted,
                     &self.objective_display_aliases,
                     self.fowl_miz_export.as_ref(),
+                    &self.mobile_farp_underway,
                 ));
             }
         }
@@ -477,6 +483,7 @@ impl Ephemeral {
                         occ,
                         moved,
                         self.fowl_miz_export.as_ref(),
+                        &self.mobile_farp_underway,
                     ) {
                         self.request_objective_overlay_refresh();
                     }

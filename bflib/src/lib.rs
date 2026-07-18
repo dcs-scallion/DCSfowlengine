@@ -2438,7 +2438,10 @@ fn delayed_init_miz(lua: MizLua) -> Result<()> {
                 name, player.side
             )
         } else {
-            format_compact!("Welcome, {}! Type 'blue' or 'red' to join a team.", name)
+            format_compact!(
+                "Welcome, {}! Select Blue or Red in the DCS lobby, then occupy a slot. Type -help for commands.",
+                name
+            )
         };
         ctx.db.ephemeral.msgs().send(MsgTyp::Chat(Some(id)), welcome);
     }

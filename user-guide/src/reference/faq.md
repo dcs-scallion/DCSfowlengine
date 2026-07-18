@@ -5,13 +5,13 @@ Common questions and answers about Fowl Engine.
 ## Getting Started
 
 ### Q: How do I join the server?
-**A**: Connect to "The Coop - Operation Fowl Intent" server, register for a team (type `blue` or `red` in chat), then select an aircraft slot.
+**A**: Connect to the server, select Blue or Red in the DCS lobby, then occupy an aircraft slot. Fowl registers you automatically.
 
 ### Q: Can I change teams?
 **A**: Some servers allow limited side switching with `-switch blue` or `-switch red`. Check your remaining switches with `-lives`.
 
 ### Q: Why can't I occupy any slots?
-**A**: You must register for a team first by typing `blue` or `red` in chat while in spectator mode.
+**A**: Select Blue or Red in the DCS lobby first, then occupy a slot for that coalition. Your team must also own the objective linked to the slot.
 
 ## Gameplay
 

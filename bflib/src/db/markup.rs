@@ -20,13 +20,13 @@ use super::{
         effective_hub_production, nearest_normal_logistics_hub, opr_feed_hub,
         objective_warehouse_fuel_infobar_amounts, production_feed_line_active,
         visible_occupied_supply_anchor, visible_production_feed_hub,
-        virtual_resupply_delivery_efficiency_cached, virtual_resupply_link_active,
+        virtual_resupply_delivery_efficiency_cached, virtual_resupply_dest_receives,
         virtual_resupply_threatened_blocks, virtual_resupply_threatened_without_deliveries,
     },
     objective::{Objective, Zone},
     persisted::Persisted,
 };
-use fxhash::FxHashMap;
+use fxhash::{FxHashMap, FxHashSet};
 use crate::msgq::MsgQ;
 use bfprotocols::{
     cfg::Cfg,
@@ -55,6 +55,12 @@ const PRODUCTION_FEED_LINE_ALPHA: f32 = 0.5;
 /// Normal OLO → occupied OLO resupply link (virtual, 100% delivery).
 const OCCUPIED_HUB_SUPPLY_LINE_ALPHA: f32 = 0.5;
 const OCCUPIED_HUB_SUPPLY_SHAFT_HALF_WIDTH_M: f64 = PRODUCTION_FEED_SHAFT_HALF_WIDTH_M * 2.;
+/// Ignore sub-meter DCS/FARP position jitter when deciding to recreate underlay lines.
+const MARKUP_POS_EPS_M: f64 = 1.0;
+
+fn markup_pos_changed(a: Vector2, b: Vector2) -> bool {
+    (a - b).norm_squared() > MARKUP_POS_EPS_M * MARKUP_POS_EPS_M
+}
 
 #[derive(Debug, Clone, Copy)]
 struct SupplyConnectionMark {
@@ -354,8 +360,9 @@ fn sync_supply_connection_checked(
     to: SideFilter,
     hub: &Objective,
     dest: &Objective,
+    mobile_underway: &FxHashSet<ObjectiveId>,
 ) -> bool {
-    if !virtual_resupply_link_active(cfg, hub, dest) {
+    if !virtual_resupply_dest_receives(cfg, hub, dest, mobile_underway) {
         if mark.drawn {
             msgq.delete_underlay_mark(mark.shaft);
             msgq.delete_underlay_mark(mark.head);
@@ -454,8 +461,8 @@ fn sync_occupied_hub_supply_line(
     let occ_pos = obj.zone.pos();
     if let Some(id) = t.occupied_supply_line {
         if t.occupied_supply_anchor == Some(aid)
-            && t.occupied_supply_hub_pos == hub_pos
-            && t.occupied_supply_occ_pos == occ_pos
+            && !markup_pos_changed(t.occupied_supply_hub_pos, hub_pos)
+            && !markup_pos_changed(t.occupied_supply_occ_pos, occ_pos)
         {
             let color = text_color(obj.owner, OCCUPIED_HUB_SUPPLY_LINE_ALPHA);
             msgq.set_underlay_markup_color(id, color);
@@ -486,6 +493,7 @@ fn resync_logistics_supply_connections(
     msgq: &mut MsgQ,
     hub: &Objective,
     persisted: &Persisted,
+    mobile_underway: &FxHashSet<ObjectiveId>,
 ) -> bool {
     if !matches!(hub.kind, ObjectiveKind::Logistics) {
         return false;
@@ -513,7 +521,16 @@ fn resync_logistics_supply_connections(
             );
         }
         let mark = t.supply_connections.get_mut(oid).expect("just inserted");
-        recreated |= sync_supply_connection_checked(cfg, efficiency_cache, msgq, mark, to, hub, dst);
+        recreated |= sync_supply_connection_checked(
+            cfg,
+            efficiency_cache,
+            msgq,
+            mark,
+            to,
+            hub,
+            dst,
+            mobile_underway,
+        );
     }
     recreated
 }
@@ -659,7 +676,10 @@ fn sync_supply_connection(
     let mut shaft = geom.shaft;
     shaft.color = color;
     shaft.fill_color = color;
-    if mark.drawn && mark.hub_pos == hub_pos && mark.dest_pos == dest_pos {
+    if mark.drawn
+        && !markup_pos_changed(mark.hub_pos, hub_pos)
+        && !markup_pos_changed(mark.dest_pos, dest_pos)
+    {
         msgq.set_underlay_markup_color(mark.shaft, color);
         msgq.set_underlay_markup_fill_color(mark.shaft, color);
         msgq.set_underlay_markup_color(mark.head, color);
@@ -827,25 +847,6 @@ fn sync_overlay_cache_from_objective(
     t.points = obj.points;
 }
 
-fn refresh_objective_overlay_text(msgq: &mut MsgQ, t: &ObjectiveMarkup, obj: &Objective) {
-    let pos = obj.zone.pos();
-    let pos3 = Vector3::new(pos.x, 0., pos.y);
-    msgq.set_overlay_markup_pos_start(
-        t.label,
-        LuaVec3(Vector3::new(pos3.x + 1500., 1., pos3.z + 2500.)),
-    );
-    let stats_pos = LuaVec3(Vector3::new(pos3.x + 1500., 1., pos3.z + 2500.));
-    if let Some(id) = t.stats_label {
-        msgq.set_overlay_markup_pos_start(id, stats_pos);
-    }
-    if let Some(id) = t.stats_label_red {
-        msgq.set_overlay_markup_pos_start(id, stats_pos);
-    }
-    if let Some(id) = t.stats_label_blue {
-        msgq.set_overlay_markup_pos_start(id, stats_pos);
-    }
-}
-
 impl ObjectiveMarkup {
     pub(super) fn remove(self, msgq: &mut MsgQ) {
         let ObjectiveMarkup {
@@ -895,6 +896,7 @@ impl ObjectiveMarkup {
         obj: &Objective,
         moved: &[ObjectiveId],
         export: &FowlMizExport,
+        mobile_underway: &FxHashSet<ObjectiveId>,
     ) -> bool {
         let mut underlay_dirty = false;
         let old_production = self.production;
@@ -934,7 +936,7 @@ impl ObjectiveMarkup {
                 self.threatened_ring,
                 Color::yellow(if self.threatened { 0.75 } else { 0. }),
             );
-            underlay_dirty = true;
+            // Only mark underlay dirty when line geometry is recreated (not ring color alone).
             if matches!(obj.kind, ObjectiveKind::Logistics) {
                 underlay_dirty |= resync_logistics_supply_connections(
                     cfg,
@@ -943,6 +945,7 @@ impl ObjectiveMarkup {
                     msgq,
                     obj,
                     persisted,
+                    mobile_underway,
                 );
                 underlay_dirty |= sync_occupied_hub_supply_line(cfg, self, msgq, obj, persisted);
             }
@@ -1050,6 +1053,7 @@ impl ObjectiveMarkup {
                     msgq,
                     obj,
                     persisted,
+                    mobile_underway,
                 );
                 supply_resynced = true;
             }
@@ -1076,7 +1080,9 @@ impl ObjectiveMarkup {
         }
         if matches!(obj.kind, ObjectiveKind::Logistics) {
             let want_anchor = visible_occupied_supply_anchor(cfg, persisted, obj);
-            if want_anchor != self.occupied_supply_anchor || self.pos != obj.zone.pos() {
+            if want_anchor != self.occupied_supply_anchor
+                || markup_pos_changed(self.pos, obj.zone.pos())
+            {
                 underlay_dirty |= sync_occupied_hub_supply_line(cfg, self, msgq, obj, persisted);
             }
         }
@@ -1089,7 +1095,6 @@ impl ObjectiveMarkup {
                 refresh_objective_stats_labels(cfg, msgq, self, obj, persisted, export);
             }
         }
-        refresh_objective_overlay_text(msgq, self, obj);
         underlay_dirty
     }
 
@@ -1114,6 +1119,7 @@ impl ObjectiveMarkup {
         persisted: &Persisted,
         display_aliases: &FxHashMap<String, std::string::String>,
         export: &FowlMizExport,
+        mobile_underway: &FxHashSet<ObjectiveId>,
     ) -> Self {
         let color_func = |a| text_color(obj.owner, a);
         let all_spec = match obj.kind {
@@ -1252,6 +1258,7 @@ impl ObjectiveMarkup {
                     to,
                     obj,
                     dobj,
+                    mobile_underway,
                 );
                 t.supply_connections.insert(*oid, mark);
             }

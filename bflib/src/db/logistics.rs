@@ -1268,6 +1268,15 @@ pub(super) fn virtual_resupply_link_active(
         && !virtual_resupply_threatened_blocks(cfg, dest)
 }
 
+pub(super) fn virtual_resupply_dest_receives(
+    cfg: &bfprotocols::cfg::Cfg,
+    hub: &Objective,
+    dest: &Objective,
+    mobile_underway: &FxHashSet<ObjectiveId>,
+) -> bool {
+    virtual_resupply_link_active(cfg, hub, dest) && !mobile_underway.contains(&dest.id)
+}
+
 pub(super) fn opr_feed_hub(persisted: &Persisted, opr: &Objective) -> Option<ObjectiveId> {
     if !matches!(opr.kind, ObjectiveKind::Production) {
         return None;
@@ -3054,6 +3063,7 @@ impl Db {
                     .filter_map(|oid| Some((oid, self.persisted.objectives.get(oid)?)))
                     .filter(|(_, obj)| logi.owner == obj.owner)
                     .filter(|(_, obj)| !virtual_resupply_threatened_blocks(cfg, obj))
+                    .filter(|(oid, _)| !self.ephemeral.mobile_farp_underway.contains(oid))
             };
             let mut needed_equipment: SmallVec<[Needed; 64]> = hub_destinations()
                 .filter(|(_, obj)| obj.supply < 100)
