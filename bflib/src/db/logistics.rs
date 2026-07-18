@@ -1259,6 +1259,25 @@ pub(super) fn virtual_resupply_threatened_blocks(
     virtual_resupply_threatened_without_deliveries(cfg) && obj.threatened
 }
 
+/// Snapshot liquid `stored` before DCS sync-from (threatened: block infinite ME fuel refill).
+fn snapshot_liquid_stored(obj: &Objective) -> SmallVec<[(LiquidType, u32); 4]> {
+    obj.warehouse
+        .liquids
+        .into_iter()
+        .map(|(typ, inv)| (*typ, inv.stored))
+        .collect()
+}
+
+fn clamp_liquid_stored_no_increase(obj: &mut Objective, previous: &[(LiquidType, u32)]) {
+    for &(typ, prev_stored) in previous {
+        if let Some(inv) = obj.warehouse.liquids.get_mut_cow(&typ) {
+            if inv.stored > prev_stored {
+                inv.stored = prev_stored;
+            }
+        }
+    }
+}
+
 pub(super) fn virtual_resupply_link_active(
     cfg: &bfprotocols::cfg::Cfg,
     hub: &Objective,
@@ -3529,7 +3548,16 @@ impl Db {
             .get(&owner)
             .map(Arc::clone);
         let skip_dep_hydrate = self.dep_farp_skip_dcs_hydrate(oid);
+        let block_fuel_refill = {
+            let obj = objective!(self, oid)?;
+            virtual_resupply_threatened_blocks(&self.ephemeral.cfg, obj)
+        };
         let obj = objective_mut!(self, oid)?;
+        let prev_liquids = if block_fuel_refill {
+            snapshot_liquid_stored(obj)
+        } else {
+            smallvec![]
+        };
         canonicalize_virtual_equipment_keys(obj, resource_meta.as_ref());
         if objective_is_ground_dep_farp_export(export.as_ref(), obj) {
             let keep_virtual = skip_dep_hydrate || dep_farp_has_persisted_virtual_stock(obj);
@@ -3539,6 +3567,9 @@ impl Db {
                 self.ephemeral.dep_farp_authoritative_until.remove(&oid);
                 sync_warehouse_to_obj(obj, &warehouse, true)
                     .context("syncing ground DEP FARP warehouse from DCS (tracked rows only)")?;
+            }
+            if block_fuel_refill {
+                clamp_liquid_stored_no_increase(obj, &prev_liquids);
             }
             canonicalize_virtual_equipment_keys(obj, resource_meta.as_ref());
             record_objective_dcs_equipment_names(&mut self.ephemeral, oid, &warehouse)
@@ -3557,6 +3588,9 @@ impl Db {
             on_water,
         )
         .context("hydrating virtual warehouse from DCS inventory")?;
+        if block_fuel_refill {
+            clamp_liquid_stored_no_increase(obj, &prev_liquids);
+        }
         reconcile_objective_stock_aircraft_capacity_to_dcs(
             obj,
             export.as_ref(),
