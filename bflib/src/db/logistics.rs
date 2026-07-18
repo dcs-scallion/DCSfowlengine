@@ -3324,7 +3324,8 @@ impl Db {
     }
 
     fn balance_logistics_hubs(&mut self) -> Result<()> {
-        if !self.ephemeral.cfg.virtual_resupply {
+        // Virtual resupply: no domestic OLO↔OLO equalization (only hub→base / hub→captured).
+        if self.ephemeral.cfg.virtual_resupply {
             return Ok(());
         }
         struct Needed<'a> {
