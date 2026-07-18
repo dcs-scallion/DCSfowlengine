@@ -1319,8 +1319,8 @@ body{{margin:0;background:#000;color:#686a6e;font-family:"Roboto Condensed",Robo
 .tip-blue .tip-title{{background:rgba(46,90,172,.9)}}
 .tip-neutral{{border-color:#2e3138}}
 .tip-neutral .tip-title{{background:rgba(46,49,56,.9)}}
-.tip-red.tip-opr .tip-title{{background:#fff;color:#C43838}}
-.tip-blue.tip-opr .tip-title{{background:#fff;color:#2E5AAC}}
+.tip-red.tip-opr .tip-title{{background-color:#ffffff;color:#C43838;color-scheme:only light;forced-color-adjust:none}}
+.tip-blue.tip-opr .tip-title{{background-color:#ffffff;color:#2E5AAC;color-scheme:only light;forced-color-adjust:none}}
 </style></head><body>
 <div class="map-panel">{map_header}{map_body}</div>
 <script>
