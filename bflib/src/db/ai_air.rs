@@ -523,10 +523,10 @@ fn offsets_on_ship_deck(off: &super::group::ShipCrateOffsets, lim: (f64, f64, f6
     off.x >= lim.0 && off.x <= lim.1 && off.y >= lim.2 && off.y <= lim.3
 }
 
-/// Live crate altitude still near deck (off-deck link spawns often fall to ~-1200).
+/// Live crate altitude must stay near deck (seabed ~-98 and under-map ~-1200 both fail).
 pub(super) fn crate_altitude_on_deck(crate_y: f64, deck_alt: f64) -> bool {
-    const MAX_BELOW_DECK_M: f64 = 40.0;
-    crate_y >= deck_alt - MAX_BELOW_DECK_M && crate_y > -200.0
+    const BELOW_DECK_SLACK_M: f64 = 10.0;
+    crate_y >= deck_alt - BELOW_DECK_SLACK_M
 }
 
 pub(super) fn crate_spawned_on_deck(lua: MizLua, name: &str, deck_alt: f64) -> bool {
