@@ -42,6 +42,7 @@ use dcso3::{
     radians_to_degrees,
     static_object::StaticObject,
     trigger::Trigger,
+    unit::Unit,
 };
 use enumflags2::BitFlags;
 use fxhash::FxHashMap;
@@ -375,6 +376,16 @@ impl Db {
             Ok(Static::Static(st)) if st.is_exist().unwrap_or(false) => st
                 .as_object()
                 .and_then(|o| o.get_point())
+                .map(|p| Vector2::new(p.x, p.z))
+                .unwrap_or(fallback),
+            _ => fallback,
+        }
+    }
+
+    fn troop_unit_world_pos(lua: MizLua, name: &str, fallback: Vector2) -> Vector2 {
+        match Unit::get_by_name(lua, name) {
+            Ok(u) if u.is_exist().unwrap_or(false) => u
+                .get_point()
                 .map(|p| Vector2::new(p.x, p.z))
                 .unwrap_or(fallback),
             _ => fallback,
@@ -1646,22 +1657,61 @@ impl Db {
                 }
             }
         };
+        let dir = Vector2::new(pos.x.x, pos.x.z);
+        let group_heading = azumith3d(pos.x.0);
+        let (spawnpos, ship_hub, ship_offsets) =
+            match self.point_near_logistics(side, point) {
+                Ok((oid, _)) => match crate::db::ai_air::resolve_ship_crate_deck_spawn(
+                    lua,
+                    self,
+                    oid,
+                    point,
+                    dir,
+                    group_heading,
+                    pos.p.y,
+                )? {
+                    Some((deck_spawn, altitude, offsets)) => (
+                        SpawnLoc::AtPosOnShip {
+                            pos: deck_spawn,
+                            group_heading,
+                            altitude,
+                        },
+                        Some(oid),
+                        Some(offsets),
+                    ),
+                    None => (
+                        SpawnLoc::AtPos {
+                            pos: point,
+                            offset_direction: dir,
+                            group_heading,
+                        },
+                        None,
+                        None,
+                    ),
+                },
+                Err(_) => (
+                    SpawnLoc::AtPos {
+                        pos: point,
+                        offset_direction: dir,
+                        group_heading,
+                    },
+                    None,
+                    None,
+                ),
+            };
         let cargo = self.ephemeral.cargo.get_mut(slot).unwrap();
         let it = cargo.troops.pop().unwrap();
         Trigger::singleton(lua)?
             .action()?
             .set_unit_internal_cargo(unit_name, cargo.weight())?;
-        let spawnpos = SpawnLoc::AtPos {
-            pos: point,
-            offset_direction: Vector2::new(pos.x.x, pos.x.z),
-            group_heading: azumith3d(pos.x.0),
-        };
         let dk = DeployKind::Troop {
             player: it.player,
             moved_by: None,
             spec: it.troop.clone(),
             origin: it.origin,
             cost_fraction: it.cost_fraction,
+            ship_hub,
+            ship_offsets,
         };
         let spctx = SpawnCtx::new(lua)?;
         if let Some(gid) = to_delete {
@@ -1750,8 +1800,8 @@ impl Db {
                         spec,
                         player,
                         origin,
-                        moved_by: _,
                         cost_fraction,
+                        ..
                     } = &g.origin
                     {
                         if g.side == side {
@@ -1760,7 +1810,12 @@ impl Db {
                                 .into_iter()
                                 .filter_map(|uid| self.persisted.units.get(uid))
                                 .any(|u| {
-                                    na::distance_squared(&u.pos.into(), &point.into()) <= max_dist
+                                    let upos = Self::troop_unit_world_pos(
+                                        lua,
+                                        u.name.as_str(),
+                                        u.pos,
+                                    );
+                                    na::distance_squared(&upos.into(), &point.into()) <= max_dist
                                 });
                             if in_range {
                                 return Some((

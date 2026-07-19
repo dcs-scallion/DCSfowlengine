@@ -292,6 +292,12 @@ pub fn render_sidebar_html(view: &CampaignStatsView) -> String {
     out.push_str(&vs_row("Navy unit", bp.invested_navy as u32, rp.invested_navy as u32, false));
     out.push_str(divider());
     out.push_str(&vs_row("Total invested", total_inv_blue, total_inv_red, true));
+    out.push_str(divider());
+    let bal_blue = total_gain_blue as i64 - total_inv_blue as i64;
+    let bal_red = total_gain_red as i64 - total_inv_red as i64;
+    out.push_str(&format!(
+        r#"<div class=" stat-row is-total"><span class="lbl">Total balance</span><span class="stat-blue">{bal_blue}</span><span class="stat-sep">:</span><span class="stat-red">{bal_red}</span></div>"#
+    ));
     out.push_str(r#"</div></div></div>"#);
 
     out
@@ -626,7 +632,9 @@ impl Db {
             } else {
                 self.campaign_on_active_gain(side, amount as i64);
             }
-        } else if why.contains("airborne deslot penalty") {
+        } else if why.contains("airborne deslot penalty")
+            || why.contains("for the loss of action group")
+        {
             self.campaign_on_active_gain(side, amount as i64);
         }
     }
@@ -789,6 +797,22 @@ impl Db {
         }
     }
 
+    fn is_building_logi_facility(vehicle: &Vehicle) -> bool {
+        let n = vehicle.0.as_str();
+        let lower = n.to_ascii_lowercase();
+        n.contains("Invincible")
+            || lower.contains("farp")
+            || lower.contains("depot")
+            || lower.contains("bunker")
+            || lower.contains("warehouse")
+            || lower.contains("ammo")
+            || lower.contains("fuel")
+            || lower.contains("container")
+            || lower.contains("tent")
+            || lower.contains(".command")
+            || lower.contains("ammunition")
+    }
+
     fn classify_tags_loss(&self, vehicle: &Vehicle) -> Option<LossBucketField> {
         let tags = self.ephemeral.cfg.unit_classification.get(vehicle)?;
         if tags.contains(UnitTag::ShipCarrier) {
@@ -829,6 +853,12 @@ impl Db {
             | tags.contains(UnitTag::Launcher)
         {
             return Some(LossBucketField::Armored);
+        }
+        if tags.contains(UnitTag::Logistics) && tags.contains(UnitTag::Unarmed) {
+            if Self::is_building_logi_facility(vehicle) {
+                return Some(LossBucketField::BuildingLogi);
+            }
+            return Some(LossBucketField::Utility);
         }
         if tags.contains(UnitTag::Logistics) {
             return Some(LossBucketField::BuildingLogi);

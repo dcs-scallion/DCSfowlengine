@@ -396,10 +396,7 @@ impl Db {
                             } => Some(player.clone()),
                             DeployKind::Troop {
                                 player,
-                                spec: _,
-                                moved_by: _,
-                                origin: _,
-                                cost_fraction: _,
+                                ..
                             } => Some(*player),
                             DeployKind::Action { player, .. } => player.clone(),
                             DeployKind::Crate { .. }
@@ -665,6 +662,10 @@ impl Db {
             self.ephemeral.dirty();
             true
         } else {
+            debug!(
+                "land() not armed slot={slot:?} side={:?} pos=({:.0},{:.0}) — outside friendly objective zone",
+                player.side, position.x, position.y
+            );
             false
         }
     }

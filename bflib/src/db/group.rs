@@ -116,6 +116,12 @@ pub enum DeployKind {
         spec: Troop,
         #[serde(default = "default_cost_fraction")]
         cost_fraction: f32,
+        /// Naval hub for deck link (carrier unload).
+        #[serde(default)]
+        ship_hub: Option<ObjectiveId>,
+        /// Ship-relative offsets for carrier-deck troops.
+        #[serde(default)]
+        ship_offsets: Option<ShipCrateOffsets>,
     },
     Crate {
         origin: ObjectiveId,
@@ -445,7 +451,7 @@ impl Db {
                     msg,
                 ))
             }
-            DeployKind::Troop { player, spec, moved_by, origin: _, cost_fraction: _ } => {
+            DeployKind::Troop { player, spec, moved_by, .. } => {
                 let name = self
                     .persisted
                     .players
@@ -887,8 +893,8 @@ impl Db {
             spawned.tags.0.insert(tags.0);
         }
         match &location {
+            SpawnLoc::AtPosOnShip { .. } => (),
             SpawnLoc::AtPos { .. }
-            | SpawnLoc::AtPosOnShip { .. }
             | SpawnLoc::AtPosWithCenter { .. }
             | SpawnLoc::AtPosWithComponents { .. }
             | SpawnLoc::AtTrigger { .. } => {
@@ -898,6 +904,14 @@ impl Db {
                     () // it's ok to spawn crates on ships
                 } else if ai_air::ai_air_spawn_on_carrier_deck(&spawned.origin) {
                     () // ME TakeOffParking + linkUnit on carrier deck
+                } else if matches!(
+                    &spawned.origin,
+                    DeployKind::Troop {
+                        ship_offsets: Some(_),
+                        ..
+                    }
+                ) {
+                    () // DEP troops on carrier deck
                 } else if spawned.tags.contains(UnitTag::Boat) {
                     check_land_boat_hulls_at_deploy(
                         &land,

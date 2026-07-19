@@ -2982,6 +2982,8 @@ impl Db {
             spec: troop_cfg.clone(),
             origin: Some(origin),
             cost_fraction: 1.,
+            ship_hub: None,
+            ship_offsets: None,
         };
         let spctx = SpawnCtx::new(lua)?;
         let (n, oldest) = self.number_troops_deployed(side, troop_cfg.name.as_str())?;

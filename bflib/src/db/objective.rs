@@ -55,7 +55,7 @@ use dcso3::{
 };
 use enumflags2::BitFlags;
 use fxhash::{FxHashMap, FxHashSet};
-use log::{debug, error, warn};
+use log::{debug, error, info, warn};
 use mlua::{Value, prelude::*};
 use serde_derive::{Deserialize, Serialize};
 use smallvec::{SmallVec, smallvec};
@@ -65,8 +65,8 @@ fn naval_carrier_pad(db: &Db, pad: &str) -> bool {
     db.ephemeral.global_pad_templates.contains(pad)
 }
 
-/// Ground XZ for mobile FARP markup / zone (persisted unit.pos can lag ME template after spawn).
-fn mobile_farp_anchor_ground2(lua: MizLua<'_>, pad_template: &str) -> Option<Vector2> {
+/// Ground XZ for FARP markup / zone (persisted unit.pos can lag ME template after spawn).
+pub(super) fn mobile_farp_anchor_ground2(lua: MizLua<'_>, pad_template: &str) -> Option<Vector2> {
     let name = String::from(pad_template);
     if let Ok(ab) = Airbase::get_by_name(lua, name.clone()) {
         if ab.is_exist().unwrap_or(false) {
@@ -104,6 +104,7 @@ fn mobile_farp_speed_mps(lua: MizLua<'_>, pad_template: &str) -> Option<f64> {
 
 const MOBILE_FARP_UNDERWAY_SPEED_MPS: f64 = 0.5;
 const MOBILE_FARP_UNDERWAY_POS_DELTA_M: f64 = 2.0;
+const GROUND_FARP_ZONE_SYNC_EPS_M: f64 = 25.0;
 
 fn default_objective_production() -> u8 {
     100
@@ -622,7 +623,44 @@ impl Objective {
     }
 }
 
+fn apply_farp_zone_pos(obj: &mut Objective, lua: MizLua, new_pos: Vector2) {
+    if let Zone::Circle { pos, .. } = &mut obj.zone {
+        *pos = new_pos;
+    }
+    let alt = Land::singleton(lua)
+        .and_then(|land| land.get_height(LuaVec2(new_pos)))
+        .unwrap_or(0.)
+        + 50.;
+    obj.threat_pos3 = Vector3::new(new_pos.x, alt, new_pos.y);
+}
+
 impl Db {
+    pub(super) fn sync_ground_dep_farp_zone_from_pad(
+        &mut self,
+        lua: MizLua,
+        oid: ObjectiveId,
+    ) -> Result<bool> {
+        let pad = match &objective!(self, oid)?.kind {
+            ObjectiveKind::Farp {
+                mobile: false,
+                pad_template,
+                ..
+            } => pad_template.clone(),
+            _ => return Ok(false),
+        };
+        let Some(live) = mobile_farp_anchor_ground2(lua, pad.as_str()) else {
+            return Ok(false);
+        };
+        let old = objective!(self, oid)?.zone.pos();
+        if (live - old).norm() < GROUND_FARP_ZONE_SYNC_EPS_M {
+            return Ok(false);
+        }
+        let obj = objective_mut!(self, oid)?;
+        apply_farp_zone_pos(obj, lua, live);
+        self.ephemeral.dirty();
+        Ok(true)
+    }
+
     pub fn objective(&self, id: &ObjectiveId) -> Result<&Objective> {
         objective!(self, id)
     }
@@ -1253,6 +1291,12 @@ impl Db {
             self.ephemeral.dep_farp_pad_helipad_ids.insert(name, id);
         }
         let _ = pad_move.spawned;
+        // Align objective zone to live pad (supplier / supply lines use zone.pos).
+        if let Some(live) = mobile_farp_anchor_ground2(lua, pad_template.as_str()) {
+            if let Some(obj) = self.persisted.objectives.get_mut_cow(&oid) {
+                apply_farp_zone_pos(obj, lua, live);
+            }
+        }
         let airbase = Airbase::get_by_name(spctx.lua(), pad_template.clone())
             .with_context(|| format_compact!("getting airbase {pad_template}"))?;
         airbase.set_coalition(side)?;
@@ -1279,7 +1323,7 @@ impl Db {
                     idx,
                     side,
                     oid,
-                    pos,
+                    objective!(self, oid)?.zone.pos(),
                     pad_template.as_str(),
                 )
                 .context("linking DEP FARP static client slots to helipads")?;
@@ -1295,6 +1339,7 @@ impl Db {
                 }
             }
         }
+        self.mark_farp_threatened_by_nearby_enemy_ground(oid)?;
         self.setup_supply_lines().context("setup supply lines")?;
         if !self.ephemeral.defer_initial_hub_distribute {
             let mut trs = self
@@ -1324,6 +1369,54 @@ impl Db {
             .context("markup after DEP FARP deploy")?;
         self.ephemeral.dirty();
         Ok(oid)
+    }
+
+    /// Spawn/restore: enemy ground within `ground_vehicle_cull_distance` → threatened.
+    pub(super) fn mark_farp_threatened_by_nearby_enemy_ground(
+        &mut self,
+        oid: ObjectiveId,
+    ) -> Result<()> {
+        let ground_cull = (self.ephemeral.cfg.ground_vehicle_cull_distance as f64).powi(2);
+        let (owner, center) = {
+            let obj = objective!(self, oid)?;
+            (obj.owner, obj.zone.pos())
+        };
+        let mut threatened = false;
+        let mut near: SmallVec<[UnitId; 32]> = smallvec![];
+        for (uid, unit) in &self.persisted.units {
+            if unit.dead || unit.side == owner {
+                continue;
+            }
+            let air = unit.tags.0.contains(UnitTag::Aircraft)
+                || unit.tags.0.contains(UnitTag::Helicopter);
+            if air {
+                continue;
+            }
+            let dist = na::distance_squared(&center.into(), &unit.pos.into());
+            if dist <= ground_cull {
+                near.push(*uid);
+                threatened = true;
+            }
+        }
+        for uid in near {
+            self.ephemeral
+                .units_potentially_close_to_enemies
+                .insert(uid);
+        }
+        if threatened {
+            let now = Utc::now();
+            let obj = objective_mut!(self, oid)?;
+            if !obj.threatened {
+                info!(
+                    "DEP FARP {} threatened on spawn/scan (enemy ground within cull)",
+                    obj.name
+                );
+            }
+            obj.threatened = true;
+            obj.last_threatened_ts = now;
+            self.ephemeral.dirty();
+        }
+        Ok(())
     }
 
     pub(super) fn update_objective_status(
@@ -2038,8 +2131,7 @@ impl Db {
                             spec,
                             player,
                             origin,
-                            moved_by: _,
-                            cost_fraction: _,
+                            ..
                         } if spec.can_capture => {
                             let in_range = group
                                 .units
@@ -2120,7 +2212,7 @@ impl Db {
                     .context("repairing captured airbase logi")?;
                 self.repair_services(*side, now, oid)
                     .context("repairing captured airbase services")?;
-                self.capture_warehouse(lua, oid)
+                self.capture_warehouse(lua, oid, previous_owner)
                     .context("capturing warehouse")?;
                 self.setup_supply_lines().context("setup supply lines")?;
                 self.deliver_supplies_from_logistics_hubs()
@@ -2182,20 +2274,21 @@ impl Db {
     }
 
     pub fn update_objectives_markup(&mut self, lua: MizLua) -> Result<()> {
-        let mut pos_update: SmallVec<[(ObjectiveId, String); 8]> = smallvec![];
+        let mut pos_update: SmallVec<[(ObjectiveId, String, bool); 8]> = smallvec![];
         for (id, obj) in &self.persisted.objectives {
             if let ObjectiveKind::Farp {
-                mobile: true,
+                mobile,
                 pad_template,
                 ..
             } = &obj.kind
                 && let Zone::Circle { .. } = &obj.zone
             {
-                pos_update.push((*id, pad_template.clone()))
+                pos_update.push((*id, pad_template.clone(), *mobile))
             }
         }
         let mut moved: SmallVec<[ObjectiveId; 8]> = smallvec![];
-        for (oid, pad) in pos_update {
+        let mut ground_zone_resync = false;
+        for (oid, pad, mobile) in pos_update {
             let new_pos = mobile_farp_anchor_ground2(lua, pad.as_str()).or_else(|| {
                 let uid = self.persisted.units_by_name.get(&pad)?;
                 let unit = self.persisted.units.get(uid)?;
@@ -2204,36 +2297,38 @@ impl Db {
             let Some(new_pos) = new_pos else {
                 continue;
             };
-            let speed = mobile_farp_speed_mps(lua, pad.as_str()).unwrap_or(0.);
-            let was_underway = self.ephemeral.mobile_farp_underway.contains(&oid);
             let old_pos = match &objective!(self, oid)?.zone {
                 Zone::Circle { pos, .. } => *pos,
                 Zone::Quad { .. } => continue,
             };
             let pos_delta = (new_pos - old_pos).norm();
-            let is_underway =
-                speed >= MOBILE_FARP_UNDERWAY_SPEED_MPS || pos_delta >= MOBILE_FARP_UNDERWAY_POS_DELTA_M;
-            if is_underway {
-                self.ephemeral.mobile_farp_underway.insert(oid);
-            } else {
-                self.ephemeral.mobile_farp_underway.remove(&oid);
-            }
-            let obj = objective_mut!(self, oid)?;
-            let Zone::Circle { pos, .. } = &mut obj.zone else {
-                continue;
-            };
-            // Keep rings/labels on the ship; only resync supply arrows on start/stop.
-            if pos_delta > 1.0 {
-                *pos = new_pos;
-                let alt = Land::singleton(lua)
-                    .and_then(|land| land.get_height(LuaVec2(*pos)))
-                    .unwrap_or(0.)
-                    + 50.;
-                obj.threat_pos3 = Vector3::new(new_pos.x, alt, new_pos.y);
-            }
-            if was_underway != is_underway || (!is_underway && pos_delta > 1.0) {
+            if mobile {
+                let speed = mobile_farp_speed_mps(lua, pad.as_str()).unwrap_or(0.);
+                let was_underway = self.ephemeral.mobile_farp_underway.contains(&oid);
+                let is_underway = speed >= MOBILE_FARP_UNDERWAY_SPEED_MPS
+                    || pos_delta >= MOBILE_FARP_UNDERWAY_POS_DELTA_M;
+                if is_underway {
+                    self.ephemeral.mobile_farp_underway.insert(oid);
+                } else {
+                    self.ephemeral.mobile_farp_underway.remove(&oid);
+                }
+                let obj = objective_mut!(self, oid)?;
+                if pos_delta > 1.0 {
+                    apply_farp_zone_pos(obj, lua, new_pos);
+                }
+                if was_underway != is_underway || (!is_underway && pos_delta > 1.0) {
+                    moved.push(oid);
+                }
+            } else if pos_delta >= GROUND_FARP_ZONE_SYNC_EPS_M {
+                let obj = objective_mut!(self, oid)?;
+                apply_farp_zone_pos(obj, lua, new_pos);
                 moved.push(oid);
+                ground_zone_resync = true;
             }
+        }
+        if ground_zone_resync {
+            self.setup_supply_lines()
+                .context("resync supply lines after ground DEP FARP zone sync")?;
         }
         let now = Utc::now();
         let oids: Vec<ObjectiveId> = self

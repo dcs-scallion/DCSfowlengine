@@ -583,7 +583,7 @@ pub(super) fn resolve_ship_crate_deck_spawn(
             return Ok(Some((spawn_pos, altitude, offsets)));
         }
     }
-    bail!("cannot spawn crate off the deck; move farther onto the flight deck")
+    bail!("cannot spawn off the deck; move farther onto the flight deck")
 }
 
     pub(super) fn apply_static_ship_link<'lua>(
@@ -602,7 +602,7 @@ pub(super) fn resolve_ship_crate_deck_spawn(
     Ok(())
 }
 
-/// Apply persisted crate→ship link at DCS spawn (resolves current ship `unitId`).
+/// Apply persisted crate/troop→ship link at DCS spawn (resolves current ship `unitId`).
 pub(super) fn apply_persisted_crate_ship_link<'lua>(
     lua: MizLua<'lua>,
     persisted: &super::persisted::Persisted,
@@ -610,16 +610,24 @@ pub(super) fn apply_persisted_crate_ship_link<'lua>(
     group: &super::group::SpawnedGroup,
     unit: &miz::Unit<'lua>,
 ) -> Result<()> {
-    let DeployKind::Crate {
-        ship_hub,
-        origin,
-        ship_offsets: Some(off),
-        ..
-    } = &group.origin
-    else {
+    let (ship_hub, origin, off) = match &group.origin {
+        DeployKind::Crate {
+            ship_hub,
+            origin,
+            ship_offsets: Some(off),
+            ..
+        } => (*ship_hub, Some(*origin), off),
+        DeployKind::Troop {
+            ship_hub,
+            origin,
+            ship_offsets: Some(off),
+            ..
+        } => (*ship_hub, *origin, off),
+        _ => return Ok(()),
+    };
+    let Some(hub) = ship_hub.or(origin) else {
         return Ok(());
     };
-    let hub = ship_hub.unwrap_or(*origin);
     let Some(obj) = persisted.objectives.get(&hub) else {
         return Ok(());
     };

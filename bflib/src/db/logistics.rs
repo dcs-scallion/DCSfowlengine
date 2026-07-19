@@ -869,22 +869,116 @@ fn dep_farp_has_persisted_virtual_stock(obj: &Objective) -> bool {
     false
 }
 
-fn objective_coalition_stock_for_objective<'a>(
+fn objective_coalition_stock_for_objective_side<'a>(
     export: &'a FowlMizExport,
     obj: &Objective,
+    side: Side,
 ) -> Option<&'a ObjectiveCoalitionStock> {
-    if let Some(stock) =
-        objective_coalition_stock_for_side(export, obj.name.as_str(), obj.owner)
-    {
+    if objective_is_ground_dep_farp(obj) {
+        let ObjectiveKind::Farp { pad_template, .. } = &obj.kind else {
+            return None;
+        };
+        return objective_coalition_stock_for_side(export, pad_template.as_str(), side).or_else(
+            || objective_coalition_stock_for_side(export, obj.name.as_str(), side),
+        );
+    }
+    if let Some(stock) = objective_coalition_stock_for_side(export, obj.name.as_str(), side) {
         return Some(stock);
     }
     let keys = farp_export_lookup_keys(obj)?;
     for key in keys {
-        if let Some(stock) = objective_coalition_stock_for_side(export, key.as_str(), obj.owner) {
+        if let Some(stock) = objective_coalition_stock_for_side(export, key.as_str(), side) {
             return Some(stock);
         }
     }
     None
+}
+
+fn objective_coalition_stock_for_objective<'a>(
+    export: &'a FowlMizExport,
+    obj: &Objective,
+) -> Option<&'a ObjectiveCoalitionStock> {
+    objective_coalition_stock_for_objective_side(export, obj, obj.owner)
+}
+
+/// New clean campaign only: list objectives missing Blue and/or Red `objective_stock` rows.
+fn missing_objective_stock_profile_labels(
+    export: &FowlMizExport,
+    objectives: &super::MapM<ObjectiveId, Objective>,
+) -> Vec<CompactString> {
+    let mut missing: Vec<CompactString> = Vec::new();
+    for (_, obj) in objectives {
+        if matches!(obj.kind, ObjectiveKind::Production) {
+            continue;
+        }
+        let mut sides: SmallVec<[&'static str; 2]> = smallvec![];
+        if objective_coalition_stock_for_objective_side(export, obj, Side::Blue).is_none() {
+            sides.push("Blue");
+        }
+        if objective_coalition_stock_for_objective_side(export, obj, Side::Red).is_none() {
+            sides.push("Red");
+        }
+        if !sides.is_empty() {
+            missing.push(format_compact!("{} ({})", obj.name, sides.join(", ")));
+        }
+    }
+    missing.sort();
+    missing
+}
+
+/// Capture spoils: equipment/liquids present in both coalition export profiles (baseline > 0).
+fn capture_spoils_intersection(
+    export: &FowlMizExport,
+    obj: &Objective,
+    previous_owner: Side,
+    new_owner: Side,
+    resource_meta: &FxHashMap<String, WarehouseResourceMeta>,
+    warehouse_eq: &FxHashMap<String, u32>,
+    warehouse_liq: &FxHashMap<LiquidType, u32>,
+) -> (FxHashMap<String, u32>, FxHashMap<LiquidType, u32>) {
+    let mut spoils_eq: FxHashMap<String, u32> = FxHashMap::default();
+    let mut spoils_liq: FxHashMap<LiquidType, u32> = FxHashMap::default();
+    let (Some(old_prof), Some(new_prof)) = (
+        objective_coalition_stock_for_objective_side(export, obj, previous_owner),
+        objective_coalition_stock_for_objective_side(export, obj, new_owner),
+    ) else {
+        return (spoils_eq, spoils_liq);
+    };
+    let old_eq: FxHashSet<String> = old_prof
+        .equipment
+        .iter()
+        .filter(|(_, item)| item.baseline > 0)
+        .map(|(k, _)| resolve_export_equipment_dcs_name(k.as_str(), resource_meta))
+        .collect();
+    let new_eq: FxHashSet<String> = new_prof
+        .equipment
+        .iter()
+        .filter(|(_, item)| item.baseline > 0)
+        .map(|(k, _)| resolve_export_equipment_dcs_name(k.as_str(), resource_meta))
+        .collect();
+    for (name, &stored) in warehouse_eq {
+        if stored > 0 && old_eq.contains(name) && new_eq.contains(name) {
+            spoils_eq.insert(name.clone(), stored);
+        }
+    }
+    let old_liq: FxHashSet<LiquidType> = old_prof
+        .liquids
+        .iter()
+        .filter(|(_, item)| item.baseline > 0)
+        .filter_map(|(k, _)| liquid_type_from_export_key(k.as_str()).ok())
+        .collect();
+    let new_liq: FxHashSet<LiquidType> = new_prof
+        .liquids
+        .iter()
+        .filter(|(_, item)| item.baseline > 0)
+        .filter_map(|(k, _)| liquid_type_from_export_key(k.as_str()).ok())
+        .collect();
+    for (typ, &stored) in warehouse_liq {
+        if stored > 0 && old_liq.contains(typ) && new_liq.contains(typ) {
+            spoils_liq.insert(*typ, stored);
+        }
+    }
+    (spoils_eq, spoils_liq)
 }
 
 fn objective_defaults_for_objective<'a>(
@@ -1103,6 +1197,34 @@ fn record_objective_dcs_equipment_names(
     Ok(())
 }
 
+/// Non-OLO: drop airframe demand for types not in the objective export template (baseline 0 / missing).
+fn clamp_non_olo_airframe_rows_to_export(
+    obj: &mut Objective,
+    export: &FowlMizExport,
+    resource_meta: &FxHashMap<String, WarehouseResourceMeta>,
+) {
+    if matches!(obj.kind, ObjectiveKind::Logistics | ObjectiveKind::Production) {
+        return;
+    }
+    let profile = objective_coalition_stock_for_objective(export, obj);
+    for (name, inv) in obj.warehouse.equipment.iter_mut_cow() {
+        let Some(meta) = resource_meta.get(name) else {
+            continue;
+        };
+        if !meta.is_aircraft {
+            continue;
+        }
+        let baseline = profile
+            .and_then(|p| profile_export_equipment_item(p, name.as_str(), resource_meta))
+            .map(|item| item.baseline)
+            .unwrap_or(0);
+        if baseline == 0 {
+            inv.capacity = 0;
+            inv.stored = 0;
+        }
+    }
+}
+
 /// SETTINGS-Ai supplement airframes (`production == 0`): align virtual capacity to DCS stock.
 /// Legacy exports doubled baseline via `merge_ai_template_stock_export`; skip when already matched.
 fn reconcile_objective_stock_aircraft_capacity_to_dcs(
@@ -1164,10 +1286,11 @@ fn discover_equipment_allowed_by_export_profile(
     dcs_name: &str,
     resource_meta: &FxHashMap<String, WarehouseResourceMeta>,
 ) -> bool {
-    if objective_is_ground_dep_farp(obj) {
+    // When bftools wrote a non-empty profile, never invent SKUs outside it (OAB/OFO/DEP/OLO).
+    if profile.equipment.values().any(|i| i.baseline > 0) {
         return profile_export_equipment_has(profile, dcs_name, resource_meta);
     }
-    // Carriers / airbases: do not filter DCS rows by export wsType keys (hydrate from ME warehouse).
+    let _ = obj;
     true
 }
 
@@ -2100,6 +2223,7 @@ impl Db {
     }
 
     /// Fowl 2.0: virtual rows from export baselines; DCS amounts applied in [`Self::setup_warehouses_after_load`].
+    /// Called only on a new clean campaign (`Db::init`).
     pub(super) fn seed_objective_warehouses_from_export(&mut self, lua: MizLua) -> Result<()> {
         self.init_resource_map(lua)
             .context("initializing resource map")?;
@@ -2112,6 +2236,18 @@ impl Db {
                 "Fowl: mission export has no objective_stock (rebuild with FowlTools schema v5)"
             );
         }
+        let missing = missing_objective_stock_profile_labels(export, &self.persisted.objectives);
+        if !missing.is_empty() {
+            let list = missing.join("\n");
+            error!(
+                "Fowl: missing objective_stock profiles for {} objective(s):\n{list}",
+                missing.len()
+            );
+            bail!(
+                "Fowl: missing warehouse profiles in _fowl_export.json for:\n{list}\n\
+                 Rebuild the mission with bftools so every objective has Blue and Red stock."
+            );
+        }
         let resource_meta =
             build_resource_meta_map(lua).context("resource map for objective stock seed")?;
         for (_oid, obj) in self.persisted.objectives.iter_mut_cow() {
@@ -2121,11 +2257,7 @@ impl Db {
             }
             if objective_is_ground_dep_farp(obj) {
                 let Some(profile) = dep_farp_export_profile(export, obj) else {
-                    warn!(
-                        "ground DEP FARP {:?}: no export pad profile for {:?}",
-                        obj.name,
-                        obj.owner
-                    );
+                    // Validated Blue+Red above; Neutral owner has no side profile to seed yet.
                     continue;
                 };
                 for (name, item) in &profile.equipment {
@@ -2172,10 +2304,7 @@ impl Db {
             let Some(profile) =
                 objective_coalition_stock_for_side(export, obj.name.as_str(), obj.owner)
             else {
-                warn!(
-                    "objective {:?}: no objective_stock profile for owner {:?}",
-                    obj.name, obj.owner
-                );
+                // Neutral owner: Blue/Red rows exist (validated); seed waits until capture.
                 continue;
             };
             for (name, item) in &profile.equipment {
@@ -2699,6 +2828,23 @@ impl Db {
                 );
             }
         }
+        let mut farp_zone_resync = false;
+        let farp_oids: Vec<ObjectiveId> =
+            self.persisted.farps.into_iter().copied().collect();
+        for oid in farp_oids {
+            match self.sync_ground_dep_farp_zone_from_pad(lua, oid) {
+                Ok(true) => farp_zone_resync = true,
+                Ok(false) => (),
+                Err(e) => warn!("ground DEP FARP zone sync {:?}: {e:?}", oid),
+            }
+            if let Err(e) = self.mark_farp_threatened_by_nearby_enemy_ground(oid) {
+                warn!("ground DEP FARP threat scan {:?}: {e:?}", oid);
+            }
+        }
+        if farp_zone_resync {
+            self.setup_supply_lines()
+                .context("supply lines after ground DEP FARP zone sync on load")?;
+        }
         self.update_supply_status()
             .context("updating supply status")?;
         self.setup_supply_lines()
@@ -2886,133 +3032,104 @@ impl Db {
         Ok(())
     }
 
-    pub(super) fn capture_warehouse(&mut self, lua: MizLua, oid: ObjectiveId) -> Result<()> {
+    pub(super) fn capture_warehouse(
+        &mut self,
+        lua: MizLua,
+        oid: ObjectiveId,
+        previous_owner: Side,
+    ) -> Result<()> {
         if self.ephemeral.cfg.warehouse.is_none() {
             return Ok(());
         }
         let export = Arc::clone(&self.ephemeral.fowl_miz_export);
-        if export_has_objective_stock(export.as_ref()) {
-            let resource_meta = self
-                .warehouse_resource_meta_cache(lua)
-                .context("resource meta for capture warehouse")?;
-            let (preserved_fuel, spoils_eq, spoils_liq) = {
-                let obj = objective!(self, oid)?;
-                let mut spoils_eq: FxHashMap<String, u32> = FxHashMap::default();
-                for (k, v) in &obj.warehouse.equipment {
-                    spoils_eq.insert(k.clone(), v.stored);
-                }
-                let mut spoils_liq: FxHashMap<LiquidType, u32> = FxHashMap::default();
-                for (k, v) in &obj.warehouse.liquids {
-                    spoils_liq.insert(*k, v.stored);
-                }
-                (obj.fuel, spoils_eq, spoils_liq)
-            };
-            let reseeded = {
-                let obj = objective_mut!(self, oid)?;
-                Self::apply_export_profile_to_objective_virtual_warehouse(
-                    obj,
-                    export.as_ref(),
-                    resource_meta.as_ref(),
-                )?
-            };
-            if reseeded {
-                {
-                    let obj = objective_mut!(self, oid)?;
-                    Self::apply_capture_spoils_to_virtual(obj, &spoils_eq, &spoils_liq);
-                }
-                match self.sync_objective_to_warehouse(lua, oid) {
-                    Ok((obj, wh)) => {
-                        let dep_farp = objective_is_ground_dep_farp_export(export.as_ref(), obj);
-                        if let Err(e) = apply_virtual_warehouse_to_dcs(
-                            obj,
-                            &wh,
-                            dep_farp,
-                            true,
-                        ) {
-                            error!("apply DCS warehouse after capture {oid}: {e:?}");
-                        }
-                    }
-                    Err(e) if warehouse_sync_skip(&e) => (),
-                    Err(e) => error!("sync warehouse after capture {oid}: {e:?}"),
-                }
-                {
-                    let obj = objective_mut!(self, oid)?;
-                    obj.fuel = preserved_fuel;
-                }
-                self.update_supply_status()
-                    .context("supply status after capture warehouse reseed")?;
-                {
-                    let obj = objective_mut!(self, oid)?;
-                    if obj.fuel != preserved_fuel {
-                        obj.fuel = preserved_fuel;
-                        self.ephemeral.stat(Stat::ObjectiveSupply {
-                            id: oid,
-                            supply: obj.supply,
-                            fuel: preserved_fuel,
-                        });
-                    }
-                }
-                info!(
-                    "capture warehouse {:?}: reseeded to {:?} profile with spoils (fuel {}% preserved)",
-                    objective!(self, oid)?.name,
-                    objective!(self, oid)?.owner,
-                    preserved_fuel
-                );
-                return Ok(());
+        if !export_has_objective_stock(export.as_ref()) {
+            warn!(
+                "capture warehouse {:?}: Fowl export has no objective_stock (mission build bug)",
+                objective!(self, oid)?.name
+            );
+            return Ok(());
+        }
+        let resource_meta = self
+            .warehouse_resource_meta_cache(lua)
+            .context("resource meta for capture warehouse")?;
+        let (preserved_fuel, spoils_eq, spoils_liq, new_owner, name) = {
+            let obj = objective!(self, oid)?;
+            let mut raw_eq: FxHashMap<String, u32> = FxHashMap::default();
+            for (k, v) in &obj.warehouse.equipment {
+                raw_eq.insert(k.clone(), v.stored);
             }
-            if objective!(self, oid)?.is_occupied_logistics_hub() {
-                warn!(
-                    "capture warehouse {:?}: no objective_stock profile for {:?}; \
-                     rebuild Fowl export or check sortie _fowl_export.json",
-                    objective!(self, oid)?.name,
-                    objective!(self, oid)?.owner
-                );
+            let mut raw_liq: FxHashMap<LiquidType, u32> = FxHashMap::default();
+            for (k, v) in &obj.warehouse.liquids {
+                raw_liq.insert(*k, v.stored);
+            }
+            let (spoils_eq, spoils_liq) = capture_spoils_intersection(
+                export.as_ref(),
+                obj,
+                previous_owner,
+                obj.owner,
+                resource_meta.as_ref(),
+                &raw_eq,
+                &raw_liq,
+            );
+            (
+                obj.fuel,
+                spoils_eq,
+                spoils_liq,
+                obj.owner,
+                obj.name.clone(),
+            )
+        };
+        let reseeded = {
+            let obj = objective_mut!(self, oid)?;
+            Self::apply_export_profile_to_objective_virtual_warehouse(
+                obj,
+                export.as_ref(),
+                resource_meta.as_ref(),
+            )?
+        };
+        if !reseeded {
+            warn!(
+                "capture warehouse {name}: missing objective_stock profile for {new_owner:?} \
+                 (previous {previous_owner:?}) — should have failed at new campaign start"
+            );
+            return Ok(());
+        }
+        {
+            let obj = objective_mut!(self, oid)?;
+            Self::apply_capture_spoils_to_virtual(obj, &spoils_eq, &spoils_liq);
+        }
+        match self.sync_objective_to_warehouse(lua, oid) {
+            Ok((obj, wh)) => {
+                let dep_farp = objective_is_ground_dep_farp_export(export.as_ref(), obj);
+                if let Err(e) = apply_virtual_warehouse_to_dcs(obj, &wh, dep_farp, true) {
+                    error!("apply DCS warehouse after capture {oid}: {e:?}");
+                }
+            }
+            Err(e) if warehouse_sync_skip(&e) => (),
+            Err(e) => error!("sync warehouse after capture {oid}: {e:?}"),
+        }
+        {
+            let obj = objective_mut!(self, oid)?;
+            obj.fuel = preserved_fuel;
+        }
+        self.update_supply_status()
+            .context("supply status after capture warehouse reseed")?;
+        {
+            let obj = objective_mut!(self, oid)?;
+            if obj.fuel != preserved_fuel {
+                obj.fuel = preserved_fuel;
+                self.ephemeral.stat(Stat::ObjectiveSupply {
+                    id: oid,
+                    supply: obj.supply,
+                    fuel: preserved_fuel,
+                });
             }
         }
-        let whcfg = self.ephemeral.cfg.warehouse.as_ref().unwrap();
-        let obj = objective_mut!(self, oid)?;
-        let other_production = match self.ephemeral.production_by_side.get(&obj.owner.opposite()) {
-            Some(q) => Arc::clone(q),
-            None => Arc::new(Production::default()),
-        };
-        let production = match self.ephemeral.production_by_side.get(&obj.owner) {
-            Some(q) => Arc::clone(q),
-            None => return Ok(()),
-        };
-        let map = warehouse::Warehouse::get_resource_map(lua).context("getting resource map")?;
-        let on_water = objective_airbase_on_water(lua, obj)?;
-        let kind = &obj.kind;
-        map.for_each(|name, _| {
-            match production.equipment.get(&name) {
-                Some(equip) => {
-                    let inv = obj.warehouse.equipment.get_or_default_cow(name);
-                    inv.capacity = whcfg.capacity(kind, on_water, equip.production);
-                }
-                None => {
-                    if let Some(_) = other_production.equipment.get(&name) {
-                        let inv = obj.warehouse.equipment.get_or_default_cow(name);
-                        inv.stored = 0;
-                        inv.capacity = 0;
-                    }
-                }
-            }
-            Ok(())
-        })?;
-        for name in LiquidType::ALL {
-            match production.liquids.get(&name) {
-                Some(qty) => {
-                    let inv = obj.warehouse.liquids.get_or_default_cow(name);
-                    inv.capacity = whcfg.capacity(kind, on_water, *qty);
-                }
-                None => {
-                    if let Some(_) = other_production.liquids.get(&name) {
-                        let inv = obj.warehouse.liquids.get_or_default_cow(name);
-                        inv.stored = 0;
-                        inv.capacity = 0;
-                    }
-                }
-            }
-        }
+        info!(
+            "capture warehouse {name}: reseeded to {new_owner:?} profile; spoils eq={} liq={} (fuel {preserved_fuel}% preserved)",
+            spoils_eq.len(),
+            spoils_liq.len(),
+        );
         Ok(())
     }
 
@@ -3679,6 +3796,7 @@ impl Db {
                 .context("recording DCS warehouse equipment for supply")?;
             return Ok((obj, warehouse));
         }
+        let is_logistics_hub = matches!(obj.kind, ObjectiveKind::Logistics);
         sync_warehouse_to_obj(obj, &warehouse, false)
             .context("syncing warehouse to objective")?;
         discover_dcs_warehouse_into_obj(
@@ -3691,17 +3809,21 @@ impl Db {
             on_water,
         )
         .context("hydrating virtual warehouse from DCS inventory")?;
-        if let Some(prod) = production.as_deref() {
-            hydrate_production_keys_from_dcs(
-                obj,
-                &warehouse,
-                export.as_ref(),
-                resource_meta.as_ref(),
-                whcfg,
-                prod,
-                on_water,
-            )
-            .context("hydrating production keys from DCS get_item_count")?;
+        // Production-key hydrate is OLO-only (FARP/helipad Inventory gaps). On OAB/OFO/FARP
+        // it invented airframe demand and skewed Supply %.
+        if is_logistics_hub {
+            if let Some(prod) = production.as_deref() {
+                hydrate_production_keys_from_dcs(
+                    obj,
+                    &warehouse,
+                    export.as_ref(),
+                    resource_meta.as_ref(),
+                    whcfg,
+                    prod,
+                    on_water,
+                )
+                .context("hydrating production keys from DCS get_item_count")?;
+            }
         }
         if block_sync_from_refill {
             clamp_threatened_sync_from_refill(obj, &prev_equipment, &prev_liquids);
@@ -3711,11 +3833,20 @@ impl Db {
             export.as_ref(),
             resource_meta.as_ref(),
         );
+        if !is_logistics_hub {
+            clamp_non_olo_airframe_rows_to_export(
+                obj,
+                export.as_ref(),
+                resource_meta.as_ref(),
+            );
+        }
         canonicalize_virtual_equipment_keys(obj, resource_meta.as_ref());
         record_objective_dcs_equipment_names(&mut self.ephemeral, oid, &warehouse)
             .context("recording DCS warehouse equipment for supply")?;
-        if let Some(prod) = production.as_deref() {
-            mark_production_equipment_dcs_tracked(&mut self.ephemeral, oid, prod);
+        if is_logistics_hub {
+            if let Some(prod) = production.as_deref() {
+                mark_production_equipment_dcs_tracked(&mut self.ephemeral, oid, prod);
+            }
         }
         Ok((obj, warehouse))
     }

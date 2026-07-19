@@ -4359,7 +4359,50 @@ fn compute_virtual_objective_coalition_stock(
     )
 }
 
+/// Both Blue and Red logical profiles (neutral ME owner, or no warehouse row to extract).
+fn fill_objective_stock_both_coalitions_virtual(
+    entry: &mut ObjectiveStockByCoalition,
+    allow: &ObjectiveDynAllow,
+    objective_name: &str,
+    mult: u32,
+    tpl: &WarehouseTemplate,
+    blue_catalog: &HashSet<[i32; 4]>,
+    red_catalog: &HashSet<[i32; 4]>,
+    objective_defaults: &HashMap<StdString, ObjectiveWarehouseDefaults>,
+    br: Option<&weapon_bridge::WeaponBridgeMap>,
+    vt: Option<&VehicleTemplates>,
+    caps: Option<&campaign_cfg::WarehouseDefaultsFromCfg>,
+) -> Result<()> {
+    for side in [Side::Blue, Side::Red] {
+        let (inv_tpl, def_tpl, catalog) = match side {
+            Side::Blue => (&tpl.blue_inventory, &tpl.blue_default, blue_catalog),
+            Side::Red => (&tpl.red_inventory, &tpl.red_default, red_catalog),
+            Side::Neutral => unreachable!(),
+        };
+        let stock = compute_virtual_objective_coalition_stock(
+            inv_tpl,
+            def_tpl,
+            mult,
+            catalog,
+            objective_defaults,
+            objective_name,
+            side,
+            allow.per_side.get(&side),
+            br,
+            vt,
+            caps,
+        )?;
+        match side {
+            Side::Blue => entry.blue = stock,
+            Side::Red => entry.red = stock,
+            Side::Neutral => {}
+        }
+    }
+    Ok(())
+}
+
 /// After mission fill: `.miz` row for ME coalition + opposite coalition virtual profile (export only).
+/// Neutral ME owner: both Blue and Red profiles are synthesized (ME warehouse stays empty at build).
 pub fn build_objective_stock_export(
     _lua: &Lua,
     base: &LoadedMiz,
@@ -4398,13 +4441,27 @@ pub fn build_objective_stock_export(
         if let Some(resolved) = resolved_meta {
             let side = warehouse_side_for_default_apply(&resolved.row)?
                 .unwrap_or(allow.side);
+            if matches!(side, Side::Neutral) {
+                fill_objective_stock_both_coalitions_virtual(
+                    &mut entry,
+                    allow,
+                    objective_name,
+                    mult,
+                    tpl,
+                    &blue_catalog,
+                    &red_catalog,
+                    objective_defaults,
+                    br,
+                    vt,
+                    caps,
+                )?;
+                out.insert(objective_name.to_string(), entry);
+                continue;
+            }
             let inv_tpl = match side {
                 Side::Blue => &tpl.blue_inventory,
                 Side::Red => &tpl.red_inventory,
-                Side::Neutral => {
-                    out.insert(objective_name.to_string(), entry);
-                    continue;
-                }
+                Side::Neutral => unreachable!(),
             };
             let catalog = match side {
                 Side::Blue => &blue_catalog,
@@ -4465,32 +4522,19 @@ pub fn build_objective_stock_export(
                 Side::Neutral => {}
             }
         } else {
-            for side in [Side::Blue, Side::Red] {
-                let (inv_tpl, def_tpl, catalog) = match side {
-                    Side::Blue => (&tpl.blue_inventory, &tpl.blue_default, &blue_catalog),
-                    Side::Red => (&tpl.red_inventory, &tpl.red_default, &red_catalog),
-                    Side::Neutral => continue,
-                };
-                let ttd = allow.per_side.get(&side);
-                let stock = compute_virtual_objective_coalition_stock(
-                    inv_tpl,
-                    def_tpl,
-                    mult,
-                    catalog,
-                    objective_defaults,
-                    objective_name,
-                    side,
-                    ttd,
-                    br,
-                    vt,
-                    caps,
-                )?;
-                match side {
-                    Side::Blue => entry.blue = stock,
-                    Side::Red => entry.red = stock,
-                    Side::Neutral => {}
-                }
-            }
+            fill_objective_stock_both_coalitions_virtual(
+                &mut entry,
+                allow,
+                objective_name,
+                mult,
+                tpl,
+                &blue_catalog,
+                &red_catalog,
+                objective_defaults,
+                br,
+                vt,
+                caps,
+            )?;
         }
         out.insert(objective_name.to_string(), entry);
     }
@@ -9635,7 +9679,7 @@ enum ObjectiveZoneGeom {
 
 /// Per-objective (O*) zone: extracted geometry + side → allowed unit types.
 ///
-/// Zone coalition is read from the 4th character of the zone name: 'R' = Red, 'B' = Blue.
+/// Zone coalition is read from the 4th character of the zone name: 'R' = Red, 'B' = Blue, 'N' = Neutral.
 struct ObjectiveDynAllow {
     /// ME trigger zone name (first three chars map `SETTINGS-dynamic-spawn`).
     zone_name: StdString,
@@ -10003,10 +10047,11 @@ fn build_objective_dyn_allow(
             continue;
         }
         let is_logistics_hub = name.starts_with("OLO");
-        // 4th character (index 3) of O* zone name: 'R' = Red, 'B' = Blue.
+        // 4th character (index 3) of O* zone name: 'R' = Red, 'B' = Blue, 'N' = Neutral.
         let base_side = match name.chars().nth(3) {
             Some('R') | Some('r') => Side::Red,
             Some('B') | Some('b') => Side::Blue,
+            Some('N') | Some('n') => Side::Neutral,
             other => {
                 warn!(
                     "O* zone {:?} has unknown coalition letter at pos 4 ({:?}), skipping",

@@ -736,6 +736,18 @@ fn sanitize_airborne_slot_lock(ctx: &mut Context, lua: MizLua, ucid: &Ucid, now:
     if player_unit_in_air(ctx, lua, ucid, None) {
         return;
     }
+    // Grounded while still marked airborne (Land event lost): keep life-return window.
+    let grounded_airborne: SmallVec<[DcsOid<ClassUnit>; 2]> = ctx
+        .airborne
+        .iter()
+        .filter(|id| ctx.db.player_in_unit(false, id) == Some(*ucid))
+        .cloned()
+        .collect();
+    for id in grounded_airborne {
+        ctx.recently_landed
+            .entry(id)
+            .or_insert_with(Utc::now);
+    }
     clear_stale_airborne_session(ctx, *ucid);
 }
 
@@ -1076,12 +1088,9 @@ fn on_event(lua: MizLua, ev: Event) -> Result<()> {
                                 .get_slot_info(&slot)
                                 .and_then(|sifo| ctx.db.ephemeral.cfg.life_types.get(&sifo.typ))
                                 .copied();
-                            if let Err(e) =
-                                message_life(ctx, lua, &slot, typ, "life taken\n")
-                            {
-                                error!("could not display life taken message {:?}", e)
-                            } else if let Err(e) = schedule_life_taken_sound(lua, slot) {
-                                error!("could not schedule life taken sound {:?}", e)
+                            // Defer panel/sound so Birth returns before UI (cockpit switch is fragile).
+                            if let Err(e) = schedule_life_taken_ui(lua, slot.clone(), typ) {
+                                error!("could not schedule life taken UI {:?}", e)
                             }
                         }
                         ctx.menu_init_queue.insert(slot);
@@ -1149,6 +1158,9 @@ fn on_event(lua: MizLua, ev: Event) -> Result<()> {
                         }
                     }
                     Ok((_, None, deslot)) => {
+                        if let Some((ucid, slot)) = &deslot {
+                            maybe_warn_life_not_returned(ctx, lua, *ucid, slot);
+                        }
                         if let Some((ucid, slot)) = deslot {
                             ctx.db.player_deslot_slot(&ucid, &slot);
                         }
@@ -1294,6 +1306,8 @@ fn on_event(lua: MizLua, ev: Event) -> Result<()> {
                             );
                         }
                     }
+                    // Before deslot: player_in_unit still resolves for war-loss airframe bucket.
+                    ctx.db.campaign_record_player_airframe_loss(&ucid, &id);
                     finish_airborne_exit(ctx, ucid, &id);
                     ctx.db.player_deslot(&ucid);
                 }
@@ -1376,7 +1390,9 @@ fn on_event(lua: MizLua, ev: Event) -> Result<()> {
                 if let Some(ucid) = ctx.db.player_in_unit(false, &id) {
                     ctx.airborne_voluntary_eject.remove(&ucid);
                 }
-                if !ctx.recently_born.contains_key(&id) && ctx.airborne.remove(&id) {
+                // Always arm life-return even if sanitize already cleared `airborne`.
+                if !ctx.recently_born.contains_key(&id) {
+                    let _ = ctx.airborne.remove(&id);
                     ctx.recently_landed.insert(id, Utc::now());
                 }
             }
@@ -1563,6 +1579,23 @@ fn lives(
 }
 
 const LIFE_TAKEN_SOUND_DELAY_SECS: f32 = 4.5;
+/// Let Birth finish before life-taken panel (keeps DCS cockpit switch responsive).
+const LIFE_TAKEN_UI_DELAY_SECS: f32 = 0.25;
+
+fn schedule_life_taken_ui(lua: MizLua, slot: SlotId, typ: Option<LifeType>) -> Result<()> {
+    let timer = Timer::singleton(lua)?;
+    let when = timer.get_time()? + LIFE_TAKEN_UI_DELAY_SECS;
+    timer.schedule_function(when, mlua::Value::Nil, move |lua, _, _| {
+        let ctx = unsafe { Context::get_mut() };
+        if let Err(e) = message_life(ctx, lua, &slot, typ, "life taken\n") {
+            error!("could not display life taken message {:?}", e);
+        } else if let Err(e) = schedule_life_taken_sound(lua, slot) {
+            error!("could not schedule life taken sound {:?}", e);
+        }
+        Ok(None)
+    })?;
+    Ok(())
+}
 
 fn schedule_life_taken_sound(lua: MizLua, slot: SlotId) -> Result<()> {
     let timer = Timer::singleton(lua)?;
@@ -1573,6 +1606,30 @@ fn schedule_life_taken_sound(lua: MizLua, slot: SlotId) -> Result<()> {
         Ok(None)
     })?;
     Ok(())
+}
+
+fn maybe_warn_life_not_returned(ctx: &mut Context, lua: MizLua, ucid: Ucid, slot: &SlotId) {
+    let cfg = &ctx.db.ephemeral.cfg;
+    if !(cfg.limited_lives && cfg.lives_birth) {
+        return;
+    }
+    let Some(sifo) = ctx.db.ephemeral.get_slot_info(slot) else {
+        return;
+    };
+    if !is_aircraft_or_helicopter(&ctx.db, &sifo.typ) {
+        return;
+    }
+    let msg = CompactString::from(
+        "Life not returned\nLand and stop at a friendly objective, then deslot",
+    );
+    if let Some(uid) = slot.as_unit_id() {
+        ctx.db.ephemeral.msgs().panel_to_unit(12, false, uid, msg);
+    } else if let Ok(trigger) = Trigger::singleton(lua) {
+        if let Ok(action) = trigger.action() {
+            let _ = action.out_text_for_group(sifo.miz_gid, msg.into(), 12, false);
+        }
+    }
+    info!("life not returned on deslot for {ucid} (not marked landed at friendly objective)");
 }
 
 fn message_life(
@@ -1617,8 +1674,33 @@ fn return_lives(lua: MizLua, ctx: &mut Context, ts: DateTime<Utc>) {
             let pos = or_false!(unit.get_ground_position());
             let slot = or_false!(unit.slot());
             if db.land(slot, pos.0, &unit) {
+                if db.ephemeral.cfg.limited_lives && db.ephemeral.cfg.lives_birth {
+                    let obj_label = db
+                        .ephemeral
+                        .player_in_slot(&slot)
+                        .and_then(|ucid| db.persisted.players.get(ucid))
+                        .and_then(|p| {
+                            p.current_slot
+                                .as_ref()
+                                .and_then(|(_, inst)| inst.as_ref())
+                                .and_then(|i| i.landed_at_objective)
+                        })
+                        .and_then(|oid| db.persisted.objectives.get(&oid))
+                        .map(|o| db.objective_f10_map_label(o))
+                        .unwrap_or_else(|| "friendly objective".to_string());
+                    let msg = format_compact!(
+                        "Landed at {obj_label}\nDeslot to return your life"
+                    );
+                    if let Some(uid) = slot.as_unit_id() {
+                        db.ephemeral.msgs().panel_to_unit(15, false, uid, msg);
+                    }
+                }
                 return false;
             }
+            debug!(
+                "land() not armed slot={slot:?} pos=({:.0},{:.0}) — outside friendly objective zone?",
+                pos.0.x, pos.0.y
+            );
         }
         true
     });

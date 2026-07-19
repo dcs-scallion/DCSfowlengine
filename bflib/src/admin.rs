@@ -446,6 +446,8 @@ fn admin_spawn(ctx: &mut Context, lua: MizLua, id: Option<PlayerId>, key: String
                         spec: spec.clone(),
                         origin: None,
                         cost_fraction: 1.,
+                        ship_hub: None,
+                        ship_offsets: None,
                     };
                     ctx.db
                         .add_and_queue_group(
