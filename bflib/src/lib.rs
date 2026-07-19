@@ -1519,9 +1519,15 @@ fn lives(
     db.maybe_reset_lives(ucid, Utc::now())?;
     let player = db.player(ucid).ok_or_else(|| anyhow!("no such player {:?}", ucid))?;
     let cfg = &db.ephemeral.cfg;
+    // 1+ only while still in players_by_slot (`current_slot` can linger after death).
     let active_life_type = player
         .current_slot
         .as_ref()
+        .filter(|(slot, _)| {
+            db.ephemeral
+                .player_in_slot(slot)
+                .is_some_and(|u| u == ucid)
+        })
         .and_then(|(slot, _)| db.ephemeral.get_slot_info(slot))
         .and_then(|sifo| cfg.life_types.get(&sifo.typ))
         .copied();
