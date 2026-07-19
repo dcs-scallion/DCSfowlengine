@@ -696,6 +696,83 @@ fn discover_dcs_warehouse_into_obj(
     Ok(())
 }
 
+/// FARP/helipad `getInventory` can omit SKUs that `getItemCount` still returns.
+/// Ensure side production keys exist in virtual for logistics/production.
+fn hydrate_production_keys_from_dcs(
+    obj: &mut Objective,
+    warehouse: &warehouse::Warehouse,
+    export: &FowlMizExport,
+    resource_meta: &FxHashMap<String, WarehouseResourceMeta>,
+    whcfg: Option<&bfprotocols::cfg::WarehouseConfig>,
+    production: &Production,
+    on_water: bool,
+) -> Result<u32> {
+    let mut new_eq = 0u32;
+    for name in production.equipment.keys() {
+        let meta = resource_meta.get(name).copied();
+        if !equipment_allowed_for_objective(export, obj, obj.owner, name.as_str(), meta) {
+            continue;
+        }
+        let stored = warehouse
+            .get_item_count(name.clone())
+            .with_context(|| format_compact!("get_item_count production hydrate {name}"))?;
+        let capacity = equipment_capacity_for_discovered_row(
+            obj,
+            name.as_str(),
+            stored,
+            export,
+            resource_meta,
+            whcfg,
+            Some(production),
+            on_water,
+        );
+        let existed = obj.warehouse.equipment.get(name).is_some();
+        let row = obj.warehouse.equipment.get_or_default_cow(name.clone());
+        row.stored = stored;
+        row.capacity = capacity.max(stored).max(row.capacity);
+        if !existed {
+            new_eq = new_eq.saturating_add(1);
+        }
+    }
+    for typ in production.liquids.keys() {
+        let stored = warehouse
+            .get_liquid_amount(*typ)
+            .with_context(|| format_compact!("get_liquid_amount production hydrate {typ:?}"))?;
+        let capacity = liquid_capacity_for_discovered_row(
+            obj,
+            *typ,
+            stored,
+            export,
+            whcfg,
+            Some(production),
+            on_water,
+        );
+        let row = obj.warehouse.liquids.get_or_default_cow(*typ);
+        row.stored = stored;
+        row.capacity = capacity.max(stored).max(row.capacity);
+    }
+    if new_eq > 0 {
+        wh_diag(format_compact!(
+            "production-hydrate {}: +{new_eq} equipment keys via get_item_count",
+            obj.name
+        ));
+    }
+    Ok(new_eq)
+}
+
+fn mark_production_equipment_dcs_tracked(
+    ephemeral: &mut super::ephemeral::Ephemeral,
+    oid: ObjectiveId,
+    production: &Production,
+) {
+    let Some(tracked) = ephemeral.warehouse_dcs_equipment_names.get_mut(&oid) else {
+        return;
+    };
+    for name in production.equipment.keys() {
+        tracked.insert(name.clone());
+    }
+}
+
 fn get_supplier<'lua>(lua: MizLua<'lua>, template: String) -> Result<warehouse::Warehouse<'lua>> {
     Airbase::get_by_name(lua, template.clone())
         .with_context(|| format_compact!("getting airbase {}", template))?
@@ -3614,6 +3691,18 @@ impl Db {
             on_water,
         )
         .context("hydrating virtual warehouse from DCS inventory")?;
+        if let Some(prod) = production.as_deref() {
+            hydrate_production_keys_from_dcs(
+                obj,
+                &warehouse,
+                export.as_ref(),
+                resource_meta.as_ref(),
+                whcfg,
+                prod,
+                on_water,
+            )
+            .context("hydrating production keys from DCS get_item_count")?;
+        }
         if block_sync_from_refill {
             clamp_threatened_sync_from_refill(obj, &prev_equipment, &prev_liquids);
         }
@@ -3625,6 +3714,9 @@ impl Db {
         canonicalize_virtual_equipment_keys(obj, resource_meta.as_ref());
         record_objective_dcs_equipment_names(&mut self.ephemeral, oid, &warehouse)
             .context("recording DCS warehouse equipment for supply")?;
+        if let Some(prod) = production.as_deref() {
+            mark_production_equipment_dcs_tracked(&mut self.ephemeral, oid, prod);
+        }
         Ok((obj, warehouse))
     }
 
