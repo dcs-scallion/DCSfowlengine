@@ -1380,9 +1380,9 @@ pub struct Cfg {
     #[serde(default)]
     pub virtual_resupply: bool,
     /// When true with `virtual_resupply`: threatened hubs/objectives skip virtual deliveries
-    /// (weapons, equipment, airframes, **and fuel/liquids**); threatened OLO shows 0% Production;
+    /// (weapons, equipment, airframes, and fuel/liquids); threatened OLO shows 0% Production;
     /// OPR→OLO feed lines hide while OPR or OLO is threatened. DCS sync-from must not refill
-    /// liquids on threatened objectives (ME warehouses can look "infinite").
+    /// equipment or liquids on threatened objectives (ME/DCS can restore stock e.g. after destroy).
     #[serde(default)]
     pub virtual_resupply_threatened_without_deliveries: bool,
     /// Distance-based hub-to-objective virtual resupply efficiency (ignored when `virtual_resupply` is false).

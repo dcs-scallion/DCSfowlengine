@@ -1259,12 +1259,20 @@ pub(super) fn virtual_resupply_threatened_blocks(
     virtual_resupply_threatened_without_deliveries(cfg) && obj.threatened
 }
 
-/// Snapshot liquid `stored` before DCS sync-from (threatened: block infinite ME fuel refill).
+/// Snapshot before DCS sync-from (threatened: block DCS/ME stock refill).
 fn snapshot_liquid_stored(obj: &Objective) -> SmallVec<[(LiquidType, u32); 4]> {
     obj.warehouse
         .liquids
         .into_iter()
         .map(|(typ, inv)| (*typ, inv.stored))
+        .collect()
+}
+
+fn snapshot_equipment_stored(obj: &Objective) -> FxHashMap<String, u32> {
+    obj.warehouse
+        .equipment
+        .into_iter()
+        .map(|(name, inv)| (name.clone(), inv.stored))
         .collect()
 }
 
@@ -1276,6 +1284,24 @@ fn clamp_liquid_stored_no_increase(obj: &mut Objective, previous: &[(LiquidType,
             }
         }
     }
+}
+
+fn clamp_equipment_stored_no_increase(obj: &mut Objective, previous: &FxHashMap<String, u32>) {
+    for (name, inv) in obj.warehouse.equipment.iter_mut_cow() {
+        let prev = previous.get(name.as_str()).copied().unwrap_or(0);
+        if inv.stored > prev {
+            inv.stored = prev;
+        }
+    }
+}
+
+fn clamp_threatened_sync_from_refill(
+    obj: &mut Objective,
+    prev_equipment: &FxHashMap<String, u32>,
+    prev_liquids: &[(LiquidType, u32)],
+) {
+    clamp_equipment_stored_no_increase(obj, prev_equipment);
+    clamp_liquid_stored_no_increase(obj, prev_liquids);
 }
 
 pub(super) fn virtual_resupply_link_active(
@@ -3548,15 +3574,15 @@ impl Db {
             .get(&owner)
             .map(Arc::clone);
         let skip_dep_hydrate = self.dep_farp_skip_dcs_hydrate(oid);
-        let block_fuel_refill = {
+        let block_sync_from_refill = {
             let obj = objective!(self, oid)?;
             virtual_resupply_threatened_blocks(&self.ephemeral.cfg, obj)
         };
         let obj = objective_mut!(self, oid)?;
-        let prev_liquids = if block_fuel_refill {
-            snapshot_liquid_stored(obj)
+        let (prev_equipment, prev_liquids) = if block_sync_from_refill {
+            (snapshot_equipment_stored(obj), snapshot_liquid_stored(obj))
         } else {
-            smallvec![]
+            (FxHashMap::default(), smallvec![])
         };
         canonicalize_virtual_equipment_keys(obj, resource_meta.as_ref());
         if objective_is_ground_dep_farp_export(export.as_ref(), obj) {
@@ -3568,8 +3594,8 @@ impl Db {
                 sync_warehouse_to_obj(obj, &warehouse, true)
                     .context("syncing ground DEP FARP warehouse from DCS (tracked rows only)")?;
             }
-            if block_fuel_refill {
-                clamp_liquid_stored_no_increase(obj, &prev_liquids);
+            if block_sync_from_refill {
+                clamp_threatened_sync_from_refill(obj, &prev_equipment, &prev_liquids);
             }
             canonicalize_virtual_equipment_keys(obj, resource_meta.as_ref());
             record_objective_dcs_equipment_names(&mut self.ephemeral, oid, &warehouse)
@@ -3588,8 +3614,8 @@ impl Db {
             on_water,
         )
         .context("hydrating virtual warehouse from DCS inventory")?;
-        if block_fuel_refill {
-            clamp_liquid_stored_no_increase(obj, &prev_liquids);
+        if block_sync_from_refill {
+            clamp_threatened_sync_from_refill(obj, &prev_equipment, &prev_liquids);
         }
         reconcile_objective_stock_aircraft_capacity_to_dcs(
             obj,
