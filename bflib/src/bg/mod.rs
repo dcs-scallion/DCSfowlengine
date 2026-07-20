@@ -320,21 +320,34 @@ impl Logs {
                 log_file,
                 stats_path: _,
             } => {
-                *log_file = Some(
-                    File::options()
-                        .create(true)
-                        .write(true)
-                        .open(&log_path)
-                        .await?,
+                if let Some(parent) = log_path.parent() {
+                    tokio::fs::create_dir_all(parent)
+                        .await
+                        .with_context(|| format!("create log dir {parent:?}"))?;
+                }
+                let mut file = tokio::fs::OpenOptions::new()
+                    .create(true)
+                    .append(true)
+                    .write(true)
+                    .open(&log_path)
+                    .await
+                    .with_context(|| format!("open log file {log_path:?}"))?;
+                let banner = format!(
+                    "bfnext log open path={log_path:?} at {}\n",
+                    Utc::now().to_rfc3339()
                 );
+                file.write_all(banner.as_bytes()).await?;
+                file.flush().await?;
+                *log_file = Some(file);
                 Ok(())
             }
         }
     }
 
     async fn new(write_dir: &Path) -> Result<Self> {
-        let stats_path = write_dir.join("Logs").join("stats");
-        let log_path = write_dir.join("Logs").join("bfnext.txt");
+        let logs_dir = write_dir.join("Logs");
+        let stats_path = logs_dir.join("stats");
+        let log_path = logs_dir.join("bfnext.txt");
         rotate_log(&log_path);
         let mut t = Self::Files {
             log_file: None,
@@ -351,8 +364,32 @@ impl Logs {
             Self::Files {
                 log_file: Some(log_file),
                 ..
-            } => Ok(log_file.write_all_buf(&mut buf.as_bytes()).await?),
-            Self::Files { .. } => bail!("log file is closed"),
+            } => {
+                log_file.write_all(buf.bytes()).await?;
+                log_file.flush().await?;
+                Ok(())
+            }
+            Self::Files {
+                log_path,
+                log_file,
+                ..
+            } => {
+                // Handle deleted-while-open / closed file: reopen and retry once.
+                if let Some(parent) = log_path.parent() {
+                    let _ = tokio::fs::create_dir_all(parent).await;
+                }
+                let mut file = tokio::fs::OpenOptions::new()
+                    .create(true)
+                    .append(true)
+                    .write(true)
+                    .open(&log_path)
+                    .await
+                    .with_context(|| format!("reopen log file {log_path:?}"))?;
+                file.write_all(buf.bytes()).await?;
+                file.flush().await?;
+                *log_file = Some(file);
+                Ok(())
+            }
         }
     }
 
@@ -667,13 +704,34 @@ fn setup_logger(tx: UnboundedSender<Task>) {
         .expect("could not init logger")
 }
 
+fn ensure_bfnext_boot_file(write_dir: &Path) {
+    let logs_dir = write_dir.join("Logs");
+    if let Err(e) = fs::create_dir_all(&logs_dir) {
+        eprintln!("bfnext: create_dir_all {logs_dir:?} failed: {e:?}");
+        return;
+    }
+    let path = logs_dir.join("bfnext.txt");
+    match fs::OpenOptions::new().create(true).append(true).open(&path) {
+        Ok(mut f) => {
+            use io::Write;
+            let _ = writeln!(
+                f,
+                "bfnext boot (sync) write_dir={write_dir:?} path={path:?} at {}",
+                Utc::now().to_rfc3339()
+            );
+            let _ = f.flush();
+        }
+        Err(e) => eprintln!("bfnext: sync open {path:?} failed: {e:?}"),
+    }
+}
+
 pub(super) fn init(write_dir: PathBuf) -> UnboundedSender<Task> {
     match TXCOM.get() {
         Some(tx) => tx.clone(),
         None => {
+            ensure_bfnext_boot_file(&write_dir);
             let (tx, rx) = mpsc::unbounded_channel();
-            TXCOM.set(tx.clone()).expect("txcom is already set");
-            setup_logger(tx.clone());
+            // Spawn before logger so a SetLogger panic cannot leave TXCOM without a receiver.
             thread::spawn(move || {
                 let rt = Builder::new_multi_thread()
                     .enable_all()
@@ -682,6 +740,8 @@ pub(super) fn init(write_dir: PathBuf) -> UnboundedSender<Task> {
                 rt.block_on(background_loop(write_dir, rx));
                 println!("background thread exiting")
             });
+            TXCOM.set(tx.clone()).expect("txcom is already set");
+            setup_logger(tx.clone());
             tx
         }
     }

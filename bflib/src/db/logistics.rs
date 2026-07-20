@@ -926,11 +926,12 @@ fn missing_objective_stock_profile_labels(
     missing
 }
 
-/// Capture spoils: equipment/liquids present in both coalition export profiles (baseline > 0).
+/// Capture spoils: old warehouse stock that is also in the new owner's export template.
+/// Amounts are exact (may exceed new template baseline); Neutral→capture needs no old profile.
 fn capture_spoils_intersection(
     export: &FowlMizExport,
     obj: &Objective,
-    previous_owner: Side,
+    _previous_owner: Side,
     new_owner: Side,
     resource_meta: &FxHashMap<String, WarehouseResourceMeta>,
     warehouse_eq: &FxHashMap<String, u32>,
@@ -938,18 +939,10 @@ fn capture_spoils_intersection(
 ) -> (FxHashMap<String, u32>, FxHashMap<LiquidType, u32>) {
     let mut spoils_eq: FxHashMap<String, u32> = FxHashMap::default();
     let mut spoils_liq: FxHashMap<LiquidType, u32> = FxHashMap::default();
-    let (Some(old_prof), Some(new_prof)) = (
-        objective_coalition_stock_for_objective_side(export, obj, previous_owner),
-        objective_coalition_stock_for_objective_side(export, obj, new_owner),
-    ) else {
+    let Some(new_prof) = objective_coalition_stock_for_objective_side(export, obj, new_owner)
+    else {
         return (spoils_eq, spoils_liq);
     };
-    let old_eq: FxHashSet<String> = old_prof
-        .equipment
-        .iter()
-        .filter(|(_, item)| item.baseline > 0)
-        .map(|(k, _)| resolve_export_equipment_dcs_name(k.as_str(), resource_meta))
-        .collect();
     let new_eq: FxHashSet<String> = new_prof
         .equipment
         .iter()
@@ -957,16 +950,10 @@ fn capture_spoils_intersection(
         .map(|(k, _)| resolve_export_equipment_dcs_name(k.as_str(), resource_meta))
         .collect();
     for (name, &stored) in warehouse_eq {
-        if stored > 0 && old_eq.contains(name) && new_eq.contains(name) {
+        if stored > 0 && new_eq.contains(name) {
             spoils_eq.insert(name.clone(), stored);
         }
     }
-    let old_liq: FxHashSet<LiquidType> = old_prof
-        .liquids
-        .iter()
-        .filter(|(_, item)| item.baseline > 0)
-        .filter_map(|(k, _)| liquid_type_from_export_key(k.as_str()).ok())
-        .collect();
     let new_liq: FxHashSet<LiquidType> = new_prof
         .liquids
         .iter()
@@ -974,7 +961,7 @@ fn capture_spoils_intersection(
         .filter_map(|(k, _)| liquid_type_from_export_key(k.as_str()).ok())
         .collect();
     for (typ, &stored) in warehouse_liq {
-        if stored > 0 && old_liq.contains(typ) && new_liq.contains(typ) {
+        if stored > 0 && new_liq.contains(typ) {
             spoils_liq.insert(*typ, stored);
         }
     }
@@ -2412,16 +2399,43 @@ impl Db {
         equipment: &FxHashMap<String, u32>,
         liquids: &FxHashMap<LiquidType, u32>,
     ) {
+        // Exact transfer; over-template amounts are kept (capacity stays template baseline).
         for (name, inv) in obj.warehouse.equipment.iter_mut_cow() {
             if let Some(&stored) = equipment.get(name.as_str()) {
-                inv.stored = stored.min(inv.capacity);
+                inv.stored = stored;
             }
         }
         for (typ, inv) in obj.warehouse.liquids.iter_mut_cow() {
             if let Some(&stored) = liquids.get(typ) {
-                inv.stored = stored.min(inv.capacity);
+                inv.stored = stored;
             }
         }
+    }
+
+    /// Fill template rows still at `stored == 0` after spoils (CFG % of capacity). OFO/OAB/OLO.
+    fn apply_capture_stock_percentage_to_virtual(obj: &mut Objective, pct: u8) -> usize {
+        if pct == 0 {
+            return 0;
+        }
+        let pct = pct.min(100);
+        let mut filled = 0usize;
+        for (_, inv) in obj.warehouse.equipment.iter_mut_cow() {
+            if inv.capacity > 0 && inv.stored == 0 {
+                inv.stored = scale_capacity_by_percent_floor(inv.capacity, pct);
+                if inv.stored > 0 {
+                    filled += 1;
+                }
+            }
+        }
+        for (_, inv) in obj.warehouse.liquids.iter_mut_cow() {
+            if inv.capacity > 0 && inv.stored == 0 {
+                inv.stored = scale_capacity_by_percent_floor(inv.capacity, pct);
+                if inv.stored > 0 {
+                    filled += 1;
+                }
+            }
+        }
+        filled
     }
 
     pub(super) fn setup_warehouses_after_load(&mut self, lua: MizLua) -> Result<()> {
@@ -3052,7 +3066,7 @@ impl Db {
         let resource_meta = self
             .warehouse_resource_meta_cache(lua)
             .context("resource meta for capture warehouse")?;
-        let (preserved_fuel, spoils_eq, spoils_liq, new_owner, name) = {
+        let (spoils_eq, spoils_liq, new_owner, name) = {
             let obj = objective!(self, oid)?;
             let mut raw_eq: FxHashMap<String, u32> = FxHashMap::default();
             for (k, v) in &obj.warehouse.equipment {
@@ -3071,13 +3085,7 @@ impl Db {
                 &raw_eq,
                 &raw_liq,
             );
-            (
-                obj.fuel,
-                spoils_eq,
-                spoils_liq,
-                obj.owner,
-                obj.name.clone(),
-            )
+            (spoils_eq, spoils_liq, obj.owner, obj.name.clone())
         };
         let reseeded = {
             let obj = objective_mut!(self, oid)?;
@@ -3094,39 +3102,83 @@ impl Db {
             );
             return Ok(());
         }
-        {
+        let capture_stock_pct = self
+            .ephemeral
+            .cfg
+            .warehouse
+            .as_ref()
+            .map(|w| {
+                let kind = match objective!(self, oid) {
+                    Ok(o) => &o.kind,
+                    Err(_) => return 0,
+                };
+                match kind {
+                    ObjectiveKind::Fob => w.captured_stock_percentage_ofo,
+                    ObjectiveKind::Airbase => w.captured_stock_percentage_oab,
+                    ObjectiveKind::Logistics => w.captured_stock_percentage_olo,
+                    _ => 0,
+                }
+            })
+            .unwrap_or(0);
+        let (eq_cap_rows, liq_cap_rows, pct_filled, pct) = {
             let obj = objective_mut!(self, oid)?;
             Self::apply_capture_spoils_to_virtual(obj, &spoils_eq, &spoils_liq);
-        }
-        match self.sync_objective_to_warehouse(lua, oid) {
+            let pct = capture_stock_pct;
+            let pct_filled = Self::apply_capture_stock_percentage_to_virtual(obj, pct);
+            let mut eq_cap_rows = 0usize;
+            for (_, inv) in &obj.warehouse.equipment {
+                if inv.capacity > 0 {
+                    eq_cap_rows += 1;
+                }
+            }
+            let mut liq_cap_rows = 0usize;
+            for (_, inv) in &obj.warehouse.liquids {
+                if inv.capacity > 0 {
+                    liq_cap_rows += 1;
+                }
+            }
+            (eq_cap_rows, liq_cap_rows, pct_filled, pct)
+        };
+        let capture_track = match self.sync_objective_to_warehouse(lua, oid) {
             Ok((obj, wh)) => {
                 let dep_farp = objective_is_ground_dep_farp_export(export.as_ref(), obj);
                 if let Err(e) = apply_virtual_warehouse_to_dcs(obj, &wh, dep_farp, true) {
                     error!("apply DCS warehouse after capture {oid}: {e:?}");
                 }
+                let mut track_names: Vec<String> = Vec::new();
+                for (name, inv) in &obj.warehouse.equipment {
+                    if inv.capacity > 0 {
+                        track_names.push(name.clone());
+                    }
+                }
+                match collect_dcs_warehouse_equipment_names(&wh) {
+                    Ok(dcs_names) => Some((track_names, dcs_names)),
+                    Err(e) => {
+                        error!("record DCS warehouse equipment after capture {oid}: {e:?}");
+                        Some((track_names, FxHashSet::default()))
+                    }
+                }
             }
-            Err(e) if warehouse_sync_skip(&e) => (),
-            Err(e) => error!("sync warehouse after capture {oid}: {e:?}"),
-        }
-        {
-            let obj = objective_mut!(self, oid)?;
-            obj.fuel = preserved_fuel;
+            Err(e) if warehouse_sync_skip(&e) => None,
+            Err(e) => {
+                error!("sync warehouse after capture {oid}: {e:?}");
+                None
+            }
+        };
+        if let Some((track_names, mut dcs_names)) = capture_track {
+            for name in track_names {
+                dcs_names.insert(name);
+            }
+            self.ephemeral
+                .warehouse_dcs_equipment_names
+                .insert(oid, dcs_names);
         }
         self.update_supply_status()
             .context("supply status after capture warehouse reseed")?;
-        {
-            let obj = objective_mut!(self, oid)?;
-            if obj.fuel != preserved_fuel {
-                obj.fuel = preserved_fuel;
-                self.ephemeral.stat(Stat::ObjectiveSupply {
-                    id: oid,
-                    supply: obj.supply,
-                    fuel: preserved_fuel,
-                });
-            }
-        }
         info!(
-            "capture warehouse {name}: reseeded to {new_owner:?} profile; spoils eq={} liq={} (fuel {preserved_fuel}% preserved)",
+            "capture warehouse {name}: reseeded to {new_owner:?} profile; \
+             virtual eq_cap={eq_cap_rows} liq_cap={liq_cap_rows}; spoils eq={} liq={}; \
+             capture_stock_pct={pct} filled_rows={pct_filled}",
             spoils_eq.len(),
             spoils_liq.len(),
         );

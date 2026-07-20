@@ -106,6 +106,28 @@ const MOBILE_FARP_UNDERWAY_SPEED_MPS: f64 = 0.5;
 const MOBILE_FARP_UNDERWAY_POS_DELTA_M: f64 = 2.0;
 const GROUND_FARP_ZONE_SYNC_EPS_M: f64 = 25.0;
 
+/// DCS ship/pad hull HP % (`Unit.getLife` / `getLife0`). None if pad not live.
+fn mobile_farp_hull_hp_percent(lua: MizLua<'_>, pad_template: &str) -> Option<u8> {
+    let g = Group::get_by_name(lua, pad_template).ok()?;
+    if !g.is_exist().ok()? {
+        return None;
+    }
+    let u = g.get_unit(1).ok()?;
+    if !u.is_exist().ok()? {
+        return None;
+    }
+    let life = u.get_life().ok()?;
+    let life0 = u.get_life0().ok()?;
+    if life0 <= 0 {
+        return Some(100);
+    }
+    // Hoggit: life <= 1 → dead / cooking off.
+    if life <= 1 {
+        return Some(0);
+    }
+    Some(((life as f32 / life0 as f32) * 100.).trunc().clamp(0., 100.) as u8)
+}
+
 fn default_objective_production() -> u8 {
     100
 }
@@ -797,6 +819,51 @@ impl Db {
     }
 
     fn compute_objective_status(&self, obj: &Objective) -> Result<(u8, u8)> {
+        if let ObjectiveKind::Farp {
+            mobile: true,
+            pad_template,
+            ..
+        } = &obj.kind
+        {
+            let (_, logi) = obj
+                .groups
+                .get(&obj.owner)
+                .map(|groups| {
+                    let mut logi_total = 0;
+                    let mut logi_alive = 0;
+                    for gid in groups {
+                        let group = group!(self, gid)?;
+                        if !group.class.counts_toward_logi_pct() {
+                            continue;
+                        }
+                        for uid in &group.units {
+                            let unit = unit!(self, uid)?;
+                            if unit.tags.contains(UnitTag::Invincible) {
+                                continue;
+                            }
+                            logi_total += 1;
+                            if !unit.dead {
+                                logi_alive += 1;
+                            }
+                        }
+                    }
+                    let logi = if logi_total == 0 {
+                        100
+                    } else {
+                        ((logi_alive as f32 / logi_total as f32) * 100.).trunc() as u8
+                    };
+                    Ok::<_, anyhow::Error>((0u8, logi))
+                })
+                .unwrap_or(Ok((0, 0)))?;
+            let health = self
+                .persisted
+                .units_by_name
+                .get(pad_template.as_str())
+                .and_then(|uid| self.persisted.units.get(uid))
+                .map(|u| if u.dead { 0 } else { u.hp_percent })
+                .unwrap_or(100);
+            return Ok((health, logi));
+        }
         obj.groups
             .get(&obj.owner)
             .map(|groups| {
@@ -828,6 +895,78 @@ impl Db {
                 Ok((health, logi))
             })
             .unwrap_or(Ok((0, 0)))
+    }
+
+    /// Poll DCS hull HP into persisted pad unit (`hp_percent`) for mobile FARPs.
+    pub(super) fn sync_mobile_farp_hull_hp_from_dcs(
+        &mut self,
+        lua: MizLua,
+        oid: ObjectiveId,
+    ) -> Result<()> {
+        let ObjectiveKind::Farp {
+            mobile: true,
+            pad_template,
+            ..
+        } = &objective!(self, oid)?.kind
+        else {
+            return Ok(());
+        };
+        let pad = pad_template.clone();
+        let Some(hp) = mobile_farp_hull_hp_percent(lua, pad.as_str()) else {
+            return Ok(());
+        };
+        let Some(uid) = self.persisted.units_by_name.get(&pad).copied() else {
+            return Ok(());
+        };
+        if let Some(unit) = self.persisted.units.get_mut_cow(&uid) {
+            if unit.hp_percent != hp {
+                unit.hp_percent = hp;
+                unit.dead = hp == 0;
+                self.ephemeral.dirty();
+            }
+        }
+        Ok(())
+    }
+
+    /// After mission load: DCS respawns ships at full life; no official `Unit.setLife`.
+    pub(super) fn try_restore_mobile_farp_hull_hp_after_load(
+        &mut self,
+        lua: MizLua,
+        oid: ObjectiveId,
+    ) -> Result<()> {
+        let ObjectiveKind::Farp {
+            mobile: true,
+            pad_template,
+            ..
+        } = &objective!(self, oid)?.kind
+        else {
+            return Ok(());
+        };
+        let pad = pad_template.clone();
+        let Some(uid) = self.persisted.units_by_name.get(&pad).copied() else {
+            return Ok(());
+        };
+        let Some(unit) = self.persisted.units.get(&uid) else {
+            return Ok(());
+        };
+        if unit.dead || unit.hp_percent >= 100 {
+            return Ok(());
+        }
+        let persisted_hp = unit.hp_percent;
+        let live = mobile_farp_hull_hp_percent(lua, pad.as_str()).unwrap_or(100);
+        if live == persisted_hp {
+            return Ok(());
+        }
+        // Official DCS API: Unit.getLife/getLife0 only — no Unit.setLife (Hoggit / ED docs).
+        // MOOSE uses undocumented a_unit_set_life_percentage via net.dostring_in; not used here.
+        if !self.ephemeral.mobile_farp_hull_restore_unsupported_logged {
+            self.ephemeral.mobile_farp_hull_restore_unsupported_logged = true;
+            warn!(
+                "mobile FARP hull HP restore after restart is not possible: DCS Unit has no setLife \
+                 (persisted {pad} hp={persisted_hp}%, live DCS hp={live}%). Further restore attempts stopped."
+            );
+        }
+        Ok(())
     }
 
     fn factory_unit_hp_from_dcs(&self, lua: MizLua, unit: &SpawnedUnit) -> Result<u8> {
@@ -2337,6 +2476,11 @@ impl Db {
             .into_iter()
             .map(|(id, _)| *id)
             .collect();
+        for oid in &oids {
+            if let Err(e) = self.sync_mobile_farp_hull_hp_from_dcs(lua, *oid) {
+                warn!("mobile FARP hull HP sync {oid:?}: {e:?}");
+            }
+        }
         for oid in oids {
             self.update_objective_status(None, &oid, now)?;
         }

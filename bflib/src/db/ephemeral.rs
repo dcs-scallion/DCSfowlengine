@@ -222,6 +222,8 @@ pub struct Ephemeral {
     overlay_underlay_dirty: bool,
     /// Mobile FARP / carrier pads currently underway (no supply arrow / no virtual deliveries).
     pub(super) mobile_farp_underway: FxHashSet<ObjectiveId>,
+    /// Logged once: DCS cannot restore ship hull HP after restart (no Unit.setLife).
+    pub(super) mobile_farp_hull_restore_unsupported_logged: bool,
 }
 
 impl Default for Ephemeral {
@@ -301,6 +303,7 @@ impl Default for Ephemeral {
             campaign_airframe_loss_ids: FxHashSet::default(),
             overlay_underlay_dirty: false,
             mobile_farp_underway: FxHashSet::default(),
+            mobile_farp_hull_restore_unsupported_logged: false,
         }
     }
 }

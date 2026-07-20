@@ -589,6 +589,24 @@ pub struct WarehouseConfig {
         rename = "dynamicFARPs_InitialStockPercentage"
     )]
     pub dynamic_farps_initial_stock_percentage: u8,
+    /// After capture of an OFO (Fob): fill still-empty template rows to this % of capacity (0-100).
+    #[serde(
+        default = "default_captured_stock_percentage",
+        rename = "CapturedStockPercentage_OFO"
+    )]
+    pub captured_stock_percentage_ofo: u8,
+    /// After capture of an OAB (Airbase): fill still-empty template rows to this % of capacity (0-100).
+    #[serde(
+        default = "default_captured_stock_percentage",
+        rename = "CapturedStockPercentage_OAB"
+    )]
+    pub captured_stock_percentage_oab: u8,
+    /// After capture of an OLO (Logistics hub): fill still-empty template rows to this % of capacity (0-100).
+    #[serde(
+        default = "default_captured_stock_percentage",
+        rename = "CapturedStockPercentage_OLO"
+    )]
+    pub captured_stock_percentage_olo: u8,
 }
 
 fn default_front_line_grid_size_meters() -> f64 {
@@ -605,6 +623,10 @@ fn default_carrier_airbase_max() -> u32 {
 
 fn default_dynamic_farps_initial_stock_percentage() -> u8 {
     100
+}
+
+fn default_captured_stock_percentage() -> u8 {
+    0
 }
 
 impl WarehouseConfig {

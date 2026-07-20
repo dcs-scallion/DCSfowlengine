@@ -855,6 +855,7 @@ impl Db {
                 }
             }
             debug!("respawning farps");
+            let mut mobile_farp_hull_restore: SmallVec<[ObjectiveId; 8]> = smallvec![];
             for (_, obj) in self.persisted.objectives.iter_mut_cow() {
                 let pos = obj.zone.pos();
                 let alt = land.get_height(LuaVec2(pos))? + 50.;
@@ -874,6 +875,7 @@ impl Db {
                             .move_farp_pad(idx, obj.owner, &pad_template, pos)
                             .context("moving mobile farp pad")?
                             .spawned;
+                        mobile_farp_hull_restore.push(obj.id);
                     } else {
                         let pad_move = spctx
                             .move_farp_pad(idx, obj.owner, &pad_template, pos)
@@ -922,6 +924,12 @@ impl Db {
                             self.ephemeral.push_spawn(*gid);
                         }
                     }
+                }
+            }
+            for oid in mobile_farp_hull_restore {
+                if let Err(e) = self.try_restore_mobile_farp_hull_hp_after_load(spctx.lua(), oid)
+                {
+                    warn!("mobile FARP {oid:?} hull HP restore after load: {e:?}");
                 }
             }
             Ok(())
