@@ -35,17 +35,27 @@ use compact_str::{format_compact, CompactString};
 use dcso3::{
     airbase::Airbase,
     coalition::Side,
+    env::miz::Miz,
     land::{Land, SurfaceType},
     object::DcsObject,
     perf::record_perf,
-    warehouse::{self, LiquidType},
+    warehouse::{self, LiquidType, WSAircraftCategory, WSCategory},
     world::World,
-    LuaVec2, MizLua, String, Vector2,
+    LuaEnv, LuaVec2, MizLua, String, Vector2,
 };
 use fxhash::{FxHashMap, FxHashSet};
 use log::{debug, error, info, warn};
+use mlua::{prelude::*, Value};
 use serde_derive::{Deserialize, Serialize};
 use smallvec::{smallvec, SmallVec};
+use std::{
+    cmp::{max, min},
+    collections::hash_map::Entry,
+    mem,
+    ops::{AddAssign, SubAssign},
+    sync::Arc,
+};
+use tokio::sync::mpsc::UnboundedSender;
 
 fn objective_airbase_on_water(lua: MizLua, obj: &Objective) -> Result<bool> {
     if !matches!(obj.kind, ObjectiveKind::Airbase) {
@@ -62,14 +72,267 @@ fn objective_airbase_on_water(lua: MizLua, obj: &Objective) -> Result<bool> {
 fn scale_capacity_by_percent_floor(capacity: u32, pct: u8) -> u32 {
     capacity.saturating_mul(pct as u32) / 100
 }
-use std::{
-    cmp::{max, min},
-    collections::hash_map::Entry,
-    mem,
-    ops::{AddAssign, SubAssign},
-    sync::Arc,
-};
-use tokio::sync::mpsc::UnboundedSender;
+
+const DYNAMIC_TEMPLATE_GROUP_PREFIX: &str = "zzDT-";
+const LEGACY_DYNAMIC_TEMPLATE_PREFIX: &str = "DT-";
+
+fn scan_dyn_spawn_template_links(lua: MizLua) -> Result<FxHashMap<(Side, String), i64>> {
+    let miz = Miz::singleton(lua)?;
+    let mut out: FxHashMap<(Side, String), i64> = FxHashMap::default();
+    for side in [Side::Blue, Side::Red] {
+        let coa = miz.coalition(side)?;
+        for country in coa.countries()? {
+            let country = country?;
+            for groups in [country.planes()?, country.helicopters()?] {
+                for group in groups {
+                    let group = group?;
+                    let name = group.name()?;
+                    let is_dt = group
+                        .raw_get::<_, bool>("dynSpawnTemplate")
+                        .unwrap_or(false)
+                        || name.starts_with(DYNAMIC_TEMPLATE_GROUP_PREFIX)
+                        || name.starts_with(LEGACY_DYNAMIC_TEMPLATE_PREFIX);
+                    if !is_dt {
+                        continue;
+                    }
+                    let gid = group.id()?.inner();
+                    let mut unit_type: Option<String> = None;
+                    for unit in group.units()? {
+                        unit_type = Some(unit?.typ()?);
+                        break;
+                    }
+                    let Some(unit_type) = unit_type else {
+                        continue;
+                    };
+                    out.insert((side, unit_type), gid);
+                }
+            }
+        }
+    }
+    Ok(out)
+}
+
+fn env_warehouses_table(lua: MizLua) -> Result<Option<LuaTable>> {
+    let env: LuaTable = lua.inner().globals().raw_get("env")?;
+    match env.raw_get::<_, Value>("warehouses")? {
+        Value::Table(t) => Ok(Some(t)),
+        _ => Ok(None),
+    }
+}
+
+fn me_warehouse_table_for_airbase_id<'lua>(
+    warehouses: &LuaTable<'lua>,
+    ab_id: i64,
+) -> Result<Option<LuaTable<'lua>>> {
+    for section in ["airports", "warehouses"] {
+        let Ok(section_tbl) = warehouses.raw_get::<_, LuaTable>(section) else {
+            continue;
+        };
+        // ME keys may be integer or stringified id.
+        if let Ok(t) = section_tbl.raw_get::<_, LuaTable>(ab_id) {
+            return Ok(Some(t));
+        }
+        let key = format!("{ab_id}");
+        if let Ok(t) = section_tbl.raw_get::<_, LuaTable>(key.as_str()) {
+            return Ok(Some(t));
+        }
+    }
+    Ok(None)
+}
+
+fn apply_me_warehouse_link_dyn_templ(
+    lua: MizLua,
+    ab_id: i64,
+    new_owner: Side,
+    links: &FxHashMap<(Side, String), i64>,
+) -> Result<usize> {
+    let Some(warehouses) = env_warehouses_table(lua)? else {
+        warn!("capture linkDynTempl: env.warehouses missing (cannot set ME linkDynTempl)");
+        return Ok(0);
+    };
+    let Some(wh) = me_warehouse_table_for_airbase_id(&warehouses, ab_id)? else {
+        warn!("capture linkDynTempl: no ME warehouse row for airbase id {ab_id}");
+        return Ok(0);
+    };
+    let aircrafts: LuaTable = match wh.raw_get("aircrafts") {
+        Ok(t) => t,
+        Err(_) => {
+            let t = lua.inner().create_table()?;
+            wh.raw_set("aircrafts", t.clone())?;
+            t
+        }
+    };
+    let mut updated = 0usize;
+    let mut seen: FxHashSet<String> = FxHashSet::default();
+    for cat in ["helicopters", "planes"] {
+        let cat_tbl: LuaTable = match aircrafts.raw_get(cat) {
+            Ok(t) => t,
+            Err(_) => {
+                let t = lua.inner().create_table()?;
+                aircrafts.raw_set(cat, t.clone())?;
+                t
+            }
+        };
+        let mut keys: SmallVec<[String; 32]> = smallvec![];
+        cat_tbl.for_each(|k: Value, _: Value| {
+            if let Value::String(s) = k {
+                keys.push(String::from(s.to_str()?));
+            }
+            Ok(())
+        })?;
+        for unit_type in keys {
+            seen.insert(unit_type.clone());
+            let row: LuaTable = cat_tbl.raw_get(unit_type.as_str())?;
+            let link = links
+                .get(&(new_owner, unit_type.clone()))
+                .copied()
+                .unwrap_or(0);
+            row.raw_set("linkDynTempl", link)?;
+            updated += 1;
+        }
+    }
+    // Ensure new-owner DT types exist as ME aircraft rows (stock may be added via setItem).
+    let resource_map = warehouse::Warehouse::get_resource_map(lua).ok();
+    for ((side, unit_type), &gid) in links {
+        if *side != new_owner || seen.contains(unit_type) {
+            continue;
+        }
+        let cat = aircraft_me_category(resource_map.as_ref(), unit_type.as_str());
+        let cat_tbl: LuaTable = aircrafts.raw_get(cat)?;
+        let row = lua.inner().create_table()?;
+        row.raw_set("initialAmount", 0u32)?;
+        row.raw_set("linkDynTempl", gid)?;
+        if let Some(rm) = resource_map.as_ref() {
+            if let Some(quad) = resource_map_ws_quad(rm, unit_type.as_str()) {
+                let ws = lua.inner().create_table()?;
+                ws.raw_set(1, quad[0])?;
+                ws.raw_set(2, quad[1])?;
+                ws.raw_set(3, quad[2])?;
+                ws.raw_set(4, quad[3])?;
+                row.raw_set("wsType", ws)?;
+            }
+        }
+        cat_tbl.raw_set(unit_type.as_str(), row)?;
+        updated += 1;
+    }
+    Ok(updated)
+}
+
+/// Opposite/capture: Red ME often lacks Blue ordnance rows (e.g. AGM-114K). `Warehouse.setItem`
+/// alone may not create Warehouse State entries — mirror bftools `apply_zone_ws_weapon_stock` row insert.
+fn ensure_me_warehouse_weapon_rows_for_virtual(
+    lua: MizLua,
+    ab_id: i64,
+    obj: &Objective,
+    resource_meta: &FxHashMap<String, WarehouseResourceMeta>,
+) -> Result<usize> {
+    let Some(warehouses) = env_warehouses_table(lua)? else {
+        return Ok(0);
+    };
+    let Some(wh) = me_warehouse_table_for_airbase_id(&warehouses, ab_id)? else {
+        return Ok(0);
+    };
+    let weapons: LuaTable = match wh.raw_get("weapons") {
+        Ok(t) => t,
+        Err(_) => {
+            let t = lua.inner().create_table()?;
+            wh.raw_set("weapons", t.clone())?;
+            t
+        }
+    };
+    let mut existing: FxHashSet<[i32; 4]> = FxHashSet::default();
+    weapons.for_each(|_: Value, w: Value| {
+        let Value::Table(row) = w else {
+            return Ok(());
+        };
+        if let Some(quad) = me_weapon_row_ws_quad(&row) {
+            existing.insert(quad);
+        }
+        Ok(())
+    })?;
+    let mut added = 0usize;
+    for (name, inv) in &obj.warehouse.equipment {
+        if inv.capacity == 0 {
+            continue;
+        }
+        let Some(meta) = resource_meta.get(name) else {
+            continue;
+        };
+        if meta.is_aircraft {
+            continue;
+        }
+        let Some(quad) = meta.quad else {
+            continue;
+        };
+        // Same shape as bftools inventory-cap ordnance + fuel tanks (Warehouse State rows).
+        let need_me_row = (quad[0] == 1 && quad[1] == 3)
+            || (quad[0] == 4 && ((4..=8).contains(&quad[1]) || quad[1] == 15));
+        if !need_me_row {
+            continue;
+        }
+        if existing.contains(&quad) {
+            continue;
+        }
+        let row = lua.inner().create_table()?;
+        let ws = lua.inner().create_table()?;
+        ws.raw_set(1, quad[0])?;
+        ws.raw_set(2, quad[1])?;
+        ws.raw_set(3, quad[2])?;
+        ws.raw_set(4, quad[3])?;
+        row.raw_set("wsType", ws)?;
+        row.raw_set("initialAmount", 0u32)?;
+        row.raw_set("name", name.as_str())?;
+        row.raw_set("displayName", name.as_str())?;
+        let mut new_idx = weapons.raw_len().saturating_add(1);
+        if new_idx == 0 {
+            new_idx = 1;
+        }
+        weapons.raw_set(new_idx, row)?;
+        existing.insert(quad);
+        added += 1;
+    }
+    Ok(added)
+}
+
+fn me_weapon_row_ws_quad(row: &LuaTable) -> Option<[i32; 4]> {
+    let wst: LuaTable = row.raw_get("wsType").ok()?;
+    Some([
+        wst.raw_get(1).ok()?,
+        wst.raw_get(2).ok()?,
+        wst.raw_get(3).ok()?,
+        wst.raw_get(4).ok()?,
+    ])
+}
+
+fn resource_map_ws_quad(rm: &warehouse::ResourceMap, unit_type: &str) -> Option<[i32; 4]> {
+    let mut out = None;
+    let _ = rm.for_each(|name, ws| {
+        if name.as_str() == unit_type {
+            out = ws.quad().ok();
+        }
+        Ok(())
+    });
+    out
+}
+
+fn aircraft_me_category(resource_map: Option<&warehouse::ResourceMap>, unit_type: &str) -> &'static str {
+    let Some(rm) = resource_map else {
+        return "planes";
+    };
+    let mut cat = "planes";
+    let _ = rm.for_each(|name, ws| {
+        if name.as_str() == unit_type {
+            if matches!(
+                ws.category()?,
+                WSCategory::Aircraft(WSAircraftCategory::Helicopters)
+            ) {
+                cat = "helicopters";
+            }
+        }
+        Ok(())
+    });
+    cat
+}
 
 #[derive(Debug)]
 struct WarehouseSyncSkipped;
@@ -188,7 +451,13 @@ impl Transfer {
         self.target
     }
 
-    fn execute(&self, db: &mut Persisted, to_bg: &Option<UnboundedSender<Task>>) -> Result<()> {
+    fn execute(
+        &self,
+        db: &mut Persisted,
+        to_bg: &Option<UnboundedSender<Task>>,
+        export: &FowlMizExport,
+        resource_meta: &FxHashMap<String, WarehouseResourceMeta>,
+    ) -> Result<()> {
         let src_name = db
             .objectives
             .get(&self.source)
@@ -200,6 +469,20 @@ impl Transfer {
             .map(|o| o.name.clone())
             .unwrap_or_else(|| format_compact!("{:?}", self.target).into());
         let item = transfer_item_label(&self.item);
+        let src_cap = match &self.item {
+            TransferItem::Equipment(name) => db
+                .objectives
+                .get(&self.source)
+                .and_then(|o| o.warehouse.equipment.get(name.as_str()))
+                .map(|i| i.capacity)
+                .unwrap_or(0),
+            TransferItem::Liquid(name) => db
+                .objectives
+                .get(&self.source)
+                .and_then(|o| o.warehouse.liquids.get(name))
+                .map(|i| i.capacity)
+                .unwrap_or(0),
+        };
         let src = db
             .objectives
             .get_mut_cow(&self.source)
@@ -256,28 +539,54 @@ impl Transfer {
         };
         match &self.item {
             TransferItem::Equipment(name) => {
-                let d = &mut dst
+                let stored_after = dst_before.saturating_add(self.amount);
+                let export_cap = equipment_capacity_for_discovered_row(
+                    dst,
+                    name.as_str(),
+                    stored_after,
+                    export,
+                    resource_meta,
+                    None,
+                    None,
+                    false,
+                );
+                let inv = dst
                     .warehouse
                     .equipment
-                    .get_or_default_cow(name.clone())
-                    .stored;
-                *d += self.amount;
+                    .get_or_default_cow(name.clone());
+                inv.stored = stored_after;
+                if inv.capacity == 0 {
+                    inv.capacity = export_cap.max(src_cap).max(inv.stored);
+                }
                 if let Some(to_bg) = to_bg.as_ref() {
                     let _ = to_bg.send(Task::Stat(Stat::EquipmentInventory {
                         id: dst.id,
                         item: name.clone(),
-                        amount: *d,
+                        amount: inv.stored,
                     }));
                 }
             }
             TransferItem::Liquid(name) => {
-                let d = &mut dst.warehouse.liquids.get_or_default_cow(*name).stored;
-                *d += self.amount;
+                let stored_after = dst_before.saturating_add(self.amount);
+                let export_cap = liquid_capacity_for_discovered_row(
+                    dst,
+                    *name,
+                    stored_after,
+                    export,
+                    None,
+                    None,
+                    false,
+                );
+                let inv = dst.warehouse.liquids.get_or_default_cow(*name);
+                inv.stored = stored_after;
+                if inv.capacity == 0 {
+                    inv.capacity = export_cap.max(src_cap).max(inv.stored);
+                }
                 if let Some(to_bg) = to_bg.as_ref() {
                     let _ = to_bg.send(Task::Stat(Stat::LiquidInventory {
                         id: dst.id,
                         item: *name,
-                        amount: *d,
+                        amount: inv.stored,
                     }));
                 }
             }
@@ -443,6 +752,53 @@ fn sync_warehouse_to_obj(
         ));
     }
     Ok(())
+}
+
+/// ME build may leave `initialAmount=1` on opposite DT rows so DCS registers `linkDynTempl`.
+/// After SyncFrom with preserve_fill, zero those aircraft if they are not in the owner export profile.
+fn prune_registration_aircraft_outside_export_profile(
+    obj: &mut Objective,
+    warehouse: &warehouse::Warehouse<'_>,
+    export: &FowlMizExport,
+    resource_meta: &FxHashMap<String, WarehouseResourceMeta>,
+) -> Result<usize> {
+    let Some(profile) = objective_coalition_stock_for_objective(export, obj) else {
+        return Ok(0);
+    };
+    let mut allowed: FxHashSet<String> = FxHashSet::default();
+    for (name, item) in &profile.equipment {
+        if item.baseline == 0 {
+            continue;
+        }
+        let dcs_name = resolve_export_equipment_dcs_name(name.as_str(), resource_meta);
+        let is_ac = resource_meta
+            .get(dcs_name.as_str())
+            .map(|m| m.is_aircraft)
+            .unwrap_or(false);
+        if is_ac {
+            allowed.insert(dcs_name);
+        }
+    }
+    let inv = warehouse
+        .get_inventory(None)
+        .context("warehouse inventory for DT registration prune")?;
+    let mut pruned = 0usize;
+    inv.aircraft()
+        .context("aircraft inventory for DT registration prune")?
+        .for_each(|name, qty| {
+            if qty == 0 || allowed.contains(name.as_str()) {
+                return Ok(());
+            }
+            warehouse
+                .set_item(name.clone(), 0)
+                .with_context(|| format_compact!("zero registration A/C {name}"))?;
+            obj.warehouse
+                .equipment
+                .remove_cow(&String::from(name.as_str()));
+            pruned += 1;
+            Ok(())
+        })?;
+    Ok(pruned)
 }
 
 /// Drop DCS rows not in virtual; optional full profile row registration (capture reseed).
@@ -679,18 +1035,23 @@ fn discover_dcs_warehouse_into_obj(
                     return Ok(());
                 }
             }
+            let stored_virtual = if objective_liquids_stored_as_tons(export, obj) {
+                dcs_liquid_kg_to_fowl_tons(stored)
+            } else {
+                stored
+            };
             let capacity = liquid_capacity_for_discovered_row(
                 obj,
                 typ,
-                stored,
+                stored_virtual,
                 export,
                 whcfg,
                 production,
                 on_water,
             );
             let row = obj.warehouse.liquids.get_or_default_cow(typ);
-            row.stored = stored;
-            row.capacity = capacity.max(stored);
+            row.stored = stored_virtual;
+            row.capacity = capacity.max(stored_virtual);
             Ok(())
         })?;
     Ok(())
@@ -735,9 +1096,14 @@ fn hydrate_production_keys_from_dcs(
         }
     }
     for typ in production.liquids.keys() {
-        let stored = warehouse
+        let stored_kg = warehouse
             .get_liquid_amount(*typ)
             .with_context(|| format_compact!("get_liquid_amount production hydrate {typ:?}"))?;
+        let stored = if objective_liquids_stored_as_tons(export, obj) {
+            dcs_liquid_kg_to_fowl_tons(stored_kg)
+        } else {
+            stored_kg
+        };
         let capacity = liquid_capacity_for_discovered_row(
             obj,
             *typ,
@@ -849,6 +1215,15 @@ fn dep_farp_export_profile<'a>(
 /// Ground DEP FARP with per-pad export stock: 20% initial fill, DCS sync in tons, virtual prune.
 fn objective_is_ground_dep_farp_export(export: &FowlMizExport, obj: &Objective) -> bool {
     dep_farp_export_profile(export, obj).is_some()
+}
+
+/// Export `InitFuel` / `objective_stock` liquid baselines are metric tons; DCS API uses kg.
+fn objective_liquids_stored_as_tons(export: &FowlMizExport, obj: &Objective) -> bool {
+    if matches!(obj.kind, ObjectiveKind::Production) {
+        return false;
+    }
+    objective_coalition_stock_for_objective(export, obj).is_some()
+        || objective_is_ground_dep_farp_export(export, obj)
 }
 
 /// Persisted deploy: virtual rows already set (e.g. after 20% init); do not hydrate from ME pad template on load.
@@ -995,7 +1370,7 @@ fn liquid_type_from_export_key(key: &str) -> Result<LiquidType> {
     }
 }
 
-/// Fowl export / bftools `InitFuel` for FARPs: metric tons; DCS `getLiquidAmount` / `setLiquidAmount`: kg.
+/// Fowl export / bftools `InitFuel` baselines: metric tons; DCS `getLiquidAmount` / `setLiquidAmount`: kg.
 const FOWL_LIQUID_TONS_TO_DCS_KG: u32 = 1000;
 
 fn fowl_liquid_tons_to_dcs_kg(tons: u32) -> u32 {
@@ -1027,7 +1402,7 @@ pub(super) fn objective_warehouse_fuel_infobar_amounts(
     export: &FowlMizExport,
     obj: &Objective,
 ) -> (CompactString, u8) {
-    let stored_in_tons = objective_is_ground_dep_farp_export(export, obj);
+    let stored_in_tons = objective_liquids_stored_as_tons(export, obj);
     let mut out = CompactString::new("");
     let mut first = true;
     let mut kinds = 0u8;
@@ -1151,6 +1526,9 @@ fn canonicalize_virtual_equipment_keys(
         }
         if old_inv.capacity > row.capacity {
             row.capacity = old_inv.capacity;
+        }
+        if row.capacity == 0 && row.stored > 0 {
+            row.capacity = row.stored;
         }
     }
 }
@@ -2079,16 +2457,7 @@ impl Db {
                 }
                 let dcs_name =
                     resolve_export_equipment_dcs_name(name.as_str(), resource_meta.as_ref());
-                let meta = resource_meta.get(&dcs_name).copied();
-                if !equipment_allowed_for_objective(
-                    export.as_ref(),
-                    obj,
-                    obj.owner,
-                    name.as_str(),
-                    meta,
-                ) {
-                    continue;
-                }
+                // DEP FARP objective_stock is authoritative.
                 obj.warehouse.equipment.insert_cow(
                     dcs_name,
                     Inventory {
@@ -2253,16 +2622,7 @@ impl Db {
                     }
                     let dcs_name =
                         resolve_export_equipment_dcs_name(name.as_str(), &resource_meta);
-                    let meta = resource_meta.get(&dcs_name).copied();
-                    if !equipment_allowed_for_objective(
-                        export,
-                        obj,
-                        obj.owner,
-                        name.as_str(),
-                        meta,
-                    ) {
-                        continue;
-                    }
+                    // objective_stock is authoritative (see apply_export_profile).
                     obj.warehouse.equipment.insert_cow(
                         dcs_name,
                         Inventory {
@@ -2295,21 +2655,12 @@ impl Db {
                 continue;
             };
             for (name, item) in &profile.equipment {
-                let dcs_name =
-                    resolve_export_equipment_dcs_name(name.as_str(), &resource_meta);
-                let meta = resource_meta.get(&dcs_name).copied();
-                if !equipment_allowed_for_objective(
-                    export,
-                    obj,
-                    obj.owner,
-                    name.as_str(),
-                    meta,
-                ) {
-                    continue;
-                }
                 if item.baseline == 0 {
                     continue;
                 }
+                let dcs_name =
+                    resolve_export_equipment_dcs_name(name.as_str(), &resource_meta);
+                // objective_stock is authoritative (see apply_export_profile).
                 obj.warehouse.equipment.insert_cow(
                     dcs_name,
                     Inventory {
@@ -2336,6 +2687,66 @@ impl Db {
         }
         self.ephemeral.dirty();
         Ok(())
+    }
+
+    /// Test-only: swap Red↔Blue owners from ME zone prefixes (OAB/OFO/OLO).
+    pub(super) fn apply_debugging_objectives_coalition_switch(&mut self) {
+        if !self.ephemeral.cfg.debugging_objectives_coalition_switch {
+            return;
+        }
+        let mut flipped = 0usize;
+        for (_oid, obj) in self.persisted.objectives.iter_mut_cow() {
+            if !matches!(
+                obj.kind,
+                ObjectiveKind::Airbase | ObjectiveKind::Fob | ObjectiveKind::Logistics
+            ) {
+                continue;
+            }
+            let from = obj.owner;
+            if !matches!(from, Side::Blue | Side::Red) {
+                continue;
+            }
+            let to = from.opposite();
+            obj.owner = to;
+            obj.nominal_owner = Some(to);
+            flipped += 1;
+            info!(
+                "debugging_objectives_coalition_switch: {} {:?} -> {:?}",
+                obj.name, from, to
+            );
+        }
+        info!(
+            "debugging_objectives_coalition_switch: flipped {flipped} objective owner(s)"
+        );
+        self.ephemeral.dirty();
+    }
+
+    /// Test-only: after opposite export seed, fill stored=capacity for SyncTo into DCS.
+    pub(super) fn fill_virtual_warehouses_to_capacity_for_debug(&mut self) {
+        if !self.ephemeral.cfg.debugging_objectives_coalition_switch {
+            return;
+        }
+        for (_oid, obj) in self.persisted.objectives.iter_mut_cow() {
+            if !matches!(
+                obj.kind,
+                ObjectiveKind::Airbase | ObjectiveKind::Fob | ObjectiveKind::Logistics
+            ) {
+                continue;
+            }
+            if !matches!(obj.owner, Side::Blue | Side::Red) {
+                continue;
+            }
+            for (_name, inv) in obj.warehouse.equipment.iter_mut_cow() {
+                inv.stored = inv.capacity;
+            }
+            for (_typ, inv) in obj.warehouse.liquids.iter_mut_cow() {
+                inv.stored = inv.capacity;
+            }
+        }
+        info!(
+            "debugging_objectives_coalition_switch: virtual warehouses filled to opposite export capacity"
+        );
+        self.ephemeral.dirty();
     }
 
     /// Replace virtual warehouse rows with the export profile for `obj.owner`.
@@ -2365,10 +2776,8 @@ impl Db {
                 continue;
             }
             let dcs_name = resolve_export_equipment_dcs_name(name.as_str(), resource_meta);
-            let meta = resource_meta.get(&dcs_name).copied();
-            if !equipment_allowed_for_objective(export, obj, obj.owner, name.as_str(), meta) {
-                continue;
-            }
+            // objective_stock is the build-time allowlist; do not re-filter with narrower
+            // objective_defaults (policy-only, misses B/RDEFAULT+ / zone ordnance e.g. AGM-114K).
             obj.warehouse.equipment.insert_cow(
                 dcs_name,
                 Inventory {
@@ -2436,6 +2845,104 @@ impl Db {
             }
         }
         filled
+    }
+
+    /// Re-assert export template maxima after spoils / capture % (and before DCS sync).
+    fn reapply_export_capacities_to_virtual(
+        obj: &mut Objective,
+        export: &FowlMizExport,
+        resource_meta: &FxHashMap<String, WarehouseResourceMeta>,
+    ) {
+        let Some(profile) = (if objective_is_ground_dep_farp(obj) {
+            dep_farp_export_profile(export, obj)
+        } else {
+            objective_coalition_stock_for_objective(export, obj)
+        }) else {
+            return;
+        };
+        for (name, inv) in obj.warehouse.equipment.iter_mut_cow() {
+            if let Some(item) = profile_export_equipment_item(profile, name.as_str(), resource_meta)
+            {
+                if item.baseline > 0 {
+                    inv.capacity = item.baseline.max(inv.stored);
+                }
+            } else if inv.capacity == 0 && inv.stored > 0 {
+                inv.capacity = inv.stored;
+            }
+        }
+        for (typ, inv) in obj.warehouse.liquids.iter_mut_cow() {
+            let baseline = profile.liquids.iter().find_map(|(key, liq)| {
+                (liquid_type_from_export_key(key).ok() == Some(*typ) && liq.baseline > 0)
+                    .then_some(liq.baseline)
+            });
+            if let Some(baseline) = baseline {
+                inv.capacity = baseline.max(inv.stored);
+            } else if inv.capacity == 0 && inv.stored > 0 {
+                inv.capacity = inv.stored;
+            }
+        }
+    }
+
+    fn execute_transfer(&mut self, tr: &Transfer) -> Result<()> {
+        let export = self.ephemeral.fowl_miz_export.as_ref();
+        let empty_meta = FxHashMap::default();
+        let resource_meta = self
+            .ephemeral
+            .warehouse_resource_meta
+            .as_ref()
+            .map(|m| m.as_ref())
+            .unwrap_or(&empty_meta);
+        tr.execute(
+            &mut self.persisted,
+            &self.ephemeral.to_bg,
+            export,
+            resource_meta,
+        )
+    }
+
+    fn ensure_dyn_spawn_template_links(&mut self, lua: MizLua) -> Result<()> {
+        if !self.ephemeral.dyn_spawn_template_links.is_empty() {
+            return Ok(());
+        }
+        self.ephemeral.dyn_spawn_template_links = scan_dyn_spawn_template_links(lua)?;
+        info!(
+            "dyn spawn template links cached: {} (zzDT-*/dynSpawnTemplate)",
+            self.ephemeral.dyn_spawn_template_links.len()
+        );
+        Ok(())
+    }
+
+    /// ME `linkDynTempl` swap for new owner (bftools `patch_warehouse_dynamic_spawn_links` shape).
+    /// Uses `env.warehouses` (Hoggit: warehouses table is scripting-accessible). Official Warehouse
+    /// class has no linkDynTempl API — live dyn-spawn may only pick this up if DCS re-reads ME rows.
+    fn apply_capture_link_dyn_templ(
+        &mut self,
+        lua: MizLua,
+        oid: ObjectiveId,
+        new_owner: Side,
+    ) -> Result<()> {
+        if matches!(new_owner, Side::Neutral) {
+            return Ok(());
+        }
+        self.ensure_dyn_spawn_template_links(lua)?;
+        let links = self.ephemeral.dyn_spawn_template_links.clone();
+        if links.is_empty() {
+            warn!("capture linkDynTempl: no zzDT-* / dynSpawnTemplate groups in mission");
+            return Ok(());
+        }
+        let airbase_oid = self
+            .ephemeral
+            .airbase_by_oid
+            .get(&oid)
+            .ok_or_else(|| anyhow!("no airbase for objective {oid:?}"))?
+            .clone();
+        let airbase = Airbase::get_instance(lua, &airbase_oid).context("airbase for linkDynTempl")?;
+        let ab_id = airbase.get_id().context("airbase id for linkDynTempl")?.inner();
+        let updated = apply_me_warehouse_link_dyn_templ(lua, ab_id, new_owner, &links)?;
+        info!(
+            "capture linkDynTempl oid={oid:?} owner={new_owner:?} airbase_id={ab_id}: updated {updated} aircraft rows"
+        );
+        Ok(())
     }
 
     pub(super) fn setup_warehouses_after_load(&mut self, lua: MizLua) -> Result<()> {
@@ -2804,8 +3311,43 @@ impl Db {
         }
         let sync_oids: Vec<ObjectiveId> = self.ephemeral.airbase_by_oid.keys().copied().collect();
         let preserve_fill = self.ephemeral.preserve_initial_warehouse_fill;
+        let debug_coalition_switch = self.ephemeral.cfg.debugging_objectives_coalition_switch;
         for oid in sync_oids {
             if matches!(objective!(self, oid)?.kind, ObjectiveKind::Production) {
+                continue;
+            }
+            if debug_coalition_switch {
+                let (kind, owner) = {
+                    let obj = objective!(self, oid)?;
+                    (obj.kind.clone(), obj.owner)
+                };
+                if matches!(
+                    kind,
+                    ObjectiveKind::Airbase | ObjectiveKind::Fob | ObjectiveKind::Logistics
+                ) && matches!(owner, Side::Blue | Side::Red)
+                {
+                    self.replace_dcs_warehouse_from_virtual(lua, oid)
+                        .with_context(|| {
+                            format_compact!(
+                                "debugging_objectives_coalition_switch: replace DCS stock {:?}",
+                                oid
+                            )
+                        })?;
+                    // Same as capture: ME linkDynTempl must follow new owner zzDT-* (stock alone is not enough).
+                    if let Err(e) = self.apply_capture_link_dyn_templ(lua, oid, owner) {
+                        error!(
+                            "debugging_objectives_coalition_switch linkDynTempl {:?}: {e:?}",
+                            oid
+                        );
+                    }
+                } else {
+                    self.sync_warehouse_to_objective(lua, oid).with_context(|| {
+                        format_compact!(
+                            "debugging_objectives_coalition_switch: SyncFrom ME {:?}",
+                            oid
+                        )
+                    })?;
+                }
                 continue;
             }
             self.sync_warehouse_to_objective(lua, oid)
@@ -2814,9 +3356,41 @@ impl Db {
                 self.sync_objective_to_warehouse(lua, oid).with_context(|| {
                     format_compact!("Fowl export: prune/sync DCS warehouse for {:?}", oid)
                 })?;
+            } else {
+                // Drop ME amount=1 opposite DT registration fillers not in owner export stock.
+                let export = Arc::clone(&self.ephemeral.fowl_miz_export);
+                let resource_meta = self
+                    .warehouse_resource_meta_cache(lua)
+                    .context("resource meta for DT registration prune")?;
+                let airbase_oid = self
+                    .ephemeral
+                    .airbase_by_oid
+                    .get(&oid)
+                    .ok_or_else(|| anyhow!("no airbase for DT registration prune {oid:?}"))?
+                    .clone();
+                let warehouse = Airbase::get_instance(lua, &airbase_oid)?
+                    .get_warehouse()
+                    .context("warehouse for DT registration prune")?;
+                let obj = objective_mut!(self, oid)?;
+                let n = prune_registration_aircraft_outside_export_profile(
+                    obj,
+                    &warehouse,
+                    export.as_ref(),
+                    resource_meta.as_ref(),
+                )?;
+                if n > 0 {
+                    info!(
+                        "preserve_fill: pruned {n} registration-only A/C row(s) outside export for {:?}",
+                        obj.name
+                    );
+                }
             }
         }
-        if preserve_fill {
+        if debug_coalition_switch {
+            info!(
+                "debugging_objectives_coalition_switch: replaced DCS stock with opposite export (orphans removed)"
+            );
+        } else if preserve_fill {
             self.ephemeral.preserve_initial_warehouse_fill = false;
             info!(
                 "new campaign: preserved bftools ME warehouse stock (virtual sync from DCS only, no prune/sync-to)"
@@ -3006,8 +3580,19 @@ impl Db {
                 LogiStage::ExecuteTransfers { transfers } => {
                     let st = Utc::now();
                     let before = transfers.len();
+                    let export = Arc::clone(&self.ephemeral.fowl_miz_export);
+                    let resource_meta = self
+                        .ephemeral
+                        .warehouse_resource_meta
+                        .clone()
+                        .unwrap_or_else(|| Arc::new(FxHashMap::default()));
                     while let Some(tr) = transfers.pop() {
-                        if let Err(e) = tr.execute(&mut self.persisted, &self.ephemeral.to_bg) {
+                        if let Err(e) = tr.execute(
+                            &mut self.persisted,
+                            &self.ephemeral.to_bg,
+                            export.as_ref(),
+                            resource_meta.as_ref(),
+                        ) {
                             error!("executing transfer {:?} {e:?}", tr)
                         }
                         if Utc::now() - st > Duration::milliseconds(6) {
@@ -3125,6 +3710,7 @@ impl Db {
             Self::apply_capture_spoils_to_virtual(obj, &spoils_eq, &spoils_liq);
             let pct = capture_stock_pct;
             let pct_filled = Self::apply_capture_stock_percentage_to_virtual(obj, pct);
+            Self::reapply_export_capacities_to_virtual(obj, export.as_ref(), resource_meta.as_ref());
             let mut eq_cap_rows = 0usize;
             for (_, inv) in &obj.warehouse.equipment {
                 if inv.capacity > 0 {
@@ -3139,10 +3725,36 @@ impl Db {
             }
             (eq_cap_rows, liq_cap_rows, pct_filled, pct)
         };
+        if let Err(e) = self.apply_capture_link_dyn_templ(lua, oid, new_owner) {
+            error!("capture linkDynTempl {name}: {e:?}");
+        }
+        // Ensure ME weapon rows for new-owner ordnance before Warehouse.setItem (AGM-114K etc.).
+        if let Ok(Some(ab_id)) = (|| -> Result<Option<i64>> {
+            let airbase_oid = match self.ephemeral.airbase_by_oid.get(&oid) {
+                Some(id) => id,
+                None => return Ok(None),
+            };
+            let ab = Airbase::get_instance(lua, airbase_oid)?;
+            Ok(Some(ab.get_id()?.inner()))
+        })() {
+            let obj = objective!(self, oid)?;
+            match ensure_me_warehouse_weapon_rows_for_virtual(
+                lua,
+                ab_id,
+                obj,
+                resource_meta.as_ref(),
+            ) {
+                Ok(n) if n > 0 => info!(
+                    "capture {name}: added {n} ME weapon row(s) for {new_owner:?} export stock"
+                ),
+                Ok(_) => {}
+                Err(e) => warn!("capture {name}: ME weapon rows {e:?}"),
+            }
+        }
         let capture_track = match self.sync_objective_to_warehouse(lua, oid) {
             Ok((obj, wh)) => {
-                let dep_farp = objective_is_ground_dep_farp_export(export.as_ref(), obj);
-                if let Err(e) = apply_virtual_warehouse_to_dcs(obj, &wh, dep_farp, true) {
+                let liquids_tons = objective_liquids_stored_as_tons(export.as_ref(), obj);
+                if let Err(e) = apply_virtual_warehouse_to_dcs(obj, &wh, liquids_tons, true) {
                     error!("apply DCS warehouse after capture {oid}: {e:?}");
                 }
                 let mut track_names: Vec<String> = Vec::new();
@@ -3718,7 +4330,7 @@ impl Db {
                 ));
             }
             for tr in transfers.drain(..) {
-                tr.execute(&mut self.persisted, &self.ephemeral.to_bg)
+                self.execute_transfer(&tr)
                     .with_context(|| format_compact!("executing transfer {:?}", tr))?
             }
             self.ephemeral.dirty();
@@ -3849,7 +4461,8 @@ impl Db {
             return Ok((obj, warehouse));
         }
         let is_logistics_hub = matches!(obj.kind, ObjectiveKind::Logistics);
-        sync_warehouse_to_obj(obj, &warehouse, false)
+        let liquids_tons = objective_liquids_stored_as_tons(export.as_ref(), obj);
+        sync_warehouse_to_obj(obj, &warehouse, liquids_tons)
             .context("syncing warehouse to objective")?;
         discover_dcs_warehouse_into_obj(
             obj,
@@ -3931,14 +4544,63 @@ impl Db {
         let owner = obj.owner;
         let export = self.ephemeral.fowl_miz_export.as_ref();
         prune_disallowed_dcs_weapon_stock(&warehouse, export, owner, resource_meta.as_ref())?;
-        let dep_farp_export = objective_is_ground_dep_farp_export(export, obj);
-        sync_obj_to_warehouse(obj, &warehouse, dep_farp_export)
+        let liquids_tons = objective_liquids_stored_as_tons(export, obj);
+        sync_obj_to_warehouse(obj, &warehouse, liquids_tons)
             .context("syncing warehouse to objective")?;
-        if dep_farp_export {
+        if objective_is_ground_dep_farp_export(export, obj) {
             reconcile_dcs_warehouse_to_virtual(obj, &warehouse)
                 .context("pruning ground DEP FARP DCS warehouse after virtual push")?;
         }
         Ok((obj, warehouse))
+    }
+
+    /// Drop DCS rows not in virtual, then set all virtual rows (opposite-owner debug / capture-style).
+    fn replace_dcs_warehouse_from_virtual<'lua>(
+        &mut self,
+        lua: MizLua<'lua>,
+        oid: ObjectiveId,
+    ) -> Result<()> {
+        let resource_meta = self
+            .warehouse_resource_meta_cache(lua)
+            .context("warehouse resource meta for opposite replace")?;
+        let obj = objective_mut!(self, oid)?;
+        if matches!(obj.kind, ObjectiveKind::Production) {
+            return Ok(());
+        }
+        let airbase = self
+            .ephemeral
+            .airbase_by_oid
+            .get(&oid)
+            .ok_or_else(|| anyhow!("no logistics for objective {}", obj.name))?;
+        let airbase_inst = Airbase::get_instance(lua, airbase).context("getting airbase")?;
+        let ab_id = airbase_inst
+            .get_id()
+            .context("airbase id for ME weapon rows")?
+            .inner();
+        let warehouse = airbase_inst
+            .get_warehouse()
+            .context("getting warehouse")?;
+        let owner = obj.owner;
+        let export = self.ephemeral.fowl_miz_export.as_ref();
+        let added = ensure_me_warehouse_weapon_rows_for_virtual(
+            lua,
+            ab_id,
+            obj,
+            resource_meta.as_ref(),
+        )?;
+        if added > 0 {
+            info!(
+                "ME warehouse weapon rows: added {added} for {:?} (opposite/export stock)",
+                obj.name
+            );
+        }
+        prune_disallowed_dcs_weapon_stock(&warehouse, export, owner, resource_meta.as_ref())?;
+        let liquids_tons = objective_liquids_stored_as_tons(export, obj);
+        apply_virtual_warehouse_to_dcs(obj, &warehouse, liquids_tons, true)
+            .context("replace DCS warehouse from virtual")?;
+        record_objective_dcs_equipment_names(&mut self.ephemeral, oid, &warehouse)
+            .context("record DCS equipment after opposite replace")?;
+        Ok(())
     }
 
     pub fn transfer_supplies(
@@ -3996,13 +4658,13 @@ impl Db {
         compute!(equipment, Equipment);
         compute!(liquids, Liquid);
         for tr in transfers {
-            tr.execute(&mut self.persisted, &self.ephemeral.to_bg)?
+            self.execute_transfer(&tr)?
         }
         let export = self.ephemeral.fowl_miz_export.as_ref();
-        let from_dep = objective_is_ground_dep_farp_export(export, objective!(self, from)?);
-        let to_dep = objective_is_ground_dep_farp_export(export, objective!(self, to)?);
-        sync_obj_to_warehouse(objective!(self, from)?, &from_wh, from_dep)?;
-        sync_obj_to_warehouse(objective!(self, to)?, &to_wh, to_dep)?;
+        let from_tons = objective_liquids_stored_as_tons(export, objective!(self, from)?);
+        let to_tons = objective_liquids_stored_as_tons(export, objective!(self, to)?);
+        sync_obj_to_warehouse(objective!(self, from)?, &from_wh, from_tons)?;
+        sync_obj_to_warehouse(objective!(self, to)?, &to_wh, to_tons)?;
         self.update_supply_status()
             .context("updating supply status")?;
         Ok(())
@@ -4026,7 +4688,7 @@ impl Db {
             Some(p) => Arc::clone(p),
             None => return Ok(()),
         };
-        let dep_farp_export = objective_is_ground_dep_farp_export(
+        let liquids_tons = objective_liquids_stored_as_tons(
             self.ephemeral.fowl_miz_export.as_ref(),
             objective!(self, oid)?,
         );
@@ -4043,7 +4705,7 @@ impl Db {
                 inv.reduce(percent);
             }
         }
-        sync_obj_to_warehouse(obj, &warehouse, dep_farp_export).context("syncing from warehouse")?;
+        sync_obj_to_warehouse(obj, &warehouse, liquids_tons).context("syncing from warehouse")?;
         self.update_supply_status()
             .context("updating supply status")?;
         self.ephemeral.dirty();

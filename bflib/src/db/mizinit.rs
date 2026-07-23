@@ -698,6 +698,7 @@ impl Db {
                 t.init_objective(lua, zone, stem)?
             }
         }
+        t.apply_debugging_objectives_coalition_switch();
         t.build_carrier_slot_maps(miz)?;
         for side in Side::ALL {
             let coa = miz.coalition(side)?;
@@ -756,9 +757,17 @@ impl Db {
             .context("OPR feed hubs after factory link")?;
         t.seed_objective_warehouses_from_export(lua)
             .context("seeding objective warehouses from Fowl export")?;
-        t.ephemeral.preserve_initial_warehouse_fill = true;
-        t.ephemeral.defer_initial_hub_distribute = true;
-        t.ephemeral.defer_initial_logistics_sync_to = true;
+        if t.ephemeral.cfg.debugging_objectives_coalition_switch {
+            t.fill_virtual_warehouses_to_capacity_for_debug();
+            // Opposite export stock → DCS; do not SyncFrom ME fill for the pre-flip owner.
+            t.ephemeral.preserve_initial_warehouse_fill = false;
+            t.ephemeral.defer_initial_hub_distribute = true;
+            t.ephemeral.defer_initial_logistics_sync_to = false;
+        } else {
+            t.ephemeral.preserve_initial_warehouse_fill = true;
+            t.ephemeral.defer_initial_hub_distribute = true;
+            t.ephemeral.defer_initial_logistics_sync_to = true;
+        }
         t.ephemeral.dirty();
         Ok(t)
     }

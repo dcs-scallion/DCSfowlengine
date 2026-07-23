@@ -3674,7 +3674,21 @@ const EXTRA_FUEL_LIQUID_KEYS: [&str; 3] = ["gasoline", "methanol_mixture", "dies
 const EXTRA_FUEL_OBJECTIVE_KINDS: [&str; 3] = ["OLO", "OAB", "OFO"];
 
 fn ordnance_ws_type(quad: [i32; 4]) -> bool {
-    quad[0] == 4 && (4..=8).contains(&quad[1])
+    // Same shape as ME `is_inventory_cap_ordnance_ws` (includes containers/pods l2=15).
+    quad[0] == 4 && ((4..=8).contains(&quad[1]) || quad[1] == 15)
+}
+
+fn fueltank_ws_type(quad: [i32; 4]) -> bool {
+    quad[0] == 1 && quad[1] == 3
+}
+
+/// ME DEFAULT restore + opposite export: ordnance/containers and fuel tanks.
+fn default_restore_weapon_ws(quad: [i32; 4]) -> bool {
+    ordnance_ws_type(quad) || fueltank_ws_type(quad)
+}
+
+fn stock_export_ws_type(quad: [i32; 4]) -> Option<[i32; 4]> {
+    default_restore_weapon_ws(quad).then_some(quad)
 }
 
 #[derive(Default)]
@@ -3750,14 +3764,14 @@ fn coalition_catalog_weapon_ws(row: &Table) -> Result<HashSet<[i32; 4]>> {
     Ok(out)
 }
 
-/// All ordnance wsTypes on B/RDEFAULT (amount may be zero until cfg caps are applied).
+/// All ordnance/fuel wsTypes on B/RDEFAULT (amount may be zero until cfg caps are applied).
 fn coalition_default_weapon_ws_catalog(row: &Table) -> Result<HashSet<[i32; 4]>> {
     let mut out = HashSet::default();
     if let Ok(weapons) = row.raw_get::<_, Table>("weapons") {
         for pair in weapons.clone().pairs::<Value, Table>() {
             let (_, w) = pair?;
             if let Some(ws) = read_weapon_ws_type(&w) {
-                if ordnance_ws_type(ws) {
+                if default_restore_weapon_ws(ws) {
                     out.insert(ws);
                 }
             }
@@ -3777,6 +3791,92 @@ fn coalition_stock_export_weapon_catalog(
         out.extend(coalition_default_weapon_ws_catalog(def)?);
     }
     Ok(out)
+}
+
+/// Zone `B/RINVENTORY+` / `B/RDEFAULT+` wsType amount rows (ME `apply_zone_ws_stock_amounts`).
+fn extend_catalog_with_zone_ws_stock_specs(
+    catalog: &mut HashSet<[i32; 4]>,
+    inv_specs: &HashMap<[i32; 4], WsZoneStockSpec>,
+    def_specs: &HashMap<[i32; 4], WsZoneStockSpec>,
+) {
+    for specs in [inv_specs, def_specs] {
+        for (&ws, spec) in specs {
+            if spec.amount.is_some() || spec.distribute == WsZoneDistributeScope::All {
+                catalog.insert(ws);
+            }
+        }
+    }
+}
+
+fn zone_ws_specs_for_side(
+    tpl: &WarehouseTemplate,
+    side: Side,
+) -> Option<(
+    &HashMap<[i32; 4], WsZoneStockSpec>,
+    &HashMap<[i32; 4], WsZoneStockSpec>,
+)> {
+    match side {
+        Side::Blue => Some((
+            &tpl.zone_ws_inventory_blue,
+            &tpl.zone_ws_default_blue,
+        )),
+        Side::Red => Some((
+            &tpl.zone_ws_inventory_red,
+            &tpl.zone_ws_default_red,
+        )),
+        Side::Neutral => None,
+    }
+}
+
+/// Mirror ME `apply_zone_ws_stock_amounts` into export equipment (Filter and All).
+fn append_zone_ws_stock_amounts_to_export(
+    out: &mut ObjectiveCoalitionStock,
+    inv_specs: &HashMap<[i32; 4], WsZoneStockSpec>,
+    def_specs: &HashMap<[i32; 4], WsZoneStockSpec>,
+    allow: Option<&HashSet<[i32; 4]>>,
+    mult: u32,
+    prod: &InventoryProductionMaps,
+) {
+    let mult = mult.max(1);
+    let mut applied: HashSet<[i32; 4]> = HashSet::new();
+    for scope in [WsZoneDistributeScope::Filter, WsZoneDistributeScope::All] {
+        for specs in [inv_specs, def_specs] {
+            for (&ws, spec) in specs {
+                if spec.distribute != scope {
+                    continue;
+                }
+                let Some(amt) = spec.amount else {
+                    continue;
+                };
+                if applied.contains(&ws) {
+                    continue;
+                }
+                if scope == WsZoneDistributeScope::Filter {
+                    if let Some(allowed) = allow {
+                        if !allowed.contains(&ws) {
+                            continue;
+                        }
+                    }
+                }
+                let baseline = amt.saturating_mul(mult);
+                if baseline == 0 {
+                    continue;
+                }
+                applied.insert(ws);
+                let name = weapon_ws_type_label(ws);
+                let entry = out.equipment.entry(name).or_insert(ObjectiveStockItem {
+                    baseline: 0,
+                    ws_type: stock_export_ws_type(ws),
+                    production: prod.weapon_by_ws.get(&ws).copied().unwrap_or(0),
+                });
+                // Zone amounts are authoritative for these corrective rows (same as ME set).
+                entry.baseline = baseline;
+                if entry.ws_type.is_none() {
+                    entry.ws_type = stock_export_ws_type(ws);
+                }
+            }
+        }
+    }
 }
 
 fn copy_weapon_row_display_fields(dst: &Table, src: &Table) {
@@ -3975,10 +4075,26 @@ fn weapon_allowed_for_objective_stock(
     let Some(allow) = allow else {
         return true;
     };
-    if !ordnance_ws_type(ws) {
-        return true;
+    // Policy allowlist covers ordnance + fuel; other weapon rows stay catalog-only.
+    if default_restore_weapon_ws(ws) {
+        return allow.contains(&ws);
     }
-    allow.contains(&ws)
+    true
+}
+
+fn zone_ws_has_stock_amount(
+    inv_specs: &HashMap<[i32; 4], WsZoneStockSpec>,
+    def_specs: &HashMap<[i32; 4], WsZoneStockSpec>,
+    ws: [i32; 4],
+) -> bool {
+    for specs in [inv_specs, def_specs] {
+        if let Some(spec) = specs.get(&ws) {
+            if spec.amount.is_some() {
+                return true;
+            }
+        }
+    }
+    false
 }
 
 fn extract_objective_coalition_stock(
@@ -3991,10 +4107,28 @@ fn extract_objective_coalition_stock(
     ttd_aircraft: Option<&HashSet<StdString>>,
     br: Option<&weapon_bridge::WeaponBridgeMap>,
     vt: Option<&VehicleTemplates>,
+    tpl: Option<&WarehouseTemplate>,
+    is_logistics_hub: bool,
 ) -> Result<ObjectiveCoalitionStock> {
     let prod = build_inventory_production_maps(inv_tpl)?;
-    let allow =
-        objective_export_weapon_allowset(defaults, objective_name, side, ttd_aircraft, br, vt);
+    // Same allowlist as ME fill / opposite synthesize (zone+), not policy-only defaults.
+    let allow: Option<HashSet<[i32; 4]>> = if !is_logistics_hub {
+        match (tpl, br, vt, ttd_aircraft) {
+            (Some(tpl), Some(br), Some(vt), Some(types)) if !types.is_empty() => {
+                Some(me_style_objective_zone_weapon_allowlist(side, types, tpl, br, vt)?)
+            }
+            _ => objective_export_weapon_allowset(
+                defaults,
+                objective_name,
+                side,
+                ttd_aircraft,
+                br,
+                vt,
+            ),
+        }
+    } else {
+        objective_export_weapon_allowset(defaults, objective_name, side, ttd_aircraft, br, vt)
+    };
     let mut out = ObjectiveCoalitionStock::default();
     if let Ok(weapons) = row.raw_get::<_, Table>("weapons") {
         for pair in weapons.clone().pairs::<Value, Table>() {
@@ -4003,7 +4137,14 @@ fn extract_objective_coalition_stock(
                 continue;
             };
             if !weapon_allowed_for_objective_stock(ws, catalog, allow.as_ref()) {
-                continue;
+                // ME `apply_zone_ws_stock_amounts` can insert corrective rows absent from
+                // B/RINVENTORY catalog / policy allowlist (e.g. KMGU `[4,5,32,94]`).
+                let zone_ok = tpl
+                    .and_then(|t| zone_ws_specs_for_side(t, side))
+                    .is_some_and(|(inv, def)| zone_ws_has_stock_amount(inv, def, ws));
+                if !zone_ok {
+                    continue;
+                }
             }
             let baseline = w.raw_get::<_, u32>("initialAmount").unwrap_or(0);
             if baseline == 0 {
@@ -4016,7 +4157,7 @@ fn extract_objective_coalition_stock(
                 name,
                 ObjectiveStockItem {
                     baseline,
-                    ws_type: ordnance_ws_type(ws).then_some(ws),
+                    ws_type: stock_export_ws_type(ws),
                     production: prod.weapon_by_ws.get(&ws).copied().unwrap_or(0),
                 },
             );
@@ -4189,37 +4330,196 @@ fn stock_mult_for_objective(
     allow: &ObjectiveDynAllow,
     resolved: Option<(i64, bool)>,
 ) -> Result<u32> {
-    if allow.is_logistics_hub {
-        return Ok(mult_cfg.hub_max.max(1));
-    }
+    // Same rules as ME fill (`warehouse_stock_mult_for_objective_zone`), not `mult_warehouse_row`
+    // (that path needs `--warehouse-fob-ids` or OFO wrongly becomes airbase_max).
     if let Some((id, is_airport)) = resolved {
-        return Ok(if is_airport {
-            mult_cfg.mult_airport(id)
-        } else {
-            mult_cfg.mult_warehouse_row(id)
-        });
+        return Ok(warehouse_stock_mult_for_objective_zone(
+            mult_cfg,
+            Some(allow),
+            id,
+            is_airport,
+        ));
     }
-    Ok(mult_cfg.airbase_max.max(1))
+    Ok(match objective_kind_from_zone_name(allow.zone_name.as_str()) {
+        Some("OLO") => mult_cfg.hub_max.max(1),
+        Some("OFO") => mult_cfg.fob_max.max(1),
+        Some("OAB") => mult_cfg.airbase_max.max(1),
+        _ => mult_cfg.airbase_max.max(1),
+    })
 }
 
-/// Opposite-coalition baseline for export: RINVENTORY production × mult plus RDEFAULT ordnance on TTD allowlist.
+/// ME-style OAB/OFO weapon allowlist (TTD + B/RINVENTORY+ + B/RDEFAULT+), same as warehouse fill.
+fn me_style_objective_zone_weapon_allowlist(
+    side: Side,
+    policy_types: &HashSet<StdString>,
+    tpl: &WarehouseTemplate,
+    br: &weapon_bridge::WeaponBridgeMap,
+    vt: &VehicleTemplates,
+) -> Result<HashSet<[i32; 4]>> {
+    let (
+        inv,
+        inv_plus,
+        def,
+        def_plus,
+        zplus,
+        ws_zplus,
+        def_zplus,
+        ws_def_zplus,
+    ) = match side {
+        Side::Blue => (
+            &tpl.blue_inventory,
+            tpl.blue_inventory_plus.as_ref(),
+            &tpl.blue_default,
+            &tpl.blue_default_plus,
+            tpl.zone_plus_blue.as_slice(),
+            &tpl.zone_ws_inventory_blue,
+            tpl.zone_default_plus_blue.as_slice(),
+            &tpl.zone_ws_default_blue,
+        ),
+        Side::Red => (
+            &tpl.red_inventory,
+            tpl.red_inventory_plus.as_ref(),
+            &tpl.red_default,
+            &tpl.red_default_plus,
+            tpl.zone_plus_red.as_slice(),
+            &tpl.zone_ws_inventory_red,
+            tpl.zone_default_plus_red.as_slice(),
+            &tpl.zone_ws_default_red,
+        ),
+        Side::Neutral => return Ok(HashSet::default()),
+    };
+    let (nm, ws) = build_inventory_plus_resolution_maps(Some(inv), inv_plus)?;
+    let (def_nm, def_ws) = build_inventory_plus_resolution_maps(Some(def), Some(def_plus))?;
+    let full = coalition_ordnance_ws_catalog(Some(inv), inv_plus, Some(def), Some(def_plus))?;
+    let positive =
+        coalition_positive_ordnance_ws_catalog(Some(inv), inv_plus, Some(def), Some(def_plus))?;
+    Ok(objective_zone_weapon_allowlist(
+        br,
+        vt,
+        side,
+        policy_types,
+        zplus,
+        ws_zplus,
+        &nm,
+        &ws,
+        def_zplus,
+        ws_def_zplus,
+        &def_nm,
+        &def_ws,
+        &positive,
+        &full,
+    ))
+}
+
+fn append_allowed_ordnance_from_weapon_tables(
+    out: &mut ObjectiveCoalitionStock,
+    sources: &[&Table<'_>],
+    allow: &HashSet<[i32; 4]>,
+    catalog: &HashSet<[i32; 4]>,
+    mult: u32,
+    prod: &InventoryProductionMaps,
+    caps: Option<&campaign_cfg::WarehouseDefaultsFromCfg>,
+) -> Result<()> {
+    let mult = mult.max(1);
+    for src in sources {
+        let Ok(weapons) = src.raw_get::<_, Table>("weapons") else {
+            continue;
+        };
+        for pair in weapons.clone().pairs::<Value, Table>() {
+            let (_, w) = pair?;
+            let Some(ws) = read_weapon_ws_type(&w) else {
+                continue;
+            };
+            // Match ME `ensure_positive_default_ordnance_for_allowed_ws` (ordnance + fuel tanks).
+            if !default_restore_weapon_ws(ws) || !allow.contains(&ws) {
+                continue;
+            }
+            if !catalog.contains(&ws) {
+                continue;
+            }
+            let Some(name) = weapon_row_export_key(&w) else {
+                continue;
+            };
+            if out.equipment.contains_key(&name) {
+                continue;
+            }
+            let mut unit_amt = w.raw_get::<_, u32>("initialAmount").unwrap_or(0);
+            if unit_amt == 0 {
+                if let Some(caps) = caps {
+                    unit_amt = campaign_cfg::default_cap_for_weapon_ws(ws, caps).unwrap_or(0);
+                }
+            }
+            if unit_amt == 0 {
+                continue;
+            }
+            let baseline = unit_amt.saturating_mul(mult);
+            out.equipment.insert(
+                name,
+                ObjectiveStockItem {
+                    baseline,
+                    ws_type: Some(ws),
+                    production: prod.weapon_by_ws.get(&ws).copied().unwrap_or(0),
+                },
+            );
+        }
+    }
+    Ok(())
+}
+
+/// Opposite-coalition export stock: same allowlist + DEFAULT restore as ME O* warehouse fill.
 fn synthesize_virtual_coalition_stock(
-    inv_tpl: &Table<'static>,
-    def_tpl: &Table<'static>,
+    tpl: &WarehouseTemplate,
     mult: u32,
     catalog: &HashSet<[i32; 4]>,
     defaults: &HashMap<StdString, ObjectiveWarehouseDefaults>,
     objective_name: &str,
     side: Side,
     ttd_aircraft: Option<&HashSet<StdString>>,
+    // OFO/OAB: only TTD types (missing/empty → no A/C). OLO: unrestricted unless TTD set is present.
+    restrict_aircraft_to_ttd: bool,
+    is_logistics_hub: bool,
+    objective_kind: Option<&str>,
     br: Option<&weapon_bridge::WeaponBridgeMap>,
     vt: Option<&VehicleTemplates>,
     caps: Option<&campaign_cfg::WarehouseDefaultsFromCfg>,
 ) -> Result<ObjectiveCoalitionStock> {
+    let (inv_tpl, inv_plus, def_tpl, def_plus) = match side {
+        Side::Blue => (
+            &tpl.blue_inventory,
+            tpl.blue_inventory_plus.as_ref(),
+            &tpl.blue_default,
+            &tpl.blue_default_plus,
+        ),
+        Side::Red => (
+            &tpl.red_inventory,
+            tpl.red_inventory_plus.as_ref(),
+            &tpl.red_default,
+            &tpl.red_default_plus,
+        ),
+        Side::Neutral => {
+            return Ok(ObjectiveCoalitionStock::default());
+        }
+    };
     let prod = build_inventory_production_maps(inv_tpl)?;
-    let allow =
-        objective_export_weapon_allowset(defaults, objective_name, side, ttd_aircraft, br, vt);
     let mult = mult.max(1);
+    // OAB/OFO with TTD: ME `objective_zone_weapon_allowlist`. Else export defaults / open catalog.
+    let allow: Option<HashSet<[i32; 4]>> = if !is_logistics_hub {
+        match (br, vt, ttd_aircraft) {
+            (Some(br), Some(vt), Some(types)) if !types.is_empty() => {
+                Some(me_style_objective_zone_weapon_allowlist(side, types, tpl, br, vt)?)
+            }
+            _ => objective_export_weapon_allowset(
+                defaults,
+                objective_name,
+                side,
+                ttd_aircraft,
+                br,
+                vt,
+            ),
+        }
+    } else {
+        objective_export_weapon_allowset(defaults, objective_name, side, ttd_aircraft, br, vt)
+    };
     let mut out = ObjectiveCoalitionStock::default();
     if let Ok(weapons) = inv_tpl.raw_get::<_, Table>("weapons") {
         for pair in weapons.clone().pairs::<Value, Table>() {
@@ -4242,51 +4542,45 @@ fn synthesize_virtual_coalition_stock(
                 name,
                 ObjectiveStockItem {
                     baseline,
-                    ws_type: ordnance_ws_type(ws).then_some(ws),
+                    ws_type: stock_export_ws_type(ws),
                     production,
                 },
             );
         }
     }
+    // ME `ensure_positive_default_ordnance_for_allowed_ws`: INV+/DEFAULT/DEFAULT+ for allowlist.
     if let Some(allow_set) = allow.as_ref() {
-        if let Ok(weapons) = def_tpl.raw_get::<_, Table>("weapons") {
-            for pair in weapons.clone().pairs::<Value, Table>() {
-                let (_, w) = pair?;
-                let Some(ws) = read_weapon_ws_type(&w) else {
-                    continue;
-                };
-                if !ordnance_ws_type(ws) || !allow_set.contains(&ws) {
-                    continue;
-                }
-                if !catalog.contains(&ws) {
-                    continue;
-                }
-                let Some(name) = weapon_row_export_key(&w) else {
-                    continue;
-                };
-                if out.equipment.contains_key(&name) {
-                    continue;
-                }
-                let mut unit_amt = w.raw_get::<_, u32>("initialAmount").unwrap_or(0);
-                if unit_amt == 0 {
-                    if let Some(caps) = caps {
-                        unit_amt = campaign_cfg::default_cap_for_weapon_ws(ws, caps).unwrap_or(0);
-                    }
-                }
-                if unit_amt == 0 {
-                    continue;
-                }
-                let baseline = unit_amt.saturating_mul(mult);
-                out.equipment.insert(
-                    name,
-                    ObjectiveStockItem {
-                        baseline,
-                        ws_type: Some(ws),
-                        production: prod.weapon_by_ws.get(&ws).copied().unwrap_or(0),
-                    },
-                );
-            }
+        let mut sources: Vec<&Table<'_>> = Vec::new();
+        if let Some(t) = inv_plus {
+            sources.push(t);
         }
+        sources.push(def_tpl);
+        sources.push(def_plus);
+        append_allowed_ordnance_from_weapon_tables(
+            &mut out,
+            &sources,
+            allow_set,
+            catalog,
+            mult,
+            &prod,
+            caps,
+        )?;
+    }
+    if let Some((ws_inv, ws_def)) = zone_ws_specs_for_side(tpl, side) {
+        // OLO: ME uses broader zone distribution; do not re-filter through TTD allow.
+        let zone_allow = if is_logistics_hub {
+            None
+        } else {
+            allow.as_ref()
+        };
+        append_zone_ws_stock_amounts_to_export(
+            &mut out,
+            ws_inv,
+            ws_def,
+            zone_allow,
+            mult,
+            &prod,
+        );
     }
     if let Ok(aircrafts) = inv_tpl.raw_get::<_, Table>("aircrafts") {
         for cat in ["helicopters", "planes"] {
@@ -4295,6 +4589,18 @@ fn synthesize_virtual_coalition_stock(
             };
             for pair in cat_tbl.clone().pairs::<String, Table>() {
                 let (unit_type, row) = pair?;
+                if restrict_aircraft_to_ttd {
+                    let Some(allow_ac) = ttd_aircraft else {
+                        continue;
+                    };
+                    if !allow_ac.contains(unit_type.as_str()) {
+                        continue;
+                    }
+                } else if let Some(allow_ac) = ttd_aircraft {
+                    if !allow_ac.is_empty() && !allow_ac.contains(unit_type.as_str()) {
+                        continue;
+                    }
+                }
                 let production = row.raw_get::<_, u32>("initialAmount").unwrap_or(0);
                 if production == 0 {
                     continue;
@@ -4328,31 +4634,62 @@ fn synthesize_virtual_coalition_stock(
             },
         );
     }
+    // Same as ME `apply_extra_fuel_directives` (B/REXTRAFUEL-*, not jet_fuel).
+    if let Some(kind) = objective_kind {
+        let side_map = match side {
+            Side::Blue => &tpl.extra_fuel.blue,
+            Side::Red => &tpl.extra_fuel.red,
+            Side::Neutral => return Ok(out),
+        };
+        let kind_key = StdString::from(kind);
+        for liquid in EXTRA_FUEL_LIQUID_KEYS {
+            let lookup = (kind_key.clone(), StdString::from(liquid));
+            let Some(base_tons) = side_map.get(&lookup) else {
+                continue;
+            };
+            if *base_tons <= 0.0 {
+                continue;
+            }
+            let add_tons = (*base_tons * mult as f64).round().clamp(0.0, u32::MAX as f64) as u32;
+            if add_tons == 0 {
+                continue;
+            }
+            let entry = out.liquids.entry(liquid.to_string()).or_insert(ObjectiveStockLiquid {
+                baseline: 0,
+                production: 0,
+            });
+            entry.baseline = entry.baseline.saturating_add(add_tons);
+        }
+    }
     Ok(out)
 }
 
 fn compute_virtual_objective_coalition_stock(
-    inv_tpl: &Table<'static>,
-    def_tpl: &Table<'static>,
+    tpl: &WarehouseTemplate,
     mult: u32,
     catalog: &HashSet<[i32; 4]>,
     defaults: &HashMap<StdString, ObjectiveWarehouseDefaults>,
     objective_name: &str,
     side: Side,
     ttd_aircraft: Option<&HashSet<StdString>>,
+    restrict_aircraft_to_ttd: bool,
+    is_logistics_hub: bool,
+    objective_kind: Option<&str>,
     br: Option<&weapon_bridge::WeaponBridgeMap>,
     vt: Option<&VehicleTemplates>,
     caps: Option<&campaign_cfg::WarehouseDefaultsFromCfg>,
 ) -> Result<ObjectiveCoalitionStock> {
     synthesize_virtual_coalition_stock(
-        inv_tpl,
-        def_tpl,
+        tpl,
         mult,
         catalog,
         defaults,
         objective_name,
         side,
         ttd_aircraft,
+        restrict_aircraft_to_ttd,
+        is_logistics_hub,
+        objective_kind,
         br,
         vt,
         caps,
@@ -4373,21 +4710,25 @@ fn fill_objective_stock_both_coalitions_virtual(
     vt: Option<&VehicleTemplates>,
     caps: Option<&campaign_cfg::WarehouseDefaultsFromCfg>,
 ) -> Result<()> {
+    let restrict_ac = objective_restrict_aircraft_to_ttd(allow);
+    let objective_kind = objective_kind_from_zone_name(allow.zone_name.as_str());
     for side in [Side::Blue, Side::Red] {
-        let (inv_tpl, def_tpl, catalog) = match side {
-            Side::Blue => (&tpl.blue_inventory, &tpl.blue_default, blue_catalog),
-            Side::Red => (&tpl.red_inventory, &tpl.red_default, red_catalog),
+        let catalog = match side {
+            Side::Blue => blue_catalog,
+            Side::Red => red_catalog,
             Side::Neutral => unreachable!(),
         };
         let stock = compute_virtual_objective_coalition_stock(
-            inv_tpl,
-            def_tpl,
+            tpl,
             mult,
             catalog,
             objective_defaults,
             objective_name,
             side,
             allow.per_side.get(&side),
+            restrict_ac,
+            allow.is_logistics_hub,
+            objective_kind,
             br,
             vt,
             caps,
@@ -4401,7 +4742,16 @@ fn fill_objective_stock_both_coalitions_virtual(
     Ok(())
 }
 
+fn objective_restrict_aircraft_to_ttd(allow: &ObjectiveDynAllow) -> bool {
+    !allow.is_logistics_hub
+        && matches!(
+            objective_kind_from_zone_name(allow.zone_name.as_str()),
+            Some("OFO") | Some("OAB")
+        )
+}
+
 /// After mission fill: `.miz` row for ME coalition + opposite coalition virtual profile (export only).
+/// Opposite uses the same O* allowlist + DEFAULT restore as ME fill (`objective_zone_weapon_allowlist`).
 /// Neutral ME owner: both Blue and Red profiles are synthesized (ME warehouse stays empty at build).
 pub fn build_objective_stock_export(
     _lua: &Lua,
@@ -4416,10 +4766,20 @@ pub fn build_objective_stock_export(
     vt: Option<&VehicleTemplates>,
     caps: Option<&campaign_cfg::WarehouseDefaultsFromCfg>,
 ) -> Result<HashMap<StdString, ObjectiveStockByCoalition>> {
-    let blue_catalog =
+    let mut blue_catalog =
         coalition_stock_export_weapon_catalog(built_blue, Some(&tpl.blue_default))?;
-    let red_catalog =
+    let mut red_catalog =
         coalition_stock_export_weapon_catalog(built_red, Some(&tpl.red_default))?;
+    extend_catalog_with_zone_ws_stock_specs(
+        &mut blue_catalog,
+        &tpl.zone_ws_inventory_blue,
+        &tpl.zone_ws_default_blue,
+    );
+    extend_catalog_with_zone_ws_stock_specs(
+        &mut red_catalog,
+        &tpl.zone_ws_inventory_red,
+        &tpl.zone_ws_default_red,
+    );
     let mut out: HashMap<StdString, ObjectiveStockByCoalition> = HashMap::default();
     let mut seen: HashSet<StdString> = HashSet::default();
     for allow in obj_dyn_allow {
@@ -4484,6 +4844,8 @@ pub fn build_objective_stock_export(
                 },
                 br,
                 vt,
+                Some(tpl),
+                allow.is_logistics_hub,
             )?;
             match side {
                 Side::Blue => entry.blue = stock,
@@ -4491,17 +4853,16 @@ pub fn build_objective_stock_export(
                 Side::Neutral => {}
             }
             let opposite = side.opposite();
-            let (opp_inv, opp_def, opp_cat) = match opposite {
-                Side::Blue => (&tpl.blue_inventory, &tpl.blue_default, &blue_catalog),
-                Side::Red => (&tpl.red_inventory, &tpl.red_default, &red_catalog),
+            let opp_cat = match opposite {
+                Side::Blue => &blue_catalog,
+                Side::Red => &red_catalog,
                 Side::Neutral => {
                     out.insert(objective_name.to_string(), entry);
                     continue;
                 }
             };
             let virtual_stock = compute_virtual_objective_coalition_stock(
-                opp_inv,
-                opp_def,
+                tpl,
                 mult,
                 opp_cat,
                 objective_defaults,
@@ -4512,6 +4873,9 @@ pub fn build_objective_stock_export(
                     Side::Red => ttd_red,
                     Side::Neutral => None,
                 },
+                objective_restrict_aircraft_to_ttd(allow),
+                allow.is_logistics_hub,
+                objective_kind_from_zone_name(allow.zone_name.as_str()),
                 br,
                 vt,
                 caps,
@@ -4563,10 +4927,20 @@ fn merge_naval_ship_objective_stock_export(
         .warehouses
         .raw_get::<_, Table>("warehouses")
         .context("warehouses for naval objective_stock export")?;
-    let blue_catalog =
+    let mut blue_catalog =
         coalition_stock_export_weapon_catalog(built_blue, Some(&tpl.blue_default))?;
-    let red_catalog =
+    let mut red_catalog =
         coalition_stock_export_weapon_catalog(built_red, Some(&tpl.red_default))?;
+    extend_catalog_with_zone_ws_stock_specs(
+        &mut blue_catalog,
+        &tpl.zone_ws_inventory_blue,
+        &tpl.zone_ws_default_blue,
+    );
+    extend_catalog_with_zone_ws_stock_specs(
+        &mut red_catalog,
+        &tpl.zone_ws_inventory_red,
+        &tpl.zone_ws_default_red,
+    );
     let mut added = 0usize;
     for (&wid, (side, group_name)) in ship_wh_map {
         let display_key = StdString::from(ship_pad_display_name(group_name.as_str()));
@@ -4597,6 +4971,8 @@ fn merge_naval_ship_objective_stock_export(
             None,
             None,
             None,
+            Some(tpl),
+            false,
         )?;
         let mut entry = ObjectiveStockByCoalition::default();
         match side {
@@ -4605,9 +4981,9 @@ fn merge_naval_ship_objective_stock_export(
             Side::Neutral => {}
         }
         let opposite = side.opposite();
-        let (opp_inv, opp_def, opp_cat) = match opposite {
-            Side::Blue => (&tpl.blue_inventory, &tpl.blue_default, &blue_catalog),
-            Side::Red => (&tpl.red_inventory, &tpl.red_default, &red_catalog),
+        let opp_cat = match opposite {
+            Side::Blue => &blue_catalog,
+            Side::Red => &red_catalog,
             Side::Neutral => {
                 out.insert(display_key, entry);
                 added += 1;
@@ -4615,13 +4991,15 @@ fn merge_naval_ship_objective_stock_export(
             }
         };
         let virtual_stock = compute_virtual_objective_coalition_stock(
-            opp_inv,
-            opp_def,
+            tpl,
             mult,
             opp_cat,
             objective_defaults,
             display_key.as_str(),
             opposite,
+            None,
+            false,
+            false,
             None,
             None,
             None,
@@ -4699,10 +5077,20 @@ fn merge_dep_farp_objective_stock_export(
         .warehouses
         .raw_get::<_, Table>("warehouses")
         .context("warehouses for DEP FARP objective_stock export")?;
-    let blue_catalog =
+    let mut blue_catalog =
         coalition_stock_export_weapon_catalog(built_blue, Some(&tpl.blue_default))?;
-    let red_catalog =
+    let mut red_catalog =
         coalition_stock_export_weapon_catalog(built_red, Some(&tpl.red_default))?;
+    extend_catalog_with_zone_ws_stock_specs(
+        &mut blue_catalog,
+        &tpl.zone_ws_inventory_blue,
+        &tpl.zone_ws_default_blue,
+    );
+    extend_catalog_with_zone_ws_stock_specs(
+        &mut red_catalog,
+        &tpl.zone_ws_inventory_red,
+        &tpl.zone_ws_default_red,
+    );
     let mut added = 0usize;
     for (&wid, (side, group_name)) in dep_wh_map {
         let key = StdString::from(group_name.as_str());
@@ -4733,6 +5121,8 @@ fn merge_dep_farp_objective_stock_export(
             None,
             None,
             None,
+            Some(tpl),
+            false,
         )?;
         let mut entry = ObjectiveStockByCoalition::default();
         match side {
@@ -4741,9 +5131,9 @@ fn merge_dep_farp_objective_stock_export(
             Side::Neutral => {}
         }
         let opposite = side.opposite();
-        let (opp_inv, opp_def, opp_cat) = match opposite {
-            Side::Blue => (&tpl.blue_inventory, &tpl.blue_default, &blue_catalog),
-            Side::Red => (&tpl.red_inventory, &tpl.red_default, &red_catalog),
+        let opp_cat = match opposite {
+            Side::Blue => &blue_catalog,
+            Side::Red => &red_catalog,
             Side::Neutral => {
                 out.insert(key, entry);
                 added += 1;
@@ -4751,13 +5141,15 @@ fn merge_dep_farp_objective_stock_export(
             }
         };
         let virtual_stock = compute_virtual_objective_coalition_stock(
-            opp_inv,
-            opp_def,
+            tpl,
             mult,
             opp_cat,
             objective_defaults,
             key.as_str(),
             opposite,
+            None,
+            false,
+            false,
             None,
             None,
             None,
@@ -4895,13 +5287,13 @@ fn objective_export_name_from_zone(zone_name: &str) -> Option<&str> {
 fn resolve_ai_stock_objective<'a>(
     key: &str,
     obj_dyn_allow: &'a [ObjectiveDynAllow],
-) -> Option<(&'a ObjectiveDynAllow, StdString)> {
+) -> Option<(&'a ObjectiveDynAllow, StdString, Side)> {
     if let Some(o) = obj_dyn_allow
         .iter()
         .find(|o| o.zone_name.as_str().eq_ignore_ascii_case(key))
     {
         let name = objective_export_name_from_zone(o.zone_name.as_str())?;
-        return Some((o, StdString::from(name)));
+        return Some((o, StdString::from(name), o.side));
     }
     for o in obj_dyn_allow {
         if objective_export_name_from_zone(o.zone_name.as_str())
@@ -4910,26 +5302,26 @@ fn resolve_ai_stock_objective<'a>(
             return Some((
                 o,
                 StdString::from(objective_export_name_from_zone(o.zone_name.as_str())?),
+                o.side,
             ));
         }
     }
+    // `RBatumi` / `BBeslan`: prefix = target stock coalition, name = objective (any ME owner).
     if key.len() >= 2 {
-        let side = match key.chars().next()? {
+        let stock_side = match key.chars().next()? {
             'R' | 'r' => Side::Red,
             'B' | 'b' => Side::Blue,
             _ => return None,
         };
         let rest = &key[1..];
         for o in obj_dyn_allow {
-            if o.side != side {
-                continue;
-            }
             if objective_export_name_from_zone(o.zone_name.as_str())
                 .is_some_and(|n| n.eq_ignore_ascii_case(rest))
             {
                 return Some((
                     o,
                     StdString::from(objective_export_name_from_zone(o.zone_name.as_str())?),
+                    stock_side,
                 ));
             }
         }
@@ -5282,9 +5674,22 @@ fn apply_settings_ai_template_stock(
 ) -> Result<()> {
     for spec in specs {
         for (obj_key, amount) in &spec.objectives {
-            if let Some((allow, export_name)) =
+            if let Some((allow, export_name, stock_side)) =
                 resolve_ai_stock_objective(obj_key.as_str(), obj_dyn_allow)
             {
+                // Prefix R/B targets that coalition's stock profile. ME warehouse is only the
+                // current owner fill — write when owner matches; opposite goes to export merge.
+                if allow.side != stock_side {
+                    info!(
+                        "SETTINGS-Ai-{}: {} +{} {} deferred to opposite export (ME owner {:?})",
+                        spec.template_name.as_str(),
+                        export_name.as_str(),
+                        amount,
+                        spec.airframe.as_str(),
+                        allow.side
+                    );
+                    continue;
+                }
                 let Some(resolved) = resolve_objective_warehouse(base, allow)? else {
                     warn!(
                         "SETTINGS-Ai-{}: no warehouse for objective {:?}",
@@ -5297,7 +5702,7 @@ fn apply_settings_ai_template_stock(
                     lua,
                     &resolved.row,
                     spec.airframe.as_str(),
-                    allow.side,
+                    stock_side,
                     *amount,
                     Some(resolved.wh_id),
                     emit,
@@ -5363,21 +5768,57 @@ fn resolve_ai_stock_naval_target(
 }
 
 fn merge_ai_template_stock_export(
-    _out: &mut HashMap<StdString, ObjectiveStockByCoalition>,
+    out: &mut HashMap<StdString, ObjectiveStockByCoalition>,
     ai_template_airframes: &mut HashMap<std::string::String, std::string::String>,
     specs: &[AiTemplateStockSpec],
-    _obj_dyn_allow: &[ObjectiveDynAllow],
+    obj_dyn_allow: &[ObjectiveDynAllow],
     _ship_wh_map: &HashMap<i64, (Side, String)>,
 ) {
+    let mut filled = 0usize;
     for spec in specs {
         ai_template_airframes.insert(
             spec.template_name.as_str().into(),
             spec.airframe.as_str().into(),
         );
+        for (obj_key, amount) in &spec.objectives {
+            if *amount == 0 {
+                continue;
+            }
+            let Some((_allow, export_name, stock_side)) =
+                resolve_ai_stock_objective(obj_key.as_str(), obj_dyn_allow)
+            else {
+                continue;
+            };
+            if matches!(stock_side, Side::Neutral) {
+                continue;
+            }
+            let entry = out.entry(export_name.clone()).or_default();
+            let coal = match stock_side {
+                Side::Blue => &mut entry.blue,
+                Side::Red => &mut entry.red,
+                Side::Neutral => continue,
+            };
+            let airframe = spec.airframe.as_str().to_string();
+            // Owner ME extract already has SETTINGS-Ai amounts; only fill opposite (or missing).
+            if coal.equipment.contains_key(&airframe) {
+                continue;
+            }
+            coal.equipment.insert(
+                airframe,
+                ObjectiveStockItem {
+                    baseline: *amount,
+                    ws_type: None,
+                    production: 0,
+                },
+            );
+            filled += 1;
+        }
     }
-    // Aircraft baselines come from `extract_objective_coalition_stock` on the patched ME
-    // warehouse row (after `apply_settings_ai_template_stock`); do not add SETTINGS-Ai amounts
-    // again here — that doubled capacity vs DCS `get_item_count` (50% supply on hubs).
+    if filled > 0 {
+        info!(
+            "SETTINGS-Ai: filled {filled} missing opposite/export airframe row(s) in objective_stock"
+        );
+    }
 }
 
 struct WarehouseTemplate {
@@ -9671,6 +10112,128 @@ fn neutral_dynamic_spawn_airport_zero_stock_link_templates(
     Ok(())
 }
 
+/// Land OAB/OFO/OLO: ensure ME `aircrafts` rows exist for TTD (both coalitions) with correct
+/// `linkDynTempl` from `zzDT-*`. Opposite / empty linked rows use `initialAmount = 1` so DCS
+/// registers the DT at mission load (amount 0 is ignored by dyn-spawn); bflib then reconciles
+/// stock from export / opposite fill.
+fn ensure_land_objective_opposite_dyn_templ_rows(
+    lua: &Lua,
+    wh: &Table<'_>,
+    emit: &DynamicSpawnEmit,
+    owner_side: Side,
+    obj: Option<&ObjectiveDynAllow>,
+) -> Result<usize> {
+    let mut ensured = 0usize;
+    for dt_side in [Side::Blue, Side::Red] {
+        let filter: Option<&HashSet<StdString>> = match obj {
+            Some(o) if o.is_logistics_hub => None,
+            Some(o) => match o.per_side.get(&dt_side) {
+                Some(s) if !s.is_empty() => Some(s),
+                _ => continue,
+            },
+            None => {
+                // No O* zone: only ensure owner-side DT rows missing from ME.
+                if dt_side != owner_side {
+                    continue;
+                }
+                None
+            }
+        };
+        let types: Vec<String> = emit
+            .link_by_side_type
+            .iter()
+            .filter_map(|((s, ut), _)| {
+                if *s != dt_side {
+                    return None;
+                }
+                if let Some(allow) = filter {
+                    if !allow.contains(ut.as_str()) {
+                        return None;
+                    }
+                }
+                Some(ut.clone())
+            })
+            .collect();
+        for unit_type in types {
+            let Some(gid) = emit
+                .link_by_side_type
+                .get(&(dt_side, unit_type.clone()))
+                .map(|g| g.inner())
+            else {
+                continue;
+            };
+            if gid == 0 {
+                continue;
+            }
+            let aircrafts: Table = match wh.raw_get("aircrafts") {
+                Ok(t) => t,
+                Err(_) => {
+                    let t = lua.create_table()?;
+                    wh.raw_set("aircrafts", t.clone())?;
+                    t
+                }
+            };
+            let cat = warehouse_aircraft_category(wh, unit_type.as_str());
+            let cat_tbl: Table = match aircrafts.raw_get(cat) {
+                Ok(t) => t,
+                Err(_) => {
+                    let t = lua.create_table()?;
+                    aircrafts.raw_set(cat, t.clone())?;
+                    t
+                }
+            };
+            match cat_tbl.raw_get::<_, Table>(unit_type.as_str()) {
+                Ok(row) => {
+                    let cur_amt = row.raw_get::<_, u32>("initialAmount").unwrap_or(0);
+                    let cur_link = row.raw_get::<_, i64>("linkDynTempl").unwrap_or(0);
+                    if dt_side == owner_side {
+                        row.raw_set("linkDynTempl", gid)?;
+                    } else if cur_amt == 0 || cur_link == 0 {
+                        // Opposite / empty row: attach opposite DT (do not steal owner stocked links).
+                        row.raw_set("linkDynTempl", gid)?;
+                    }
+                }
+                Err(_) => {
+                    let row = lua.create_table()?;
+                    // amount 1: DCS registers linkDynTempl at load (0 is skipped).
+                    row.raw_set("initialAmount", 1u32)?;
+                    row.raw_set("linkDynTempl", gid)?;
+                    cat_tbl.raw_set(unit_type.as_str(), row)?;
+                    ensured += 1;
+                }
+            }
+        }
+    }
+    Ok(ensured)
+}
+
+/// DCS dyn-spawn registers `linkDynTempl` at mission load only when `initialAmount > 0`.
+/// Bump linked empty rows to 1 (after TTD amount prune); Fowl reconciles real stock at start.
+fn bump_linked_aircraft_amount_for_dyn_templ_registration(wh: &Table<'_>) -> Result<usize> {
+    let Ok(aircrafts) = wh.raw_get::<_, Table>("aircrafts") else {
+        return Ok(0);
+    };
+    let mut bumped = 0usize;
+    for cat in ["helicopters", "planes"] {
+        let Ok(cat_tbl) = aircrafts.raw_get::<_, Table>(cat) else {
+            continue;
+        };
+        for pair in cat_tbl.clone().pairs::<String, Table>() {
+            let (_, row) = pair?;
+            let link = row.raw_get::<_, i64>("linkDynTempl").unwrap_or(0);
+            if link == 0 {
+                continue;
+            }
+            let amt = row.raw_get::<_, u32>("initialAmount").unwrap_or(0);
+            if amt == 0 {
+                row.raw_set("initialAmount", 1u32)?;
+                bumped += 1;
+            }
+        }
+    }
+    Ok(bumped)
+}
+
 /// Geometry extracted from a trigger zone (owns no Lua state).
 enum ObjectiveZoneGeom {
     Circle { center: Vector2, radius: f64 },
@@ -9893,6 +10456,61 @@ fn extend_objective_defaults_from_dyn_allow(
     added
 }
 
+/// Union ME-style zone allowlist (TTD + B/RINVENTORY+/BDEFAULT+) into export defaults.
+/// Does not change ME warehouse fill — only `_fowl_export.json` / bflib filters.
+fn merge_zone_weapon_allowlist_into_objective_defaults(
+    defaults: &mut HashMap<StdString, bfprotocols::fowl_miz_export::ObjectiveWarehouseDefaults>,
+    obj_dyn_allow: &[ObjectiveDynAllow],
+    tpl: &WarehouseTemplate,
+    br: &weapon_bridge::WeaponBridgeMap,
+    vt: &VehicleTemplates,
+) -> Result<usize> {
+    let mut touched = 0usize;
+    for allow in obj_dyn_allow {
+        if allow.is_logistics_hub {
+            continue;
+        }
+        let Some(name) = allow.zone_name.as_str().get(4..) else {
+            continue;
+        };
+        let Some(entry) = defaults.get_mut(name) else {
+            continue;
+        };
+        for side in [Side::Blue, Side::Red] {
+            let Some(types) = allow.per_side.get(&side) else {
+                continue;
+            };
+            if types.is_empty() {
+                continue;
+            }
+            let zone_ws = me_style_objective_zone_weapon_allowlist(side, types, tpl, br, vt)?;
+            if zone_ws.is_empty() {
+                continue;
+            }
+            let list = match side {
+                Side::Blue => &mut entry.blue_weapon_ws,
+                Side::Red => &mut entry.red_weapon_ws,
+                Side::Neutral => continue,
+            };
+            let before = list.len();
+            let mut set: HashSet<[i32; 4]> = list.iter().copied().collect();
+            set.extend(zone_ws);
+            let mut v: Vec<_> = set.into_iter().collect();
+            v.sort_by_key(|w| (w[0], w[1], w[2], w[3]));
+            *list = v;
+            if list.len() > before {
+                touched += 1;
+            }
+        }
+    }
+    if touched > 0 {
+        info!(
+            "objective_defaults: merged zone weapon allowlist into {touched} Blue/Red profile(s)"
+        );
+    }
+    Ok(touched)
+}
+
 /// Per DEP pad group name (`DEPBFARPPAD0`, …): `objective_defaults` from `TTDdynFARP` (export extract + bflib filters).
 fn extend_objective_defaults_for_dep_farps(
     defaults: &mut HashMap<StdString, bfprotocols::fowl_miz_export::ObjectiveWarehouseDefaults>,
@@ -10031,15 +10649,49 @@ fn extend_objective_defaults_for_naval_hulls(
     Ok(added)
 }
 
+/// `BlueRoadBase` ↔ `RedRoadBase` (and `Blue*RoadBase` ↔ `Red*RoadBase`).
+fn paired_roadbase_template(tmpl_name: &str) -> Option<StdString> {
+    if !tmpl_name.ends_with("RoadBase") {
+        return None;
+    }
+    if let Some(rest) = tmpl_name.strip_prefix("Blue") {
+        return Some(format!("Red{rest}"));
+    }
+    if let Some(rest) = tmpl_name.strip_prefix("Red") {
+        return Some(format!("Blue{rest}"));
+    }
+    None
+}
+
+fn merge_dyn_template_into_per_side(
+    per_side: &mut HashMap<Side, HashSet<StdString>>,
+    dyn_templates: &HashMap<String, SlotSpec>,
+    tmpl_name: &str,
+) {
+    let Some(spec) = dyn_templates.get(tmpl_name) else {
+        return;
+    };
+    for (side, m) in &spec.slots {
+        let entry = per_side.entry(*side).or_default();
+        for (ut, count) in m {
+            if *count > 0 {
+                entry.insert(StdString::from(ut.as_str()));
+            }
+        }
+    }
+}
+
 /// Build per-objective zone dynamic allow map from O* zones that have `include_dyn_slots`.
 ///
 /// Each O* zone's `include_dyn_slots` values are TTD template names (without `TTD` prefix).
 /// Resolved via `dyn_templates`; union across all referenced templates, per side.
+/// `*RoadBase` includes also pull in the opposite-coalition pair (opposite warehouse / capture).
 fn build_objective_dyn_allow(
     base: &LoadedMiz,
     dyn_templates: &HashMap<String, SlotSpec>,
 ) -> Result<Vec<ObjectiveDynAllow>> {
     let mut out: Vec<ObjectiveDynAllow> = Vec::new();
+    let mut roadbase_pairs = 0usize;
     for zone in base.mission.triggers()? {
         let zone = zone?;
         let name = zone.name()?;
@@ -10063,20 +10715,13 @@ fn build_objective_dyn_allow(
         };
         let mut per_side: HashMap<Side, HashSet<StdString>> = HashMap::default();
         let mut airbase_id: Option<i64> = None;
+        let mut include_tmpls: HashSet<StdString> = HashSet::default();
         for prop in zone.properties()? {
             let prop = prop?;
             if INCLUDE_DYNAMIC_SLOT_KEYS.iter().any(|&k| prop.key.as_ref() == k) {
                 let tmpl_name = prop.value.as_str();
-                if let Some(spec) = dyn_templates.get(tmpl_name) {
-                    for (side, m) in &spec.slots {
-                        let entry = per_side.entry(*side).or_default();
-                        for (ut, count) in m {
-                            if *count > 0 {
-                                entry.insert(StdString::from(ut.as_str()));
-                            }
-                        }
-                    }
-                }
+                include_tmpls.insert(StdString::from(tmpl_name));
+                merge_dyn_template_into_per_side(&mut per_side, dyn_templates, tmpl_name);
             } else if prop.key.eq_ignore_ascii_case("airbaseID") {
                 let raw = prop.value.trim();
                 if !raw.is_empty() {
@@ -10090,6 +10735,25 @@ fn build_objective_dyn_allow(
                     }
                 }
             }
+        }
+        for tmpl in include_tmpls.iter() {
+            let Some(pair) = paired_roadbase_template(tmpl.as_str()) else {
+                continue;
+            };
+            if include_tmpls.contains(pair.as_str()) {
+                continue;
+            }
+            if !dyn_templates.contains_key(pair.as_str()) {
+                continue;
+            }
+            merge_dyn_template_into_per_side(&mut per_side, dyn_templates, pair.as_str());
+            roadbase_pairs += 1;
+            info!(
+                "O* zone {:?}: paired RoadBase TTD {:?} → {:?} (opposite stock/slots)",
+                name.as_str(),
+                tmpl.as_str(),
+                pair.as_str()
+            );
         }
         let center = zone.pos()?;
         let geom = match zone.typ()? {
@@ -10109,8 +10773,9 @@ fn build_objective_dyn_allow(
         });
     }
     info!(
-        "per-base dyn-allow: {} O* zone(s) with include_dyn_slots TTD refs",
-        out.len()
+        "per-base dyn-allow: {} O* zone(s) with include_dyn_slots TTD refs ({} RoadBase pair merge(s))",
+        out.len(),
+        roadbase_pairs
     );
     Ok(out)
 }
@@ -11084,7 +11749,24 @@ fn objective_zone_weapon_allowlist(
         def_weapon_ws,
         def_label,
     ));
+    // Zone amount rows (e.g. KMGU `[4,5,32,94]`) may be absent from FARP template
+    // catalogs; ME still applies them — keep after retain.
+    let mut zone_amount_ws = ws_zone_stock_ws_for_policy_modules(inv_ws_zone_specs, policy_types);
+    zone_amount_ws.extend(ws_zone_stock_ws_for_policy_modules(
+        def_ws_zone_specs,
+        policy_types,
+    ));
+    for specs in [inv_ws_zone_specs, def_ws_zone_specs] {
+        for (&ws, spec) in specs {
+            if spec.amount.is_some()
+                && (spec.distribute == WsZoneDistributeScope::All || spec.modules.is_empty())
+            {
+                zone_amount_ws.insert(ws);
+            }
+        }
+    }
     retain_ordnance_in_coalition_catalog(&mut zone_ws, full_catalog);
+    zone_ws.extend(zone_amount_ws);
     let mut policy_ws = objective_policy_weapon_allowlist(br, vt, side, policy_types);
     policy_ws.retain(|ws| positive_catalog.contains(ws));
     let mut out = policy_ws;
@@ -11561,9 +12243,37 @@ fn patch_warehouse_dynamic_spawn_links(
                         None
                     }
                     .or_else(|| emit.link_by_side_type.get(&(side, unit_type.clone())))
+                    // Opposite DT: land O* ME catalogs often list both coalitions; owner-only
+                    // lookup left Red types at linkDynTempl=0 on Blue bases (and vice versa).
+                    .or_else(|| {
+                        if mult_cfg.naval_warehouse_ids.contains(&wid)
+                            || mult_cfg.dep_farp_warehouse_ids.contains(&wid)
+                        {
+                            None
+                        } else {
+                            emit.link_by_side_type
+                                .get(&(side.opposite(), unit_type.clone()))
+                        }
+                    })
                     .map(|gid| gid.inner())
                     .unwrap_or(0);
                     row.raw_set("linkDynTempl", link)?;
+                }
+            }
+            if !mult_cfg.naval_warehouse_ids.contains(&wid)
+                && !mult_cfg.dep_farp_warehouse_ids.contains(&wid)
+            {
+                let n = ensure_land_objective_opposite_dyn_templ_rows(
+                    lua,
+                    &wh,
+                    emit,
+                    side,
+                    obj_zone,
+                )?;
+                if n > 0 {
+                    info!(
+                        "warehouse {wid}: ensured {n} opposite/owner DT aircraft row(s) with linkDynTempl"
+                    );
                 }
             }
             // Per-base O* zone filter: zero initialAmount for types not in this base's
@@ -11583,6 +12293,16 @@ fn patch_warehouse_dynamic_spawn_links(
                         None,
                         &mut zone_stock_applied,
                     )?;
+                    if !mult_cfg.naval_warehouse_ids.contains(&wid)
+                        && !mult_cfg.dep_farp_warehouse_ids.contains(&wid)
+                    {
+                        let b = bump_linked_aircraft_amount_for_dyn_templ_registration(&wh)?;
+                        if b > 0 {
+                            info!(
+                                "warehouse {wid}: bumped {b} linked A/C row(s) to amount=1 for DT registration"
+                            );
+                        }
+                    }
                     continue;
                 }
                 // DEP template pads: `TTDdynFARP` + weapon allowlist below, not O* zone TTD / zone ws.
@@ -11610,6 +12330,16 @@ fn patch_warehouse_dynamic_spawn_links(
                         }
                     }
                 }
+                }
+            }
+            if !mult_cfg.naval_warehouse_ids.contains(&wid)
+                && !mult_cfg.dep_farp_warehouse_ids.contains(&wid)
+            {
+                let b = bump_linked_aircraft_amount_for_dyn_templ_registration(&wh)?;
+                if b > 0 {
+                    info!(
+                        "warehouse {wid}: bumped {b} linked A/C row(s) to amount=1 for DT registration"
+                    );
                 }
             }
             // DEP* dynamic FARP template stocks: prune A/C rows by `TTDdynFARP` allowlist only.
@@ -14231,6 +14961,16 @@ pub fn run(cfg: &MizCmd) -> Result<()> {
                     br,
                 )
                 .context("DEP FARP pad objective_defaults for export")?;
+            }
+            if let Some(br) = weapon_bridge_map.as_ref() {
+                merge_zone_weapon_allowlist_into_objective_defaults(
+                    &mut fowl_from_warehouse.objective_defaults,
+                    &obj_dyn_allow,
+                    &wb.template,
+                    br,
+                    &vehicle_templates,
+                )
+                .context("merging zone weapon allowlist into objective_defaults")?;
             }
             let mut objective_stock = build_objective_stock_export(
                 lua,

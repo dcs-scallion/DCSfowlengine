@@ -1583,6 +1583,10 @@ pub struct Cfg {
     /// Test-only: extra Blue headcount for `balancing_point_gain` (not Discord map).
     #[serde(default)]
     pub debugging_online_blue_players: u32,
+    /// Test-only: on new campaign init, swap capturable ME owners (`…R…`↔`…B…`) and load
+    /// that side's export warehouse templates into DCS (skip ME preserve SyncFrom).
+    #[serde(default)]
+    pub debugging_objectives_coalition_switch: bool,
     /// Hours after deploy only the spawning player may run `-action` on that air AI; `0` or omit = no lock.
     #[serde(default)]
     pub ai_air_action_owner_hours: Option<u32>,
