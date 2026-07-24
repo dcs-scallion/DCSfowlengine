@@ -179,6 +179,19 @@ impl WSCategory {
 wrapped_table!(WSType, None);
 
 impl<'lua> WSType<'lua> {
+    /// Build a Lua `wsType` table `{[1]=a,[2]=b,[3]=c,[4]=d}` for Warehouse.setItem.
+    pub fn from_quad(lua: MizLua<'lua>, quad: [i32; 4]) -> Result<Self> {
+        let t = lua.inner().create_table()?;
+        t.raw_set(1, quad[0])?;
+        t.raw_set(2, quad[1])?;
+        t.raw_set(3, quad[2])?;
+        t.raw_set(4, quad[3])?;
+        Ok(Self {
+            t,
+            lua: lua.inner(),
+        })
+    }
+
     pub fn category(&self) -> Result<WSCategory> {
         match self.t.raw_get(1)? {
             0 => Ok(WSCategory::None),

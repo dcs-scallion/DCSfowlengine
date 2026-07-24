@@ -3803,6 +3803,7 @@ fn extend_catalog_with_zone_ws_stock_specs(
         for (&ws, spec) in specs {
             if spec.amount.is_some() || spec.distribute == WsZoneDistributeScope::All {
                 catalog.insert(ws);
+                catalog.insert(remap_zone_weapon_ws_for_export(ws));
             }
         }
     }
@@ -3828,6 +3829,16 @@ fn zone_ws_specs_for_side(
     }
 }
 
+/// Zone keys `[4,5,32,94|95]` are legacy KMGU markers (not in weapon bridge / ResourceMap).
+/// Map to armable dispenser wsTypes used by loadouts (BKF / KMGU-2).
+fn remap_zone_weapon_ws_for_export(ws: [i32; 4]) -> [i32; 4] {
+    match ws {
+        [4, 5, 32, 94] => [4, 5, 38, 361],
+        [4, 5, 32, 95] => [4, 5, 38, 362],
+        other => other,
+    }
+}
+
 /// Mirror ME `apply_zone_ws_stock_amounts` into export equipment (Filter and All).
 fn append_zone_ws_stock_amounts_to_export(
     out: &mut ObjectiveCoalitionStock,
@@ -3841,21 +3852,22 @@ fn append_zone_ws_stock_amounts_to_export(
     let mut applied: HashSet<[i32; 4]> = HashSet::new();
     for scope in [WsZoneDistributeScope::Filter, WsZoneDistributeScope::All] {
         for specs in [inv_specs, def_specs] {
-            for (&ws, spec) in specs {
+            for (&raw_ws, spec) in specs {
                 if spec.distribute != scope {
                     continue;
                 }
                 let Some(amt) = spec.amount else {
                     continue;
                 };
+                let ws = remap_zone_weapon_ws_for_export(raw_ws);
                 if applied.contains(&ws) {
                     continue;
                 }
-                if scope == WsZoneDistributeScope::Filter {
-                    if let Some(allowed) = allow {
-                        if !allowed.contains(&ws) {
-                            continue;
-                        }
+                // OAB/OFO: TTD allowlist gates Filter and All (BINVENTORY+ ALL e.g. AGM-65D
+                // must not land on helo-only FOBs). OLO passes allow=None.
+                if let Some(allowed) = allow {
+                    if !allowed.contains(&raw_ws) && !allowed.contains(&ws) {
+                        continue;
                     }
                 }
                 let baseline = amt.saturating_mul(mult);
@@ -4150,17 +4162,31 @@ fn extract_objective_coalition_stock(
             if baseline == 0 {
                 continue;
             }
-            let Some(name) = weapon_row_export_key(&w) else {
+            let ws = remap_zone_weapon_ws_for_export(ws);
+            let Some(name) = weapon_row_export_key(&w).or_else(|| Some(weapon_ws_type_label(ws)))
+            else {
                 continue;
             };
-            out.equipment.insert(
-                name,
-                ObjectiveStockItem {
-                    baseline,
-                    ws_type: stock_export_ws_type(ws),
-                    production: prod.weapon_by_ws.get(&ws).copied().unwrap_or(0),
-                },
-            );
+            // Prefer remapped armable key when ME still stores legacy KMGU zone ws.
+            let export_name = if matches!(
+                read_weapon_ws_type(&w),
+                Some([4, 5, 32, 94] | [4, 5, 32, 95])
+            ) {
+                weapon_ws_type_label(ws)
+            } else {
+                name
+            };
+            let entry = out.equipment.entry(export_name).or_insert(ObjectiveStockItem {
+                baseline: 0,
+                ws_type: stock_export_ws_type(ws),
+                production: prod.weapon_by_ws.get(&ws).copied().unwrap_or(0),
+            });
+            if baseline > entry.baseline {
+                entry.baseline = baseline;
+            }
+            if entry.ws_type.is_none() {
+                entry.ws_type = stock_export_ws_type(ws);
+            }
         }
     }
     if let Ok(aircrafts) = row.raw_get::<_, Table>("aircrafts") {
@@ -4427,18 +4453,27 @@ fn append_allowed_ordnance_from_weapon_tables(
         };
         for pair in weapons.clone().pairs::<Value, Table>() {
             let (_, w) = pair?;
-            let Some(ws) = read_weapon_ws_type(&w) else {
+            let Some(raw_ws) = read_weapon_ws_type(&w) else {
                 continue;
             };
+            let ws = remap_zone_weapon_ws_for_export(raw_ws);
             // Match ME `ensure_positive_default_ordnance_for_allowed_ws` (ordnance + fuel tanks).
-            if !default_restore_weapon_ws(ws) || !allow.contains(&ws) {
+            if !default_restore_weapon_ws(ws) && !default_restore_weapon_ws(raw_ws) {
                 continue;
             }
-            if !catalog.contains(&ws) {
+            if !allow.contains(&ws) && !allow.contains(&raw_ws) {
                 continue;
             }
-            let Some(name) = weapon_row_export_key(&w) else {
+            if !catalog.contains(&ws) && !catalog.contains(&raw_ws) {
                 continue;
+            }
+            let name = if ws != raw_ws {
+                weapon_ws_type_label(ws)
+            } else {
+                let Some(name) = weapon_row_export_key(&w) else {
+                    continue;
+                };
+                name
             };
             if out.equipment.contains_key(&name) {
                 continue;
@@ -4446,7 +4481,9 @@ fn append_allowed_ordnance_from_weapon_tables(
             let mut unit_amt = w.raw_get::<_, u32>("initialAmount").unwrap_or(0);
             if unit_amt == 0 {
                 if let Some(caps) = caps {
-                    unit_amt = campaign_cfg::default_cap_for_weapon_ws(ws, caps).unwrap_or(0);
+                    unit_amt = campaign_cfg::default_cap_for_weapon_ws(ws, caps)
+                        .or_else(|| campaign_cfg::default_cap_for_weapon_ws(raw_ws, caps))
+                        .unwrap_or(0);
                 }
             }
             if unit_amt == 0 {
@@ -4458,7 +4495,12 @@ fn append_allowed_ordnance_from_weapon_tables(
                 ObjectiveStockItem {
                     baseline,
                     ws_type: Some(ws),
-                    production: prod.weapon_by_ws.get(&ws).copied().unwrap_or(0),
+                    production: prod
+                        .weapon_by_ws
+                        .get(&ws)
+                        .copied()
+                        .or_else(|| prod.weapon_by_ws.get(&raw_ws).copied())
+                        .unwrap_or(0),
                 },
             );
         }
@@ -4502,8 +4544,10 @@ fn synthesize_virtual_coalition_stock(
     };
     let prod = build_inventory_production_maps(inv_tpl)?;
     let mult = mult.max(1);
-    // OAB/OFO with TTD: ME `objective_zone_weapon_allowlist`. Else export defaults / open catalog.
-    let allow: Option<HashSet<[i32; 4]>> = if !is_logistics_hub {
+    // OAB/OFO with TTD: ME `objective_zone_weapon_allowlist`. OLO: full INV+DEFAULT (no TTD).
+    let allow: Option<HashSet<[i32; 4]>> = if is_logistics_hub {
+        None
+    } else {
         match (br, vt, ttd_aircraft) {
             (Some(br), Some(vt), Some(types)) if !types.is_empty() => {
                 Some(me_style_objective_zone_weapon_allowlist(side, types, tpl, br, vt)?)
@@ -4517,39 +4561,62 @@ fn synthesize_virtual_coalition_stock(
                 vt,
             ),
         }
-    } else {
-        objective_export_weapon_allowset(defaults, objective_name, side, ttd_aircraft, br, vt)
     };
     let mut out = ObjectiveCoalitionStock::default();
     if let Ok(weapons) = inv_tpl.raw_get::<_, Table>("weapons") {
         for pair in weapons.clone().pairs::<Value, Table>() {
             let (_, w) = pair?;
-            let Some(ws) = read_weapon_ws_type(&w) else {
+            let Some(raw_ws) = read_weapon_ws_type(&w) else {
                 continue;
             };
-            if !weapon_allowed_for_objective_stock(ws, catalog, allow.as_ref()) {
+            let ws = remap_zone_weapon_ws_for_export(raw_ws);
+            if !weapon_allowed_for_objective_stock(ws, catalog, allow.as_ref())
+                && !weapon_allowed_for_objective_stock(raw_ws, catalog, allow.as_ref())
+            {
                 continue;
             }
-            let production = prod.weapon_by_ws.get(&ws).copied().unwrap_or(0);
+            let production = prod
+                .weapon_by_ws
+                .get(&ws)
+                .copied()
+                .or_else(|| prod.weapon_by_ws.get(&raw_ws).copied())
+                .unwrap_or(0);
             if production == 0 {
                 continue;
             }
             let baseline = production.saturating_mul(mult);
-            let Some(name) = weapon_row_export_key(&w) else {
-                continue;
+            let name = if ws != raw_ws {
+                weapon_ws_type_label(ws)
+            } else {
+                let Some(name) = weapon_row_export_key(&w) else {
+                    continue;
+                };
+                name
             };
-            out.equipment.insert(
-                name,
-                ObjectiveStockItem {
-                    baseline,
-                    ws_type: stock_export_ws_type(ws),
-                    production,
-                },
-            );
+            let entry = out.equipment.entry(name).or_insert(ObjectiveStockItem {
+                baseline: 0,
+                ws_type: stock_export_ws_type(ws),
+                production,
+            });
+            if baseline > entry.baseline {
+                entry.baseline = baseline;
+            }
+            if entry.ws_type.is_none() {
+                entry.ws_type = stock_export_ws_type(ws);
+            }
+            if production > entry.production {
+                entry.production = production;
+            }
         }
     }
-    // ME `ensure_positive_default_ordnance_for_allowed_ws`: INV+/DEFAULT/DEFAULT+ for allowlist.
-    if let Some(allow_set) = allow.as_ref() {
+    // ME `ensure_positive_default_ordnance_for_allowed_ws`: INV+/DEFAULT/DEFAULT+.
+    // OLO: allow=None → restore against full coalition catalog (same as ME hub fill).
+    let default_allow: Option<&HashSet<[i32; 4]>> = if is_logistics_hub {
+        Some(catalog)
+    } else {
+        allow.as_ref()
+    };
+    if let Some(allow_set) = default_allow {
         let mut sources: Vec<&Table<'_>> = Vec::new();
         if let Some(t) = inv_plus {
             sources.push(t);
@@ -4589,16 +4656,19 @@ fn synthesize_virtual_coalition_stock(
             };
             for pair in cat_tbl.clone().pairs::<String, Table>() {
                 let (unit_type, row) = pair?;
-                if restrict_aircraft_to_ttd {
-                    let Some(allow_ac) = ttd_aircraft else {
-                        continue;
-                    };
-                    if !allow_ac.contains(unit_type.as_str()) {
-                        continue;
-                    }
-                } else if let Some(allow_ac) = ttd_aircraft {
-                    if !allow_ac.is_empty() && !allow_ac.contains(unit_type.as_str()) {
-                        continue;
+                // OLO: ME keeps full coalition A/C (no include_dyn_slots prune).
+                if !is_logistics_hub {
+                    if restrict_aircraft_to_ttd {
+                        let Some(allow_ac) = ttd_aircraft else {
+                            continue;
+                        };
+                        if !allow_ac.contains(unit_type.as_str()) {
+                            continue;
+                        }
+                    } else if let Some(allow_ac) = ttd_aircraft {
+                        if !allow_ac.is_empty() && !allow_ac.contains(unit_type.as_str()) {
+                            continue;
+                        }
                     }
                 }
                 let production = row.raw_get::<_, u32>("initialAmount").unwrap_or(0);
@@ -4802,6 +4872,26 @@ pub fn build_objective_stock_export(
             let side = warehouse_side_for_default_apply(&resolved.row)?
                 .unwrap_or(allow.side);
             if matches!(side, Side::Neutral) {
+                fill_objective_stock_both_coalitions_virtual(
+                    &mut entry,
+                    allow,
+                    objective_name,
+                    mult,
+                    tpl,
+                    &blue_catalog,
+                    &red_catalog,
+                    objective_defaults,
+                    br,
+                    vt,
+                    caps,
+                )?;
+                out.insert(objective_name.to_string(), entry);
+                continue;
+            }
+            // OLO (hub / ROAD FOB): ME extract uses a narrow policy allowset and skips DEFAULT
+            // restore — owner profiles end thin and diverge from opposite synthesize (and from
+            // airport OLO). Both coalitions use the same INV+DEFAULT+zone synthesize path.
+            if allow.is_logistics_hub {
                 fill_objective_stock_both_coalitions_virtual(
                     &mut entry,
                     allow,
@@ -11749,26 +11839,30 @@ fn objective_zone_weapon_allowlist(
         def_weapon_ws,
         def_label,
     ));
-    // Zone amount rows (e.g. KMGU `[4,5,32,94]`) may be absent from FARP template
-    // catalogs; ME still applies them — keep after retain.
+    // Zone Filter amounts linked to this hub's TTD modules (e.g. KMGU for Mi-24P).
     let mut zone_amount_ws = ws_zone_stock_ws_for_policy_modules(inv_ws_zone_specs, policy_types);
     zone_amount_ws.extend(ws_zone_stock_ws_for_policy_modules(
         def_ws_zone_specs,
         policy_types,
     ));
-    for specs in [inv_ws_zone_specs, def_ws_zone_specs] {
-        for (&ws, spec) in specs {
-            if spec.amount.is_some()
-                && (spec.distribute == WsZoneDistributeScope::All || spec.modules.is_empty())
-            {
-                zone_amount_ws.insert(ws);
-            }
-        }
-    }
     retain_ordnance_in_coalition_catalog(&mut zone_ws, full_catalog);
     zone_ws.extend(zone_amount_ws);
     let mut policy_ws = objective_policy_weapon_allowlist(br, vt, side, policy_types);
     policy_ws.retain(|ws| positive_catalog.contains(ws));
+    // BINVENTORY+ ALL (e.g. AGM-65D) is hub-wide stock for OLO — only keep on OFO/OAB when
+    // a TTD airframe can actually employ the wsType.
+    for specs in [inv_ws_zone_specs, def_ws_zone_specs] {
+        for (&raw_ws, spec) in specs {
+            if spec.amount.is_none() || spec.distribute != WsZoneDistributeScope::All {
+                continue;
+            }
+            let ws = remap_zone_weapon_ws_for_export(raw_ws);
+            if policy_ws.contains(&ws) || policy_ws.contains(&raw_ws) {
+                zone_ws.insert(ws);
+                zone_ws.insert(raw_ws);
+            }
+        }
+    }
     let mut out = policy_ws;
     out.extend(zone_ws);
     out
@@ -12206,8 +12300,15 @@ fn patch_warehouse_dynamic_spawn_links(
             };
             let is_dep_wh = mult_cfg.dep_farp_warehouse_ids.contains(&wid);
             let mut zone_stock_applied = HashSet::<[i32; 4]>::new();
+            // Global BINVENTORY+/BDEFAULT+ ALL rows: OLO hubs (+ non-O* warehouses) only.
+            // OAB/OFO must not inherit ALL (e.g. AGM-65D) when TTD is helicopters only.
+            let apply_zone_all = match obj_zone {
+                Some(o) if o.is_logistics_hub => true,
+                Some(_) => false,
+                None => true,
+            };
             // DEP template pads: only TTDdynFARP-filtered zone stock (below), not global BINVENTORY+ All rows.
-            if !is_dep_wh {
+            if !is_dep_wh && apply_zone_all {
                 apply_zone_ws_stock_amounts(
                     lua,
                     &wh,

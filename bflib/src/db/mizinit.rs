@@ -1164,7 +1164,9 @@ impl Db {
             error!("TISP spawn queue drain failed: {e:?}");
         }
         self.build_carrier_slot_maps(&miz)?;
-        self.ephemeral.preserve_initial_warehouse_fill = true;
+        // Opposite-export debug flip must not SyncFrom ME owner fill after TISP.
+        self.ephemeral.preserve_initial_warehouse_fill =
+            !self.ephemeral.cfg.debugging_objectives_coalition_switch;
         self.setup_warehouses_after_load(lua)
             .context("warehouses after deferred TISP")?;
         self.ephemeral.defer_initial_hub_distribute = false;

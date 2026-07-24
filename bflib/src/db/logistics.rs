@@ -218,9 +218,9 @@ fn apply_me_warehouse_link_dyn_templ(
     Ok(updated)
 }
 
-/// Opposite/capture: Red ME often lacks Blue ordnance rows (e.g. AGM-114K). `Warehouse.setItem`
-/// alone may not create Warehouse State entries — mirror bftools `apply_zone_ws_weapon_stock` row insert.
-fn ensure_me_warehouse_weapon_rows_for_virtual(
+/// Opposite/capture: Invisible FARP / ROAD FOB ME weapon tables are incomplete vs airports.
+/// Rebuild `weapons` from virtual stock (drop opponent leftovers) before `Warehouse.setItem`.
+fn rebuild_me_warehouse_weapons_from_virtual(
     lua: MizLua,
     ab_id: i64,
     obj: &Objective,
@@ -232,47 +232,33 @@ fn ensure_me_warehouse_weapon_rows_for_virtual(
     let Some(wh) = me_warehouse_table_for_airbase_id(&warehouses, ab_id)? else {
         return Ok(0);
     };
-    let weapons: LuaTable = match wh.raw_get("weapons") {
-        Ok(t) => t,
-        Err(_) => {
-            let t = lua.inner().create_table()?;
-            wh.raw_set("weapons", t.clone())?;
-            t
-        }
-    };
-    let mut existing: FxHashSet<[i32; 4]> = FxHashSet::default();
-    weapons.for_each(|_: Value, w: Value| {
-        let Value::Table(row) = w else {
-            return Ok(());
-        };
-        if let Some(quad) = me_weapon_row_ws_quad(&row) {
-            existing.insert(quad);
-        }
-        Ok(())
-    })?;
+    let weapons = lua.inner().create_table()?;
+    let mut written: FxHashSet<[i32; 4]> = FxHashSet::default();
     let mut added = 0usize;
     for (name, inv) in &obj.warehouse.equipment {
         if inv.capacity == 0 {
             continue;
         }
-        let Some(meta) = resource_meta.get(name) else {
-            continue;
-        };
-        if meta.is_aircraft {
+        if resource_meta
+            .get(name.as_str())
+            .map(|m| m.is_aircraft)
+            .unwrap_or(false)
+        {
             continue;
         }
-        let Some(quad) = meta.quad else {
+        let Some(quad) = equipment_ws_quad(name.as_str(), resource_meta) else {
             continue;
         };
-        // Same shape as bftools inventory-cap ordnance + fuel tanks (Warehouse State rows).
         let need_me_row = (quad[0] == 1 && quad[1] == 3)
             || (quad[0] == 4 && ((4..=8).contains(&quad[1]) || quad[1] == 15));
         if !need_me_row {
             continue;
         }
-        if existing.contains(&quad) {
+        if !written.insert(quad) {
             continue;
         }
+        let label = preferred_resource_meta_name_for_quad(quad, resource_meta)
+            .unwrap_or_else(|| name.clone());
         let row = lua.inner().create_table()?;
         let ws = lua.inner().create_table()?;
         ws.raw_set(1, quad[0])?;
@@ -281,27 +267,13 @@ fn ensure_me_warehouse_weapon_rows_for_virtual(
         ws.raw_set(4, quad[3])?;
         row.raw_set("wsType", ws)?;
         row.raw_set("initialAmount", 0u32)?;
-        row.raw_set("name", name.as_str())?;
-        row.raw_set("displayName", name.as_str())?;
-        let mut new_idx = weapons.raw_len().saturating_add(1);
-        if new_idx == 0 {
-            new_idx = 1;
-        }
-        weapons.raw_set(new_idx, row)?;
-        existing.insert(quad);
+        row.raw_set("name", label.as_str())?;
+        row.raw_set("displayName", label.as_str())?;
         added += 1;
+        weapons.raw_set(added, row)?;
     }
+    wh.raw_set("weapons", weapons)?;
     Ok(added)
-}
-
-fn me_weapon_row_ws_quad(row: &LuaTable) -> Option<[i32; 4]> {
-    let wst: LuaTable = row.raw_get("wsType").ok()?;
-    Some([
-        wst.raw_get(1).ok()?,
-        wst.raw_get(2).ok()?,
-        wst.raw_get(3).ok()?,
-        wst.raw_get(4).ok()?,
-    ])
 }
 
 fn resource_map_ws_quad(rm: &warehouse::ResourceMap, unit_type: &str) -> Option<[i32; 4]> {
@@ -801,13 +773,56 @@ fn prune_registration_aircraft_outside_export_profile(
     Ok(pruned)
 }
 
+fn set_warehouse_equipment_count<'lua>(
+    lua: MizLua<'lua>,
+    warehouse: &warehouse::Warehouse<'lua>,
+    name: &String,
+    count: u32,
+    resource_meta: Option<&FxHashMap<String, WarehouseResourceMeta>>,
+) -> Result<()> {
+    // Hoggit: setItem accepts name or wsType table — quads avoid alias/name mismatches (KMGU/BKF).
+    if let Some(meta) = resource_meta.and_then(|m| m.get(name.as_str())) {
+        if !meta.is_aircraft {
+            if let Some(quad) = meta.quad {
+                let wst = warehouse::WSType::from_quad(lua, quad)
+                    .with_context(|| format_compact!("wsType from quad for {name}"))?;
+                return warehouse
+                    .set_item(warehouse::WarehouseItem::Typ(wst), count)
+                    .with_context(|| {
+                        format_compact!("set_item wsType {quad:?} ({name}) to {count}")
+                    });
+            }
+        }
+    }
+    if let Some(quad) = parse_export_ws_type_key(name.as_str()) {
+        let wst = warehouse::WSType::from_quad(lua, quad)
+            .with_context(|| format_compact!("wsType from export key {name}"))?;
+        return warehouse
+            .set_item(warehouse::WarehouseItem::Typ(wst), count)
+            .with_context(|| format_compact!("set_item wsType {quad:?} to {count}"));
+    }
+    warehouse
+        .set_item(name.clone(), count)
+        .with_context(|| format_compact!("set_item {name} to {count}"))
+}
+
 /// Drop DCS rows not in virtual; optional full profile row registration (capture reseed).
 fn apply_virtual_warehouse_to_dcs<'lua>(
+    lua: MizLua<'lua>,
     obj: &Objective,
     warehouse: &warehouse::Warehouse<'lua>,
     export_farp_liquids_tons: bool,
     establish_profile_rows: bool,
+    resource_meta: Option<&FxHashMap<String, WarehouseResourceMeta>>,
 ) -> Result<()> {
+    let mut virtual_quads: FxHashSet<[i32; 4]> = FxHashSet::default();
+    if let Some(meta) = resource_meta {
+        for (name, _) in &obj.warehouse.equipment {
+            if let Some(q) = equipment_ws_quad(name.as_str(), meta) {
+                virtual_quads.insert(q);
+            }
+        }
+    }
     let inv = warehouse
         .get_inventory(None)
         .context("warehouse getInventory for virtual apply")?;
@@ -816,21 +831,39 @@ fn apply_virtual_warehouse_to_dcs<'lua>(
             if qty == 0 {
                 return Ok(());
             }
-            let in_virtual = obj.warehouse.equipment.get(name.as_str()).is_some();
-            if !in_virtual {
-                warehouse
-                    .remove_item(name.clone(), qty)
-                    .with_context(|| format_compact!("remove_item orphan {name}"))?;
+            let in_virtual_by_name = obj.warehouse.equipment.get(name.as_str()).is_some();
+            let in_virtual_by_quad = resource_meta
+                .and_then(|m| m.get(name.as_str()))
+                .and_then(|meta| meta.quad)
+                .map(|q| virtual_quads.contains(&remap_legacy_kmgu_ws(q)))
+                .unwrap_or(false);
+            if !in_virtual_by_name && !in_virtual_by_quad {
+                if let Some(quad) = resource_meta
+                    .and_then(|m| m.get(name.as_str()))
+                    .and_then(|meta| meta.quad)
+                {
+                    clear_dcs_warehouse_equipment_quad(lua, warehouse, quad, name.as_str())?;
+                } else {
+                    warehouse
+                        .remove_item(name.clone(), qty)
+                        .with_context(|| format_compact!("remove_item orphan {name}"))?;
+                }
                 return Ok(());
             }
             let Some(inv) = obj.warehouse.equipment.get(name.as_str()) else {
+                // Kept by wsType quad under a different ResourceMap alias; establish sets amount.
                 return Ok(());
             };
             let target = inv.stored;
             if qty != target {
-                warehouse
-                    .set_item(name.clone(), target)
-                    .with_context(|| format_compact!("set_item {name} to {target}"))?;
+                let key = String::from(name.as_str());
+                set_warehouse_equipment_count(
+                    lua,
+                    warehouse,
+                    &key,
+                    target,
+                    resource_meta,
+                )?;
             }
             Ok(())
         })
@@ -867,9 +900,7 @@ fn apply_virtual_warehouse_to_dcs<'lua>(
     }
     if establish_profile_rows {
         for (name, inv) in &obj.warehouse.equipment {
-            warehouse
-                .set_item(name.clone(), inv.stored)
-                .with_context(|| format_compact!("establish warehouse item {name}"))?;
+            set_warehouse_equipment_count(lua, warehouse, name, inv.stored, resource_meta)?;
         }
         for (typ, inv) in &obj.warehouse.liquids {
             let kg = if export_farp_liquids_tons {
@@ -887,10 +918,12 @@ fn apply_virtual_warehouse_to_dcs<'lua>(
 
 /// Ground DEP FARP: ME pad may still carry full stock; drop DCS rows not in virtual or above virtual `stored`.
 fn reconcile_dcs_warehouse_to_virtual<'lua>(
+    lua: MizLua<'lua>,
     obj: &Objective,
     warehouse: &warehouse::Warehouse<'lua>,
+    resource_meta: Option<&FxHashMap<String, WarehouseResourceMeta>>,
 ) -> Result<()> {
-    apply_virtual_warehouse_to_dcs(obj, warehouse, true, false)
+    apply_virtual_warehouse_to_dcs(lua, obj, warehouse, true, false, resource_meta)
 }
 
 fn equipment_capacity_for_discovered_row(
@@ -1452,9 +1485,81 @@ fn parse_export_ws_type_key(key: &str) -> Option<[i32; 4]> {
         .filter_map(|s| s.trim().parse().ok())
         .collect();
     match parts.as_slice() {
-        [a, b, c, d] => Some([*a, *b, *c, *d]),
+        [a, b, c, d] => Some(remap_legacy_kmgu_ws([*a, *b, *c, *d])),
         _ => None,
     }
+}
+
+/// Zone/INV legacy KMGU markers → armable BKF/KMGU-2 dispenser wsTypes.
+fn remap_legacy_kmgu_ws(ws: [i32; 4]) -> [i32; 4] {
+    match ws {
+        [4, 5, 32, 94] => [4, 5, 38, 361],
+        [4, 5, 32, 95] => [4, 5, 38, 362],
+        other => other,
+    }
+}
+
+/// ME may keep both legacy `[4,5,32,94|95]` and armable `[4,5,38,361|362]` rows; DCS
+/// Inventory treats them as distinct — clear every alias when zeroing orphans.
+fn kmgu_ws_aliases(ws: [i32; 4]) -> SmallVec<[[i32; 4]; 2]> {
+    match remap_legacy_kmgu_ws(ws) {
+        [4, 5, 38, 361] => smallvec![[4, 5, 38, 361], [4, 5, 32, 94]],
+        [4, 5, 38, 362] => smallvec![[4, 5, 38, 362], [4, 5, 32, 95]],
+        other => smallvec![other],
+    }
+}
+
+/// Zero DCS stock by wsType (KMGU/BKF name aliases are unreliable for removeItem).
+fn clear_dcs_warehouse_equipment_quad<'lua>(
+    lua: MizLua<'lua>,
+    warehouse: &warehouse::Warehouse<'lua>,
+    quad: [i32; 4],
+    label: &str,
+) -> Result<()> {
+    for q in kmgu_ws_aliases(quad) {
+        let wst = warehouse::WSType::from_quad(lua, q).with_context(|| {
+            format_compact!("wsType from quad {q:?} clearing {label}")
+        })?;
+        warehouse
+            .set_item(warehouse::WarehouseItem::Typ(wst), 0)
+            .with_context(|| format_compact!("set_item wsType {q:?} (clear {label}) to 0"))?;
+    }
+    Ok(())
+}
+
+fn equipment_ws_quad(
+    name: &str,
+    resource_meta: &FxHashMap<String, WarehouseResourceMeta>,
+) -> Option<[i32; 4]> {
+    if let Some(meta) = resource_meta.get(name) {
+        if let Some(q) = meta.quad {
+            return Some(remap_legacy_kmgu_ws(q));
+        }
+    }
+    parse_export_ws_type_key(name)
+}
+
+fn preferred_resource_meta_name_for_quad(
+    quad: [i32; 4],
+    resource_meta: &FxHashMap<String, WarehouseResourceMeta>,
+) -> Option<String> {
+    let mut best: Option<&String> = None;
+    for (name, meta) in resource_meta {
+        if meta.quad == Some(quad) {
+            best = Some(match best {
+                None => name,
+                Some(cur) => {
+                    let pick = preferred_dcs_equipment_name(cur.as_str(), name.as_str());
+                    if pick == name.as_str() {
+                        name
+                    } else {
+                        cur
+                    }
+                }
+            });
+        }
+    }
+    best.cloned()
 }
 
 fn resolve_export_equipment_dcs_name(
@@ -1462,34 +1567,61 @@ fn resolve_export_equipment_dcs_name(
     resource_meta: &FxHashMap<String, WarehouseResourceMeta>,
 ) -> String {
     if let Some(quad) = parse_export_ws_type_key(export_key) {
-        let mut best: Option<&String> = None;
-        for (name, meta) in resource_meta {
-            if meta.quad == Some(quad) {
-                best = Some(match best {
-                    None => name,
-                    Some(cur) => {
-                        let pick = preferred_dcs_equipment_name(cur.as_str(), name.as_str());
-                        if pick == name.as_str() {
-                            name
-                        } else {
-                            cur
-                        }
-                    }
-                });
-            }
+        if let Some(name) = preferred_resource_meta_name_for_quad(quad, resource_meta) {
+            return name;
         }
-        if let Some(name) = best {
-            return name.clone();
+    }
+    if let Some(meta) = resource_meta.get(export_key) {
+        if let Some(quad) = meta.quad {
+            let quad = remap_legacy_kmgu_ws(quad);
+            if let Some(name) = preferred_resource_meta_name_for_quad(quad, resource_meta) {
+                return name;
+            }
         }
     }
     String::from(export_key)
 }
 
+/// Prefer Warehouse.setItem-friendly labels (KMGU/BKF/UPK…), not numeric launcher ids.
+fn dcs_equipment_name_score(s: &str) -> i32 {
+    let u = s.to_ascii_uppercase();
+    if u.contains("EMPTY") {
+        return 2000;
+    }
+    if !s.is_empty() && s.chars().all(|c| c.is_ascii_digit()) {
+        return 1500;
+    }
+    if u.contains("BYCLSID") || u.contains("CATEGORIES/") || u.starts_with("DB/") {
+        return 900;
+    }
+    if (u.starts_with('{') && u.ends_with('}')) || u.contains("GUID") {
+        return 700;
+    }
+    // Composite dispenser / gun-pod family: human labels beat short CLSID stubs.
+    if u.contains("KMGU") && (u.contains(" - ") || u.contains("DISPENSER")) {
+        return -50;
+    }
+    if u.contains("BKF") && u.contains(" - ") {
+        return -45;
+    }
+    if u.contains("KMGU") || u.contains("BKF") || u.contains("UPK") || u.contains("SPPU") || u.contains("PKT")
+    {
+        if u.contains(" - ") || u.contains("GUN POD") || u.contains("MMG") {
+            return -40;
+        }
+        return -10;
+    }
+    if u.contains("GIAT") || u.contains("M621") {
+        return -20;
+    }
+    s.len() as i32
+}
+
 fn preferred_dcs_equipment_name<'a>(a: &'a str, b: &'a str) -> &'a str {
-    let a_empty = a.contains("EMPTY") || a.contains("Empty");
-    let b_empty = b.contains("EMPTY") || b.contains("Empty");
-    if a_empty != b_empty {
-        return if a_empty { b } else { a };
+    let sa = dcs_equipment_name_score(a);
+    let sb = dcs_equipment_name_score(b);
+    if sa != sb {
+        return if sa < sb { a } else { b };
     }
     if a.len() != b.len() {
         return if a.len() < b.len() { a } else { b };
@@ -1514,6 +1646,64 @@ fn canonicalize_virtual_equipment_keys(
         .collect();
     for old in names {
         let canonical = resolve_export_equipment_dcs_name(old.as_str(), resource_meta);
+        if canonical == old {
+            continue;
+        }
+        let Some(old_inv) = obj.warehouse.equipment.remove_cow(&old) else {
+            continue;
+        };
+        let row = obj.warehouse.equipment.get_or_default_cow(canonical);
+        if old_inv.stored > row.stored {
+            row.stored = old_inv.stored;
+        }
+        if old_inv.capacity > row.capacity {
+            row.capacity = old_inv.capacity;
+        }
+        if row.capacity == 0 && row.stored > 0 {
+            row.capacity = row.stored;
+        }
+    }
+}
+
+/// After DCS setItem, align virtual keys to getInventory aliases (FARP ME name ≠ ResourceMap preferred).
+fn rematch_virtual_equipment_to_dcs_names(
+    obj: &mut Objective,
+    dcs_names: &FxHashSet<String>,
+    resource_meta: &FxHashMap<String, WarehouseResourceMeta>,
+) {
+    let mut quad_to_dcs: FxHashMap<[i32; 4], String> = FxHashMap::default();
+    for name in dcs_names {
+        let Some(meta) = resource_meta.get(name.as_str()) else {
+            continue;
+        };
+        let Some(q) = meta.quad.map(remap_legacy_kmgu_ws) else {
+            continue;
+        };
+        match quad_to_dcs.get(&q) {
+            None => {
+                quad_to_dcs.insert(q, name.clone());
+            }
+            Some(cur) => {
+                let pick = preferred_dcs_equipment_name(cur.as_str(), name.as_str());
+                if pick == name.as_str() {
+                    quad_to_dcs.insert(q, name.clone());
+                }
+            }
+        }
+    }
+    let names: SmallVec<[String; 64]> = obj
+        .warehouse
+        .equipment
+        .iter_mut_cow()
+        .map(|(name, _)| name.clone())
+        .collect();
+    for old in names {
+        let Some(quad) = equipment_ws_quad(old.as_str(), resource_meta) else {
+            continue;
+        };
+        let Some(canonical) = quad_to_dcs.get(&quad).cloned() else {
+            continue;
+        };
         if canonical == old {
             continue;
         }
@@ -1731,6 +1921,13 @@ fn equipment_allowed_for_objective(
     _name: &str,
     meta: Option<WarehouseResourceMeta>,
 ) -> bool {
+    // OLO: `objective_stock` is full INV+DEFAULT synthesize; `objective_defaults` weapon
+    // lists are thin TTD/policy (e.g. Zestafoni red_weapon_ws=3) and must not prune hubs.
+    if matches!(obj.kind, ObjectiveKind::Logistics)
+        && objective_coalition_stock_for_side(export, obj.name.as_str(), side).is_some()
+    {
+        return true;
+    }
     let Some((_, allowed_ws)) = objective_defaults_for_objective(export, obj, side) else {
         return true;
     };
@@ -1767,6 +1964,7 @@ fn allowed_weapon_quads(export: &FowlMizExport, side: Side) -> FxHashSet<[i32; 4
 
 /// Prune via warehouse inventory + cached resource map (not full DCS catalog scan).
 fn prune_disallowed_dcs_weapon_stock<'lua>(
+    lua: MizLua<'lua>,
     warehouse: &warehouse::Warehouse<'lua>,
     export: &FowlMizExport,
     side: Side,
@@ -1794,15 +1992,16 @@ fn prune_disallowed_dcs_weapon_stock<'lua>(
             let Some(quad) = meta.quad else {
                 return Ok(());
             };
-            if !row_subject_to_weapon_allowlist(export, &quad) {
+            let quad_n = remap_legacy_kmgu_ws(quad);
+            if !row_subject_to_weapon_allowlist(export, &quad)
+                && !row_subject_to_weapon_allowlist(export, &quad_n)
+            {
                 return Ok(());
             }
-            if allowed.contains(&quad) {
+            if allowed.contains(&quad) || allowed.contains(&quad_n) {
                 return Ok(());
             }
-            warehouse
-                .remove_item(name.clone(), qty)
-                .with_context(|| format_compact!("remove_item {name}"))?;
+            clear_dcs_warehouse_equipment_quad(lua, warehouse, quad, name.as_str())?;
             Ok(())
         })
         .context("pruning disallowed weapon stock from DCS")?;
@@ -2623,13 +2822,10 @@ impl Db {
                     let dcs_name =
                         resolve_export_equipment_dcs_name(name.as_str(), &resource_meta);
                     // objective_stock is authoritative (see apply_export_profile).
-                    obj.warehouse.equipment.insert_cow(
-                        dcs_name,
-                        Inventory {
-                            stored: 0,
-                            capacity: item.baseline,
-                        },
-                    );
+                    let row = obj.warehouse.equipment.get_or_default_cow(dcs_name);
+                    if item.baseline > row.capacity {
+                        row.capacity = item.baseline;
+                    }
                 }
                 for (key, liq) in &profile.liquids {
                     if liq.baseline == 0 {
@@ -2637,13 +2833,10 @@ impl Db {
                     }
                     let typ = liquid_type_from_export_key(key)
                         .with_context(|| format_compact!("DEP FARP {:?}", obj.name))?;
-                    obj.warehouse.liquids.insert_cow(
-                        typ,
-                        Inventory {
-                            stored: 0,
-                            capacity: liq.baseline,
-                        },
-                    );
+                    let row = obj.warehouse.liquids.get_or_default_cow(typ);
+                    if liq.baseline > row.capacity {
+                        row.capacity = liq.baseline;
+                    }
                 }
                 canonicalize_virtual_equipment_keys(obj, &resource_meta);
                 continue;
@@ -2661,13 +2854,10 @@ impl Db {
                 let dcs_name =
                     resolve_export_equipment_dcs_name(name.as_str(), &resource_meta);
                 // objective_stock is authoritative (see apply_export_profile).
-                obj.warehouse.equipment.insert_cow(
-                    dcs_name,
-                    Inventory {
-                        stored: 0,
-                        capacity: item.baseline,
-                    },
-                );
+                let row = obj.warehouse.equipment.get_or_default_cow(dcs_name);
+                if item.baseline > row.capacity {
+                    row.capacity = item.baseline;
+                }
             }
             for (key, liq) in &profile.liquids {
                 if liq.baseline == 0 {
@@ -2675,13 +2865,10 @@ impl Db {
                 }
                 let typ = liquid_type_from_export_key(key)
                     .with_context(|| format_compact!("objective {:?}", obj.name))?;
-                obj.warehouse.liquids.insert_cow(
-                    typ,
-                    Inventory {
-                        stored: 0,
-                        capacity: liq.baseline,
-                    },
-                );
+                let row = obj.warehouse.liquids.get_or_default_cow(typ);
+                if liq.baseline > row.capacity {
+                    row.capacity = liq.baseline;
+                }
             }
             canonicalize_virtual_equipment_keys(obj, &resource_meta);
         }
@@ -2778,13 +2965,10 @@ impl Db {
             let dcs_name = resolve_export_equipment_dcs_name(name.as_str(), resource_meta);
             // objective_stock is the build-time allowlist; do not re-filter with narrower
             // objective_defaults (policy-only, misses B/RDEFAULT+ / zone ordnance e.g. AGM-114K).
-            obj.warehouse.equipment.insert_cow(
-                dcs_name,
-                Inventory {
-                    stored: 0,
-                    capacity: item.baseline,
-                },
-            );
+            let row = obj.warehouse.equipment.get_or_default_cow(dcs_name);
+            if item.baseline > row.capacity {
+                row.capacity = item.baseline;
+            }
         }
         for (key, liq) in &profile.liquids {
             if liq.baseline == 0 {
@@ -2792,14 +2976,12 @@ impl Db {
             }
             let typ = liquid_type_from_export_key(key)
                 .with_context(|| format_compact!("capture warehouse {:?}", obj.name))?;
-            obj.warehouse.liquids.insert_cow(
-                typ,
-                Inventory {
-                    stored: 0,
-                    capacity: liq.baseline,
-                },
-            );
+            let row = obj.warehouse.liquids.get_or_default_cow(typ);
+            if liq.baseline > row.capacity {
+                row.capacity = liq.baseline;
+            }
         }
+        canonicalize_virtual_equipment_keys(obj, resource_meta);
         Ok(true)
     }
 
@@ -3738,24 +3920,39 @@ impl Db {
             Ok(Some(ab.get_id()?.inner()))
         })() {
             let obj = objective!(self, oid)?;
-            match ensure_me_warehouse_weapon_rows_for_virtual(
+            match rebuild_me_warehouse_weapons_from_virtual(
                 lua,
                 ab_id,
                 obj,
                 resource_meta.as_ref(),
             ) {
                 Ok(n) if n > 0 => info!(
-                    "capture {name}: added {n} ME weapon row(s) for {new_owner:?} export stock"
+                    "capture {name}: rebuilt {n} ME weapon row(s) for {new_owner:?} export stock"
                 ),
                 Ok(_) => {}
-                Err(e) => warn!("capture {name}: ME weapon rows {e:?}"),
+                Err(e) => warn!("capture {name}: ME weapon rebuild {e:?}"),
             }
         }
         let capture_track = match self.sync_objective_to_warehouse(lua, oid) {
             Ok((obj, wh)) => {
                 let liquids_tons = objective_liquids_stored_as_tons(export.as_ref(), obj);
-                if let Err(e) = apply_virtual_warehouse_to_dcs(obj, &wh, liquids_tons, true) {
+                if let Err(e) = apply_virtual_warehouse_to_dcs(
+                    lua,
+                    obj,
+                    &wh,
+                    liquids_tons,
+                    true,
+                    Some(resource_meta.as_ref()),
+                ) {
                     error!("apply DCS warehouse after capture {oid}: {e:?}");
+                }
+                if let Ok(dcs_names) = collect_dcs_warehouse_equipment_names(&wh) {
+                    rematch_virtual_equipment_to_dcs_names(
+                        obj,
+                        &dcs_names,
+                        resource_meta.as_ref(),
+                    );
+                    canonicalize_virtual_equipment_keys(obj, resource_meta.as_ref());
                 }
                 let mut track_names: Vec<String> = Vec::new();
                 for (name, inv) in &obj.warehouse.equipment {
@@ -4445,7 +4642,12 @@ impl Db {
         canonicalize_virtual_equipment_keys(obj, resource_meta.as_ref());
         if objective_is_ground_dep_farp_export(export.as_ref(), obj) {
             let keep_virtual = skip_dep_hydrate || dep_farp_has_persisted_virtual_stock(obj);
-            reconcile_dcs_warehouse_to_virtual(obj, &warehouse)
+            reconcile_dcs_warehouse_to_virtual(
+                lua,
+                obj,
+                &warehouse,
+                Some(resource_meta.as_ref()),
+            )
                 .context("pruning ground DEP FARP DCS warehouse to virtual stock")?;
             if !keep_virtual {
                 self.ephemeral.dep_farp_authoritative_until.remove(&oid);
@@ -4543,12 +4745,17 @@ impl Db {
             .context("getting warehouse")?;
         let owner = obj.owner;
         let export = self.ephemeral.fowl_miz_export.as_ref();
-        prune_disallowed_dcs_weapon_stock(&warehouse, export, owner, resource_meta.as_ref())?;
+        prune_disallowed_dcs_weapon_stock(lua, &warehouse, export, owner, resource_meta.as_ref())?;
         let liquids_tons = objective_liquids_stored_as_tons(export, obj);
         sync_obj_to_warehouse(obj, &warehouse, liquids_tons)
             .context("syncing warehouse to objective")?;
         if objective_is_ground_dep_farp_export(export, obj) {
-            reconcile_dcs_warehouse_to_virtual(obj, &warehouse)
+            reconcile_dcs_warehouse_to_virtual(
+                lua,
+                obj,
+                &warehouse,
+                Some(resource_meta.as_ref()),
+            )
                 .context("pruning ground DEP FARP DCS warehouse after virtual push")?;
         }
         Ok((obj, warehouse))
@@ -4582,24 +4789,38 @@ impl Db {
             .context("getting warehouse")?;
         let owner = obj.owner;
         let export = self.ephemeral.fowl_miz_export.as_ref();
-        let added = ensure_me_warehouse_weapon_rows_for_virtual(
+        // ROAD FOB / Invisible FARP: additive ensure_me leaves owner leftover weapons and
+        // misses most opposite rows (eq_rows ~20–70). Rebuild ME weapons from virtual.
+        let rebuilt = rebuild_me_warehouse_weapons_from_virtual(
             lua,
             ab_id,
             obj,
             resource_meta.as_ref(),
         )?;
-        if added > 0 {
+        if rebuilt > 0 {
             info!(
-                "ME warehouse weapon rows: added {added} for {:?} (opposite/export stock)",
+                "ME warehouse weapons: rebuilt {rebuilt} row(s) for {:?} (opposite/export stock)",
                 obj.name
             );
         }
-        prune_disallowed_dcs_weapon_stock(&warehouse, export, owner, resource_meta.as_ref())?;
+        prune_disallowed_dcs_weapon_stock(lua, &warehouse, export, owner, resource_meta.as_ref())?;
         let liquids_tons = objective_liquids_stored_as_tons(export, obj);
-        apply_virtual_warehouse_to_dcs(obj, &warehouse, liquids_tons, true)
+        apply_virtual_warehouse_to_dcs(
+            lua,
+            obj,
+            &warehouse,
+            liquids_tons,
+            true,
+            Some(resource_meta.as_ref()),
+        )
             .context("replace DCS warehouse from virtual")?;
-        record_objective_dcs_equipment_names(&mut self.ephemeral, oid, &warehouse)
-            .context("record DCS equipment after opposite replace")?;
+        let dcs_names = collect_dcs_warehouse_equipment_names(&warehouse)
+            .context("collect DCS equipment names after opposite replace")?;
+        rematch_virtual_equipment_to_dcs_names(obj, &dcs_names, resource_meta.as_ref());
+        canonicalize_virtual_equipment_keys(obj, resource_meta.as_ref());
+        self.ephemeral
+            .warehouse_dcs_equipment_names
+            .insert(oid, dcs_names);
         Ok(())
     }
 
