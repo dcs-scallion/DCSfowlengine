@@ -237,6 +237,8 @@ pub enum LifeType {
     Logistics,
     Attack,
     Recon,
+    /// Combined Arms: player controlling a coalition deployable / troop unit.
+    CombinedArms,
 }
 
 impl fmt::Display for LifeType {
@@ -247,6 +249,7 @@ impl fmt::Display for LifeType {
             Self::Logistics => "logistics",
             Self::Attack => "attack",
             Self::Recon => "recon",
+            Self::CombinedArms => "combined arms",
         };
         write!(f, "{s}")
     }
@@ -260,6 +263,7 @@ impl LifeType {
             LifeType::Intercept => Some(LifeType::Attack),
             LifeType::Attack => Some(LifeType::Standard),
             LifeType::Standard => None,
+            LifeType::CombinedArms => None,
         }
     }
 
@@ -271,6 +275,7 @@ impl LifeType {
             LifeType::Intercept => Some(LifeType::Logistics),
             LifeType::Attack => Some(LifeType::Attack),
             LifeType::Standard => Some(LifeType::Attack),
+            LifeType::CombinedArms => None,
         }
     }
 }

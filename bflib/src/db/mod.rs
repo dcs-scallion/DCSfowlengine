@@ -233,6 +233,10 @@ impl Db {
         crate::sounds::play_player_export(&self.ephemeral.fowl_miz_export, lua, key, slot);
     }
 
+    pub fn play_sound_unit(&self, lua: MizLua, key: &str, unit: dcso3::env::miz::UnitId) {
+        crate::sounds::play_unit_export(&self.ephemeral.fowl_miz_export, lua, key, unit);
+    }
+
     pub fn play_sound_all(&self, lua: MizLua, key: &str) {
         crate::sounds::play_all_export(&self.ephemeral.fowl_miz_export, lua, key);
     }

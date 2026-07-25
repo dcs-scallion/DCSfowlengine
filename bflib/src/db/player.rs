@@ -1685,11 +1685,18 @@ impl Db {
                 });
             let pps = (total_points as f32 / hit_by.len() as f32).ceil() as i32;
             let victim_info = match &dead.victim {
-                Who::Player { ucid, .. } => self.persisted.players.get(ucid).map(|p| VictimInfo {
-                    ucid: *ucid,
-                    name: p.name.clone(),
-                    life_type: p.airborne,
-                    ai_deployable: false,
+                Who::Player { ucid, unit, .. } => self.persisted.players.get(ucid).map(|p| {
+                    let life_type = if self.is_combined_arms_life_unit(unit) {
+                        Some(LifeType::CombinedArms)
+                    } else {
+                        p.airborne
+                    };
+                    VictimInfo {
+                        ucid: *ucid,
+                        name: p.name.clone(),
+                        life_type,
+                        ai_deployable: false,
+                    }
                 }),
                 Who::AI { ucid: None, .. } => None,
                 Who::AI { ucid: Some(i), .. } => {
@@ -1763,4 +1770,218 @@ impl Db {
             }
         }
     }
+
+    /// Fowl deployable / troop unit eligible for Combined Arms lives.
+    pub fn is_combined_arms_life_unit(&self, id: &DcsOid<ClassUnit>) -> bool {
+        self.ephemeral
+            .uid_by_object_id
+            .get(id)
+            .and_then(|uid| self.persisted.units.get(uid))
+            .and_then(|unit| self.persisted.groups.get(&unit.group))
+            .is_some_and(|g| {
+                matches!(
+                    g.origin,
+                    DeployKind::Deployed { .. } | DeployKind::Troop { .. }
+                )
+            })
+    }
+
+    pub fn ca_controller(&self, id: &DcsOid<ClassUnit>) -> Option<Ucid> {
+        self.ephemeral.ca_controller_by_oid.get(id).copied()
+    }
+
+    pub fn clear_ca_control(&mut self, id: &DcsOid<ClassUnit>) {
+        if let Some(ucid) = self.ephemeral.ca_controller_by_oid.remove(id) {
+            if self
+                .ephemeral
+                .ca_oid_by_controller
+                .get(&ucid)
+                .is_some_and(|oid| oid == id)
+            {
+                self.ephemeral.ca_oid_by_controller.remove(&ucid);
+            }
+        }
+    }
+
+    pub fn register_ca_control(&mut self, id: DcsOid<ClassUnit>, ucid: Ucid) {
+        if let Some(old_oid) = self.ephemeral.ca_oid_by_controller.insert(ucid, id.clone()) {
+            self.ephemeral.ca_controller_by_oid.remove(&old_oid);
+        }
+        if let Some(old_ucid) = self.ephemeral.ca_controller_by_oid.insert(id, ucid) {
+            if old_ucid != ucid {
+                self.ephemeral.ca_oid_by_controller.remove(&old_ucid);
+            }
+        }
+    }
+
+    fn ca_lives_configured(&self) -> bool {
+        self.ephemeral.cfg.limited_lives
+            && self
+                .ephemeral
+                .cfg
+                .default_lives
+                .contains_key(&LifeType::CombinedArms)
+    }
+
+    /// Remaining Combined Arms lives after applying reset timer (None = unlimited / not configured).
+    pub fn combined_arms_lives_remaining(&mut self, ucid: &Ucid, now: DateTime<Utc>) -> Option<u8> {
+        if !self.ca_lives_configured() {
+            return None;
+        }
+        let &(max_lives, reset_secs) = self
+            .ephemeral
+            .cfg
+            .default_lives
+            .get(&LifeType::CombinedArms)?;
+        let player = self.persisted.players.get_mut_cow(ucid)?;
+        let (since, n) = player
+            .lives
+            .get_or_insert_cow(LifeType::CombinedArms, || (now, max_lives));
+        if reset_secs > 0 && (now - *since).num_seconds() >= reset_secs as i64 {
+            *since = now;
+            *n = max_lives;
+        }
+        Some(*n)
+    }
+
+    fn take_combined_arms_life(&mut self, ucid: &Ucid, now: DateTime<Utc>) -> Result<()> {
+        let &(max_lives, reset_secs) = self
+            .ephemeral
+            .cfg
+            .default_lives
+            .get(&LifeType::CombinedArms)
+            .ok_or_else(|| anyhow!("CombinedArms lives not configured"))?;
+        let player = self
+            .persisted
+            .players
+            .get_mut_cow(ucid)
+            .ok_or_else(|| anyhow!("no player {ucid}"))?;
+        let (since, n) = player
+            .lives
+            .get_or_insert_cow(LifeType::CombinedArms, || (now, max_lives));
+        if reset_secs > 0 && (now - *since).num_seconds() >= reset_secs as i64 {
+            *since = now;
+            *n = max_lives;
+        }
+        if *n == 0 {
+            bail!("no Combined Arms lives remaining");
+        }
+        *n -= 1;
+        info!(
+            "life taken on Combined Arms enter for {ucid}, remaining {}",
+            *n
+        );
+        let lives_snap = player.lives.clone();
+        self.ephemeral.stat(Stat::Life {
+            id: *ucid,
+            lives: lives_snap,
+        });
+        self.ephemeral.dirty();
+        Ok(())
+    }
+
+    fn return_combined_arms_life(&mut self, ucid: &Ucid) -> bool {
+        if !self.ca_lives_configured() {
+            return false;
+        }
+        let max_lives = self.ephemeral.cfg.default_lives[&LifeType::CombinedArms].0;
+        let Some(player) = self.persisted.players.get_mut_cow(ucid) else {
+            return false;
+        };
+        let Some((_, n)) = player.lives.get_mut_cow(&LifeType::CombinedArms) else {
+            return false;
+        };
+        *n += 1;
+        if *n >= max_lives {
+            player.lives.remove_cow(&LifeType::CombinedArms);
+        }
+        let lives_snap = player.lives.clone();
+        self.ephemeral.stat(Stat::Life {
+            id: *ucid,
+            lives: lives_snap,
+        });
+        self.ephemeral.dirty();
+        info!("life returned on Combined Arms leave for {ucid}");
+        true
+    }
+
+    /// Player entered a Combined Arms–eligible unit; deny if no lives.
+    /// Escrows one Combined Arms life (same model as aircraft `lives_birth` slotting).
+    pub fn on_combined_arms_enter(
+        &mut self,
+        id: DcsOid<ClassUnit>,
+        ucid: Ucid,
+        now: DateTime<Utc>,
+    ) -> Result<CaEnterRes> {
+        if !self.is_combined_arms_life_unit(&id) {
+            return Ok(CaEnterRes::NotApplicable);
+        }
+        // Already escrowed for this player (unit switch): remount only.
+        if self.ephemeral.ca_oid_by_controller.get(&ucid) == Some(&id)
+            || self.ephemeral.ca_oid_by_controller.contains_key(&ucid)
+        {
+            self.register_ca_control(id, ucid);
+            return Ok(CaEnterRes::Ok);
+        }
+        // Displaced previous controller keeps their escrow until leave/dead of their unit;
+        // register_ca_control drops the old mapping for this unit — return that life.
+        if let Some(old_ucid) = self.ephemeral.ca_controller_by_oid.get(&id).copied() {
+            if old_ucid != ucid {
+                self.clear_ca_control(&id);
+                self.return_combined_arms_life(&old_ucid);
+            }
+        }
+        if self.ca_lives_configured() {
+            if let Some(0) = self.combined_arms_lives_remaining(&ucid, now) {
+                self.ephemeral.panel_to_player(
+                    &self.persisted,
+                    15,
+                    &ucid,
+                    "no Combined Arms lives remaining; wait for life reset",
+                );
+                return Ok(CaEnterRes::Rejected);
+            }
+            self.take_combined_arms_life(&ucid, now)?;
+            self.register_ca_control(id, ucid);
+            return Ok(CaEnterRes::LifeTaken);
+        }
+        self.register_ca_control(id, ucid);
+        Ok(CaEnterRes::Ok)
+    }
+
+    /// Player left a CA unit. Returns life when `return_life` (unit still alive).
+    pub fn on_combined_arms_leave(
+        &mut self,
+        id: &DcsOid<ClassUnit>,
+        return_life: bool,
+    ) -> Option<(Ucid, bool)> {
+        let ucid = self.ephemeral.ca_controller_by_oid.remove(id)?;
+        if self
+            .ephemeral
+            .ca_oid_by_controller
+            .get(&ucid)
+            .is_some_and(|oid| oid == id)
+        {
+            self.ephemeral.ca_oid_by_controller.remove(&ucid);
+        }
+        let returned = return_life && self.return_combined_arms_life(&ucid);
+        Some((ucid, returned))
+    }
+
+    /// Controlled CA unit destroyed: escrow stays spent (no second deduct, no return).
+    pub fn on_combined_arms_unit_dead(&mut self, id: &DcsOid<ClassUnit>) {
+        let Some(ucid) = self.ephemeral.ca_controller_by_oid.remove(id) else {
+            return;
+        };
+        self.ephemeral.ca_oid_by_controller.remove(&ucid);
+        info!("combined arms unit dead for {ucid}; life escrow kept");
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CaEnterRes {
+    NotApplicable,
+    Rejected,
+    Ok,
+    LifeTaken,
 }

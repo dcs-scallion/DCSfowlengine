@@ -25,6 +25,7 @@ use chrono::{Duration, prelude::*};
 use dcso3::{
     String,
     event::Shot as ShotEvent,
+    net::SlotId,
     object::{DcsObject, DcsOid, Object},
     unit::{ClassUnit, Unit},
 };
@@ -58,6 +59,21 @@ macro_rules! some {
 }
 
 pub(crate) fn who(db: &Db, id: DcsOid<ClassUnit>) -> Option<Who> {
+    if let Some(ucid) = db.ca_controller(&id) {
+        return db.player(&ucid).map(|p| {
+            let slot = p
+                .current_slot
+                .as_ref()
+                .map(|(s, _)| *s)
+                .unwrap_or(SlotId::Spectator);
+            Who::Player {
+                side: p.side,
+                slot,
+                ucid,
+                unit: id.clone(),
+            }
+        });
+    }
     match db.ephemeral.get_uid_by_object_id(&id) {
         Some(uid) => db.unit(uid).ok().map(|u| Who::AI {
             side: u.side,

@@ -928,6 +928,7 @@ fn life_type_loss_bucket(lt: LifeType, helo: bool) -> LossBucketField {
         LifeType::Recon => LossBucketField::PlanesRecon,
         LifeType::Logistics if helo => LossBucketField::HelicoptersLog,
         LifeType::Logistics => LossBucketField::PlanesAttack,
+        LifeType::CombinedArms => LossBucketField::PlanesAttack,
     }
 }
 

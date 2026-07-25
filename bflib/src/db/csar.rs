@@ -45,12 +45,13 @@ use mlua::{FromLua, Value};
 use serde_derive::{Deserialize, Serialize};
 use smallvec::SmallVec;
 
-pub const LIFE_TYPE_DISPLAY_ORDER: [LifeType; 5] = [
+pub const LIFE_TYPE_DISPLAY_ORDER: [LifeType; 6] = [
     LifeType::Standard,
     LifeType::Attack,
     LifeType::Intercept,
     LifeType::Recon,
     LifeType::Logistics,
+    LifeType::CombinedArms,
 ];
 
 pub fn life_type_display_label(lt: LifeType) -> &'static str {
@@ -60,16 +61,18 @@ pub fn life_type_display_label(lt: LifeType) -> &'static str {
         LifeType::Intercept => "Intercept",
         LifeType::Recon => "Recon",
         LifeType::Logistics => "Logistics",
+        LifeType::CombinedArms => "Combined Arms",
     }
 }
 
-pub fn life_type_map_abbrev(lt: LifeType) -> char {
+pub fn life_type_map_abbrev(lt: LifeType) -> &'static str {
     match lt {
-        LifeType::Standard => 'S',
-        LifeType::Attack => 'A',
-        LifeType::Intercept => 'I',
-        LifeType::Recon => 'R',
-        LifeType::Logistics => 'L',
+        LifeType::Standard => "S",
+        LifeType::Attack => "A",
+        LifeType::Intercept => "I",
+        LifeType::Recon => "R",
+        LifeType::Logistics => "L",
+        LifeType::CombinedArms => "CA",
     }
 }
 

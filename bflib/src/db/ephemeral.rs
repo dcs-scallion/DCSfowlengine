@@ -220,6 +220,10 @@ pub struct Ephemeral {
     pub(super) campaign_online_since: FxHashMap<dcso3::net::Ucid, DateTime<Utc>>,
     /// Player airframe war-loss already counted (PilotDead + UnitLost both hit unit_killed).
     pub(super) campaign_airframe_loss_ids: FxHashSet<DcsOid<ClassUnit>>,
+    /// Combined Arms: object id → UCID of player currently controlling a Fowl deployable/troop.
+    pub(crate) ca_controller_by_oid: FxHashMap<DcsOid<ClassUnit>, Ucid>,
+    /// Reverse of `ca_controller_by_oid` (one controlled unit per player).
+    pub(crate) ca_oid_by_controller: FxHashMap<Ucid, DcsOid<ClassUnit>>,
     /// PRI_LINE redraw pending; re-queue PRI_OVERLAY before the next markup flush.
     overlay_underlay_dirty: bool,
     /// Mobile FARP / carrier pads currently underway (no supply arrow / no virtual deliveries).
@@ -304,6 +308,8 @@ impl Default for Ephemeral {
             restart_display_skew_secs: 0,
             campaign_online_since: FxHashMap::default(),
             campaign_airframe_loss_ids: FxHashSet::default(),
+            ca_controller_by_oid: FxHashMap::default(),
+            ca_oid_by_controller: FxHashMap::default(),
             overlay_underlay_dirty: false,
             mobile_farp_underway: FxHashSet::default(),
             mobile_farp_hull_restore_unsupported_logged: false,

@@ -15,15 +15,12 @@ for more details.
 */
 
 use bfprotocols::fowl_miz_export::FowlMizExport;
-use dcso3::{net::SlotId, trigger::Trigger, MizLua};
+use dcso3::{env::miz::UnitId, net::SlotId, trigger::Trigger, MizLua};
 use log::{debug, warn};
 use std::sync::Arc;
 
-pub fn play_player(export: &FowlMizExport, lua: MizLua, key: &str, slot: &SlotId) {
+pub fn play_unit(export: &FowlMizExport, lua: MizLua, key: &str, unit: UnitId) {
     let Some(path) = export.sounds_player.get(key) else {
-        return;
-    };
-    let Some(unit) = slot.as_unit_id() else {
         return;
     };
     let Ok(trigger) = Trigger::singleton(lua) else {
@@ -35,6 +32,17 @@ pub fn play_player(export: &FowlMizExport, lua: MizLua, key: &str, slot: &SlotId
     if let Err(e) = action.out_sound_for_unit(unit, path.clone().into()) {
         debug!("sound {key} for unit skipped: {e:?}");
     }
+}
+
+pub fn play_player(export: &FowlMizExport, lua: MizLua, key: &str, slot: &SlotId) {
+    let Some(unit) = slot.as_unit_id() else {
+        return;
+    };
+    play_unit(export, lua, key, unit);
+}
+
+pub fn play_unit_export(export: &Arc<FowlMizExport>, lua: MizLua, key: &str, unit: UnitId) {
+    play_unit(export, lua, key, unit);
 }
 
 pub fn play_all(export: &FowlMizExport, lua: MizLua, key: &str) {

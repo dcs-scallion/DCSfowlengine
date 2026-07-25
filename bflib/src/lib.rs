@@ -47,7 +47,7 @@ use crossbeam::queue::SegQueue;
 use db::{
     discord_map::{DiscordMapLiveCtx, DiscordMapPilot},
     group::BirthRes,
-    player::{RegErr, TakeoffRes},
+    player::{CaEnterRes, RegErr, TakeoffRes},
     Db,
 };
 use dcso3::{
@@ -1023,6 +1023,220 @@ fn flush_markup_if_pending(ctx: &mut Context, lua: MizLua) {
     }
 }
 
+fn is_combined_arms_control_slot(slot: &SlotId) -> bool {
+    matches!(
+        slot,
+        SlotId::ArtilleryCommander(_, _)
+            | SlotId::ForwardObserver(_, _)
+            | SlotId::Observer(_, _)
+            | SlotId::Instructor(_, _)
+    )
+}
+
+fn ca_control_slot_priority(slot: &SlotId) -> u8 {
+    match slot {
+        SlotId::ArtilleryCommander(_, _) => 0,
+        SlotId::ForwardObserver(_, _) => 1,
+        SlotId::Observer(_, _) => 2,
+        SlotId::Instructor(_, _) => 3,
+        _ => 9,
+    }
+}
+
+fn lookup_ucid_by_player_name(ctx: &Context, name: &str) -> Option<Ucid> {
+    if let Some(ifo) = ctx.connected.get_by_name(name) {
+        return Some(ifo.ucid);
+    }
+    ctx.db.persisted.players.into_iter().find_map(|(u, p)| {
+        if p.name.as_str() == name || p.alts.into_iter().any(|a| a.as_str() == name) {
+            Some(*u)
+        } else {
+            None
+        }
+    })
+}
+
+/// True when the player currently occupies an aircraft/helicopter campaign slot.
+fn player_slotted_in_aircraft_or_helicopter(ctx: &Context, ucid: &Ucid) -> bool {
+    let Some(player) = ctx.db.persisted.players.get(ucid) else {
+        return false;
+    };
+    let Some((slot, _)) = player.current_slot.as_ref() else {
+        return false;
+    };
+    match slot {
+        SlotId::Unit(_) | SlotId::MultiCrew(_, _) => {
+            let Some(sifo) = ctx.db.ephemeral.get_slot_info(slot) else {
+                return false;
+            };
+            is_aircraft_or_helicopter(&ctx.db, &sifo.typ)
+        }
+        _ => false,
+    }
+}
+
+/// DCS often reports CA ground `getPlayerName()` as `"PLAYER"` on enter; Shot often has the real callsign.
+fn resolve_combined_arms_controller(
+    ctx: &Context,
+    unit: &Unit,
+    id: &DcsOid<ClassUnit>,
+) -> Option<Ucid> {
+    if let Ok(Some(name)) = unit.get_player_name() {
+        if !name.is_empty() && !name.eq_ignore_ascii_case("PLAYER") {
+            if let Some(ucid) = lookup_ucid_by_player_name(ctx, name.as_str()) {
+                return Some(ucid);
+            }
+        }
+    }
+    let unit_side = ctx
+        .db
+        .ephemeral
+        .get_uid_by_object_id(id)
+        .and_then(|uid| ctx.db.persisted.units.get(uid))
+        .map(|u| u.side)?;
+
+    // Shot path: not in air ⇒ can only be firing from Combined Arms.
+    let mut non_air: SmallVec<[Ucid; 4]> = smallvec![];
+    for (ucid, player) in &ctx.db.persisted.players {
+        if player.side != unit_side {
+            continue;
+        }
+        if !ctx.connected.id_by_ucid.contains_key(ucid) {
+            continue;
+        }
+        if player_slotted_in_aircraft_or_helicopter(ctx, ucid) {
+            continue;
+        }
+        non_air.push(*ucid);
+    }
+    if non_air.len() == 1 {
+        info!(
+            "CA controller resolved via sole non-air player for {id:?} -> {}",
+            non_air[0]
+        );
+        return Some(non_air[0]);
+    }
+
+    let mut best: Option<(Ucid, u8)> = None;
+    let mut best_count = 0u32;
+    for ucid in &non_air {
+        let Some(player) = ctx.db.persisted.players.get(ucid) else {
+            continue;
+        };
+        let Some((slot, _)) = player.current_slot.as_ref() else {
+            continue;
+        };
+        if !is_combined_arms_control_slot(slot) {
+            continue;
+        }
+        let pri = ca_control_slot_priority(slot);
+        match best {
+            None => {
+                best = Some((*ucid, pri));
+                best_count = 1;
+            }
+            Some((_, bpri)) if pri < bpri => {
+                best = Some((*ucid, pri));
+                best_count = 1;
+            }
+            Some((_, bpri)) if pri == bpri => {
+                best_count += 1;
+            }
+            Some(_) => {}
+        }
+    }
+    if best_count == 1 {
+        let ucid = best.map(|(u, _)| u)?;
+        info!("CA controller resolved via side CA slot for {id:?} -> {ucid}");
+        Some(ucid)
+    } else {
+        if best_count > 1 {
+            warn!(
+                "CA: ambiguous controller for {id:?} ({best_count} CA-slot players on {unit_side:?})"
+            );
+        }
+        None
+    }
+}
+
+fn apply_combined_arms_control(
+    lua: MizLua,
+    ctx: &mut Context,
+    unit: &Unit,
+    id: DcsOid<ClassUnit>,
+    ucid: Ucid,
+    now: DateTime<Utc>,
+) -> Result<()> {
+    if player_slotted_in_aircraft_or_helicopter(ctx, &ucid) {
+        return Ok(());
+    }
+    match ctx.db.on_combined_arms_enter(id, ucid, now)? {
+        CaEnterRes::Rejected => {
+            ctx.db.ephemeral.force_player_to_spectators(&ucid);
+            Ok(())
+        }
+        CaEnterRes::LifeTaken => {
+            let unit_id = unit.id()?;
+            if let Err(e) = schedule_ca_life_taken_ui(lua, ucid, unit_id) {
+                error!("could not schedule CA life taken UI {:?}", e);
+            }
+            Ok(())
+        }
+        CaEnterRes::NotApplicable | CaEnterRes::Ok => Ok(()),
+    }
+}
+
+fn handle_combined_arms_enter(
+    lua: MizLua,
+    ctx: &mut Context,
+    unit: &dcso3::unit::Unit,
+    now: DateTime<Utc>,
+) -> Result<()> {
+    let cat = unit.get_category()?;
+    if cat != dcso3::unit::UnitCategory::GroundUnit {
+        return Ok(());
+    }
+    let id = unit.object_id()?;
+    if !ctx.db.is_combined_arms_life_unit(&id) {
+        return Ok(());
+    }
+    let Some(ucid) = resolve_combined_arms_controller(ctx, unit, &id) else {
+        warn!("CA enter: could not resolve controller for {id:?}");
+        return Ok(());
+    };
+    apply_combined_arms_control(lua, ctx, unit, id, ucid, now)
+}
+
+/// Shot (and ShootingStart for MG/autocannon): real callsign often appears here; not-in-air ⇒ CA.
+fn handle_combined_arms_shot(
+    lua: MizLua,
+    ctx: &mut Context,
+    unit: &Unit,
+    now: DateTime<Utc>,
+) -> Result<()> {
+    let cat = match unit.get_category() {
+        Ok(c) => c,
+        Err(_) => return Ok(()),
+    };
+    if cat != dcso3::unit::UnitCategory::GroundUnit {
+        return Ok(());
+    }
+    let id = match unit.object_id() {
+        Ok(id) => id,
+        Err(_) => return Ok(()),
+    };
+    if !ctx.db.is_combined_arms_life_unit(&id) {
+        return Ok(());
+    }
+    if ctx.db.ca_controller(&id).is_some() {
+        return Ok(());
+    }
+    let Some(ucid) = resolve_combined_arms_controller(ctx, unit, &id) else {
+        return Ok(());
+    };
+    apply_combined_arms_control(lua, ctx, unit, id, ucid, now)
+}
+
 fn unit_killed(
     lua: MizLua,
     ctx: &mut Context,
@@ -1053,6 +1267,7 @@ fn unit_killed(
     if let Err(e) = ctx.jtac.unit_dead(lua, &mut ctx.db, &id) {
         error!("jtac unit dead failed for {:?} {:?}", id, e)
     }
+    ctx.db.on_combined_arms_unit_dead(&id);
     if let Err(e) = ctx.db.unit_dead(&id, Utc::now()) {
         error!("unit dead failed for {:?} {:?}", id, e);
     } else {
@@ -1115,6 +1330,16 @@ fn on_event(lua: MizLua, ev: Event) -> Result<()> {
                 }
             }
         }
+        Event::PlayerEnterUnit(e) => {
+            if let Some(initiator) = e.initiator {
+                if let Ok(unit) = initiator.as_unit() {
+                    match handle_combined_arms_enter(lua, ctx, &unit, start_ts) {
+                        Ok(()) => {}
+                        Err(err) => error!("combined arms enter failed: {err:?}"),
+                    }
+                }
+            }
+        }
         Event::PlayerLeaveUnit(e) => {
             if let Some(initiator) = e.initiator {
                 if let Some(ucid) = ctx.db.player_in_unit(false, &initiator) {
@@ -1131,6 +1356,34 @@ fn on_event(lua: MizLua, ev: Event) -> Result<()> {
                             if inst.landed_at_objective.is_none() {
                                 ctx.shots_out.dead(initiator.clone(), start_ts)
                             }
+                        }
+                    }
+                }
+                let ca_oid = initiator.clone();
+                let ca_return_life = Unit::get_instance(lua, &ca_oid)
+                    .ok()
+                    .and_then(|u| {
+                        let exist = u.is_exist().unwrap_or(false);
+                        let alive = u.get_life().map(|l| l > 0).unwrap_or(false);
+                        Some(exist && alive)
+                    })
+                    .unwrap_or(false);
+                let ca_unit_id = Unit::get_instance(lua, &ca_oid)
+                    .ok()
+                    .and_then(|u| u.id().ok());
+                if let Some((ucid, returned)) =
+                    ctx.db.on_combined_arms_leave(&ca_oid, ca_return_life)
+                {
+                    if returned {
+                        let mut msg = CompactString::new("life returned\n");
+                        if let Ok(l) =
+                            format_lives_total(&mut ctx.db, &ucid, LifeType::CombinedArms)
+                        {
+                            msg.push_str(&l);
+                        }
+                        ctx.db.ephemeral.panel_to_player(&ctx.db.persisted, 10, &ucid, msg);
+                        if let Some(unit_id) = ca_unit_id {
+                            ctx.db.play_sound_unit(lua, "life_return", unit_id);
                         }
                     }
                 }
@@ -1246,10 +1499,22 @@ fn on_event(lua: MizLua, ev: Event) -> Result<()> {
             }
         }
         Event::Shot(e) => {
+            // Register CA controller before shot bookkeeping so who() sees the player.
+            if let Err(err) = handle_combined_arms_shot(lua, ctx, &e.initiator, start_ts) {
+                error!("combined arms shot failed: {err:?}");
+            }
             if let Err(e) = ctx.shots_out.shot(&ctx.db, start_ts, &e) {
                 error!("error processing shot event {:?}", e)
             }
             ()
+        }
+        Event::ShootingStart(e) => {
+            // MG/autocannon do not emit Shot (Hoggit); same CA identity rule as Shot.
+            if let Some(initiator) = e.initiator.as_ref().and_then(|o| o.as_unit().ok()) {
+                if let Err(err) = handle_combined_arms_shot(lua, ctx, &initiator, start_ts) {
+                    error!("combined arms shooting_start failed: {err:?}");
+                }
+            }
         }
         Event::Dead(e) | Event::UnitLost(e) | Event::PilotDead(e) => {
             if let Some(unit) = e.initiator.as_ref().and_then(|u| u.as_unit().ok()) {
@@ -1495,7 +1760,7 @@ fn format_life_type(
             );
             if include_slot_reserve
                 && cfg.limited_lives
-                && cfg.lives_birth
+                && (cfg.lives_birth || _typ == LifeType::CombinedArms)
                 && active_life_type == Some(_typ)
             {
                 format_compact!("{label} 1+{cur}/{n} RST {reset}")
@@ -1538,7 +1803,8 @@ fn lives(
     db.maybe_reset_lives(ucid, Utc::now())?;
     let player = db.player(ucid).ok_or_else(|| anyhow!("no such player {:?}", ucid))?;
     let cfg = &db.ephemeral.cfg;
-    // 1+ only while still in players_by_slot (`current_slot` can linger after death).
+    // 1+ only while still in players_by_slot (`current_slot` can linger after death),
+    // or while controlling a Combined Arms ground unit.
     let active_life_type = player
         .current_slot
         .as_ref()
@@ -1549,7 +1815,13 @@ fn lives(
         })
         .and_then(|(slot, _)| db.ephemeral.get_slot_info(slot))
         .and_then(|sifo| cfg.life_types.get(&sifo.typ))
-        .copied();
+        .copied()
+        .or_else(|| {
+            db.ephemeral
+                .ca_oid_by_controller
+                .contains_key(ucid)
+                .then_some(LifeType::CombinedArms)
+        });
     let now = Utc::now();
     let mut parts: SmallVec<[CompactString; 6]> = smallvec![];
     for typ in db::csar::LIFE_TYPE_DISPLAY_ORDER {
@@ -1606,6 +1878,43 @@ fn schedule_life_taken_sound(lua: MizLua, slot: SlotId) -> Result<()> {
     timer.schedule_function(when, mlua::Value::Nil, move |lua, _, _| {
         let ctx = unsafe { Context::get_mut() };
         ctx.db.play_sound_player(lua, "life_taken", &slot);
+        Ok(None)
+    })?;
+    Ok(())
+}
+
+fn schedule_ca_life_taken_ui(lua: MizLua, ucid: Ucid, unit_id: UnitId) -> Result<()> {
+    let timer = Timer::singleton(lua)?;
+    let when = timer.get_time()? + LIFE_TAKEN_UI_DELAY_SECS;
+    timer.schedule_function(when, mlua::Value::Nil, move |lua, _, _| {
+        let ctx = unsafe { Context::get_mut() };
+        let mut msg = CompactString::new("life taken\n");
+        if let Ok(lives) = lives(
+            &mut ctx.db,
+            &ucid,
+            Some(LifeType::CombinedArms),
+            true,
+            LivesFormat::Panel,
+        ) {
+            msg.push_str(&lives);
+        }
+        ctx.db
+            .ephemeral
+            .panel_to_player(&ctx.db.persisted, 10, &ucid, msg);
+        if let Err(e) = schedule_ca_life_taken_sound(lua, unit_id) {
+            error!("could not schedule CA life taken sound {:?}", e);
+        }
+        Ok(None)
+    })?;
+    Ok(())
+}
+
+fn schedule_ca_life_taken_sound(lua: MizLua, unit_id: UnitId) -> Result<()> {
+    let timer = Timer::singleton(lua)?;
+    let when = timer.get_time()? + LIFE_TAKEN_SOUND_DELAY_SECS;
+    timer.schedule_function(when, mlua::Value::Nil, move |lua, _, _| {
+        let ctx = unsafe { Context::get_mut() };
+        ctx.db.play_sound_unit(lua, "life_taken", unit_id);
         Ok(None)
     })?;
     Ok(())

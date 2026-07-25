@@ -2089,6 +2089,7 @@ impl Default for Cfg {
                 (LifeType::Attack, (4, 21600)),
                 (LifeType::Logistics, (6, 21600)),
                 (LifeType::Recon, (6, 21600)),
+                (LifeType::CombinedArms, (4, 21600)),
             ]),
             life_types: default_life_types(),
             limited_lives: true,

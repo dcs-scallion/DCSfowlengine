@@ -231,7 +231,7 @@
   "ewr_delay": 60,
   "ewr_antenna_height_m": 6,
   "ewr_min_speed_kmh": 150,
-  "ewr_min_ralt_m": 100,
+  "ewr_min_ralt_m": 50,
   "ewr_aspect_hysteresis_deg": 2.5,
   "threatened_distance": {
     "C-101CC": 9000,
@@ -376,6 +376,10 @@
       21600
     ],
     "Attack": [
+      4,
+      21600
+    ],
+    "CombinedArms": [
       4,
       21600
     ]
