@@ -4888,10 +4888,14 @@ pub fn build_objective_stock_export(
                 out.insert(objective_name.to_string(), entry);
                 continue;
             }
-            // OLO (hub / ROAD FOB): ME extract uses a narrow policy allowset and skips DEFAULT
-            // restore — owner profiles end thin and diverge from opposite synthesize (and from
-            // airport OLO). Both coalitions use the same INV+DEFAULT+zone synthesize path.
-            if allow.is_logistics_hub {
+            // OAB/OFO/OLO: both coalitions via synthesize (never ME extract). Owner extract after
+            // DT registration stubs polluted A/C baselines (amount=1 spam) and broke non-opposite.
+            if allow.is_logistics_hub
+                || matches!(
+                    objective_kind_from_zone_name(allow.zone_name.as_str()),
+                    Some("OFO") | Some("OAB")
+                )
+            {
                 fill_objective_stock_both_coalitions_virtual(
                     &mut entry,
                     allow,
@@ -10202,10 +10206,13 @@ fn neutral_dynamic_spawn_airport_zero_stock_link_templates(
     Ok(())
 }
 
-/// Land OAB/OFO/OLO: ensure ME `aircrafts` rows exist for TTD (both coalitions) with correct
-/// `linkDynTempl` from `zzDT-*`. Opposite / empty linked rows use `initialAmount = 1` so DCS
-/// registers the DT at mission load (amount 0 is ignored by dyn-spawn); bflib then reconciles
-/// stock from export / opposite fill.
+/// Land OAB/OFO/OLO: ensure ME `aircrafts` rows + `linkDynTempl` for TTD (both coalitions).
+///
+/// Stock vs DT registration (must not pollute owner fill):
+/// - Owner / OLO: never invent `initialAmount = 1`; new rows stay 0 (INV×mult is real stock).
+/// - OFO/OAB opposite TTD only: `initialAmount = 1` stubs so DCS registers opposite `zzDT-*` at
+///   load (amount 0 is skipped). Call **after** owner TTD amount prune so stubs are not zeroed.
+/// - bflib `prune_registration_aircraft_outside_export_profile` / opposite replace clear stubs.
 fn ensure_land_objective_opposite_dyn_templ_rows(
     lua: &Lua,
     wh: &Table<'_>,
@@ -10214,6 +10221,7 @@ fn ensure_land_objective_opposite_dyn_templ_rows(
     obj: Option<&ObjectiveDynAllow>,
 ) -> Result<usize> {
     let mut ensured = 0usize;
+    let opposite_registration_stubs = obj.is_some_and(|o| !o.is_logistics_hub);
     for dt_side in [Side::Blue, Side::Red] {
         let filter: Option<&HashSet<StdString>> = match obj {
             Some(o) if o.is_logistics_hub => None,
@@ -10244,6 +10252,7 @@ fn ensure_land_objective_opposite_dyn_templ_rows(
                 Some(ut.clone())
             })
             .collect();
+        let opposite_stub = opposite_registration_stubs && dt_side != owner_side;
         for unit_type in types {
             let Some(gid) = emit
                 .link_by_side_type
@@ -10281,47 +10290,27 @@ fn ensure_land_objective_opposite_dyn_templ_rows(
                     } else if cur_amt == 0 || cur_link == 0 {
                         // Opposite / empty row: attach opposite DT (do not steal owner stocked links).
                         row.raw_set("linkDynTempl", gid)?;
+                        if opposite_stub && cur_amt == 0 {
+                            row.raw_set("initialAmount", 1u32)?;
+                            ensured += 1;
+                        }
                     }
                 }
                 Err(_) => {
                     let row = lua.create_table()?;
-                    // amount 1: DCS registers linkDynTempl at load (0 is skipped).
-                    row.raw_set("initialAmount", 1u32)?;
+                    // Opposite OFO/OAB: amount 1 registers DT. Owner/OLO: amount 0 (real stock elsewhere).
+                    let amt = if opposite_stub { 1u32 } else { 0u32 };
+                    row.raw_set("initialAmount", amt)?;
                     row.raw_set("linkDynTempl", gid)?;
                     cat_tbl.raw_set(unit_type.as_str(), row)?;
-                    ensured += 1;
+                    if opposite_stub {
+                        ensured += 1;
+                    }
                 }
             }
         }
     }
     Ok(ensured)
-}
-
-/// DCS dyn-spawn registers `linkDynTempl` at mission load only when `initialAmount > 0`.
-/// Bump linked empty rows to 1 (after TTD amount prune); Fowl reconciles real stock at start.
-fn bump_linked_aircraft_amount_for_dyn_templ_registration(wh: &Table<'_>) -> Result<usize> {
-    let Ok(aircrafts) = wh.raw_get::<_, Table>("aircrafts") else {
-        return Ok(0);
-    };
-    let mut bumped = 0usize;
-    for cat in ["helicopters", "planes"] {
-        let Ok(cat_tbl) = aircrafts.raw_get::<_, Table>(cat) else {
-            continue;
-        };
-        for pair in cat_tbl.clone().pairs::<String, Table>() {
-            let (_, row) = pair?;
-            let link = row.raw_get::<_, i64>("linkDynTempl").unwrap_or(0);
-            if link == 0 {
-                continue;
-            }
-            let amt = row.raw_get::<_, u32>("initialAmount").unwrap_or(0);
-            if amt == 0 {
-                row.raw_set("initialAmount", 1u32)?;
-                bumped += 1;
-            }
-        }
-    }
-    Ok(bumped)
 }
 
 /// Geometry extracted from a trigger zone (owns no Lua state).
@@ -12364,17 +12353,21 @@ fn patch_warehouse_dynamic_spawn_links(
             if !mult_cfg.naval_warehouse_ids.contains(&wid)
                 && !mult_cfg.dep_farp_warehouse_ids.contains(&wid)
             {
-                let n = ensure_land_objective_opposite_dyn_templ_rows(
-                    lua,
-                    &wh,
-                    emit,
-                    side,
-                    obj_zone,
-                )?;
-                if n > 0 {
-                    info!(
-                        "warehouse {wid}: ensured {n} opposite/owner DT aircraft row(s) with linkDynTempl"
-                    );
+                // OLO: linkDynTempl only (no amount=1 stubs; INV×mult is stock). OFO/OAB: after
+                // owner TTD prune below.
+                if obj_zone.is_some_and(|o| o.is_logistics_hub) || obj_zone.is_none() {
+                    let n = ensure_land_objective_opposite_dyn_templ_rows(
+                        lua,
+                        &wh,
+                        emit,
+                        side,
+                        obj_zone,
+                    )?;
+                    if n > 0 {
+                        info!(
+                            "warehouse {wid}: ensured {n} opposite/owner DT aircraft row(s) with linkDynTempl"
+                        );
+                    }
                 }
             }
             // Per-base O* zone filter: zero initialAmount for types not in this base's
@@ -12394,16 +12387,7 @@ fn patch_warehouse_dynamic_spawn_links(
                         None,
                         &mut zone_stock_applied,
                     )?;
-                    if !mult_cfg.naval_warehouse_ids.contains(&wid)
-                        && !mult_cfg.dep_farp_warehouse_ids.contains(&wid)
-                    {
-                        let b = bump_linked_aircraft_amount_for_dyn_templ_registration(&wh)?;
-                        if b > 0 {
-                            info!(
-                                "warehouse {wid}: bumped {b} linked A/C row(s) to amount=1 for DT registration"
-                            );
-                        }
-                    }
+                    // No blind amount=1 bump (pre-opposite OLO stock semantics).
                     continue;
                 }
                 // DEP template pads: `TTDdynFARP` + weapon allowlist below, not O* zone TTD / zone ws.
@@ -12431,18 +12415,26 @@ fn patch_warehouse_dynamic_spawn_links(
                         }
                     }
                 }
+                // After owner TTD prune: opposite TTD rows get amount=1 DT stubs only.
+                if !mult_cfg.naval_warehouse_ids.contains(&wid)
+                    && !mult_cfg.dep_farp_warehouse_ids.contains(&wid)
+                {
+                    let n = ensure_land_objective_opposite_dyn_templ_rows(
+                        lua,
+                        &wh,
+                        emit,
+                        side,
+                        Some(obj),
+                    )?;
+                    if n > 0 {
+                        info!(
+                            "warehouse {wid}: ensured {n} opposite DT registration stub(s) (amount=1)"
+                        );
+                    }
+                }
                 }
             }
-            if !mult_cfg.naval_warehouse_ids.contains(&wid)
-                && !mult_cfg.dep_farp_warehouse_ids.contains(&wid)
-            {
-                let b = bump_linked_aircraft_amount_for_dyn_templ_registration(&wh)?;
-                if b > 0 {
-                    info!(
-                        "warehouse {wid}: bumped {b} linked A/C row(s) to amount=1 for DT registration"
-                    );
-                }
-            }
+            // Do not bump all linked amount=0 → 1 (that undid TTD zeros and polluted owner stock).
             // DEP* dynamic FARP template stocks: prune A/C rows by `TTDdynFARP` allowlist only.
             if mult_cfg.dep_farp_warehouse_ids.contains(&wid) {
                 if let Some(dyn_allow) = dyn_farp_aircraft_allow {
