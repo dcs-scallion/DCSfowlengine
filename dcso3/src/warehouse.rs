@@ -13,7 +13,8 @@ FITNESS FOR A PARTICULAR PURPOSE.
 
 use super::as_tbl;
 use crate::{
-    airbase::Airbase, cvt_err, lua_err, simple_enum, wrapped_table, LuaEnv, MizLua, String,
+    airbase::Airbase, cvt_err, lua_err, simple_enum, static_object::StaticObject, wrapped_table,
+    LuaEnv, MizLua, String,
 };
 use anyhow::{anyhow, Result};
 use mlua::{prelude::*, Value};
@@ -286,6 +287,12 @@ impl<'lua> Warehouse<'lua> {
     pub fn get_resource_map(lua: MizLua<'lua>) -> Result<ResourceMap<'lua>> {
         let wh: LuaTable = lua.inner().globals().raw_get("Warehouse")?;
         Ok(wh.call_function("getResourceMap", ())?)
+    }
+
+    /// Mini-warehouse inside an ED dynamic / static cargo crate (DCS 2.9.6+).
+    pub fn get_cargo_as_warehouse(lua: MizLua<'lua>, cargo: &StaticObject<'lua>) -> Result<Self> {
+        let wh: LuaTable = lua.inner().globals().raw_get("Warehouse")?;
+        Ok(wh.call_function("getCargoAsWarehouse", cargo.clone())?)
     }
 
     pub fn add_item<T: Into<WarehouseItem<'lua>>>(&self, item: T, count: u32) -> Result<()> {

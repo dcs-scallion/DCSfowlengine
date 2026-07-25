@@ -46,6 +46,7 @@ pub mod campaign_top10;
 pub mod cargo;
 pub mod csar;
 pub mod discord_map;
+pub mod dynamic_cargo;
 pub mod ephemeral;
 pub mod front_line;
 pub mod group;

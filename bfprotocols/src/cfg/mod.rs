@@ -1298,6 +1298,55 @@ pub struct CsarCfg {
     pub pilot_template_blue: Option<String>,
 }
 
+/// ED dynamic cargo crates: Fowl registry, To stock → objective warehouse, points.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct DynamicCargoDeliveryCfg {
+    /// Master switch (registry, persistence, Supplies → To stock).
+    #[serde(default)]
+    pub enabled: bool,
+    /// Soft cap of registered crates per coalition; spawning over limit destroys oldest (FIFO).
+    #[serde(default = "default_maximum_dynamic_crates_per_coalition")]
+    pub maximum_dynamic_crates_per_coalition: u32,
+    /// Radius (m) around the player for Supplies → To stock.
+    #[serde(default = "default_to_stock_dynamic_crate_distance")]
+    pub to_stock_dynamic_crate_distance: u32,
+    /// Points to the player who runs To stock when crate source ≠ destination objective.
+    #[serde(default = "default_to_stock_points")]
+    pub to_stock_points: u32,
+    /// Points to the registered spawner on cross-objective To stock.
+    #[serde(default = "default_source_spawner_points")]
+    pub source_spawner_points: u32,
+}
+
+impl Default for DynamicCargoDeliveryCfg {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            maximum_dynamic_crates_per_coalition: default_maximum_dynamic_crates_per_coalition(),
+            to_stock_dynamic_crate_distance: default_to_stock_dynamic_crate_distance(),
+            to_stock_points: default_to_stock_points(),
+            source_spawner_points: default_source_spawner_points(),
+        }
+    }
+}
+
+fn default_maximum_dynamic_crates_per_coalition() -> u32 {
+    100
+}
+
+fn default_to_stock_dynamic_crate_distance() -> u32 {
+    50
+}
+
+fn default_to_stock_points() -> u32 {
+    5
+}
+
+fn default_source_spawner_points() -> u32 {
+    15
+}
+
 fn default_supply_transfer_players() -> bool {
     true
 }
@@ -1516,6 +1565,8 @@ pub struct Cfg {
     pub airborne_deslot_penalty_points: u32,
     #[serde(default)]
     pub csar: CsarCfg,
+    #[serde(default)]
+    pub dynamic_cargo_delivery: DynamicCargoDeliveryCfg,
     #[serde(default)]
     pub acmi_sanitize: AcmiSanitizeCfg,
     /// Available actions per side

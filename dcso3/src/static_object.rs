@@ -12,10 +12,15 @@ FITNESS FOR A PARTICULAR PURPOSE.
 */
 
 use super::{as_tbl, coalition::Side, country::Country, object::Object};
-use crate::{airbase::Airbase, coalition::Static, object::{DcsObject, DcsOid}, wrapped_prim, wrapped_table, LuaEnv, MizLua};
+use crate::{
+    airbase::Airbase,
+    coalition::Static,
+    object::{DcsObject, DcsOid},
+    wrapped_prim, wrapped_table, LuaEnv, MizLua, String,
+};
 use anyhow::{anyhow, bail, Result};
 use mlua::{prelude::*, Value};
-use serde_derive::{Serialize, Deserialize};
+use serde_derive::{Deserialize, Serialize};
 use std::{marker::PhantomData, ops::Deref};
 
 wrapped_prim!(StaticObjectId, i64, Hash, Copy);
@@ -90,6 +95,14 @@ impl<'lua> StaticObject<'lua> {
 
     pub fn get_desc(&self) -> Result<mlua::Table<'lua>> {
         Ok(self.t.call_method("getDesc", ())?)
+    }
+
+    pub fn get_type_name(&self) -> Result<String> {
+        Ok(self.t.call_method("getTypeName", ())?)
+    }
+
+    pub fn get_point(&self) -> Result<crate::LuaVec3> {
+        Ok(self.t.call_method("getPoint", ())?)
     }
 }
 

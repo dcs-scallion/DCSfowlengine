@@ -958,6 +958,9 @@ impl Db {
         }
         self.setup_warehouses_after_load(spctx.lua())
             .context("setting up warehouses")?;
+        if let Err(e) = self.restore_dynamic_cargo_after_load(spctx.lua()) {
+            error!("dynamic cargo restore after load: {e:?}");
+        }
         for (oid, side, pos, pad_template, groups) in dep_farp_slot_reactivate {
             self.reactivate_ground_dep_farp_static_slots(
                 spctx,

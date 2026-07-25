@@ -259,6 +259,29 @@ fn destroy_nearby_crate(lua: MizLua, gid: GroupId) -> Result<()> {
     Ok(())
 }
 
+fn to_stock_dynamic_cargo(lua: MizLua, gid: GroupId) -> Result<()> {
+    let ctx = unsafe { Context::get_mut() };
+    let (side, slot) = slot_for_group(lua, ctx, &gid).context("getting slot for group")?;
+    match ctx.db.to_stock_dynamic_cargo(lua, &slot) {
+        Ok(res) => {
+            let player = player_name(&ctx.db, &slot);
+            let msg = format_compact!(
+                "{player} To stock: {} crate(s) into {}",
+                res.crates,
+                res.destination
+            );
+            ctx.db.ephemeral.msgs().panel_to_side(10, false, side, msg);
+        }
+        Err(e) => {
+            ctx.db
+                .ephemeral
+                .msgs()
+                .panel_to_group(10, false, gid, format_compact!("{e}"))
+        }
+    }
+    Ok(())
+}
+
 fn spawn_crate(lua: MizLua, arg: ArgTuple<GroupId, String>) -> Result<()> {
     let ctx = unsafe { Context::get_mut() };
     let (_side, slot) = slot_for_group(lua, ctx, &arg.fst).context("getting slot for group")?;
@@ -341,6 +364,16 @@ pub(super) fn add_cargo_menu_for_group(
         destroy_nearby_crate,
         group,
     )?;
+    if cfg.dynamic_cargo_delivery.enabled {
+        let supplies = mc.add_submenu_for_group(group, "Supplies".into(), Some(root.clone()))?;
+        mc.add_command_for_group(
+            group,
+            "To stock".into(),
+            Some(supplies),
+            to_stock_dynamic_cargo,
+            group,
+        )?;
+    }
     let root = mc.add_submenu_for_group(group, "Crates".into(), Some(root.clone()))?;
     let rep = &cfg.repair_crate[side];
     let logi = mc.add_submenu_for_group(group, "Logistics".into(), Some(root.clone()))?;

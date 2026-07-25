@@ -1110,6 +1110,9 @@ fn on_event(lua: MizLua, ev: Event) -> Result<()> {
                 if let Err(e) = ctx.db.static_born(&st) {
                     error!("static born failed {:?} {:?}", st, e);
                 }
+                if let Err(e) = ctx.db.register_dynamic_cargo_static(lua, &st) {
+                    error!("dynamic cargo register failed {:?} {:?}", st, e);
+                }
             }
         }
         Event::PlayerLeaveUnit(e) => {
@@ -2087,6 +2090,12 @@ fn run_slow_timed_events(
                 )
             }
         }
+        if ctx.db.dynamic_cargo_enabled() {
+            ctx.db.prune_missing_dynamic_cargo(lua);
+            ctx.db.refresh_dynamic_cargo_snapshots(lua);
+        } else {
+            ctx.db.clear_dynamic_cargo_if_disabled();
+        }
         return_lives(lua, ctx, ts);
         ctx.recently_born.retain(|_, ts| start_ts - *ts <= Duration::seconds(5));
         {
@@ -2526,10 +2535,7 @@ fn delayed_init_miz(lua: MizLua) -> Result<()> {
                 name, player.side
             )
         } else {
-            format_compact!(
-                "Welcome, {}! Select Blue or Red in the DCS lobby, then occupy a slot. Type -help for commands.",
-                name
-            )
+            format_compact!("Welcome, {}! Type -help for commands.", name)
         };
         ctx.db.ephemeral.msgs().send(MsgTyp::Chat(Some(id)), welcome);
     }

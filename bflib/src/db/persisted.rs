@@ -17,6 +17,7 @@ for more details.
 use super::{
     campaign_stats,
     campaign_top10,
+    dynamic_cargo::DynamicCargoCrate,
     group::{SpawnedGroup, SpawnedUnit},
     objective::Objective,
     player::Player,
@@ -66,6 +67,10 @@ pub struct Persisted {
     pub campaign_stats: campaign_stats::CampaignStats,
     #[serde(default)]
     pub campaign_top10: campaign_top10::CampaignTop10,
+    #[serde(default)]
+    pub dynamic_cargo_crates: MapM<String, DynamicCargoCrate>,
+    #[serde(default)]
+    pub dynamic_cargo_next_index: MapS<Side, u64>,
 }
 
 impl Persisted {

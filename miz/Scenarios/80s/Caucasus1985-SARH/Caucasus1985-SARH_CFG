@@ -62,6 +62,13 @@
     "campaign_top10": true,
     "rounds_per_day": 4
   },
+  "dynamic_cargo_delivery": {
+    "enabled": true,
+    "maximum_dynamic_crates_per_coalition": 100,
+    "to_stock_dynamic_crate_distance": 50,
+    "to_stock_points": 5,
+    "source_spawner_points": 15
+  },
   "acmi_sanitize": {
     "process_inbox_bat": "C:\\acmi-sanitize\\process_inbox.bat",
     "post_round_delay_secs": 30
@@ -112,7 +119,7 @@
     "AGM_86C",
     "AGM_86D"
   ],
-  "repair_time": 3600,
+  "repair_time": 5400,
   "repair_crate": {
     "Red": {
       "name": "Repair",
@@ -185,11 +192,11 @@
     "airbase_max": 4,
     "hub_max": 10,
     "dynamicFARPs_InitialStockPercentage": 10,
+    "CapturedStockPercentage_OFO": 10,
+    "CapturedStockPercentage_OAB": 15,
     "CapturedStockPercentage_OLO": 20,
-    "CapturedStockPercentage_OAB": 10,
-    "CapturedStockPercentage_OFO": 5,
     "tick": 20,
-    "ticks_per_delivery": 7,
+    "ticks_per_delivery": 6,
     "supply_transfer_size": 10,
     "supply_transfer_crate": {
       "Red": {

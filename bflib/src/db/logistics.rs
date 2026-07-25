@@ -950,14 +950,13 @@ fn equipment_capacity_for_discovered_row(
     }
     if let Some(inv) = obj.warehouse.equipment.get(name) {
         if inv.capacity > 0 {
-            return inv.capacity.max(stored);
+            // Keep template ceiling; stored may exceed after dynamic cargo To stock.
+            return inv.capacity;
         }
     }
     if let (Some(whcfg), Some(prod)) = (whcfg, production) {
         if let Some(eq) = prod.equipment.get(name) {
-            return whcfg
-                .capacity(&obj.kind, on_water, eq.production)
-                .max(stored);
+            return whcfg.capacity(&obj.kind, on_water, eq.production);
         }
     }
     stored.max(1)
@@ -981,12 +980,12 @@ fn liquid_capacity_for_discovered_row(
     }
     if let Some(inv) = obj.warehouse.liquids.get(&typ) {
         if inv.capacity > 0 {
-            return inv.capacity.max(stored);
+            return inv.capacity;
         }
     }
     if let (Some(whcfg), Some(prod)) = (whcfg, production) {
         if let Some(qty) = prod.liquids.get(&typ) {
-            return whcfg.capacity(&obj.kind, on_water, *qty).max(stored);
+            return whcfg.capacity(&obj.kind, on_water, *qty);
         }
     }
     stored.max(1)
@@ -1048,7 +1047,11 @@ fn discover_dcs_warehouse_into_obj(
                     .equipment
                     .get_or_default_cow(String::from(name.as_str()));
                 row.stored = stored;
-                row.capacity = capacity.max(stored);
+                if capacity > 0 {
+                    row.capacity = capacity;
+                } else if row.capacity == 0 {
+                    row.capacity = stored.max(1);
+                }
                 Ok(())
             })
         };
@@ -1084,7 +1087,11 @@ fn discover_dcs_warehouse_into_obj(
             );
             let row = obj.warehouse.liquids.get_or_default_cow(typ);
             row.stored = stored_virtual;
-            row.capacity = capacity.max(stored_virtual);
+            if capacity > 0 {
+                row.capacity = capacity;
+            } else if row.capacity == 0 {
+                row.capacity = stored_virtual.max(1);
+            }
             Ok(())
         })?;
     Ok(())
@@ -1123,7 +1130,11 @@ fn hydrate_production_keys_from_dcs(
         let existed = obj.warehouse.equipment.get(name).is_some();
         let row = obj.warehouse.equipment.get_or_default_cow(name.clone());
         row.stored = stored;
-        row.capacity = capacity.max(stored).max(row.capacity);
+        if capacity > 0 {
+            row.capacity = capacity;
+        } else if row.capacity == 0 {
+            row.capacity = stored.max(1);
+        }
         if !existed {
             new_eq = new_eq.saturating_add(1);
         }
@@ -1148,7 +1159,11 @@ fn hydrate_production_keys_from_dcs(
         );
         let row = obj.warehouse.liquids.get_or_default_cow(*typ);
         row.stored = stored;
-        row.capacity = capacity.max(stored).max(row.capacity);
+        if capacity > 0 {
+            row.capacity = capacity;
+        } else if row.capacity == 0 {
+            row.capacity = stored.max(1);
+        }
     }
     if new_eq > 0 {
         wh_diag(format_compact!(
@@ -1250,13 +1265,24 @@ fn objective_is_ground_dep_farp_export(export: &FowlMizExport, obj: &Objective) 
     dep_farp_export_profile(export, obj).is_some()
 }
 
+/// Fowl export / bftools `InitFuel` baselines: metric tons; DCS `getLiquidAmount` / `setLiquidAmount`: kg.
+const FOWL_LIQUID_TONS_TO_DCS_KG: u32 = 1000;
+
 /// Export `InitFuel` / `objective_stock` liquid baselines are metric tons; DCS API uses kg.
-fn objective_liquids_stored_as_tons(export: &FowlMizExport, obj: &Objective) -> bool {
+pub(crate) fn objective_liquids_stored_as_tons(export: &FowlMizExport, obj: &Objective) -> bool {
     if matches!(obj.kind, ObjectiveKind::Production) {
         return false;
     }
     objective_coalition_stock_for_objective(export, obj).is_some()
         || objective_is_ground_dep_farp_export(export, obj)
+}
+
+pub(crate) fn fowl_liquid_tons_to_dcs_kg(tons: u32) -> u32 {
+    tons.saturating_mul(FOWL_LIQUID_TONS_TO_DCS_KG)
+}
+
+pub(crate) fn dcs_liquid_kg_to_fowl_tons(kg: u32) -> u32 {
+    kg / FOWL_LIQUID_TONS_TO_DCS_KG
 }
 
 /// Persisted deploy: virtual rows already set (e.g. after 20% init); do not hydrate from ME pad template on load.
@@ -1401,17 +1427,6 @@ fn liquid_type_from_export_key(key: &str) -> Result<LiquidType> {
         "methanol_mixture" => Ok(LiquidType::MW50),
         _ => bail!("unknown liquid key in Fowl export: {key}"),
     }
-}
-
-/// Fowl export / bftools `InitFuel` baselines: metric tons; DCS `getLiquidAmount` / `setLiquidAmount`: kg.
-const FOWL_LIQUID_TONS_TO_DCS_KG: u32 = 1000;
-
-fn fowl_liquid_tons_to_dcs_kg(tons: u32) -> u32 {
-    tons.saturating_mul(FOWL_LIQUID_TONS_TO_DCS_KG)
-}
-
-fn dcs_liquid_kg_to_fowl_tons(kg: u32) -> u32 {
-    kg / FOWL_LIQUID_TONS_TO_DCS_KG
 }
 
 /// DCS ME / warehouse liquid list order; unknown `LiquidType` variants follow sorted by discriminant.
@@ -4222,7 +4237,7 @@ impl Db {
             }
             let transfers_before = transfers.len();
             macro_rules! schedule_transfers {
-                ($typ:expr, $from:ident, $get:ident, $needed:ident) => {
+                ($typ:expr, $from:ident, $get:ident, $needed:ident, $reserved_fn:ident) => {
                     for (name, inv) in &logi.warehouse.$from {
                         if inv.stored == 0 {
                             continue;
@@ -4235,11 +4250,9 @@ impl Db {
                         let mut total_demanded = 0;
                         for n in &mut $needed {
                             let inv = n.obj.$get(name);
-                            let demanded = if inv.stored <= inv.capacity {
-                                inv.capacity - inv.stored
-                            } else {
-                                0
-                            };
+                            let reserved = self.$reserved_fn(*n.oid, name);
+                            let demanded =
+                                Db::dynamic_cargo_demand_room(inv.stored, inv.capacity, reserved);
                             total_demanded += demanded;
                             n.demanded = demanded;
                             n.allocated = 0;
@@ -4287,9 +4300,16 @@ impl Db {
                 TransferItem::Equipment,
                 equipment,
                 get_equipment,
-                needed_equipment
+                needed_equipment,
+                dynamic_cargo_equipment_reserved
             );
-            schedule_transfers!(TransferItem::Liquid, liquids, get_liquids, needed_liquid);
+            schedule_transfers!(
+                TransferItem::Liquid,
+                liquids,
+                get_liquids,
+                needed_liquid,
+                dynamic_cargo_liquid_reserved
+            );
             let hub_planned = transfers.len() - transfers_before;
             if hub_planned > 0 {
                 wh_diag(format_compact!(
@@ -4360,7 +4380,7 @@ impl Db {
                 smallvec![]
             };
             macro_rules! schedule_occupied_transfers {
-                ($typ:expr, $from:ident, $get:ident, $needed:ident) => {
+                ($typ:expr, $from:ident, $get:ident, $needed:ident, $reserved_fn:ident) => {
                     for (name, inv) in &logi.warehouse.$from {
                         if inv.stored == 0 {
                             continue;
@@ -4373,11 +4393,9 @@ impl Db {
                         let mut total_demanded = 0;
                         for n in &mut $needed {
                             let inv = n.obj.$get(name);
-                            let demanded = if inv.stored <= inv.capacity {
-                                inv.capacity - inv.stored
-                            } else {
-                                0
-                            };
+                            let reserved = self.$reserved_fn(*n.oid, name);
+                            let demanded =
+                                Db::dynamic_cargo_demand_room(inv.stored, inv.capacity, reserved);
                             total_demanded += demanded;
                             n.demanded = demanded;
                             n.allocated = 0;
@@ -4417,13 +4435,15 @@ impl Db {
                 TransferItem::Equipment,
                 equipment,
                 get_equipment,
-                needed_equipment
+                needed_equipment,
+                dynamic_cargo_equipment_reserved
             );
             schedule_occupied_transfers!(
                 TransferItem::Liquid,
                 liquids,
                 get_liquids,
-                needed_liquid
+                needed_liquid,
+                dynamic_cargo_liquid_reserved
             );
         }
         wh_diag(format_compact!(
@@ -4536,7 +4556,7 @@ impl Db {
         Ok(())
     }
 
-    fn update_supply_status(&mut self) -> Result<()> {
+    pub(crate) fn update_supply_status(&mut self) -> Result<()> {
         for (id, obj) in self.persisted.objectives.iter_mut_cow() {
             let current_supply = obj.supply;
             let current_fuel = obj.fuel;
@@ -4660,6 +4680,16 @@ impl Db {
             canonicalize_virtual_equipment_keys(obj, resource_meta.as_ref());
             record_objective_dcs_equipment_names(&mut self.ephemeral, oid, &warehouse)
                 .context("recording DCS warehouse equipment for supply")?;
+            if self.ephemeral.cfg.dynamic_cargo_delivery.enabled
+                && Db::clamp_dynamic_cargo_checkout_obj(
+                    obj,
+                    oid,
+                    &self.persisted.dynamic_cargo_crates,
+                    self.ephemeral.fowl_miz_export.as_ref(),
+                )
+            {
+                self.ephemeral.dirty();
+            }
             return Ok((obj, warehouse));
         }
         let is_logistics_hub = matches!(obj.kind, ObjectiveKind::Logistics);
@@ -4714,6 +4744,16 @@ impl Db {
             if let Some(prod) = production.as_deref() {
                 mark_production_equipment_dcs_tracked(&mut self.ephemeral, oid, prod);
             }
+        }
+        if self.ephemeral.cfg.dynamic_cargo_delivery.enabled
+            && Db::clamp_dynamic_cargo_checkout_obj(
+                obj,
+                oid,
+                &self.persisted.dynamic_cargo_crates,
+                self.ephemeral.fowl_miz_export.as_ref(),
+            )
+        {
+            self.ephemeral.dirty();
         }
         Ok((obj, warehouse))
     }
@@ -4852,17 +4892,14 @@ impl Db {
         let from_obj = objective!(self, from)?;
         let to_obj = objective!(self, to)?;
         macro_rules! compute {
-            ($src:ident, $typ:ident) => {
+            ($src:ident, $typ:ident, $reserved_fn:ident) => {
                 for (name, inv) in &from_obj.warehouse.$src {
                     if inv.stored > 0 {
                         let needed = match to_obj.warehouse.$src.get(name) {
                             None => 0,
                             Some(inv) => {
-                                if inv.capacity >= inv.stored {
-                                    inv.capacity - inv.stored
-                                } else {
-                                    0
-                                }
+                                let reserved = self.$reserved_fn(to, name);
+                                Db::dynamic_cargo_demand_room(inv.stored, inv.capacity, reserved)
                             }
                         };
                         let amount = min(needed, max(1, (inv.stored as f32 * size) as u32));
@@ -4876,8 +4913,8 @@ impl Db {
                 }
             };
         }
-        compute!(equipment, Equipment);
-        compute!(liquids, Liquid);
+        compute!(equipment, Equipment, dynamic_cargo_equipment_reserved);
+        compute!(liquids, Liquid, dynamic_cargo_liquid_reserved);
         for tr in transfers {
             self.execute_transfer(&tr)?
         }
