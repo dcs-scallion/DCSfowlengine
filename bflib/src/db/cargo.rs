@@ -48,6 +48,31 @@ use enumflags2::BitFlags;
 use fxhash::FxHashMap;
 use log::debug;
 use serde_derive::{Deserialize, Serialize};
+
+/// DCS CargoBayGates ramp/door draw arg (CH-47 / Mi-8 / Mi-24 / C-130).
+const CARGO_BAY_DOOR_ARG: i32 = 86;
+/// Hang/Open are ~0.55–1.0; closed is 0.
+const CARGO_BAY_READY_MIN: f64 = 0.5;
+
+fn type_requires_cargo_bay_door(type_name: &str) -> bool {
+    matches!(
+        type_name,
+        "CH-47Fbl1" | "Mi-8MTV2" | "Mi-8MT" | "Mi-24P" | "C-130J-30"
+    )
+}
+
+/// Match DCS dynamic-cargo gate: refuse load/unload until ramp/door is open.
+fn ensure_cargo_bay_ready(unit: &Unit) -> Result<()> {
+    let typ = unit.get_type_name()?;
+    if !type_requires_cargo_bay_door(typ.as_str()) {
+        return Ok(());
+    }
+    let v = unit.get_draw_argument_value(CARGO_BAY_DOOR_ARG)?;
+    if v < CARGO_BAY_READY_MIN {
+        bail!("CARGO BAY IS NOT READY, CHECK THE DOOR");
+    }
+    Ok(())
+}
 use smallvec::{SmallVec, smallvec};
 use std::{cmp::max, fmt, sync::Arc};
 
@@ -1374,6 +1399,8 @@ impl Db {
         if cargo.map(|c| c.crates.is_empty()).unwrap_or(true) {
             bail!("no crates onboard")
         }
+        let unit = self.ephemeral.slot_instance_unit(lua, slot)?;
+        ensure_cargo_bay_ready(&unit)?;
         let cargo = self.ephemeral.cargo.get_mut(slot).unwrap();
         let (oid, crate_cfg) = cargo.crates.pop().unwrap();
         let weight = cargo.weight();
@@ -1513,6 +1540,8 @@ impl Db {
 
     pub fn load_nearby_crate(&mut self, lua: MizLua, slot: &SlotId) -> Result<Crate> {
         let st = SlotStats::get(self, lua, slot)?;
+        let unit = self.ephemeral.slot_instance_unit(lua, slot)?;
+        ensure_cargo_bay_ready(&unit)?;
         let (cargo_capacity, side, unit_name) = self.unit_cargo_cfg(slot)?;
         let cargo = self.ephemeral.cargo.entry(slot.clone()).or_default();
         if cargo_capacity.crate_slots as usize <= cargo.num_crates()

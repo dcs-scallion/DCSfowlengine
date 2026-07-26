@@ -1286,6 +1286,9 @@ body{{margin:0;background:#000;color:#686a6e;font-family:"Roboto Condensed",Robo
 .top10-blue{{color:#2E5AAC}}
 .top10-red{{color:#C43838}}
 .top10-neutral{{color:#686a6e}}
+.top10-toggle{{flex:0 0 {rank_col}px;width:{rank_col}px;min-width:{rank_col}px;margin:0;padding:0;border:0;background:transparent;color:#e8c547;font:inherit;font-size:inherit;line-height:1;cursor:pointer;text-align:center}}
+.top10-toggle:hover{{filter:brightness(1.15)}}
+.top10-collapsible:not(.top10-expanded) .top10-row-more{{display:none}}
 .map-frame{{border:1px solid #2e3138;box-sizing:border-box;display:block;line-height:0;width:100%}}
 #wrap{{position:relative;display:block;line-height:0;width:100%}}
 #base{{display:block;width:100%;height:auto}}
@@ -1466,6 +1469,18 @@ body{{margin:0;background:#000;color:#686a6e;font-family:"Roboto Condensed",Robo
     }}).catch(function(){{}});
   }}
   setInterval(poll,45000);
+}})();
+(function(){{
+  document.querySelectorAll('.top10-toggle').forEach(function(btn){{
+    btn.addEventListener('click',function(){{
+      var block=btn.closest('.top10-collapsible');
+      if(!block){{return;}}
+      var open=block.classList.toggle('top10-expanded');
+      btn.setAttribute('aria-expanded',open?'true':'false');
+      btn.innerHTML=open?'&#9650;':'&#9660;';
+      btn.title=open?'Show top preview':'Show full Top 10';
+    }});
+  }});
 }})();
 </script>
 </body></html>"#,

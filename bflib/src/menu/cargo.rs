@@ -112,7 +112,12 @@ fn load_crate(lua: MizLua, gid: GroupId) -> Result<()> {
             ctx.db.play_sound_player(lua, "crate_load", &slot);
         }
         Err(e) => {
-            let msg = format_compact!("crate could not be loaded: {}", e);
+            let err = format_compact!("{e}");
+            let msg = if err.as_str() == "CARGO BAY IS NOT READY, CHECK THE DOOR" {
+                err
+            } else {
+                format_compact!("crate could not be loaded: {err}")
+            };
             ctx.db.ephemeral.msgs().panel_to_group(10, false, gid, msg)
         }
     }
@@ -136,7 +141,7 @@ fn unload_crate(lua: MizLua, gid: GroupId) -> Result<()> {
     Ok(())
 }
 
-pub(crate) fn list_cargo_for_slot(ctx: &mut Context, slot: &SlotId) -> Result<()> {
+pub(crate) fn list_cargo_for_slot(ctx: &mut Context, lua: MizLua, slot: &SlotId) -> Result<()> {
     let cargo = Cargo::default();
     let cargo = ctx.db.list_cargo(&slot).unwrap_or(&cargo);
     let sifo = ctx
@@ -165,14 +170,14 @@ pub(crate) fn list_cargo_for_slot(ctx: &mut Context, slot: &SlotId) -> Result<()
         capacity.total_slots
     ));
     msg.push_str("----------------------------\n");
-    let mut total = 0;
+    let mut fowl_total = 0u32;
     for (_, cr) in &cargo.crates {
         msg.push_str(&format_compact!(
             "{} crate weighing {} kg\n",
             cr.name,
             cr.weight
         ));
-        total += cr.weight
+        fowl_total = fowl_total.saturating_add(cr.weight);
     }
     for it in &cargo.troops {
         msg.push_str(&format_compact!(
@@ -180,12 +185,18 @@ pub(crate) fn list_cargo_for_slot(ctx: &mut Context, slot: &SlotId) -> Result<()
             it.troop.name,
             it.troop.weight
         ));
-        total += it.troop.weight
+        fowl_total = fowl_total.saturating_add(it.troop.weight);
     }
-    if total > 0 {
+    let dynamic_kg = ctx.db.loaded_dynamic_cargo_weight_kg(lua, slot);
+    if fowl_total > 0 || dynamic_kg > 0 {
         msg.push_str("----------------------------\n");
     }
-    msg.push_str(&format_compact!("total cargo weight: {} kg", total as u32));
+    msg.push_str(&format_compact!(
+        "dynamic cargo weight: {} kg\n",
+        dynamic_kg
+    ));
+    let total = fowl_total.saturating_add(dynamic_kg);
+    msg.push_str(&format_compact!("total cargo weight: {} kg", total));
     ctx.db
         .ephemeral
         .msgs()
@@ -199,7 +210,7 @@ pub(crate) fn list_cargo_for_slot_with_sound(
     slot: &dcso3::net::SlotId,
     sound_key: &str,
 ) -> Result<()> {
-    list_cargo_for_slot(ctx, slot)?;
+    list_cargo_for_slot(ctx, lua, slot)?;
     ctx.db.play_sound_player(lua, sound_key, slot);
     Ok(())
 }

@@ -158,37 +158,33 @@ fn spawn_detached(
 
     const CREATE_NO_WINDOW: u32 = 0x0800_0000;
     const CREATE_BREAKAWAY_FROM_JOB: u32 = 0x0100_0000;
+    const DETACHED_PROCESS: u32 = 0x0000_0008;
+    const CREATE_NEW_PROCESS_GROUP: u32 = 0x0000_0200;
 
     let delay = delay_secs.to_string();
     let miz = miz_path
         .to_str()
         .ok_or_else(|| anyhow!("miz path is not valid UTF-8"))?;
-    let mut args = vec![
-        "/C".into(),
-        "start".into(),
-        "/B".into(),
-        "".into(),
-        "cmd".into(),
-        "/C".into(),
-        bat.to_string(),
-        "bflib".into(),
-        delay,
-    ];
+    // Spawn the .BAT directly (no nested `cmd /C` / `start`). Paths with spaces
+    // (e.g. Saved Games) work because CreateProcess gets lpApplicationName separately.
+    let mut cmd = Command::new(bat);
+    cmd.arg("bflib").arg(&delay);
     match date {
         Some(d) => {
-            args.push(d.to_string());
-            args.push(time.to_string());
+            cmd.arg(d).arg(time);
         }
         None => {
-            args.push("keep-date".into());
-            args.push(time.to_string());
+            cmd.arg("keep-date").arg(time);
         }
     }
-    args.push(miz.to_string());
-
-    let child = Command::new("cmd")
-        .args(&args)
-        .creation_flags(CREATE_NO_WINDOW | CREATE_BREAKAWAY_FROM_JOB)
+    cmd.arg(miz);
+    let child = cmd
+        .creation_flags(
+            CREATE_NO_WINDOW
+                | CREATE_BREAKAWAY_FROM_JOB
+                | DETACHED_PROCESS
+                | CREATE_NEW_PROCESS_GROUP,
+        )
         .spawn()
         .map_err(|e| anyhow!("spawn {bat}: {e}"))?;
     info!(

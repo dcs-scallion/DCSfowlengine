@@ -186,6 +186,11 @@ impl<'lua> Unit<'lua> {
         Ok(self.t.call_method("getFuel", ())?)
     }
 
+    /// External model animation arg (-1..1). Invalid args return 0 (Hoggit).
+    pub fn get_draw_argument_value(&self, arg: i32) -> Result<f64> {
+        Ok(self.t.call_method("getDrawArgumentValue", arg)?)
+    }
+
     pub fn enable_emission(&self, on: bool) -> Result<()> {
         Ok(self.t.call_method("enableEmission", on)?)
     }

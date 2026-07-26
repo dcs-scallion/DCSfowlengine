@@ -2,7 +2,7 @@
 
 use super::Db;
 use bfprotocols::{
-    cfg::UnitTag,
+    cfg::{UnitTag, Vehicle},
     shots::{Dead, Who},
 };
 use chrono::Duration;
@@ -15,16 +15,36 @@ use smallvec::{smallvec, SmallVec};
 pub enum Top10Bucket {
     A2A,
     A2G,
-    Naval,
+    A2S,
+    G2A,
+    G2G,
+    G2S,
     Logistics,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum TargetKind {
+    Air,
+    Ground,
+    Ship,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct PlayerTop10Stats {
     pub name: String,
+    #[serde(default)]
     pub a2a: u32,
+    #[serde(default)]
     pub a2g: u32,
-    pub naval: u32,
+    #[serde(default)]
+    pub a2s: u32,
+    #[serde(default)]
+    pub g2a: u32,
+    #[serde(default)]
+    pub g2g: u32,
+    #[serde(default)]
+    pub g2s: u32,
+    #[serde(default)]
     pub logistics: u32,
 }
 
@@ -45,7 +65,10 @@ pub struct Top10Row {
 pub struct CampaignTop10View {
     pub a2a: Vec<Top10Row>,
     pub a2g: Vec<Top10Row>,
-    pub naval: Vec<Top10Row>,
+    pub a2s: Vec<Top10Row>,
+    pub g2a: Vec<Top10Row>,
+    pub g2g: Vec<Top10Row>,
+    pub g2s: Vec<Top10Row>,
     pub logistics: Vec<Top10Row>,
 }
 
@@ -58,19 +81,20 @@ impl Db {
         if !self.campaign_top10_active() {
             return;
         }
-        let Some(bucket) = classify_unit_kill_bucket(self, dead) else {
+        let Some(target) = classify_target_kind(self, dead) else {
             return;
         };
-        let participants = player_kill_participants(dead);
+        let participants = player_kill_participants(self, dead);
         if participants.is_empty() {
             return;
         }
-        for ucid in participants {
+        for (ucid, air) in participants {
+            let bucket = bucket_for(air, target);
             self.top10_credit(ucid, bucket);
         }
     }
 
-    /// Player-only static kill (buildings / factories) → A2G.
+    /// Player-only static kill (buildings / factories) → A2G or G2G by shooter platform.
     pub fn campaign_top10_on_static_kill(&mut self, killer: &Who, owner: Side) {
         if !self.campaign_top10_active() {
             return;
@@ -81,7 +105,12 @@ impl Db {
         if *side == owner {
             return;
         }
-        self.top10_credit(*ucid, Top10Bucket::A2G);
+        let bucket = if shooter_is_air(self, killer) {
+            Top10Bucket::A2G
+        } else {
+            Top10Bucket::G2G
+        };
+        self.top10_credit(*ucid, bucket);
     }
 
     pub fn campaign_top10_on_logistics(&mut self, ucid: Ucid) {
@@ -107,7 +136,10 @@ impl Db {
         Some(CampaignTop10View {
             a2a: self.top10_board(|p| p.a2a),
             a2g: self.top10_board(|p| p.a2g),
-            naval: self.top10_board(|p| p.naval),
+            a2s: self.top10_board(|p| p.a2s),
+            g2a: self.top10_board(|p| p.g2a),
+            g2g: self.top10_board(|p| p.g2g),
+            g2s: self.top10_board(|p| p.g2s),
             logistics: self.top10_board(|p| p.logistics),
         })
     }
@@ -129,7 +161,10 @@ impl Db {
         match bucket {
             Top10Bucket::A2A => entry.a2a = entry.a2a.saturating_add(1),
             Top10Bucket::A2G => entry.a2g = entry.a2g.saturating_add(1),
-            Top10Bucket::Naval => entry.naval = entry.naval.saturating_add(1),
+            Top10Bucket::A2S => entry.a2s = entry.a2s.saturating_add(1),
+            Top10Bucket::G2A => entry.g2a = entry.g2a.saturating_add(1),
+            Top10Bucket::G2G => entry.g2g = entry.g2g.saturating_add(1),
+            Top10Bucket::G2S => entry.g2s = entry.g2s.saturating_add(1),
             Top10Bucket::Logistics => entry.logistics = entry.logistics.saturating_add(1),
         }
         self.ephemeral.dirty();
@@ -168,33 +203,69 @@ impl Db {
     }
 }
 
-fn classify_unit_kill_bucket(db: &Db, dead: &Dead) -> Option<Top10Bucket> {
+fn bucket_for(air_shooter: bool, target: TargetKind) -> Top10Bucket {
+    match (air_shooter, target) {
+        (true, TargetKind::Air) => Top10Bucket::A2A,
+        (true, TargetKind::Ground) => Top10Bucket::A2G,
+        (true, TargetKind::Ship) => Top10Bucket::A2S,
+        (false, TargetKind::Air) => Top10Bucket::G2A,
+        (false, TargetKind::Ground) => Top10Bucket::G2G,
+        (false, TargetKind::Ship) => Top10Bucket::G2S,
+    }
+}
+
+fn classify_target_kind(db: &Db, dead: &Dead) -> Option<TargetKind> {
     let typ = dead
         .shots
         .iter()
         .find(|s| !s.target_typ.trim().is_empty())
         .map(|s| s.target_typ.as_str())?;
-    let tags = db.ephemeral.cfg.unit_classification.get(typ)?;
+    let tags = db.ephemeral.cfg.unit_classification.get(&Vehicle::from(typ))?;
     if tags.contains(UnitTag::Aircraft) || tags.contains(UnitTag::Helicopter) {
-        return Some(Top10Bucket::A2A);
+        return Some(TargetKind::Air);
     }
     if tags.contains(UnitTag::ShipCarrier)
         || tags.contains(UnitTag::ShipWithHeliport)
         || tags.contains(UnitTag::ShipNoHeliport)
         || tags.contains(UnitTag::Boat)
     {
-        return Some(Top10Bucket::Naval);
+        return Some(TargetKind::Ship);
     }
-    Some(Top10Bucket::A2G)
+    Some(TargetKind::Ground)
 }
 
-fn player_kill_participants(dead: &Dead) -> SmallVec<[Ucid; 8]> {
-    let mut out: SmallVec<[Ucid; 8]> = smallvec![];
-    let accept = |shot: &bfprotocols::shots::Shot| -> Option<Ucid> {
-        let Who::Player {
-            ucid, side, ..
-        } = &shot.shooter
-        else {
+fn shooter_vehicle(db: &Db, who: &Who) -> Option<Vehicle> {
+    let Who::Player { unit, ucid, .. } = who else {
+        return None;
+    };
+    if let Some(uid) = db.ephemeral.get_uid_by_object_id(unit) {
+        if let Some(su) = db.persisted.units.get(uid) {
+            return Some(su.typ.clone());
+        }
+    }
+    db.persisted
+        .players
+        .get(ucid)
+        .and_then(|p| p.current_slot.as_ref())
+        .and_then(|(_, inst)| inst.as_ref())
+        .map(|inst| inst.typ.clone())
+}
+
+/// Aircraft / helicopter → air board; anything else (incl. Combined Arms) → ground board.
+fn shooter_is_air(db: &Db, who: &Who) -> bool {
+    let Some(typ) = shooter_vehicle(db, who) else {
+        return false;
+    };
+    let Some(tags) = db.ephemeral.cfg.unit_classification.get(&typ) else {
+        return false;
+    };
+    tags.contains(UnitTag::Aircraft) || tags.contains(UnitTag::Helicopter)
+}
+
+fn player_kill_participants(db: &Db, dead: &Dead) -> SmallVec<[(Ucid, bool); 8]> {
+    let mut out: SmallVec<[(Ucid, bool); 8]> = smallvec![];
+    let accept = |shot: &bfprotocols::shots::Shot| -> Option<(Ucid, bool)> {
+        let Who::Player { ucid, side, .. } = &shot.shooter else {
             return None;
         };
         if side == dead.victim.side() {
@@ -205,13 +276,13 @@ fn player_kill_participants(dead: &Dead) -> SmallVec<[Ucid; 8]> {
                 return None;
             }
         }
-        Some(*ucid)
+        Some((*ucid, shooter_is_air(db, &shot.shooter)))
     };
     for shot in &dead.shots {
         if shot.hit {
-            if let Some(ucid) = accept(shot) {
-                if !out.contains(&ucid) {
-                    out.push(ucid);
+            if let Some((ucid, air)) = accept(shot) {
+                if !out.iter().any(|(u, _)| *u == ucid) {
+                    out.push((ucid, air));
                 }
             }
         }
@@ -219,9 +290,9 @@ fn player_kill_participants(dead: &Dead) -> SmallVec<[Ucid; 8]> {
     if out.is_empty() {
         for shot in &dead.shots {
             if dead.time - shot.time <= Duration::minutes(3) {
-                if let Some(ucid) = accept(shot) {
-                    if !out.contains(&ucid) {
-                        out.push(ucid);
+                if let Some((ucid, air)) = accept(shot) {
+                    if !out.iter().any(|(u, _)| *u == ucid) {
+                        out.push((ucid, air));
                     }
                 }
             }
@@ -232,31 +303,76 @@ fn player_kill_participants(dead: &Dead) -> SmallVec<[Ucid; 8]> {
 
 pub fn render_top10_sidebar_html(view: &CampaignTop10View) -> String {
     let mut out = String::from(r#"<div class="sidebar-top10">"#);
-    out.push_str(&top10_section("Top 10 Killboard", "A2A", &view.a2a));
-    out.push_str(&top10_section("Top 10 Killboard", "A2G", &view.a2g));
-    out.push_str(&top10_section("Top 10 Killboard", "A2S", &view.naval));
-    out.push_str(&top10_section("Top 10 Support", "LOG", &view.logistics));
+    out.push_str(&top10_section(
+        "Top 10 Killboard",
+        "A2A",
+        &view.a2a,
+        3,
+    ));
+    out.push_str(&top10_section(
+        "Top 10 Killboard",
+        "A2G",
+        &view.a2g,
+        3,
+    ));
+    out.push_str(&top10_section(
+        "Top 10 Killboard",
+        "A2S",
+        &view.a2s,
+        3,
+    ));
+    out.push_str(&top10_section(
+        "Top 10 Support",
+        "LOG",
+        &view.logistics,
+        3,
+    ));
+    out.push_str(&top10_section(
+        "Top 10 Killboard",
+        "G2A",
+        &view.g2a,
+        1,
+    ));
+    out.push_str(&top10_section(
+        "Top 10 Killboard",
+        "G2G",
+        &view.g2g,
+        1,
+    ));
+    out.push_str(&top10_section(
+        "Top 10 Killboard",
+        "G2S",
+        &view.g2s,
+        1,
+    ));
     out.push_str("</div>");
     out
 }
 
-fn top10_section(title: &str, badge: &str, rows: &[Top10Row]) -> String {
+fn top10_section(title: &str, badge: &str, rows: &[Top10Row], preview: usize) -> String {
     let mut body = String::new();
-    for r in rows {
+    for (i, r) in rows.iter().enumerate() {
         let cls = match r.side {
             Side::Blue => "top10-blue",
             Side::Red => "top10-red",
             _ => "top10-neutral",
         };
+        let extra = if i < preview {
+            " top10-row-preview"
+        } else {
+            " top10-row-more"
+        };
         body.push_str(&format!(
-            r#"<div class="pilot-row"><span class="rank-col" aria-hidden="true"></span><span class="pilot-name {cls}">{name}</span><span class="pilot-ping {cls}">{count}</span></div>"#,
+            r#"<div class="pilot-row{extra}"><span class="rank-col" aria-hidden="true"></span><span class="pilot-name {cls}">{name}</span><span class="pilot-ping {cls}">{count}</span></div>"#,
+            extra = extra,
             cls = cls,
             name = html_escape(&r.name),
             count = r.count,
         ));
     }
     format!(
-        r#"<div class="pilot-block pilot-block-neutral"><div class="pilot-hdr-row pilot-hdr-top10"><span class="rank-col" aria-hidden="true"></span><span class="pilot-hdr-title">{title}</span><span class="pilot-hdr-ping">{badge}</span></div><div class="pilot-list">{rows}</div></div>"#,
+        r#"<div class="pilot-block pilot-block-neutral top10-collapsible" data-top10-preview="{preview}"><div class="pilot-hdr-row pilot-hdr-top10"><button type="button" class="top10-toggle" aria-expanded="false" title="Show full Top 10">&#9660;</button><span class="pilot-hdr-title">{title}</span><span class="pilot-hdr-ping">{badge}</span></div><div class="pilot-list">{rows}</div></div>"#,
+        preview = preview,
         title = title,
         badge = badge,
         rows = body,

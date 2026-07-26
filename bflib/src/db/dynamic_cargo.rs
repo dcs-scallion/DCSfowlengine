@@ -30,7 +30,7 @@ use dcso3::{
     object::ObjectCategory,
     static_object::StaticObject,
     warehouse::{LiquidType, Warehouse},
-    LuaEnv, MizLua, String, Vector2,
+    LuaEnv, MizLua, String, Vector2, Vector3,
 };
 use fxhash::FxHashMap;
 use log::{info, warn};
@@ -817,17 +817,90 @@ impl Db {
         self.ephemeral.dirty();
         Ok(result)
     }
+
+    /// Sum of ED dynamic cargo crate masses (kg) currently aboard this slot's airframe.
+    pub fn loaded_dynamic_cargo_weight_kg(&self, lua: MizLua, slot: &dcso3::net::SlotId) -> u32 {
+        if !self.dynamic_cargo_enabled() {
+            return 0;
+        }
+        let Some(ucid) = self.ephemeral.players_by_slot.get(slot) else {
+            return 0;
+        };
+        let Some(player) = self.persisted.players.get(ucid) else {
+            return 0;
+        };
+        let Some((_, Some(inst))) = player.current_slot.as_ref() else {
+            return 0;
+        };
+        let side = player.side;
+        let (hpt, landed, typ) = match self.ephemeral.slot_instance_unit(lua, slot) {
+            Ok(unit) => {
+                let Ok(pt) = unit.get_point() else {
+                    return 0;
+                };
+                let landed = unit.in_air().map(|a| !a).unwrap_or(!inst.in_air);
+                (pt.0, landed, inst.typ.0.clone())
+            }
+            Err(_) => (inst.position.p.0, !inst.in_air, inst.typ.0.clone()),
+        };
+        let mut total = 0u32;
+        for (name, entry) in &self.persisted.dynamic_cargo_crates {
+            if entry.side != side {
+                continue;
+            }
+            let Ok(Static::Static(st)) = StaticObject::get_by_name(lua, name.as_str()) else {
+                continue;
+            };
+            match dynamic_cargo_is_aboard_unit(hpt, landed, typ.as_str(), &st) {
+                Ok(true) => {}
+                _ => continue,
+            }
+            match st.get_cargo_weight() {
+                Ok(w) if w > 0. => {
+                    total = total.saturating_add(w.round() as u32);
+                }
+                _ => {}
+            }
+        }
+        total
+    }
 }
 
 /// MOOSE DynamicCargo: bay load = inside length×width while landed; sling = within rope 3D.
+fn dynamic_cargo_is_aboard_unit(
+    unit_pt: Vector3,
+    landed: bool,
+    type_name: &str,
+    cargo: &StaticObject,
+) -> Result<bool> {
+    let Some(dim) = dynamic_cargo_aircraft_dim(type_name) else {
+        return Ok(false);
+    };
+    let cargo_pt = cargo.get_point()?;
+    let cargo2 = Vector2::new(cargo_pt.0.x, cargo_pt.0.z);
+    let hpos = Vector2::new(unit_pt.x, unit_pt.z);
+    let delta2 = (hpos - cargo2).magnitude();
+    if landed && delta2 < dim.length && delta2 < dim.width {
+        return Ok(true);
+    }
+    if !landed && dim.ropelength > 0. {
+        let d3 = ((unit_pt.x - cargo_pt.0.x).powi(2)
+            + (unit_pt.y - cargo_pt.0.y).powi(2)
+            + (unit_pt.z - cargo_pt.0.z).powi(2))
+        .sqrt();
+        if d3 <= dim.ropelength + 1.0 {
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
+
 fn dynamic_cargo_is_aboard_transport(
     db: &Db,
     lua: MizLua,
     side: Side,
     cargo: &StaticObject,
 ) -> Result<bool> {
-    let cargo_pt = cargo.get_point()?;
-    let cargo2 = Vector2::new(cargo_pt.0.x, cargo_pt.0.z);
     for (slot, ucid) in &db.ephemeral.players_by_slot {
         let Some(player) = db.persisted.players.get(ucid) else {
             continue;
@@ -838,35 +911,18 @@ fn dynamic_cargo_is_aboard_transport(
         let Some((_, Some(inst))) = player.current_slot.as_ref() else {
             continue;
         };
-        let Some(dim) = dynamic_cargo_aircraft_dim(inst.typ.0.as_str()) else {
-            continue;
-        };
-        let (hpt, landed) = match db.ephemeral.slot_instance_unit(lua, slot) {
+        let (hpt, landed, typ) = match db.ephemeral.slot_instance_unit(lua, slot) {
             Ok(unit) => {
                 let Ok(pt) = unit.get_point() else {
                     continue;
                 };
                 let landed = unit.in_air().map(|a| !a).unwrap_or(!inst.in_air);
-                (pt.0, landed)
+                (pt.0, landed, inst.typ.0.as_str())
             }
-            Err(_) => (
-                inst.position.p.0,
-                !inst.in_air,
-            ),
+            Err(_) => (inst.position.p.0, !inst.in_air, inst.typ.0.as_str()),
         };
-        let hpos = Vector2::new(hpt.x, hpt.z);
-        let delta2 = (hpos - cargo2).magnitude();
-        if landed && delta2 < dim.length && delta2 < dim.width {
+        if dynamic_cargo_is_aboard_unit(hpt, landed, typ, cargo)? {
             return Ok(true);
-        }
-        if !landed && dim.ropelength > 0. {
-            let d3 = ((hpt.x - cargo_pt.0.x).powi(2)
-                + (hpt.y - cargo_pt.0.y).powi(2)
-                + (hpt.z - cargo_pt.0.z).powi(2))
-            .sqrt();
-            if d3 <= dim.ropelength + 1.0 {
-                return Ok(true);
-            }
         }
     }
     Ok(false)

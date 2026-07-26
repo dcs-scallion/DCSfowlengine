@@ -104,6 +104,11 @@ impl<'lua> StaticObject<'lua> {
     pub fn get_point(&self) -> Result<crate::LuaVec3> {
         Ok(self.t.call_method("getPoint", ())?)
     }
+
+    /// Mass of a cargo-category static (kg). Crashes DCS if used on non-cargo statics.
+    pub fn get_cargo_weight(&self) -> Result<f64> {
+        Ok(self.t.call_method("getCargoWeight", ())?)
+    }
 }
 
 

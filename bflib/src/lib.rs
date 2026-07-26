@@ -1670,7 +1670,7 @@ fn on_event(lua: MizLua, ev: Event) -> Result<()> {
                             } else {
                                 ctx.db.play_sound_player(lua, "life_taken", &slot);
                             }
-                            let _ = menu::cargo::list_cargo_for_slot(ctx, &slot);
+                            let _ = menu::cargo::list_cargo_for_slot(ctx, lua, &slot);
                         }
                         Ok(TakeoffRes::OutOfLives | TakeoffRes::OutOfPoints) => {
                             if let Err(e) = unit.destroy() {
