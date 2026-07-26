@@ -1066,6 +1066,10 @@ fn player_slotted_in_aircraft_or_helicopter(ctx: &Context, ucid: &Ucid) -> bool 
     };
     match slot {
         SlotId::Unit(_) | SlotId::MultiCrew(_, _) => {
+            // Ignore stale current_slot after switching to CA/FO (slot map already cleared).
+            if ctx.db.ephemeral.player_in_slot(slot) != Some(ucid) {
+                return false;
+            }
             let Some(sifo) = ctx.db.ephemeral.get_slot_info(slot) else {
                 return false;
             };
@@ -1168,6 +1172,7 @@ fn apply_combined_arms_control(
     now: DateTime<Utc>,
 ) -> Result<()> {
     if player_slotted_in_aircraft_or_helicopter(ctx, &ucid) {
+        info!("CA control skipped for {ucid}: still in aircraft/helicopter slot");
         return Ok(());
     }
     match ctx.db.on_combined_arms_enter(id, ucid, now)? {
@@ -1192,7 +1197,8 @@ fn handle_combined_arms_enter(
     unit: &dcso3::unit::Unit,
     now: DateTime<Utc>,
 ) -> Result<()> {
-    let cat = unit.get_category()?;
+    // getCategory() is Object.Category.UNIT for every unit — use getCategoryEx (Unit.Category).
+    let cat = unit.get_category_ex()?;
     if cat != dcso3::unit::UnitCategory::GroundUnit {
         return Ok(());
     }
@@ -1214,7 +1220,7 @@ fn handle_combined_arms_shot(
     unit: &Unit,
     now: DateTime<Utc>,
 ) -> Result<()> {
-    let cat = match unit.get_category() {
+    let cat = match unit.get_category_ex() {
         Ok(c) => c,
         Err(_) => return Ok(()),
     };
@@ -1232,6 +1238,7 @@ fn handle_combined_arms_shot(
         return Ok(());
     }
     let Some(ucid) = resolve_combined_arms_controller(ctx, unit, &id) else {
+        warn!("CA shot: could not resolve controller for {id:?}");
         return Ok(());
     };
     apply_combined_arms_control(lua, ctx, unit, id, ucid, now)

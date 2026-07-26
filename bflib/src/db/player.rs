@@ -755,6 +755,7 @@ impl Db {
         };
         if slot.is_spectator() {
             player.jtac_or_spectators = true;
+            player.current_slot = None;
             return SlotAuth::Yes(None);
         }
         if slot_side != player.side {
@@ -769,6 +770,7 @@ impl Db {
             SlotId::Instructor(_, _) => {
                 if self.ephemeral.cfg.admins.contains_key(ucid) {
                     player.jtac_or_spectators = true;
+                    player.current_slot = Some((slot, None));
                     SlotAuth::Yes(None)
                 } else {
                     SlotAuth::Denied
@@ -779,6 +781,7 @@ impl Db {
             | SlotId::Observer(_, _) => {
                 if self.ephemeral.cfg.rules.ca.check(ucid) {
                     player.jtac_or_spectators = true;
+                    player.current_slot = Some((slot, None));
                     SlotAuth::Yes(None)
                 } else {
                     SlotAuth::Denied
@@ -1771,7 +1774,7 @@ impl Db {
         }
     }
 
-    /// Fowl deployable / troop unit eligible for Combined Arms lives.
+    /// Ground unit eligible for Combined Arms lives (deployable, troop, or objective defense).
     pub fn is_combined_arms_life_unit(&self, id: &DcsOid<ClassUnit>) -> bool {
         self.ephemeral
             .uid_by_object_id
@@ -1781,7 +1784,10 @@ impl Db {
             .is_some_and(|g| {
                 matches!(
                     g.origin,
-                    DeployKind::Deployed { .. } | DeployKind::Troop { .. }
+                    DeployKind::Deployed { .. }
+                        | DeployKind::Troop { .. }
+                        | DeployKind::Objective { .. }
+                        | DeployKind::ObjectiveDeprecated
                 )
             })
     }

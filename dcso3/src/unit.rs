@@ -15,7 +15,7 @@ use super::{as_tbl, controller::Controller, cvt_err, group::Group, object::Objec
 use crate::{
     env::miz::UnitId,
     net::SlotId,
-    object::{DcsObject, DcsOid},
+    object::{DcsObject, DcsOid, ObjectCategory},
     record_perf, simple_enum, wrapped_table, LuaEnv, LuaVec2, LuaVec3, MizLua, Position3, Sequence,
 };
 use anyhow::{bail, Result};
@@ -190,8 +190,14 @@ impl<'lua> Unit<'lua> {
         Ok(self.t.call_method("enableEmission", on)?)
     }
 
-    pub fn get_category(&self) -> Result<UnitCategory> {
+    /// Object.Category only (`UNIT` for every unit). Prefer [`Self::get_category_ex`].
+    pub fn get_category(&self) -> Result<ObjectCategory> {
         Ok(self.t.call_method("getCategory", ())?)
+    }
+
+    /// Unit.Category (Airplane / Helicopter / GroundUnit / …). DCS 2.9.2+.
+    pub fn get_category_ex(&self) -> Result<UnitCategory> {
+        Ok(self.t.call_method("getCategoryEx", ())?)
     }
 
     pub fn get_ammo(&self) -> Result<Sequence<'lua, Ammo<'lua>>> {

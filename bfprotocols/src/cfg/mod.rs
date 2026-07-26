@@ -237,7 +237,7 @@ pub enum LifeType {
     Logistics,
     Attack,
     Recon,
-    /// Combined Arms: player controlling a coalition deployable / troop unit.
+    /// Combined Arms: player controlling a coalition deployable, troop, or objective ground unit.
     CombinedArms,
 }
 
