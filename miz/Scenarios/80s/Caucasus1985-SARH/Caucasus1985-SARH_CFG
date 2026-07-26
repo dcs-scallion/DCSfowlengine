@@ -73,6 +73,14 @@
     "process_inbox_bat": "C:\\acmi-sanitize\\process_inbox.bat",
     "post_round_delay_secs": 30
   },
+  "setmissionstartdatetime": {
+    "enabled": false,
+    "skript_path": "",
+    "mission_start_time_cycle": ["06:00", "15:00"],
+    "mission_date_base": "1985-06-19",
+    "mission_date_on_new_campaign": "reset",
+    "post_round_delay_secs": 15
+  },
   "name_filter": "^[a-zA-Z0-9_<>|= ]+$",
   "max_msgs_per_second": 5,
   "jtac_default_code_blue": 1688,
@@ -304,7 +312,7 @@
   "artillery_mission_range": 70000,
   "calcm_mission": false,
   "calcm_mission_range": 600000,
-  "lock_sides": false,
+  "lock_sides": true,
   "side_switches": 1,
   "max_crates": 6,
   "life_types": {

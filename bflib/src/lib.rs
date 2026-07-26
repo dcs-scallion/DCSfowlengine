@@ -24,6 +24,7 @@ mod jtac;
 mod landcache;
 mod menu;
 mod msgq;
+mod setmissionstartdatetime;
 mod shots;
 mod sounds;
 mod spawnctx;
@@ -1017,6 +1018,29 @@ fn on_player_try_change_slot(
     res
 }
 
+fn spawn_setmissionstartdatetime(ctx: &Context, lua: MizLua, new_campaign: bool) {
+    let miz_path = match crate::db::discord_map::resolve_mission_miz_path(lua, &ctx.miz_state_path)
+    {
+        Ok(p) => p,
+        Err(e) => {
+            error!("setmissionstartdatetime: resolve miz path failed: {e:?}");
+            return;
+        }
+    };
+    let cfg = &ctx.db.ephemeral.cfg;
+    let args = crate::setmissionstartdatetime::SpawnArgs {
+        cfg: &cfg.setmissionstartdatetime,
+        campaign_stats_enabled: cfg.discord_map.campaign_stats,
+        campaign_rounds: ctx.db.persisted.campaign_stats.campaign_rounds,
+        rounds_per_day: cfg.discord_map.rounds_per_day,
+        miz_path: &miz_path,
+        new_campaign,
+    };
+    if let Err(e) = crate::setmissionstartdatetime::maybe_spawn(args) {
+        error!("setmissionstartdatetime: {e:?}");
+    }
+}
+
 fn flush_markup_if_pending(ctx: &mut Context, lua: MizLua) {
     if let Err(e) = ctx.db.flush_markup_messages(lua) {
         error!("could not flush markup messages {e:?}");
@@ -1693,6 +1717,7 @@ fn on_event(lua: MizLua, ev: Event) -> Result<()> {
             if let Err(e) = crate::acmi_sanitize::maybe_spawn(&ctx.db.ephemeral.cfg.acmi_sanitize) {
                 error!("acmi_sanitize: {e:?}");
             }
+            spawn_setmissionstartdatetime(ctx, lua, false);
             Context::reset();
             Perf::reset();
             Context::get_mut().init_async_bg(lua.inner())?;
@@ -2867,6 +2892,7 @@ fn delayed_init_miz(lua: MizLua) -> Result<()> {
 
 fn on_mission_load_end(_lua: HooksLua) -> Result<()> {
     crate::acmi_sanitize::reset_spawn_state();
+    crate::setmissionstartdatetime::reset_spawn_state();
     unsafe {
         Context::get_mut().load_state = LoadState::MissionLoaded { time: Utc::now() }
     };

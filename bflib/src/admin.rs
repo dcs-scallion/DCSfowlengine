@@ -762,6 +762,24 @@ pub(super) fn admin_shutdown(
     if let Err(e) = crate::acmi_sanitize::maybe_spawn(&ctx.db.ephemeral.cfg.acmi_sanitize) {
         error!("acmi_sanitize: {e:?}");
     }
+    let new_campaign = reset.is_some();
+    match crate::db::discord_map::resolve_mission_miz_path(lua, &ctx.miz_state_path) {
+        Ok(miz_path) => {
+            let cfg = &ctx.db.ephemeral.cfg;
+            let args = crate::setmissionstartdatetime::SpawnArgs {
+                cfg: &cfg.setmissionstartdatetime,
+                campaign_stats_enabled: cfg.discord_map.campaign_stats,
+                campaign_rounds: ctx.db.persisted.campaign_stats.campaign_rounds,
+                rounds_per_day: cfg.discord_map.rounds_per_day,
+                miz_path: &miz_path,
+                new_campaign,
+            };
+            if let Err(e) = crate::setmissionstartdatetime::maybe_spawn(args) {
+                error!("setmissionstartdatetime: {e:?}");
+            }
+        }
+        Err(e) => error!("setmissionstartdatetime: resolve miz path failed: {e:?}"),
+    }
     let wait = Arc::new((Mutex::new(false), Condvar::new()));
     let se = {
         let perf = unsafe { Perf::get_mut() };

@@ -1619,7 +1619,9 @@ impl Db {
             }
         }
         self.ephemeral.dirty();
-        debug!("objective {oid} health: {}, logi: {}", health, logi);
+        if health != 100 || logi != 100 {
+            debug!("objective {oid} health: {}, logi: {}", health, logi);
+        }
         Ok(())
     }
 

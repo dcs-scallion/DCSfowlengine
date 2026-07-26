@@ -1218,6 +1218,113 @@ impl AcmiSanitizeCfg {
     }
 }
 
+fn default_mission_datetime_post_round_delay_secs() -> u32 {
+    15
+}
+
+fn default_mission_date_on_new_campaign() -> MissionDateOnNewCampaign {
+    MissionDateOnNewCampaign::Reset
+}
+
+/// ME calendar when a new campaign starts (`setmissionstartdatetime`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum MissionDateOnNewCampaign {
+    /// Jump ME date back to `mission_date_base` (or date currently in the .miz).
+    Reset,
+    /// Keep advancing ME date across campaign wipes (no jump back).
+    Continue,
+}
+
+/// Cycle ME mission start time (and optionally date) after each round via external script.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SetMissionStartDatetimeCfg {
+    #[serde(default)]
+    pub enabled: bool,
+    /// Absolute path to `setmissionstartdatetime.BAT` (or `.py`).
+    #[serde(default, alias = "script_path")]
+    pub skript_path: Option<String>,
+    /// Wall-clock start times of day to rotate, e.g. `["06:00", "15:00"]`.
+    #[serde(default)]
+    pub mission_start_time_cycle: Vec<String>,
+    /// Base ME calendar date (`YYYY-MM-DD`). Used when `discord_map.campaign_stats` is true.
+    /// If omitted, the date currently stored in the `.miz` is used as the base.
+    #[serde(default)]
+    pub mission_date_base: Option<String>,
+    #[serde(default = "default_mission_date_on_new_campaign")]
+    pub mission_date_on_new_campaign: MissionDateOnNewCampaign,
+    /// Wait after MissionEnd before rewriting the `.miz` (DCS file lock). 1..=1800.
+    #[serde(default = "default_mission_datetime_post_round_delay_secs")]
+    pub post_round_delay_secs: u32,
+}
+
+impl Default for SetMissionStartDatetimeCfg {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            skript_path: None,
+            mission_start_time_cycle: Vec::new(),
+            mission_date_base: None,
+            mission_date_on_new_campaign: default_mission_date_on_new_campaign(),
+            post_round_delay_secs: default_mission_datetime_post_round_delay_secs(),
+        }
+    }
+}
+
+impl SetMissionStartDatetimeCfg {
+    pub fn validate(&self) -> Result<()> {
+        if !self.enabled {
+            return Ok(());
+        }
+        let path = self
+            .skript_path
+            .as_ref()
+            .map(|s| s.trim())
+            .filter(|s| !s.is_empty())
+            .ok_or_else(|| anyhow!("setmissionstartdatetime.skript_path is required when enabled"))?;
+        let _ = path;
+        if self.mission_start_time_cycle.is_empty() {
+            bail!("setmissionstartdatetime.mission_start_time_cycle must not be empty when enabled");
+        }
+        for t in &self.mission_start_time_cycle {
+            parse_hh_mm(t).map_err(|_| {
+                anyhow!(
+                    "setmissionstartdatetime.mission_start_time_cycle entry {:?} is invalid (use HH:MM)",
+                    t
+                )
+            })?;
+        }
+        if let Some(ref d) = self.mission_date_base {
+            NaiveDate::parse_from_str(d.trim(), "%Y-%m-%d").map_err(|_| {
+                anyhow!(
+                    "setmissionstartdatetime.mission_date_base {:?} is invalid (use YYYY-MM-DD)",
+                    d
+                )
+            })?;
+        }
+        if !(1..=1800).contains(&self.post_round_delay_secs) {
+            bail!(
+                "setmissionstartdatetime.post_round_delay_secs {} out of range 1-1800",
+                self.post_round_delay_secs
+            );
+        }
+        Ok(())
+    }
+}
+
+fn parse_hh_mm(s: &str) -> Result<(u32, u32)> {
+    let parts: Vec<_> = s.trim().split(':').collect();
+    if parts.len() != 2 {
+        bail!("expected HH:MM");
+    }
+    let h: u32 = parts[0].parse()?;
+    let m: u32 = parts[1].parse()?;
+    if h > 23 || m > 59 {
+        bail!("out of range");
+    }
+    Ok((h, m))
+}
+
 /// Mirror of DCSServerBot `scheduler.yaml` `action.times` for Discord map countdown.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DcsserverBotScheduledRestartCfg {
@@ -1574,6 +1681,9 @@ pub struct Cfg {
     pub dynamic_cargo_delivery: DynamicCargoDeliveryCfg,
     #[serde(default)]
     pub acmi_sanitize: AcmiSanitizeCfg,
+    /// After each round, rewrite ME start time (and optionally date) in the on-disk `.miz`.
+    #[serde(default)]
+    pub setmissionstartdatetime: SetMissionStartDatetimeCfg,
     /// Available actions per side
     #[serde(default)]
     pub actions: FxHashMap<Side, IndexMap<String, Action, FxBuildHasher>>,
@@ -1705,6 +1815,7 @@ impl Cfg {
         }
         cfg.validate_jtac_default_codes()?;
         cfg.acmi_sanitize.validate()?;
+        cfg.setmissionstartdatetime.validate()?;
         if let Some(ref s) = cfg.dcsserver_bot_scheduled_restart {
             s.validate()?;
         }
