@@ -11,6 +11,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 /// When campaign CFG enables discord map, require ME corner zones in the base mission.
+/// Also validates campaign_top10 closed/open sizes when that feature is enabled.
 pub fn validate_discord_map_zones(mission: &dcso3::env::miz::Miz<'_>, campaign_cfg: Option<&Path>) -> Result<()> {
     let Some(cfg_path) = campaign_cfg else {
         return Ok(());
@@ -19,12 +20,15 @@ pub fn validate_discord_map_zones(mission: &dcso3::env::miz::Miz<'_>, campaign_c
         .with_context(|| format!("read campaign cfg {:?}", cfg_path))?;
     let v: serde_json::Value =
         serde_json::from_slice(&bytes).context("parse campaign cfg for discord_map check")?;
-    let enabled = v
-        .get("discord_map")
-        .and_then(|d| d.get("enabled"))
-        .and_then(|e| e.as_bool())
-        .unwrap_or(false);
-    if !enabled {
+    if let Some(dm_val) = v.get("discord_map") {
+        let dm: bfprotocols::cfg::DiscordMapCfg = serde_json::from_value(dm_val.clone())
+            .context("parse discord_map from campaign CFG")?;
+        dm.validate_campaign_top10_sizes()
+            .context("invalid discord_map.campaign_top10_* closed/open sizes in campaign CFG")?;
+        if !dm.enabled {
+            return Ok(());
+        }
+    } else {
         return Ok(());
     }
     let mut names = Vec::new();

@@ -133,14 +133,15 @@ impl Db {
         if !self.campaign_top10_active() {
             return None;
         }
+        let dm = &self.ephemeral.cfg.discord_map;
         Some(CampaignTop10View {
-            a2a: self.top10_board(|p| p.a2a),
-            a2g: self.top10_board(|p| p.a2g),
-            a2s: self.top10_board(|p| p.a2s),
-            g2a: self.top10_board(|p| p.g2a),
-            g2g: self.top10_board(|p| p.g2g),
-            g2s: self.top10_board(|p| p.g2s),
-            logistics: self.top10_board(|p| p.logistics),
+            a2a: self.top10_board(|p| p.a2a, dm.campaign_top10_A2A_open),
+            a2g: self.top10_board(|p| p.a2g, dm.campaign_top10_A2G_open),
+            a2s: self.top10_board(|p| p.a2s, dm.campaign_top10_A2S_open),
+            g2a: self.top10_board(|p| p.g2a, dm.campaign_top10_G2A_open),
+            g2g: self.top10_board(|p| p.g2g, dm.campaign_top10_G2G_open),
+            g2s: self.top10_board(|p| p.g2s, dm.campaign_top10_G2S_open),
+            logistics: self.top10_board(|p| p.logistics, dm.campaign_top10_LOG_open),
         })
     }
 
@@ -170,7 +171,11 @@ impl Db {
         self.ephemeral.dirty();
     }
 
-    fn top10_board(&self, count_of: impl Fn(&PlayerTop10Stats) -> u32) -> Vec<Top10Row> {
+    fn top10_board(
+        &self,
+        count_of: impl Fn(&PlayerTop10Stats) -> u32,
+        open: u32,
+    ) -> Vec<Top10Row> {
         let mut rows: Vec<Top10Row> = self
             .persisted
             .campaign_top10
@@ -198,7 +203,7 @@ impl Db {
             })
             .collect();
         rows.sort_by(|a, b| b.count.cmp(&a.count).then_with(|| a.name.cmp(&b.name)));
-        rows.truncate(10);
+        rows.truncate(open as usize);
         rows
     }
 }
@@ -301,49 +306,52 @@ fn player_kill_participants(db: &Db, dead: &Dead) -> SmallVec<[(Ucid, bool); 8]>
     out
 }
 
-pub fn render_top10_sidebar_html(view: &CampaignTop10View) -> String {
+pub fn render_top10_sidebar_html(
+    view: &CampaignTop10View,
+    dm: &bfprotocols::cfg::DiscordMapCfg,
+) -> String {
     let mut out = String::from(r#"<div class="sidebar-top10">"#);
     out.push_str(&top10_section(
-        "Top 10 Killboard",
+        &format!("Top {} Killboard", dm.campaign_top10_A2A_open),
         "A2A",
         &view.a2a,
-        3,
+        dm.campaign_top10_A2A_closed as usize,
     ));
     out.push_str(&top10_section(
-        "Top 10 Killboard",
+        &format!("Top {} Killboard", dm.campaign_top10_A2G_open),
         "A2G",
         &view.a2g,
-        3,
+        dm.campaign_top10_A2G_closed as usize,
     ));
     out.push_str(&top10_section(
-        "Top 10 Killboard",
+        &format!("Top {} Killboard", dm.campaign_top10_A2S_open),
         "A2S",
         &view.a2s,
-        3,
+        dm.campaign_top10_A2S_closed as usize,
     ));
     out.push_str(&top10_section(
-        "Top 10 Support",
+        &format!("Top {} Support", dm.campaign_top10_LOG_open),
         "LOG",
         &view.logistics,
-        3,
+        dm.campaign_top10_LOG_closed as usize,
     ));
     out.push_str(&top10_section(
-        "Top 10 Killboard",
+        &format!("Top {} Killboard  (CA)", dm.campaign_top10_G2A_open),
         "G2A",
         &view.g2a,
-        1,
+        dm.campaign_top10_G2A_closed as usize,
     ));
     out.push_str(&top10_section(
-        "Top 10 Killboard",
+        &format!("Top {} Killboard  (CA)", dm.campaign_top10_G2G_open),
         "G2G",
         &view.g2g,
-        1,
+        dm.campaign_top10_G2G_closed as usize,
     ));
     out.push_str(&top10_section(
-        "Top 10 Killboard",
+        &format!("Top {} Killboard  (CA)", dm.campaign_top10_G2S_open),
         "G2S",
         &view.g2s,
-        1,
+        dm.campaign_top10_G2S_closed as usize,
     ));
     out.push_str("</div>");
     out

@@ -863,7 +863,9 @@ pub fn collect_map_status_bar(
         };
     let campaign_top10_sidebar_html = if cfg.discord_map.campaign_top10 {
         db.campaign_top10_build_view()
-            .map(|v| super::campaign_top10::render_top10_sidebar_html(&v))
+            .map(|v| {
+                super::campaign_top10::render_top10_sidebar_html(&v, &cfg.discord_map)
+            })
             .unwrap_or_default()
     } else {
         String::new()

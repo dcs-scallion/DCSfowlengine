@@ -1041,7 +1041,28 @@ fn default_rounds_per_day() -> u32 {
     1
 }
 
+fn default_top10_a2_closed() -> u32 {
+    3
+}
+
+fn default_top10_a2_open() -> u32 {
+    10
+}
+
+fn default_top10_g2_closed() -> u32 {
+    1
+}
+
+fn default_top10_g2s_closed() -> u32 {
+    0
+}
+
+fn default_top10_g2_open() -> u32 {
+    10
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[allow(non_snake_case)]
 pub struct DiscordMapCfg {
     #[serde(default)]
     pub enabled: bool,
@@ -1090,6 +1111,36 @@ pub struct DiscordMapCfg {
     /// Persisted per-player Top 10 boards for the interactive map left sidebar.
     #[serde(default)]
     pub campaign_top10: bool,
+    /// Always-visible rows when the board is collapsed (`0` = all hidden until expand).
+    #[serde(default = "default_top10_a2_closed")]
+    pub campaign_top10_A2A_closed: u32,
+    /// Expanded row count and title number (`Top N Killboard`).
+    #[serde(default = "default_top10_a2_open")]
+    pub campaign_top10_A2A_open: u32,
+    #[serde(default = "default_top10_a2_closed")]
+    pub campaign_top10_A2G_closed: u32,
+    #[serde(default = "default_top10_a2_open")]
+    pub campaign_top10_A2G_open: u32,
+    #[serde(default = "default_top10_a2_closed")]
+    pub campaign_top10_A2S_closed: u32,
+    #[serde(default = "default_top10_a2_open")]
+    pub campaign_top10_A2S_open: u32,
+    #[serde(default = "default_top10_a2_closed")]
+    pub campaign_top10_LOG_closed: u32,
+    #[serde(default = "default_top10_a2_open")]
+    pub campaign_top10_LOG_open: u32,
+    #[serde(default = "default_top10_g2_closed")]
+    pub campaign_top10_G2A_closed: u32,
+    #[serde(default = "default_top10_g2_open")]
+    pub campaign_top10_G2A_open: u32,
+    #[serde(default = "default_top10_g2_closed")]
+    pub campaign_top10_G2G_closed: u32,
+    #[serde(default = "default_top10_g2_open")]
+    pub campaign_top10_G2G_open: u32,
+    #[serde(default = "default_top10_g2s_closed")]
+    pub campaign_top10_G2S_closed: u32,
+    #[serde(default = "default_top10_g2_open")]
+    pub campaign_top10_G2S_open: u32,
     /// Campaign day length: `1 + (campaign_rounds - 1) / rounds_per_day`.
     #[serde(default = "default_rounds_per_day")]
     pub rounds_per_day: u32,
@@ -1116,6 +1167,20 @@ impl Default for DiscordMapCfg {
             refresh_interval_secs: None,
             campaign_stats: false,
             campaign_top10: false,
+            campaign_top10_A2A_closed: default_top10_a2_closed(),
+            campaign_top10_A2A_open: default_top10_a2_open(),
+            campaign_top10_A2G_closed: default_top10_a2_closed(),
+            campaign_top10_A2G_open: default_top10_a2_open(),
+            campaign_top10_A2S_closed: default_top10_a2_closed(),
+            campaign_top10_A2S_open: default_top10_a2_open(),
+            campaign_top10_LOG_closed: default_top10_a2_closed(),
+            campaign_top10_LOG_open: default_top10_a2_open(),
+            campaign_top10_G2A_closed: default_top10_g2_closed(),
+            campaign_top10_G2A_open: default_top10_g2_open(),
+            campaign_top10_G2G_closed: default_top10_g2_closed(),
+            campaign_top10_G2G_open: default_top10_g2_open(),
+            campaign_top10_G2S_closed: default_top10_g2s_closed(),
+            campaign_top10_G2S_open: default_top10_g2_open(),
             rounds_per_day: default_rounds_per_day(),
         }
     }
@@ -1172,6 +1237,59 @@ impl DiscordMapCfg {
         }
         if self.campaign_stats && self.rounds_per_day == 0 {
             bail!("discord_map.rounds_per_day must be >= 1 when discord_map.campaign_stats is true");
+        }
+        self.validate_campaign_top10_sizes()?;
+        Ok(())
+    }
+
+    /// `closed` must be strictly less than `open` for every Top 10 board.
+    pub fn validate_campaign_top10_sizes(&self) -> Result<()> {
+        if !self.campaign_top10 {
+            return Ok(());
+        }
+        let boards = [
+            (
+                "A2A",
+                self.campaign_top10_A2A_closed,
+                self.campaign_top10_A2A_open,
+            ),
+            (
+                "A2G",
+                self.campaign_top10_A2G_closed,
+                self.campaign_top10_A2G_open,
+            ),
+            (
+                "A2S",
+                self.campaign_top10_A2S_closed,
+                self.campaign_top10_A2S_open,
+            ),
+            (
+                "LOG",
+                self.campaign_top10_LOG_closed,
+                self.campaign_top10_LOG_open,
+            ),
+            (
+                "G2A",
+                self.campaign_top10_G2A_closed,
+                self.campaign_top10_G2A_open,
+            ),
+            (
+                "G2G",
+                self.campaign_top10_G2G_closed,
+                self.campaign_top10_G2G_open,
+            ),
+            (
+                "G2S",
+                self.campaign_top10_G2S_closed,
+                self.campaign_top10_G2S_open,
+            ),
+        ];
+        for (name, closed, open) in boards {
+            if closed >= open {
+                bail!(
+                    "discord_map.campaign_top10_{name}_closed ({closed}) must be < campaign_top10_{name}_open ({open})"
+                );
+            }
         }
         Ok(())
     }
@@ -1816,6 +1934,7 @@ impl Cfg {
         cfg.validate_jtac_default_codes()?;
         cfg.acmi_sanitize.validate()?;
         cfg.setmissionstartdatetime.validate()?;
+        cfg.discord_map.validate_campaign_top10_sizes()?;
         if let Some(ref s) = cfg.dcsserver_bot_scheduled_restart {
             s.validate()?;
         }
