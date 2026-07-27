@@ -1436,22 +1436,20 @@ impl Db {
             .clone();
         let dir = Vector2::new(st.pos.x.x, st.pos.x.z);
         let group_heading = azumith3d(st.pos.x.0);
-        let link_oid = self
-            .point_near_logistics(st.side, st.point)
-            .map(|(near, _)| near)
-            .unwrap_or(oid);
-        let (spawnpos, ship_hub, ship_offsets, deck_alt) =
-            match crate::db::ai_air::resolve_ship_crate_deck_spawn(
-                lua,
-                self,
-                link_oid,
-                st.point,
-                dir,
-                group_heading,
-                st.pos.p.y,
-            ) {
-                Ok(v) => match v {
-                    Some((deck_spawn, altitude, offsets)) => (
+        // Deck path only when standing on a friendly logistics hub (never crate origin/carrier fallback).
+        let near_logi = self.point_near_logistics(st.side, st.point).ok();
+        let (spawnpos, ship_hub, ship_offsets, deck_alt) = match near_logi {
+            Some((link_oid, _)) => {
+                match crate::db::ai_air::resolve_ship_crate_deck_spawn(
+                    lua,
+                    self,
+                    link_oid,
+                    st.point,
+                    dir,
+                    group_heading,
+                    st.pos.p.y,
+                ) {
+                    Ok(Some((deck_spawn, altitude, offsets))) => (
                         SpawnLoc::AtPosOnShip {
                             pos: deck_spawn,
                             group_heading,
@@ -1461,7 +1459,8 @@ impl Db {
                         Some(offsets),
                         Some(altitude),
                     ),
-                    None => (
+                    // Land spawn if not naval, or deck reject (same as unload_troops).
+                    Ok(None) | Err(_) => (
                         SpawnLoc::AtPos {
                             pos: st.point,
                             offset_direction: dir,
@@ -1471,17 +1470,19 @@ impl Db {
                         None,
                         None,
                     ),
-                },
-                Err(e) => {
-                    self.ephemeral
-                        .cargo
-                        .get_mut(slot)
-                        .unwrap()
-                        .crates
-                        .push((oid, crate_cfg));
-                    return Err(e);
                 }
-            };
+            }
+            None => (
+                SpawnLoc::AtPos {
+                    pos: st.point,
+                    offset_direction: dir,
+                    group_heading,
+                },
+                None,
+                None,
+                None,
+            ),
+        };
         let dk = DeployKind::Crate {
             origin: oid,
             player: st.ucid,

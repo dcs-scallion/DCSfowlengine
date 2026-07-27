@@ -434,8 +434,18 @@ fn farp_pad_template(obj: &Objective) -> Option<&String> {
 }
 
 fn objective_is_naval_carrier(db: &Db, obj: &Objective) -> bool {
-    farp_pad_template(obj)
-        .is_some_and(|pad| db.ephemeral.global_pad_templates.contains(pad.as_str()))
+    // Ground DEP FARPs share global_pad_templates; only mobile (ship) pads are naval decks.
+    match &obj.kind {
+        ObjectiveKind::Farp {
+            pad_template,
+            mobile: true,
+            ..
+        } => db
+            .ephemeral
+            .global_pad_templates
+            .contains(pad_template.as_str()),
+        _ => false,
+    }
 }
 
 pub(super) fn carrier_ship_unit_id(lua: MizLua, db: &Db, pad_template: &str) -> Result<Option<i64>> {

@@ -274,6 +274,7 @@ impl Db {
         GroupId::setseq(max(db.persisted.gid, GroupId::seq()));
         UnitId::setseq(max(db.persisted.uid, UnitId::seq()));
         db.ephemeral.set_cfg(miz, idx, cfg, to_bg, fowl_miz_export)?;
+        db.ephemeral.warehouses_apply_persisted = true;
         db.apply_nominal_owners_from_miz(miz)
             .context("applying nominal owners from ME zone names")?;
         Ok(db)

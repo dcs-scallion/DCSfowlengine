@@ -189,6 +189,8 @@ pub struct Ephemeral {
     pub(super) actions_unlock_announced: bool,
     /// New round: do not push virtual stock into DCS during initial `setup_warehouses` passes.
     pub(super) preserve_initial_warehouse_fill: bool,
+    /// Loaded campaign: push persisted virtual stock to DCS; do not SyncFrom ME template.
+    pub(super) warehouses_apply_persisted: bool,
     /// New round only: skip one hub distribute after bftools/`setup_warehouses` fill.
     pub(super) defer_initial_hub_distribute: bool,
     /// New round: first logistics cycle reads DCS (SyncFrom) and skips SyncTo to ME.
@@ -287,6 +289,7 @@ impl Default for Ephemeral {
             actions_unlock_after: None,
             actions_unlock_announced: false,
             preserve_initial_warehouse_fill: false,
+            warehouses_apply_persisted: false,
             defer_initial_hub_distribute: false,
             defer_initial_logistics_sync_to: false,
             warehouse_dcs_equipment_names: FxHashMap::default(),

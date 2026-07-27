@@ -2584,6 +2584,44 @@ impl Db {
         ))
     }
 
+    /// Drops DCS `initialAmount=1` opposite-DT registration filler A/C rows outside owner export.
+    /// Shared by fresh (preserve_fill) and loaded (apply_persisted) load paths; capture flow
+    /// rebuilds rows from the new-owner export separately.
+    fn prune_dt_registration_aircraft_for_oid(
+        &mut self,
+        lua: MizLua,
+        oid: ObjectiveId,
+        context_tag: &'static str,
+    ) -> Result<()> {
+        let export = Arc::clone(&self.ephemeral.fowl_miz_export);
+        let resource_meta = self
+            .warehouse_resource_meta_cache(lua)
+            .context("resource meta for DT registration prune")?;
+        let airbase_oid = self
+            .ephemeral
+            .airbase_by_oid
+            .get(&oid)
+            .ok_or_else(|| anyhow!("no airbase for DT registration prune {oid:?}"))?
+            .clone();
+        let warehouse = Airbase::get_instance(lua, &airbase_oid)?
+            .get_warehouse()
+            .context("warehouse for DT registration prune")?;
+        let obj = objective_mut!(self, oid)?;
+        let n = prune_registration_aircraft_outside_export_profile(
+            obj,
+            &warehouse,
+            export.as_ref(),
+            resource_meta.as_ref(),
+        )?;
+        if n > 0 {
+            info!(
+                "{context_tag}: pruned {n} registration-only A/C row(s) outside export for {:?}",
+                obj.name
+            );
+        }
+        Ok(())
+    }
+
     fn init_resource_map(&mut self, lua: MizLua) -> Result<()> {
         let whcfg = match self.ephemeral.cfg.warehouse.as_ref() {
             None => return Ok(()),
@@ -3508,9 +3546,23 @@ impl Db {
         }
         let sync_oids: Vec<ObjectiveId> = self.ephemeral.airbase_by_oid.keys().copied().collect();
         let preserve_fill = self.ephemeral.preserve_initial_warehouse_fill;
+        let apply_persisted = self.ephemeral.warehouses_apply_persisted;
         let debug_coalition_switch = self.ephemeral.cfg.debugging_objectives_coalition_switch;
         for oid in sync_oids {
             if matches!(objective!(self, oid)?.kind, ObjectiveKind::Production) {
+                continue;
+            }
+            if apply_persisted && !debug_coalition_switch {
+                self.sync_objective_to_warehouse(lua, oid).with_context(|| {
+                    format_compact!(
+                        "loaded campaign: apply persisted warehouse to DCS for {:?}",
+                        oid
+                    )
+                })?;
+                // ME `initialAmount=1` opposite DT rows resurrect after load; virtual has no
+                // matching entry so SyncTo alone leaves DCS at 1. Reapply the same prune as
+                // preserve_fill so UI shows 0/1 and capture path can still refill on ownership change.
+                self.prune_dt_registration_aircraft_for_oid(lua, oid, "loaded campaign")?;
                 continue;
             }
             if debug_coalition_switch {
@@ -3554,36 +3606,14 @@ impl Db {
                     format_compact!("Fowl export: prune/sync DCS warehouse for {:?}", oid)
                 })?;
             } else {
-                // Drop ME amount=1 opposite DT registration fillers not in owner export stock.
-                let export = Arc::clone(&self.ephemeral.fowl_miz_export);
-                let resource_meta = self
-                    .warehouse_resource_meta_cache(lua)
-                    .context("resource meta for DT registration prune")?;
-                let airbase_oid = self
-                    .ephemeral
-                    .airbase_by_oid
-                    .get(&oid)
-                    .ok_or_else(|| anyhow!("no airbase for DT registration prune {oid:?}"))?
-                    .clone();
-                let warehouse = Airbase::get_instance(lua, &airbase_oid)?
-                    .get_warehouse()
-                    .context("warehouse for DT registration prune")?;
-                let obj = objective_mut!(self, oid)?;
-                let n = prune_registration_aircraft_outside_export_profile(
-                    obj,
-                    &warehouse,
-                    export.as_ref(),
-                    resource_meta.as_ref(),
-                )?;
-                if n > 0 {
-                    info!(
-                        "preserve_fill: pruned {n} registration-only A/C row(s) outside export for {:?}",
-                        obj.name
-                    );
-                }
+                self.prune_dt_registration_aircraft_for_oid(lua, oid, "preserve_fill")?;
             }
         }
-        if debug_coalition_switch {
+        if apply_persisted && !debug_coalition_switch {
+            info!(
+                "loaded campaign: applied persisted warehouses to DCS (skipped SyncFrom ME template)"
+            );
+        } else if debug_coalition_switch {
             info!(
                 "debugging_objectives_coalition_switch: replaced DCS stock with opposite export (orphans removed)"
             );

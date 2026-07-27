@@ -3881,8 +3881,12 @@ fn append_zone_ws_stock_amounts_to_export(
                     ws_type: stock_export_ws_type(ws),
                     production: prod.weapon_by_ws.get(&ws).copied().unwrap_or(0),
                 });
-                // Zone amounts are authoritative for these corrective rows (same as ME set).
-                entry.baseline = baseline;
+                // Fill only opposite/KMGU-corrective rows (baseline=0). Owner ME initialAmount
+                // set via `synthesize_virtual_coalition_stock` weapons loop must stay authoritative
+                // (pre-becad9f9 behavior). Otherwise Fowl scheduler caps overshoot DCS initialAmount.
+                if entry.baseline == 0 {
+                    entry.baseline = baseline;
+                }
                 if entry.ws_type.is_none() {
                     entry.ws_type = stock_export_ws_type(ws);
                 }

@@ -1251,7 +1251,7 @@ body{{margin:0;background:#000;color:#686a6e;font-family:"Roboto Condensed",Robo
 .stats{{display:flex;flex-wrap:nowrap;gap:4px;width:100%;box-sizing:border-box;font-size:clamp(12px,calc(100vw*24/{img_w}),24px)}}
 .stats-top{{flex:1 1 0;min-width:0}}
 .stats .stat{{flex:1 1 0;min-width:0;border:1px solid #2e3138;box-sizing:border-box;display:flex;flex-direction:column;min-height:0}}
-.stats-top .stat:first-child,.stats-bottom .stat:first-child{{flex:0 0 45ch;width:45ch;max-width:45ch}}
+.stats-top .stat:first-child,.stats-bottom .stat:first-child{{flex:0 0 32ch;width:32ch;max-width:32ch}}
 .sidebar-online-stat{{flex:0 0 {sidebar_w}px;width:{sidebar_w}px;min-width:{sidebar_w}px;min-height:0;border:1px solid #2e3138;box-sizing:border-box;display:flex;flex-direction:column;font-size:clamp(12px,calc(100vw*24/{img_w}),24px)}}
 .stat-h{{background:#15161a;color:#686a6e;line-height:1.2;padding:5px 2px;text-align:center;white-space:normal;word-break:break-word;overflow:hidden;border-bottom:1px solid #2e3138;font-weight:400;flex:0 0 auto}}
 .stat-v{{background:#000;color:#686a6e;line-height:1.3;padding:6px 4px;text-align:center;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;flex:1 1 auto;min-height:0;font-weight:700}}
