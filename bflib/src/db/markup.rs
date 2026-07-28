@@ -265,13 +265,13 @@ fn objective_stats_text(
                 stat_plain_repair_row(obj.production_repair, obj.production_repair_slots_needed()),
             )
         }
-        (ObjectiveKind::Logistics, true) => format_compact!(
+        (ObjectiveKind::Logistics, true) if !obj.is_occupied_logistics_hub() => format_compact!(
             "\n\n{}\n{}\n{}",
             stat_infobar_row(BAR_LOOKUP[get_idx(production)], production, "Production"),
             stat_infobar_row(BAR_LOOKUP[get_idx(obj.health)], obj.health, "Health"),
             stat_infobar_row(BAR_LOOKUP[get_idx(obj.logi)], obj.logi, "Logi"),
         ),
-        (ObjectiveKind::Logistics, false) => format_compact!(
+        (ObjectiveKind::Logistics, false) if !obj.is_occupied_logistics_hub() => format_compact!(
             "\n\n{}\n{}\n{}\n{}\n{}\n{}",
             stat_infobar_row(BAR_LOOKUP[get_idx(production)], production, "Production"),
             stat_infobar_row(BAR_LOOKUP[get_idx(obj.health)], obj.health, "Health"),
