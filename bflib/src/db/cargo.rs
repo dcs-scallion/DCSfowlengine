@@ -795,7 +795,8 @@ impl Db {
             let min_sq = (min_m as f64).powi(2);
             let mut nearest: Option<UnpackBaseDistanceViolation> = None;
             for (_, obj) in db.persisted.objectives.into_iter() {
-                if obj.owner != side || obj.threatened {
+                // Only live friendly bases; capturable (logi 0 / white ring) and enemy/neutral skip.
+                if obj.owner != side || obj.threatened || obj.captureable() {
                     continue;
                 }
                 let dist_sq = na::distance_squared(&obj.zone.pos().into(), &centroid.into());
@@ -837,6 +838,7 @@ impl Db {
                     is_origin |= oid == &cr.origin;
                 }
                 if obj.owner == side
+                    && !obj.captureable()
                     && !matches!(obj.kind, ObjectiveKind::Production)
                     && !is_origin
                     && obj.zone.contains(centroid)
