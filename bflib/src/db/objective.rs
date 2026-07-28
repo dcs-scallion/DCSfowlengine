@@ -770,18 +770,17 @@ impl Db {
     }
 
     fn compute_static_repair_need(&self, obj: &Objective) -> Result<u16> {
-        let Some(groups) = obj.groups.get(&obj.owner) else {
-            return Ok(0);
-        };
         let mut need = 0u16;
-        for gid in groups {
-            let group = group!(self, gid)?;
-            if group.class != ObjGroupClass::ObjectiveStatic {
-                continue;
-            }
-            for uid in &group.units {
-                if unit!(self, uid)?.dead {
-                    need = need.saturating_add(1);
+        for (_, groups) in &obj.groups {
+            for gid in groups {
+                let group = group!(self, gid)?;
+                if group.class != ObjGroupClass::ObjectiveStatic {
+                    continue;
+                }
+                for uid in &group.units {
+                    if unit!(self, uid)?.dead {
+                        need = need.saturating_add(1);
+                    }
                 }
             }
         }
@@ -2136,26 +2135,29 @@ impl Db {
         use dcso3::{coalition::Static, static_object::StaticObject};
 
         let obj = objective!(self, oid)?;
-        let side = obj.owner;
-        let mut targets: SmallVec<[(UnitId, i64, CompactString); 8]> = smallvec![];
-        for gid in obj.groups.get(&side).into_iter().flatten() {
-            let group = group!(self, gid)?;
-            if group.class != ObjGroupClass::ObjectiveStatic {
-                continue;
-            }
-            for uid in &group.units {
-                let unit = unit!(self, uid)?;
-                if unit.dead {
-                    targets.push((
-                        *uid,
-                        self.objective_static_durability(unit),
-                        CompactString::from(unit.name.as_str()),
-                    ));
+        let mut targets: SmallVec<[(UnitId, i64, CompactString, Side); 8]> = smallvec![];
+        for (_, groups) in &obj.groups {
+            for gid in groups {
+                let group = group!(self, gid)?;
+                if group.class != ObjGroupClass::ObjectiveStatic {
+                    continue;
+                }
+                let group_side = group.side;
+                for uid in &group.units {
+                    let unit = unit!(self, uid)?;
+                    if unit.dead {
+                        targets.push((
+                            *uid,
+                            self.objective_static_durability(unit),
+                            CompactString::from(unit.name.as_str()),
+                            group_side,
+                        ));
+                    }
                 }
             }
         }
         targets.sort_by(|a, b| a.1.cmp(&b.1).then_with(|| a.2.cmp(&b.2)));
-        let Some(uid) = targets.first().map(|(u, _, _)| *u) else {
+        let Some((uid, _, _, template_side)) = targets.first() else {
             return Ok(false);
         };
         let (unit_name, template_name) = {
@@ -2169,7 +2171,7 @@ impl Db {
             let _ = st.destroy();
         }
         let tpl = spctx
-            .get_template_ref(idx, GroupKind::Any, side, template_name.as_str())
+            .get_template_ref(idx, GroupKind::Any, *template_side, template_name.as_str())
             .with_context(|| format_compact!("objective static template {template_name}"))?;
         spctx
             .spawn(tpl)
