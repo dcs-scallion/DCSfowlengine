@@ -1228,6 +1228,20 @@ fn read_unit_fuel_kg(unit: &miz::Unit<'_>, cap_kg: u32) -> u32 {
     }
 }
 
+/// ME template `payload.fuel` is absolute kg for most DCS modules.
+/// Use it as the true capacity; fall back to `spawn_fuel_kg_per_airframe`.
+fn template_fuel_capacity_kg(unit: &miz::Unit<'_>, airframe_type: &str) -> u32 {
+    let from_template = unit
+        .raw_get::<_, Table>("payload")
+        .ok()
+        .and_then(|pl| pl.raw_get::<_, f64>("fuel").ok())
+        .or_else(|| unit.raw_get::<_, f64>("fuel").ok());
+    match from_template {
+        Some(f) if f > 1. => f.round() as u32,
+        _ => spawn_fuel_kg_per_airframe(airframe_type),
+    }
+}
+
 fn apply_me_template_fuel_kg(unit: &miz::Unit<'_>, fuel_kg: u32) -> Result<()> {
     let fuel = f64::from(fuel_kg);
     unit.raw_set("fuel", fuel)?;
@@ -1272,7 +1286,7 @@ pub(super) fn apply_me_template_fuel_fraction(
     airframe_type: &str,
     frac: f32,
 ) -> Result<()> {
-    let cap = spawn_fuel_kg_per_airframe(airframe_type);
+    let cap = template_fuel_capacity_kg(unit, airframe_type);
     let kg = ((frac.clamp(0., 1.) * cap as f32).round() as u32).min(cap);
     apply_me_template_fuel_kg(unit, kg)
 }
@@ -1373,9 +1387,23 @@ fn deduct_hub_liquid(
         bail!("insufficient {liq:?} at hub ({avail} < {kg} kg)");
     }
     wh.remove_liquid(liq, kg).context("remove_liquid")?;
+    // OAB/OLO/OFO store liquids in metric tons; DCS API returns kg
+    let tons_mode = {
+        let export = &*db.ephemeral.fowl_miz_export;
+        db.persisted
+            .objectives
+            .get(&hub)
+            .map(|obj| super::logistics::objective_liquids_stored_as_tons(export, obj))
+            .unwrap_or(false)
+    };
     if let Ok(obj) = objective_mut!(db, hub) {
         if let Some(inv) = obj.warehouse.liquids.get_mut_cow(&liq) {
-            inv.stored = wh.get_liquid_amount(liq)?;
+            let after_kg = wh.get_liquid_amount(liq)?;
+            inv.stored = if tons_mode {
+                super::logistics::dcs_liquid_kg_to_fowl_tons(after_kg)
+            } else {
+                after_kg
+            };
         }
     }
     Ok(())
@@ -4947,7 +4975,7 @@ fn apply_post_service_template_fuel(
     unit: &miz::Unit<'_>,
     airframe_type: &str,
 ) -> Result<u32> {
-    let cap = spawn_fuel_kg_per_airframe(airframe_type);
+    let cap = template_fuel_capacity_kg(unit, airframe_type);
     let hub_has_fuel = fuel_available_at_hub(lua, db, hub_oid).unwrap_or(false);
     let fuel_kg = if hub_has_fuel {
         cap
