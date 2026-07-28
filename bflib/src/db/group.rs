@@ -301,6 +301,55 @@ impl Db {
         })
     }
 
+    /// Living ME OPR factories / objective statics (StaticObject, not DCS Unit).
+    pub fn living_objective_statics(&self) -> impl Iterator<Item = &SpawnedUnit> {
+        self.persisted.units.into_iter().filter_map(|(_, sp)| {
+            if sp.dead {
+                return None;
+            }
+            let group = self.persisted.groups.get(&sp.group)?;
+            group.class.is_me_objective_static().then_some(sp)
+        })
+    }
+
+    fn me_objective_static_role_tag(class: ObjGroupClass) -> BitFlags<UnitTag> {
+        match class {
+            ObjGroupClass::Production => BitFlags::from(UnitTag::Factory),
+            ObjGroupClass::ObjectiveStatic => BitFlags::from(UnitTag::Structure),
+            _ => BitFlags::empty(),
+        }
+    }
+
+    fn ensure_me_objective_static_role_tags(db: &mut Db, uid: UnitId) {
+        let Some((gid, role)) = db.persisted.units.get(&uid).and_then(|u| {
+            db.persisted
+                .groups
+                .get(&u.group)
+                .map(|g| (u.group, Self::me_objective_static_role_tag(g.class)))
+        }) else {
+            return;
+        };
+        if role.is_empty() {
+            return;
+        }
+        let mut dirty = false;
+        if let Some(unit) = db.persisted.units.get_mut_cow(&uid) {
+            if !unit.tags.0.contains(role) {
+                unit.tags.0 |= role;
+                dirty = true;
+            }
+        }
+        if let Some(g) = db.persisted.groups.get_mut_cow(&gid) {
+            if !g.tags.0.contains(role) {
+                g.tags.0 |= role;
+                dirty = true;
+            }
+        }
+        if dirty {
+            db.ephemeral.dirty();
+        }
+    }
+
     pub fn deployed(&self) -> impl Iterator<Item = &SpawnedGroup> {
         self.persisted
             .deployed
@@ -1255,12 +1304,13 @@ impl Db {
         if self.persisted.units_by_name.get(unit_name.as_str()).is_some() {
             return Ok(());
         }
-        let tags = *self
+        let mut tags = *self
             .ephemeral
             .cfg
             .unit_classification
             .get(unit_type.as_str())
             .ok_or_else(|| anyhow!("{class_label} unit type not classified: {unit_type}"))?;
+        tags.0 |= Self::me_objective_static_role_tag(class);
         let gid = GroupId::new();
         let uid = UnitId::new();
         let position = {
@@ -1352,11 +1402,18 @@ impl Db {
             })
             .collect();
         for (uid, name) in statics {
+            Self::ensure_me_objective_static_role_tags(self, uid);
             match StaticObject::get_by_name(lua, name.as_str()) {
                 Ok(Static::Static(st)) => {
                     let id = st.object_id()?;
                     self.ephemeral.uid_by_static.insert(id, uid);
                     Self::cache_unit_static_max_life(self, uid, &st);
+                    if let Ok(pt) = st.get_point() {
+                        if let Some(unit) = self.persisted.units.get_mut_cow(&uid) {
+                            unit.position.p = pt;
+                            unit.pos = Vector2::new(pt.0.x, pt.0.z);
+                        }
+                    }
                     synced += 1;
                 }
                 Ok(Static::Airbase(_)) => {}

@@ -175,6 +175,10 @@ pub enum UnitTag {
     ShipWithHeliport,
     /// `carrier_kill` — aircraft carrier hull tier.
     ShipCarrier,
+    /// OPR production factory static (`production_factory_units`).
+    Factory,
+    /// Objective ME static (`objective_static_units`).
+    Structure,
 }
 
 #[derive(

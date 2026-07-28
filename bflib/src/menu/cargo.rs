@@ -153,7 +153,7 @@ pub(crate) fn list_cargo_for_slot(ctx: &mut Context, lua: MizLua, slot: &SlotId)
         .db
         .cargo_capacity(&sifo.typ)
         .context("getting unit cargo capacity")?;
-    let mut msg = CompactString::new("Current Cargo\n----------------------------\n");
+    let mut msg = CompactString::new("Current Cargo\n------------------------------------------\n");
     msg.push_str(&format_compact!(
         "troops: {} of {}\n",
         cargo.num_troops(),
@@ -169,7 +169,7 @@ pub(crate) fn list_cargo_for_slot(ctx: &mut Context, lua: MizLua, slot: &SlotId)
         cargo.num_total(),
         capacity.total_slots
     ));
-    msg.push_str("----------------------------\n");
+    msg.push_str("------------------------------------------\n");
     let mut fowl_total = 0u32;
     for (_, cr) in &cargo.crates {
         msg.push_str(&format_compact!(
@@ -189,13 +189,14 @@ pub(crate) fn list_cargo_for_slot(ctx: &mut Context, lua: MizLua, slot: &SlotId)
     }
     let dynamic_kg = ctx.db.loaded_dynamic_cargo_weight_kg(lua, slot);
     if fowl_total > 0 || dynamic_kg > 0 {
-        msg.push_str("----------------------------\n");
+        msg.push_str("------------------------------------------\n");
     }
     msg.push_str(&format_compact!(
         "dynamic cargo weight: {} kg\n",
         dynamic_kg
     ));
     let total = fowl_total.saturating_add(dynamic_kg);
+    msg.push_str("==========================================\n");
     msg.push_str(&format_compact!("total cargo weight: {} kg", total));
     ctx.db
         .ephemeral

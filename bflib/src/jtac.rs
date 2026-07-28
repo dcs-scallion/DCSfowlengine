@@ -31,7 +31,7 @@ use chrono::{Duration, prelude::*};
 use compact_str::{CompactString, format_compact};
 use dcso3::{
     LuaVec2, LuaVec3, MizLua, String, Vector2, Vector3,
-    coalition::Side,
+    coalition::{Side, Static},
     controller::{
         ActionTyp, AltType, AttackParams, MissionPoint, PointType, Task, TurnMethod,
         VehicleFormation, WeaponExpend,
@@ -43,6 +43,7 @@ use dcso3::{
     object::{DcsObject, DcsOid},
     radians_to_degrees, simple_enum,
     spot::{ClassSpot, Spot},
+    static_object::StaticObject,
     trigger::{MarkId, SmokeColor, Trigger},
     unit::{ClassUnit, Unit},
     weapon::Weapon,
@@ -407,8 +408,12 @@ impl Jtac {
     }
 
     fn add_unit_contact(&mut self, unit: &SpawnedUnit) {
+        self.add_unit_contact_at(unit, unit.position.p.0);
+    }
+
+    fn add_unit_contact_at(&mut self, unit: &SpawnedUnit, pos: Vector3) {
         let ct = self.contacts.entry(EnId::Unit(unit.id)).or_default();
-        ct.pos = unit.position.p.0;
+        ct.pos = pos;
         ct.last_move = unit.moved;
         ct.tags = unit.tags;
         ct.typ = unit.typ.clone();
@@ -1004,35 +1009,79 @@ impl Jtac {
                 let name = db.group(gid)?.name.clone();
                 let shooter = Group::get_by_name(lua, &name)
                     .with_context(|| format_compact!("getting group {}", name))?;
-                let target = match &target.id {
-                    EnId::Unit(id) => Unit::get_by_name(lua, &db.unit(id)?.name)?,
-                    EnId::Player(id) => match db.player(id) {
-                        None => bail!("no player"),
-                        Some(pl) => match &pl.current_slot {
-                            None => bail!("player not slotted"),
-                            Some((_, Some(inst))) => Unit::get_by_name(lua, &inst.unit_name)?,
-                            Some((_, None)) => bail!("player not instanced"),
-                        },
-                    },
+                let static_target = match &target.id {
+                    EnId::Unit(uid) => db
+                        .group(&db.unit(uid)?.group)
+                        .ok()
+                        .is_some_and(|g| g.class.is_me_objective_static()),
+                    EnId::Player(_) => false,
                 };
-                let pos = target.get_ground_position()?;
-                let task = Task::AttackUnit {
-                    unit: target.id()?,
-                    params: AttackParams {
-                        altitude: None,
-                        attack_qty: None,
-                        direction: None,
-                        expend: None,
-                        group_attack: Some(true),
+                let task = if static_target {
+                    let pos = Vector2::new(target.pos.x, target.pos.z);
+                    Task::FireAtPoint {
+                        point: LuaVec2(pos),
+                        radius: None,
+                        expend_qty: None,
                         weapon_type: None,
-                        attack_qty_limit: None,
-                        altitude_enabled: None,
-                        direction_enabled: None,
-                        point: None,
-                        x: None,
-                        y: None,
-                    },
+                        altitude: Some(0.),
+                        altitude_type: Some(AltType::RADIO),
+                    }
+                } else {
+                    let target_unit = match &target.id {
+                        EnId::Unit(id) => Unit::get_by_name(lua, &db.unit(id)?.name)?,
+                        EnId::Player(id) => match db.player(id) {
+                            None => bail!("no player"),
+                            Some(pl) => match &pl.current_slot {
+                                None => bail!("player not slotted"),
+                                Some((_, Some(inst))) => Unit::get_by_name(lua, &inst.unit_name)?,
+                                Some((_, None)) => bail!("player not instanced"),
+                            },
+                        },
+                    };
+                    let pos = target_unit.get_ground_position()?;
+                    let task = Task::AttackUnit {
+                        unit: target_unit.id()?,
+                        params: AttackParams {
+                            altitude: None,
+                            attack_qty: None,
+                            direction: None,
+                            expend: None,
+                            group_attack: Some(true),
+                            weapon_type: None,
+                            attack_qty_limit: None,
+                            altitude_enabled: None,
+                            direction_enabled: None,
+                            point: None,
+                            x: None,
+                            y: None,
+                        },
+                    };
+                    let task = Task::Mission {
+                        airborne: Some(false),
+                        route: vec![MissionPoint {
+                            action: Some(ActionTyp::Ground(VehicleFormation::OffRoad)),
+                            typ: PointType::TurningPoint,
+                            airdrome_id: None,
+                            helipad: None,
+                            time_re_fu_ar: None,
+                            link_unit: None,
+                            pos,
+                            alt: 0.,
+                            alt_typ: Some(AltType::RADIO),
+                            speed: 0.,
+                            speed_locked: None,
+                            eta: None,
+                            eta_locked: None,
+                            name: None,
+                            parking: None,
+                            task: Box::new(task),
+                        }],
+                    };
+                    let con = shooter.get_controller().context("getting controller")?;
+                    con.set_task(task)?;
+                    return Ok(());
                 };
+                let apos = db.group_center(gid)?;
                 let task = Task::Mission {
                     airborne: Some(false),
                     route: vec![MissionPoint {
@@ -1042,7 +1091,7 @@ impl Jtac {
                         helipad: None,
                         time_re_fu_ar: None,
                         link_unit: None,
-                        pos,
+                        pos: LuaVec2(apos),
                         alt: 0.,
                         alt_typ: Some(AltType::RADIO),
                         speed: 0.,
@@ -1066,13 +1115,25 @@ impl Jtac {
             let (pos, velocity) = match &target.id {
                 EnId::Unit(uid) => {
                     let unit = db.unit(uid)?;
-                    let v = db
-                        .ephemeral
-                        .get_object_id_by_uid(uid)
-                        .and_then(|oid| Unit::get_instance(lua, oid).ok())
-                        .and_then(|unit| unit.get_velocity().ok())
-                        .unwrap_or(LuaVec3(Vector3::default()));
-                    (unit.position.p.0, v.0)
+                    if db
+                        .group(&unit.group)
+                        .ok()
+                        .is_some_and(|g| g.class.is_me_objective_static())
+                    {
+                        let pos = match StaticObject::get_by_name(lua, unit.name.as_str()) {
+                            Ok(Static::Static(st)) => st.get_point()?.0,
+                            Ok(Static::Airbase(_)) | Err(_) => unit.position.p.0,
+                        };
+                        (pos, Vector3::default())
+                    } else {
+                        let v = db
+                            .ephemeral
+                            .get_object_id_by_uid(uid)
+                            .and_then(|oid| Unit::get_instance(lua, oid).ok())
+                            .and_then(|unit| unit.get_velocity().ok())
+                            .unwrap_or(LuaVec3(Vector3::default()));
+                        (unit.position.p.0, v.0)
+                    }
                 }
                 EnId::Player(ucid) => {
                     let player = db
@@ -1536,7 +1597,16 @@ impl Jtacs {
         let mut players: SmallVec<[Ucid; 16]> = smallvec![];
         for id in self.jtac_targets() {
             match id {
-                EnId::Unit(uid) => units.push(uid),
+                EnId::Unit(uid) => {
+                    let is_static = db
+                        .unit(&uid)
+                        .ok()
+                        .and_then(|u| db.group(&u.group).ok())
+                        .is_some_and(|g| g.class.is_me_objective_static());
+                    if !is_static {
+                        units.push(uid);
+                    }
+                }
                 EnId::Player(ucid) => players.push(ucid),
             }
         }
@@ -1687,6 +1757,52 @@ impl Jtacs {
                 jtac.add_unit_contact(unit)
             } else {
                 lost!()
+            }
+        }
+        for unit in db.living_objective_statics() {
+            let id = EnId::Unit(unit.id);
+            macro_rules! lost_static {
+                () => {{
+                    match jtac.remove_contact(lua, db, &id) {
+                        Err(e) => warn!(
+                            "could not remove static jtac contact {} {:?}",
+                            unit.name, e
+                        ),
+                        Ok(false) => (),
+                        Ok(true) => lost_targets.push((jtac.side, jtac.gid, None)),
+                    }
+                    continue;
+                }};
+            }
+            if unit.side == jtac.side {
+                continue;
+            }
+            saw_units.insert(id);
+            let detected = detected.entry(id).or_default();
+            if !unit.tags.contains(jtac.filter) {
+                lost_static!();
+            }
+            let pos3 = match StaticObject::get_by_name(lua, unit.name.as_str()) {
+                Ok(Static::Static(st)) => match st.get_point() {
+                    Ok(p) => p.0,
+                    Err(_) => lost_static!(),
+                },
+                Ok(Static::Airbase(_)) | Err(_) => lost_static!(),
+            };
+            if let Some(ct) = jtac.contacts.get(&id) {
+                if !jtac_moved && (ct.pos - pos3).magnitude_squared() <= 2. {
+                    detected.detected = true;
+                    continue;
+                }
+            }
+            let dist = na::distance_squared(&pos.into(), &pos3.into());
+            if dist <= range
+                && (spec.nolos || landcache.is_visible(&land, dist.sqrt(), pos, pos3)?)
+            {
+                detected.detected = true;
+                jtac.add_unit_contact_at(unit, pos3)
+            } else {
+                lost_static!()
             }
         }
         for (ucid, player, inst) in db.instanced_players() {
