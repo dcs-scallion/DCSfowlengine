@@ -408,14 +408,14 @@ impl Jtac {
     }
 
     fn add_unit_contact(&mut self, unit: &SpawnedUnit) {
-        self.add_unit_contact_at(unit, unit.position.p.0);
+        self.add_unit_contact_at(unit, unit.position.p.0, unit.tags);
     }
 
-    fn add_unit_contact_at(&mut self, unit: &SpawnedUnit, pos: Vector3) {
+    fn add_unit_contact_at(&mut self, unit: &SpawnedUnit, pos: Vector3, tags: UnitTags) {
         let ct = self.contacts.entry(EnId::Unit(unit.id)).or_default();
         ct.pos = pos;
         ct.last_move = unit.moved;
-        ct.tags = unit.tags;
+        ct.tags = tags;
         ct.typ = unit.typ.clone();
     }
 
@@ -1774,21 +1774,39 @@ impl Jtacs {
                     continue;
                 }};
             }
-            if unit.side == jtac.side {
+            // Hostility by objective owner (unit.side can lag after capture).
+            let owner = db
+                .persisted
+                .objectives_by_group
+                .get(&unit.group)
+                .and_then(|oid| db.persisted.objectives.get(oid))
+                .map(|o| o.owner);
+            let hostile = match owner {
+                Some(Side::Neutral) | None => false,
+                Some(s) => s != jtac.side,
+            };
+            if !hostile {
                 continue;
+            }
+            let mut tags = unit.tags;
+            if let Ok(g) = db.group(&unit.group) {
+                if g.class.is_production() {
+                    tags.0 |= UnitTag::Factory;
+                } else if g.class == crate::db::objective::ObjGroupClass::ObjectiveStatic {
+                    tags.0 |= UnitTag::Structure;
+                }
             }
             saw_units.insert(id);
             let detected = detected.entry(id).or_default();
-            if !unit.tags.contains(jtac.filter) {
+            if !tags.contains(jtac.filter) {
                 lost_static!();
             }
-            let pos3 = match StaticObject::get_by_name(lua, unit.name.as_str()) {
-                Ok(Static::Static(st)) => match st.get_point() {
-                    Ok(p) => p.0,
-                    Err(_) => lost_static!(),
-                },
-                Ok(Static::Airbase(_)) | Err(_) => lost_static!(),
+            // Terrain LOS to building footprints is unreliable; range-only for ME statics.
+            let mut pos3 = match StaticObject::get_by_name(lua, unit.name.as_str()) {
+                Ok(Static::Static(st)) => st.get_point().map(|p| p.0).unwrap_or(unit.position.p.0),
+                Ok(Static::Airbase(_)) | Err(_) => unit.position.p.0,
             };
+            pos3.y += 5.;
             if let Some(ct) = jtac.contacts.get(&id) {
                 if !jtac_moved && (ct.pos - pos3).magnitude_squared() <= 2. {
                     detected.detected = true;
@@ -1796,11 +1814,9 @@ impl Jtacs {
                 }
             }
             let dist = na::distance_squared(&pos.into(), &pos3.into());
-            if dist <= range
-                && (spec.nolos || landcache.is_visible(&land, dist.sqrt(), pos, pos3)?)
-            {
+            if dist <= range {
                 detected.detected = true;
-                jtac.add_unit_contact_at(unit, pos3)
+                jtac.add_unit_contact_at(unit, pos3, tags)
             } else {
                 lost_static!()
             }

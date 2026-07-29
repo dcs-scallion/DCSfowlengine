@@ -224,7 +224,8 @@ pub struct DiscordMapMarker {
     pub f10_label: String,
     pub health: u8,
     pub logi: u8,
-    pub production: u8,
+    /// Hub/OPR production % for display; `None` hides Production (occupied OLO).
+    pub production: Option<u8>,
     pub threatened: bool,
 }
 
@@ -247,7 +248,7 @@ struct MarkerLayout {
     f10_label: String,
     health: u8,
     logi: u8,
-    production: u8,
+    production: Option<u8>,
 }
 
 struct MapArtifacts {
@@ -656,15 +657,27 @@ fn restore_map_nw_corner(base: &mut RgbaImage, pristine: &RgbaImage, px_scale: f
     }
 }
 
-fn tooltip_rows_html(kind: &str, health: u8, logi: u8, production: u8) -> String {
+fn tooltip_rows_html(kind: &str, health: u8, logi: u8, production: Option<u8>) -> String {
     match kind {
         "airbase" | "fob" => format!(
             "<tr><td>Health</td><td>{health} %</td></tr><tr><td>Logi</td><td>{logi} %</td></tr>"
         ),
-        "logistics" => format!(
-            "<tr><td>Production</td><td>{production} %</td></tr><tr><td>Health</td><td>{health} %</td></tr><tr><td>Logi</td><td>{logi} %</td></tr>"
-        ),
-        "production" => format!("<tr><td>Production</td><td>{production} %</td></tr>"),
+        "logistics" => {
+            let mut rows = String::new();
+            if let Some(production) = production {
+                rows.push_str(&format!(
+                    "<tr><td>Production</td><td>{production} %</td></tr>"
+                ));
+            }
+            rows.push_str(&format!(
+                "<tr><td>Health</td><td>{health} %</td></tr><tr><td>Logi</td><td>{logi} %</td></tr>"
+            ));
+            rows
+        }
+        "production" => match production {
+            Some(production) => format!("<tr><td>Production</td><td>{production} %</td></tr>"),
+            None => String::new(),
+        },
         _ => String::new(),
     }
 }
@@ -701,10 +714,13 @@ fn stat_bar_html(value: u8) -> String {
     )
 }
 
-fn marker_stat_bars_html(kind: &str, health: u8, logi: u8, production: u8) -> String {
+fn marker_stat_bars_html(kind: &str, health: u8, logi: u8, production: Option<u8>) -> String {
     let bars: String = match kind {
         "logistics" => {
-            let mut s = stat_bar_html(production);
+            let mut s = String::new();
+            if let Some(production) = production {
+                s.push_str(&stat_bar_html(production));
+            }
             s.push_str(&stat_bar_html(health));
             s.push_str(&stat_bar_html(logi));
             s
@@ -714,7 +730,7 @@ fn marker_stat_bars_html(kind: &str, health: u8, logi: u8, production: u8) -> St
             s.push_str(&stat_bar_html(logi));
             s
         }
-        "production" => stat_bar_html(production),
+        "production" => production.map(stat_bar_html).unwrap_or_default(),
         _ => String::new(),
     };
     if bars.is_empty() {

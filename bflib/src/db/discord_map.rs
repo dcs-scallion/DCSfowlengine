@@ -353,6 +353,18 @@ fn marker_from_objective(
     kind: &str,
     ll: LLPos,
 ) -> Result<bg::discord_map::DiscordMapMarker> {
+    let production = if obj.is_occupied_logistics_hub() {
+        None
+    } else {
+        Some(match obj.kind {
+            ObjectiveKind::Logistics => super::logistics::effective_hub_production(
+                &db.ephemeral.cfg,
+                &db.persisted,
+                obj,
+            ),
+            _ => obj.production,
+        })
+    };
     Ok(bg::discord_map::DiscordMapMarker {
         lat: ll.latitude,
         lon: ll.longitude,
@@ -363,7 +375,7 @@ fn marker_from_objective(
         f10_label: db.objective_f10_map_label(obj),
         health: obj.health(),
         logi: obj.logi(),
-        production: obj.production,
+        production,
         threatened: obj.threatened,
     })
 }
@@ -693,6 +705,9 @@ fn avg_logistics_production(db: &Db, side: Side) -> Option<u8> {
     let mut n = 0u32;
     for (_, obj) in db.persisted.objectives.into_iter() {
         if obj.owner() != side || !matches!(obj.kind, ObjectiveKind::Logistics) {
+            continue;
+        }
+        if obj.is_occupied_logistics_hub() {
             continue;
         }
         sum += super::logistics::effective_hub_production(cfg, &db.persisted, obj) as u32;
