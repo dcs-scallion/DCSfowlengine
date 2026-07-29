@@ -173,7 +173,7 @@ pub(crate) fn list_cargo_for_slot(ctx: &mut Context, lua: MizLua, slot: &SlotId)
     let mut fowl_total = 0u32;
     for (_, cr) in &cargo.crates {
         msg.push_str(&format_compact!(
-            "{} crate weighing {} kg\n",
+            "{} crate weighing: {} kg\n",
             cr.name,
             cr.weight
         ));
@@ -181,7 +181,7 @@ pub(crate) fn list_cargo_for_slot(ctx: &mut Context, lua: MizLua, slot: &SlotId)
     }
     for it in &cargo.troops {
         msg.push_str(&format_compact!(
-            "{} troop weighing {} kg\n",
+            "{} troop weighing: {} kg\n",
             it.troop.name,
             it.troop.weight
         ));
@@ -192,12 +192,12 @@ pub(crate) fn list_cargo_for_slot(ctx: &mut Context, lua: MizLua, slot: &SlotId)
         msg.push_str("--------------------------------------------\n");
     }
     msg.push_str(&format_compact!(
-        "dynamic cargo weight: {} kg\n",
+        "Dynamic cargo weight: {} kg\n",
         dynamic_kg
     ));
     let total = fowl_total.saturating_add(dynamic_kg);
     msg.push_str("======================\n");
-    msg.push_str(&format_compact!("total cargo weight: {} kg", total));
+    msg.push_str(&format_compact!("Total cargo weight: {} kg", total));
     ctx.db
         .ephemeral
         .msgs()

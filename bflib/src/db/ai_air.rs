@@ -5902,14 +5902,14 @@ pub(super) fn advance_ai_air(
             finalize_ai_air_attrition(db, gid)?;
             return Ok(());
         }
-        if mission_kind_one_shot(mission_kind) {
-            return Ok(());
-        }
-        if !ai_air_may_rehydrate(db, gid, phase) {
+        // Mid-mission loss / one-shot / non-idle: remove campaign group (clears F10 waypoint marks).
+        if mission_kind_one_shot(mission_kind) || !ai_air_may_rehydrate(db, gid, phase) {
             log::warn!(
-                "ai air {gid}: all DCS units gone in phase {:?} — not re-spawning",
+                "ai air {gid}: all DCS units gone in phase {:?} — removing from campaign",
                 phase
             );
+            mark_ai_air_attrition(db, gid);
+            finalize_ai_air_attrition(db, gid)?;
             return Ok(());
         }
         let Some(hub_oid) = hub else {

@@ -178,7 +178,13 @@ impl MsgQ {
             self.0[pri].retain(|cmd| match cmd {
                 Cmd::DeleteMark(_) => true,
                 Cmd::Send(msg) => match msg {
-                    Msg::Message { .. } => true,
+                    Msg::Message { typ, .. } => match typ {
+                        MsgTyp::Mark { id, .. } if *id == did => {
+                            push = false;
+                            false
+                        }
+                        _ => true,
+                    },
                     Msg::Circle { id, .. }
                     | Msg::Rect { id, .. }
                     | Msg::Quad { id, .. }

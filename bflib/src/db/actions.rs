@@ -1950,8 +1950,8 @@ impl Db {
             } => {
                 *rtb = Some(rtb_pos);
                 (*spec).kind = ActionKind::Rtb;
-                for id in marks.iter() {
-                    self.ephemeral.msgs().delete_mark(*id);
+                for id in marks.drain() {
+                    self.ephemeral.msgs().delete_mark(id);
                 }
             }
             _ => bail!("only works with some action deployed groups."),
