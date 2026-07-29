@@ -2009,6 +2009,8 @@ impl Default for Cfg {
                 ships_with_heliport_kill: 40,
                 carrier_kill: 100,
                 production_kill: 10,
+                ewr_kill: 35,
+                awacs_kill: 80,
                 lr_sam_bonus: 5,
                 logistics_repair: 25,
                 logistics_transfer: 15,

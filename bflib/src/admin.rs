@@ -943,7 +943,9 @@ fn dcs_version_from_logs(writedir: &Path) -> Option<std::string::String> {
     let mut latest: Option<(std::time::SystemTime, PathBuf)> = None;
     for rel in ["Logs\\dcs.log", "Logs\\dcs.log.old"] {
         let p = writedir.join(rel);
-        let modified = std::fs::metadata(&p).and_then(|m| m.modified()).ok()?;
+        let Ok(modified) = std::fs::metadata(&p).and_then(|m| m.modified()) else {
+            continue;
+        };
         match &latest {
             Some((t, _)) if *t >= modified => (),
             _ => latest = Some((modified, p)),

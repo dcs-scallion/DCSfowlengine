@@ -25,7 +25,8 @@ const SIDEBAR_RANK_COL_PX: u32 = 25;
 const LAYOUT_GAP_PX: u32 = 4;
 const STAT_BARS_GAP_PX: i32 = 3;
 const HEALTH_BAR_MAP_PX: f32 = 30.0;
-const THREAT_RING_SCALE: f32 = 1.35;
+/// Threatened yellow ring diameter ≈ icon max side × this (+ pad). Raise to enlarge.
+const THREAT_RING_SCALE: f32 = 1.75;
 const THREAT_RING_PAD_PX: f32 = 4.0;
 const THREAT_RING_MIN_PX: u32 = 8;
 const LABEL_GAP_PX: i32 = 4;
@@ -1079,7 +1080,7 @@ fn map_header_links_html(bar: &DiscordMapStatusBar) -> String {
     ));
     links.push_str(&map_header_link_if_url(
         &bar.manual_url,
-        "Manual",
+        "Guide",
         MANUAL_HDR_ICON_OFF_B64.as_str(),
         MANUAL_HDR_ICON_ON_B64.as_str(),
         MANUAL_HDR_ICON_SRC.0,

@@ -106,7 +106,7 @@
     "times": ["00:00", "06:00", "12:00", "18:00"]
   },
   "points": {
-    "new_player_join": 30000,
+    "new_player_join": 300,
     "carrier_kill": 250,
     "shipsWithHeliport_kill": 120,
     "shipsNoHeliport_kill": 60,
@@ -115,6 +115,8 @@
     "capture_fob": 40,
     "air_kill": 30,
     "production_kill": 20,
+    "ewr_kill": 35,
+    "awacs_kill": 80,
     "logistics_transfer": 15,
     "lr_sam_bonus": 5,
     "ground_kill": 5,
@@ -432,7 +434,7 @@
         },
         "cost": 150,
         "penalty": 30,
-        "limit": null
+        "limit": 3
       },
       "attack-waypoint": {
         "kind": "AttackersWaypoint",
@@ -502,7 +504,7 @@
           }
         },
         "cost": 100,
-        "penalty": 100,
+        "penalty": 50,
         "limit": 1
       },
       "awacs-waypoint": {
@@ -562,14 +564,14 @@
               "kind": "Helicopter",
               "duration": null,
               "template": "RCARGOCARRIER",
-              "altitude": 317.0,
+              "altitude": 137.0,
               "altitude_typ": "RADIO",
               "speed": 82.0,
               "freq": null
             }
           }
         },
-        "cost": 30,
+        "cost": 50,
         "penalty": 25,
         "limit": null
       },
@@ -647,7 +649,7 @@
         "kind": {
           "Drone": {
             "jtac": {
-              "range": 10000,
+              "range": 12000,
               "nolos": true
             },
             "plane": {
@@ -669,7 +671,7 @@
         "kind": {
           "Drone": {
             "jtac": {
-              "range": 10000,
+              "range": 12000,
               "nolos": true
             },
             "plane": {
@@ -691,7 +693,7 @@
         "kind": {
           "Drone": {
             "jtac": {
-              "range": 10000,
+              "range": 12000,
               "nolos": true
             },
             "plane": {
@@ -743,9 +745,9 @@
             "freq": 120000000
           }
         },
-        "cost": 200,
+        "cost": 250,
         "penalty": 50,
-        "limit": 5
+        "limit": 4
       },
       "fighters-waypoint": {
         "kind": "FighersWaypoint",
@@ -832,14 +834,14 @@
             "kind": "Helicopter",
             "duration": null,
             "template": "RCARGOCARRIER",
-            "altitude": 348.0,
+            "altitude": 148.0,
             "altitude_typ": "RADIO",
             "speed": 75.0,
             "freq": null
           }
         },
-        "cost": 100,
-        "penalty": 50,
+        "cost": 70,
+        "penalty": 35,
         "limit": null
       },
       "tanker": {
@@ -871,13 +873,13 @@
             "kind": "Helicopter",
             "duration": null,
             "template": "RCARGOCARRIER",
-            "altitude": 341.0,
+            "altitude": 141.0,
             "altitude_typ": "RADIO",
             "speed": 76.0,
             "freq": null
           }
         },
-        "cost": 100,
+        "cost": 1000000,
         "penalty": 50,
         "limit": null
       }
@@ -947,7 +949,7 @@
         "kind": {
           "Awacs": {
             "ewr": {
-              "range": 300000
+              "range": 320000
             },
             "plane": {
               "kind": "FixedWing",
@@ -1042,14 +1044,14 @@
               "kind": "Helicopter",
               "duration": null,
               "template": "BCARGOCARRIER",
-              "altitude": 322.0,
+              "altitude": 152.0,
               "altitude_typ": "RADIO",
               "speed": 79.0,
               "freq": null
             }
           }
         },
-        "cost": 30,
+        "cost": 50,
         "penalty": 25,
         "limit": null
       },
@@ -1127,7 +1129,7 @@
         "kind": {
           "Drone": {
             "jtac": {
-              "range": 10000,
+              "range": 12000,
               "nolos": true
             },
             "plane": {
@@ -1149,7 +1151,7 @@
         "kind": {
           "Drone": {
             "jtac": {
-              "range": 10000,
+              "range": 12000,
               "nolos": true
             },
             "plane": {
@@ -1171,7 +1173,7 @@
         "kind": {
           "Drone": {
             "jtac": {
-              "range": 10000,
+              "range": 12000,
               "nolos": true
             },
             "plane": {
@@ -1223,9 +1225,9 @@
             "freq": 240000000
           }
         },
-        "cost": 200,
+        "cost": 250,
         "penalty": 50,
-        "limit": 5
+        "limit": 4
       },
       "fighters-waypoint": {
         "kind": "FighersWaypoint",
@@ -1312,14 +1314,14 @@
             "kind": "Helicopter",
             "duration": null,
             "template": "BCARGOCARRIER",
-            "altitude": 334.0,
+            "altitude": 144.0,
             "altitude_typ": "RADIO",
             "speed": 78.0,
             "freq": null
           }
         },
-        "cost": 100,
-        "penalty": 50,
+        "cost": 70,
+        "penalty": 35,
         "limit": null
       },
       "tanker-boom": {
@@ -1368,13 +1370,13 @@
             "kind": "Helicopter",
             "duration": null,
             "template": "BCARGOCARRIER",
-            "altitude": 327.0,
+            "altitude": 147.0,
             "altitude_typ": "RADIO",
             "speed": 78.0,
             "freq": null
           }
         },
-        "cost": 10000000,
+        "cost": 1000000,
         "penalty": 0,
         "limit": null
       }
@@ -1890,7 +1892,7 @@
         "cost": 30,
         "ewr": null,
         "jtac": {
-          "range": 12000,
+          "range": 10000,
           "nolos": false
         },
         "template": null,
@@ -1952,7 +1954,7 @@
         ],
         "repair_crate": null,
         "repair_cost": 0,
-        "cost": 40,
+        "cost": 30,
         "ewr": null,
         "jtac": {
           "range": 500,
@@ -2814,7 +2816,7 @@
         "cost": 30,
         "ewr": null,
         "jtac": {
-          "range": 12000,
+          "range": 10000,
           "nolos": false
         },
         "template": null,
@@ -2876,7 +2878,7 @@
         ],
         "repair_crate": null,
         "repair_cost": 0,
-        "cost": 40,
+        "cost": 30,
         "ewr": null,
         "jtac": {
           "range": 500,
@@ -2910,7 +2912,7 @@
         ],
         "repair_crate": null,
         "repair_cost": 0,
-        "cost": 70,
+        "cost": 60,
         "ewr": null,
         "jtac": {
           "range": 1000,
@@ -3307,7 +3309,7 @@
         "weight": 400,
         "cost": 10,
         "jtac": {
-          "range": 10000,
+          "range": 8000,
           "nolos": false
         }
       },
@@ -3376,7 +3378,7 @@
         "weight": 400,
         "cost": 10,
         "jtac": {
-          "range": 10000,
+          "range": 8000,
           "nolos": false
         }
       },
@@ -3561,6 +3563,22 @@
       "LR",
       "RadarGuided",
       "Launcher"
+    ],
+    "FPS-117": [
+      "EWR",
+      "Unarmed"
+    ],
+    "FPS-117 ECS": [
+      "EWR",
+      "Unarmed"
+    ],
+    "1L13 EWR": [
+      "EWR",
+      "Unarmed"
+    ],
+    "55G6 EWR": [
+      "EWR",
+      "Unarmed"
     ],
     "C-101CC": [
       "Aircraft"
@@ -4056,10 +4074,6 @@
       "RadarGuided",
       "Driveable"
     ],
-    "FPS-117": [
-      "EWR",
-      "Unarmed"
-    ],
     "Roland ADS": [
       "SAM",
       "SR",
@@ -4081,10 +4095,6 @@
       "Infantry",
       "LR",
       "Artillery"
-    ],
-    "55G6 EWR": [
-      "EWR",
-      "Unarmed"
     ],
     "M978 HEMTT Tanker": [
       "Logistics",
@@ -4268,10 +4278,6 @@
       "Launcher",
       "Driveable"
     ],
-    "1L13 EWR": [
-      "EWR",
-      "Unarmed"
-    ],
     "M-1 Abrams": [
       "Armor",
       "MR",
@@ -4326,10 +4332,6 @@
       "EngagesWeapons",
       "TrackRadar",
       "SearchRadar"
-    ],
-    "FPS-117 ECS": [
-      "EWR",
-      "Unarmed"
     ],
     "OH58D": [
       "Aircraft",
@@ -4458,15 +4460,15 @@
   },
   "airborne_jtacs": {
     "MB-339A": {
-      "range": 12000,
+      "range": 14000,
       "nolos": true
     },
     "C-101CC": {
-      "range": 12000,
+      "range": 14000,
       "nolos": true
     },
     "L-39ZA": {
-      "range": 12000,
+      "range": 14000,
       "nolos": true
     }
   },

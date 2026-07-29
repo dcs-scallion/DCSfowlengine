@@ -715,6 +715,10 @@ pub struct PointsCfg {
     pub carrier_kill: u32,
     /// Points for destroying a static factory unit in an OPR* zone
     pub production_kill: u32,
+    /// Points for destroying an EWR radar unit
+    pub ewr_kill: u32,
+    /// Points for destroying an AWACS aircraft
+    pub awacs_kill: u32,
     /// Bonus points awarded to heavy sam kills
     pub lr_sam_bonus: u32,
     /// Points for repairing base logistics (negative deducts from the player)
