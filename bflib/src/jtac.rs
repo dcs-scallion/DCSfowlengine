@@ -1801,12 +1801,12 @@ impl Jtacs {
             if !tags.contains(jtac.filter) {
                 lost_static!();
             }
-            // Terrain LOS to building footprints is unreliable; range-only for ME statics.
+            // Aim +10 m AGL-ish so terrain LOS hits the building volume, not the footprint.
             let mut pos3 = match StaticObject::get_by_name(lua, unit.name.as_str()) {
                 Ok(Static::Static(st)) => st.get_point().map(|p| p.0).unwrap_or(unit.position.p.0),
                 Ok(Static::Airbase(_)) | Err(_) => unit.position.p.0,
             };
-            pos3.y += 5.;
+            pos3.y += 10.;
             if let Some(ct) = jtac.contacts.get(&id) {
                 if !jtac_moved && (ct.pos - pos3).magnitude_squared() <= 2. {
                     detected.detected = true;
@@ -1814,7 +1814,9 @@ impl Jtacs {
                 }
             }
             let dist = na::distance_squared(&pos.into(), &pos3.into());
-            if dist <= range {
+            if dist <= range
+                && (spec.nolos || landcache.is_visible(&land, dist.sqrt(), pos, pos3)?)
+            {
                 detected.detected = true;
                 jtac.add_unit_contact_at(unit, pos3, tags)
             } else {

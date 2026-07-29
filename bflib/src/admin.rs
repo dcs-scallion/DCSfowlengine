@@ -60,7 +60,7 @@ use serde_json::{Value as JsonValue, json};
 use smallvec::{SmallVec, smallvec};
 use std::{
     mem,
-    path::PathBuf,
+    path::{Path, PathBuf},
     str::FromStr,
     sync::Arc,
     time::{Duration, Instant},
@@ -939,11 +939,10 @@ fn extract_version_like(raw: &str) -> Option<std::string::String> {
     best4.or(best3).map(std::string::String::from)
 }
 
-fn dcs_version_from_logs(ctx: &Context) -> Option<std::string::String> {
-    let root = ctx.miz_state_path.parent()?;
+fn dcs_version_from_logs(writedir: &Path) -> Option<std::string::String> {
     let mut latest: Option<(std::time::SystemTime, PathBuf)> = None;
     for rel in ["Logs\\dcs.log", "Logs\\dcs.log.old"] {
-        let p = root.join(rel);
+        let p = writedir.join(rel);
         let modified = std::fs::metadata(&p).and_then(|m| m.modified()).ok()?;
         match &latest {
             Some((t, _)) if *t >= modified => (),
@@ -963,7 +962,8 @@ fn dcs_version_from_logs(ctx: &Context) -> Option<std::string::String> {
         .map(|m| std::string::String::from(m.as_str()))
 }
 
-fn dcs_version_slug(ctx: &Context, lua: MizLua) -> std::string::String {
+/// Product version string for display (e.g. `2.9.27.25340`); `"unknown"` if unavailable.
+pub(crate) fn dcs_product_version(lua: MizLua, writedir: &Path) -> std::string::String {
     let l = lua.inner();
     let raw_ver: std::string::String = match l
         .load(
@@ -1019,10 +1019,17 @@ fn dcs_version_slug(ctx: &Context, lua: MizLua) -> std::string::String {
         Ok(s) => s,
         Err(_) => "unknown".into(),
     };
-    let ver = extract_version_like(&raw_ver)
-        .or_else(|| dcs_version_from_logs(ctx))
-        .unwrap_or_else(|| "unknown".into());
-    slugify(&ver, true)
+    extract_version_like(&raw_ver)
+        .or_else(|| dcs_version_from_logs(writedir))
+        .unwrap_or_else(|| "unknown".into())
+}
+
+fn dcs_version_slug(ctx: &Context, lua: MizLua) -> std::string::String {
+    let writedir = ctx
+        .miz_state_path
+        .parent()
+        .unwrap_or_else(|| Path::new("."));
+    slugify(&dcs_product_version(lua, writedir), true)
 }
 
 pub(crate) fn theatre_slug(lua: MizLua) -> std::string::String {

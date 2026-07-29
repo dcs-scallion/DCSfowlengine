@@ -187,6 +187,8 @@ pub struct DiscordMapStatusBar {
     pub delivery_to_hubs: String,
     pub dcs_bind_address: String,
     pub dcs_port: String,
+    /// Running dedicated server product version (e.g. `2.9.27.25340`).
+    pub dcs_version: String,
     pub dcs_name: String,
     pub dowload_acmi: bool,
     pub dowload_acmi_url: String,
@@ -1109,13 +1111,14 @@ fn map_header_left_html(bar: &DiscordMapStatusBar) -> String {
     let brand_w = map_label_display_w();
     let brand_h = map_label_display_h();
     format!(
-        r#"<span class="map-hdr-brand" aria-hidden="true"><span class="map-hdr-brand-icons" style="width:{brand_w}px;height:{brand_h}px"><img class="map-hdr-brand-off" src="data:image/png;base64,{icon_off}" width="{brand_w}" height="{brand_h}" alt=""><img class="map-hdr-brand-on" src="data:image/png;base64,{icon_on}" width="{brand_w}" height="{brand_h}" alt=""></span></span><span class="map-hdr-text"><span class="map-hdr-part">DCS server IP {bind}:{port}</span><span class="map-hdr-part map-hdr-name">{name}</span><span class="map-hdr-part">{mission}</span></span>"#,
+        r#"<span class="map-hdr-brand" aria-hidden="true"><span class="map-hdr-brand-icons" style="width:{brand_w}px;height:{brand_h}px"><img class="map-hdr-brand-off" src="data:image/png;base64,{icon_off}" width="{brand_w}" height="{brand_h}" alt=""><img class="map-hdr-brand-on" src="data:image/png;base64,{icon_on}" width="{brand_w}" height="{brand_h}" alt=""></span></span><span class="map-hdr-text"><span class="map-hdr-part">DCS server IP {bind}:{port} (ver.{version})</span><span class="map-hdr-part map-hdr-name">{name}</span><span class="map-hdr-part">{mission}</span></span>"#,
         icon_off = MAP_LABEL_GR_B64.as_str(),
         icon_on = MAP_LABEL_B64.as_str(),
         brand_w = brand_w,
         brand_h = brand_h,
         bind = html_escape(dcs_bind_display(&bar.dcs_bind_address)),
         port = html_escape(&bar.dcs_port),
+        version = html_escape(&bar.dcs_version),
         name = html_escape(&bar.dcs_name),
         mission = html_escape(&bar.mission_name),
     )
