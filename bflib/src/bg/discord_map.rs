@@ -26,7 +26,7 @@ const LAYOUT_GAP_PX: u32 = 4;
 const STAT_BARS_GAP_PX: i32 = 3;
 const HEALTH_BAR_MAP_PX: f32 = 30.0;
 /// Threatened yellow ring diameter ≈ icon max side × this (+ pad). Raise to enlarge.
-const THREAT_RING_SCALE: f32 = 1.75;
+const THREAT_RING_SCALE: f32 = 1.5;
 const THREAT_RING_PAD_PX: f32 = 4.0;
 const THREAT_RING_MIN_PX: u32 = 8;
 const LABEL_GAP_PX: i32 = 4;

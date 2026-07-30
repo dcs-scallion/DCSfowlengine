@@ -1240,7 +1240,7 @@ fn default_repair_crate() -> FxHashMap<Side, Crate> {
             Side::Blue,
             Crate {
                 name: "Logistics Repair".into(),
-                weight: 1500,
+                weight: 1000,
                 required: 1,
                 pos_unit: None,
                 max_drop_height_agl: 10,
@@ -1267,7 +1267,7 @@ fn default_supply_transfer_crate() -> FxHashMap<Side, Crate> {
             Side::Blue,
             Crate {
                 name: "Supply Transfer".into(),
-                weight: 1500,
+                weight: 1000,
                 required: 1,
                 pos_unit: None,
                 max_drop_height_agl: 10,

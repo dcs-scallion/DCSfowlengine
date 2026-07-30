@@ -1356,6 +1356,9 @@ fn on_event(lua: MizLua, ev: Event) -> Result<()> {
                 if let Err(e) = ctx.db.static_born(&st) {
                     error!("static born failed {:?} {:?}", st, e);
                 }
+                if let Err(e) = ctx.db.try_revive_fowl_crate_static(lua, &st) {
+                    error!("fowl crate revive failed {:?} {:?}", st, e);
+                }
                 if let Err(e) = ctx.db.register_dynamic_cargo_static(lua, &st) {
                     error!("dynamic cargo register failed {:?} {:?}", st, e);
                 }

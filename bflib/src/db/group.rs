@@ -133,6 +133,9 @@ pub enum DeployKind {
         /// Ship-relative offsets for carrier-deck crates (Hoggit `addStaticObject` link).
         #[serde(default)]
         ship_offsets: Option<ShipCrateOffsets>,
+        /// Player who F8/sling-loaded this crate (List Cargo / revive).
+        #[serde(default)]
+        ed_carrier: Option<Ucid>,
     },
     Action {
         #[serde(skip)]
@@ -1770,9 +1773,113 @@ impl Db {
             || self.persisted.crates.contains(&gid)
         {
             if self.group_health(&gid)?.0 == 0 {
-                self.delete_group(&gid)?
+                if self.persisted.crates.contains(&gid)
+                    && self.ephemeral.cfg.dynamic_cargo_delivery.enabled
+                {
+                    if let Some(carrier) = self.crate_static_ed_carrier(lua, uid) {
+                        if let Some(group) = self.persisted.groups.get_mut_cow(&gid) {
+                            if let DeployKind::Crate { ed_carrier, .. } = &mut group.origin {
+                                *ed_carrier = Some(carrier);
+                            }
+                        }
+                        // F8 / sling despawn — keep DeployKind::Crate for unload revive.
+                        if let Some(id) = self.ephemeral.group_marks.remove(&gid) {
+                            self.ephemeral.msgs.delete_mark(id);
+                        }
+                        info!("crate {gid} despawned near transport; keeping for ED cargo load");
+                    } else {
+                        self.delete_group(&gid)?
+                    }
+                } else {
+                    self.delete_group(&gid)?
+                }
             }
         }
+        Ok(())
+    }
+
+    /// Nearest same-side ED cargo transport player when Dead is likely F8/sling.
+    fn crate_static_ed_carrier(&self, lua: MizLua, uid: UnitId) -> Option<Ucid> {
+        let unit = self.persisted.units.get(&uid)?;
+        let group = self.persisted.groups.get(&unit.group)?;
+        self.nearest_ed_cargo_carrier(lua, unit.pos, group.side)
+    }
+
+    fn nearest_ed_cargo_carrier(
+        &self,
+        lua: MizLua,
+        crate_pos: Vector2,
+        side: Side,
+    ) -> Option<Ucid> {
+        const MAX_DIST: f64 = 80.;
+        let mut best: Option<(f64, Ucid)> = None;
+        for (slot, ucid) in &self.ephemeral.players_by_slot {
+            let Some(player) = self.persisted.players.get(ucid) else {
+                continue;
+            };
+            if player.side != side {
+                continue;
+            }
+            let Some((_, Some(inst))) = player.current_slot.as_ref() else {
+                continue;
+            };
+            if !super::dynamic_cargo::is_ed_cargo_transport(inst.typ.as_str()) {
+                continue;
+            }
+            let pos = match self.ephemeral.slot_instance_unit(lua, slot) {
+                Ok(u) => u
+                    .get_point()
+                    .map(|p| Vector2::new(p.0.x, p.0.z))
+                    .unwrap_or_else(|_| Vector2::new(inst.position.p.0.x, inst.position.p.0.z)),
+                Err(_) => Vector2::new(inst.position.p.0.x, inst.position.p.0.z),
+            };
+            let dist = (pos - crate_pos).magnitude();
+            if dist <= MAX_DIST {
+                match best {
+                    Some((d, _)) if dist >= d => {}
+                    _ => best = Some((dist, ucid.clone())),
+                }
+            }
+        }
+        best.map(|(_, u)| u)
+    }
+
+    /// Re-link a Fowl crate after ED F8/sling unload (same static name).
+    pub fn try_revive_fowl_crate_static(&mut self, lua: MizLua, st: &StaticObject) -> Result<()> {
+        if !self.ephemeral.cfg.dynamic_cargo_delivery.enabled {
+            return Ok(());
+        }
+        let name = st.get_name()?;
+        let Some(uid) = self.persisted.units_by_name.get(name.as_str()).copied() else {
+            return Ok(());
+        };
+        let (gid, was_dead) = {
+            let Some(unit) = self.persisted.units.get(&uid) else {
+                return Ok(());
+            };
+            if !self.persisted.crates.contains(&unit.group) {
+                return Ok(());
+            }
+            (unit.group, unit.dead)
+        };
+        if !was_dead {
+            return Ok(());
+        }
+        let point = st.get_point()?;
+        if let Some(unit) = self.persisted.units.get_mut_cow(&uid) {
+            unit.dead = false;
+            unit.pos = Vector2::new(point.0.x, point.0.z);
+            unit.position.p.0 = point.0;
+            unit.hp_percent = 100;
+        }
+        if let Some(group) = self.persisted.groups.get_mut_cow(&gid) {
+            if let DeployKind::Crate { ed_carrier, .. } = &mut group.origin {
+                *ed_carrier = None;
+            }
+        }
+        self.mark_group(lua, &gid)?;
+        self.ephemeral.dirty();
+        info!("revived Fowl crate {gid} after ED cargo unload ({name})");
         Ok(())
     }
 

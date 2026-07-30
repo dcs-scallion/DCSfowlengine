@@ -332,6 +332,7 @@ pub(super) fn add_cargo_menu_for_group(
     mc: &MissionCommands,
     side: &Side,
     group: GroupId,
+    unit_typ: &str,
 ) -> Result<()> {
     let root = mc.add_submenu_for_group(group, "Cargo".into(), None)?;
     mc.add_command_for_group(
@@ -341,20 +342,24 @@ pub(super) fn add_cargo_menu_for_group(
         unpakistan,
         group,
     )?;
-    mc.add_command_for_group(
-        group,
-        "Load Nearby Crate".into(),
-        Some(root.clone()),
-        load_crate,
-        group,
-    )?;
-    mc.add_command_for_group(
-        group,
-        "Unload Crate".into(),
-        Some(root.clone()),
-        unload_crate,
-        group,
-    )?;
+    let ed_bay = cfg.dynamic_cargo_delivery.enabled
+        && crate::db::dynamic_cargo::uses_ed_dynamic_cargo_bay(unit_typ);
+    if !ed_bay {
+        mc.add_command_for_group(
+            group,
+            "Load Nearby Crate".into(),
+            Some(root.clone()),
+            load_crate,
+            group,
+        )?;
+        mc.add_command_for_group(
+            group,
+            "Unload Crate".into(),
+            Some(root.clone()),
+            unload_crate,
+            group,
+        )?;
+    }
     mc.add_command_for_group(
         group,
         "List Nearby Crates".into(),

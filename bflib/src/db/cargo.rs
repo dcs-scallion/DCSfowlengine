@@ -341,6 +341,7 @@ impl Db {
             spec: crate_cfg.clone(),
             ship_hub,
             ship_offsets,
+            ed_carrier: None,
         };
         if let Some(gid) = to_delete {
             self.delete_group(&gid)?;
@@ -442,6 +443,9 @@ impl Db {
             };
             for uid in &group.units {
                 let unit = &unit!(self, uid)?;
+                if unit.dead {
+                    continue;
+                }
                 let pos = Self::crate_world_pos(lua, unit.name.as_str(), unit.pos);
                 let distance = na::distance(&point.into(), &pos.into());
                 if distance <= max_dist {
@@ -1491,6 +1495,7 @@ impl Db {
             spec: crate_cfg.clone(),
             ship_hub,
             ship_offsets,
+            ed_carrier: None,
         };
         let spctx = SpawnCtx::new(lua)?;
         let gid = match self.add_and_queue_group(

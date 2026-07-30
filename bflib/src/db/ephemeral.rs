@@ -18,7 +18,7 @@ use super::{
     ai_air::HubSlotKind,
     cargo::Cargo,
     discord_map::DiscordMapRuntime,
-    group::{SpawnedGroup, SpawnedUnit},
+    group::{DeployKind, SpawnedGroup, SpawnedUnit},
     logistics::LogiStage,
     front_line::FrontLine,
     markup::ObjectiveMarkup,
@@ -1330,6 +1330,11 @@ impl Ephemeral {
                         unit.set_alt(su.position.p.y)?;
                         unit.set_heading(su.heading)?;
                         unit.set_name(su.name.clone())?;
+                        if matches!(group.origin, DeployKind::Crate { .. }) {
+                            // ED F8 / sling require Cargos + canCargo.
+                            let _ = unit.raw_set("canCargo", true);
+                            let _ = unit.raw_set("category", "Cargos");
+                        }
                         if let Err(e) = super::ai_air::apply_persisted_crate_ship_link(
                             spctx.lua(),
                             persisted,

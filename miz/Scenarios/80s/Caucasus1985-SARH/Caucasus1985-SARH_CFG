@@ -80,8 +80,8 @@
     "enabled": true,
     "maximum_dynamic_crates_per_coalition": 100,
     "to_stock_dynamic_crate_distance": 50,
-    "to_stock_points": 5,
-    "source_spawner_points": 15
+    "to_stock_points_per_ton": 5,
+    "source_spawner_points_per_ton": 15
   },
   "acmi_sanitize": {
     "process_inbox_bat": "C:\\acmi-sanitize\\process_inbox.bat",
@@ -147,7 +147,7 @@
   "repair_crate": {
     "Red": {
       "name": "Repair",
-      "weight": 1500,
+      "weight": 1000,
       "required": 1,
       "pos_unit": null,
       "max_drop_height_agl": 10,
@@ -155,7 +155,7 @@
     },
     "Blue": {
       "name": "Repair",
-      "weight": 1500,
+      "weight": 1000,
       "required": 1,
       "pos_unit": null,
       "max_drop_height_agl": 10,
@@ -220,12 +220,12 @@
     "CapturedStockPercentage_OAB": 15,
     "CapturedStockPercentage_OLO": 20,
     "tick": 20,
-    "ticks_per_delivery": 6,
+    "ticks_per_delivery": 4,
     "supply_transfer_size": 10,
     "supply_transfer_crate": {
       "Red": {
         "name": "Supply Transfer",
-        "weight": 1500,
+        "weight": 1000,
         "required": 1,
         "pos_unit": null,
         "max_drop_height_agl": 10,
@@ -233,7 +233,7 @@
       },
       "Blue": {
         "name": "Supply Transfer",
-        "weight": 1500,
+        "weight": 1000,
         "required": 1,
         "pos_unit": null,
         "max_drop_height_agl": 10,
@@ -1461,7 +1461,7 @@
         "crates": [
           {
             "name": "Tunguska Crate",
-            "weight": 1500,
+            "weight": 1000,
             "required": 2,
             "pos_unit": null,
             "max_drop_height_agl": 10,
@@ -1492,7 +1492,7 @@
         "crates": [
           {
             "name": "SA-3 Launcher",
-            "weight": 1500,
+            "weight": 1000,
             "required": 1,
             "pos_unit": "5p73 s-125 ln",
             "max_drop_height_agl": 10,
@@ -1500,7 +1500,7 @@
           },
           {
             "name": "SA-3 Search Radar",
-            "weight": 1500,
+            "weight": 1000,
             "required": 1,
             "pos_unit": "p-19 s-125 sr",
             "max_drop_height_agl": 10,
@@ -1508,7 +1508,7 @@
           },
           {
             "name": "SA-3 Track Radar",
-            "weight": 1500,
+            "weight": 1000,
             "required": 1,
             "pos_unit": "snr s-125 tr",
             "max_drop_height_agl": 10,
@@ -1517,7 +1517,7 @@
         ],
         "repair_crate": {
           "name": "SA-3 Repair/Rearm",
-          "weight": 1500,
+          "weight": 1000,
           "required": 1,
           "pos_unit": null,
           "max_drop_height_agl": 10,
@@ -1548,7 +1548,7 @@
         "crates": [
           {
             "name": "Kub Launcher",
-            "weight": 1500,
+            "weight": 1000,
             "required": 2,
             "pos_unit": "Kub 2P25 ln",
             "max_drop_height_agl": 10,
@@ -1556,7 +1556,7 @@
           },
           {
             "name": "Kub Radar",
-            "weight": 1500,
+            "weight": 1000,
             "required": 1,
             "pos_unit": "Kub 1S91 str",
             "max_drop_height_agl": 10,
@@ -1565,7 +1565,7 @@
         ],
         "repair_crate": {
           "name": "Kub Repair/Rearm",
-          "weight": 1500,
+          "weight": 1000,
           "required": 1,
           "pos_unit": null,
           "max_drop_height_agl": 10,
@@ -1596,7 +1596,7 @@
         "crates": [
           {
             "name": "SA-2 Launchers",
-            "weight": 1500,
+            "weight": 1000,
             "required": 1,
             "pos_unit": "S_75M_Volhov",
             "max_drop_height_agl": 10,
@@ -1604,7 +1604,7 @@
           },
           {
             "name": "SA-2 Search Radar",
-            "weight": 1500,
+            "weight": 1000,
             "required": 1,
             "pos_unit": "p-19 s-125 sr",
             "max_drop_height_agl": 10,
@@ -1612,7 +1612,7 @@
           },
           {
             "name": "SA-2 Track Radar",
-            "weight": 1500,
+            "weight": 1000,
             "required": 1,
             "pos_unit": "SNR_75V",
             "max_drop_height_agl": 10,
@@ -1620,7 +1620,7 @@
           },
           {
             "name": "SA-2 Rangefinding Radar",
-            "weight": 1500,
+            "weight": 1000,
             "required": 1,
             "pos_unit": "RD_75",
             "max_drop_height_agl": 10,
@@ -1629,7 +1629,7 @@
         ],
         "repair_crate": {
           "name": "SA-2 Repair/Rearm",
-          "weight": 1500,
+          "weight": 1000,
           "required": 1,
           "pos_unit": null,
           "max_drop_height_agl": 10,
@@ -1660,7 +1660,7 @@
         "crates": [
           {
             "name": "ZU-23 on Ural",
-            "weight": 1500,
+            "weight": 1000,
             "required": 1,
             "pos_unit": null,
             "max_drop_height_agl": 10,
@@ -1691,7 +1691,7 @@
         "crates": [
           {
             "name": "Shilka Crate",
-            "weight": 1500,
+            "weight": 1000,
             "required": 2,
             "pos_unit": null,
             "max_drop_height_agl": 10,
@@ -1722,7 +1722,7 @@
         "crates": [
           {
             "name": "KS-19 Cannons",
-            "weight": 1500,
+            "weight": 1000,
             "required": 2,
             "pos_unit": "KS-19",
             "max_drop_height_agl": 10,
@@ -1730,7 +1730,7 @@
           },
           {
             "name": "KS-19 Track Radar",
-            "weight": 1500,
+            "weight": 1000,
             "required": 1,
             "pos_unit": "SON_9",
             "max_drop_height_agl": 10,
@@ -1739,7 +1739,7 @@
         ],
         "repair_crate": {
           "name": "KS-19 Repair/Rearm",
-          "weight": 1500,
+          "weight": 1000,
           "required": 1,
           "pos_unit": null,
           "max_drop_height_agl": 10,
@@ -1770,7 +1770,7 @@
         "crates": [
           {
             "name": "SA-9 Strela Crate",
-            "weight": 1500,
+            "weight": 1000,
             "required": 2,
             "pos_unit": null,
             "max_drop_height_agl": 10,
@@ -1801,7 +1801,7 @@
         "crates": [
           {
             "name": "SA-13 Strela Crate",
-            "weight": 1500,
+            "weight": 1000,
             "required": 2,
             "pos_unit": null,
             "max_drop_height_agl": 10,
@@ -1832,7 +1832,7 @@
         "crates": [
           {
             "name": "Silkworm Launchers",
-            "weight": 1500,
+            "weight": 1000,
             "required": 3,
             "pos_unit": "hy_launcher",
             "max_drop_height_agl": 10,
@@ -1840,7 +1840,7 @@
           },
           {
             "name": "Silkworm Search Radar",
-            "weight": 1500,
+            "weight": 1000,
             "required": 1,
             "pos_unit": "Silkworm_SR",
             "max_drop_height_agl": 10,
@@ -1849,7 +1849,7 @@
         ],
         "repair_crate": {
           "name": "Silkworm Repair/Rearm",
-          "weight": 1500,
+          "weight": 1000,
           "required": 1,
           "pos_unit": null,
           "max_drop_height_agl": 10,
@@ -1880,7 +1880,7 @@
         "crates": [
           {
             "name": "JTAC Crate",
-            "weight": 1500,
+            "weight": 1000,
             "required": 2,
             "pos_unit": null,
             "max_drop_height_agl": 20,
@@ -1914,7 +1914,7 @@
         "crates": [
           {
             "name": "Ammo Truck Crate",
-            "weight": 1500,
+            "weight": 1000,
             "required": 2,
             "pos_unit": null,
             "max_drop_height_agl": 20,
@@ -1945,7 +1945,7 @@
         "crates": [
           {
             "name": "BTR Crate",
-            "weight": 1500,
+            "weight": 1000,
             "required": 3,
             "pos_unit": null,
             "max_drop_height_agl": 20,
@@ -1979,7 +1979,7 @@
         "crates": [
           {
             "name": "BMP-2 Crate",
-            "weight": 1500,
+            "weight": 1000,
             "required": 4,
             "pos_unit": null,
             "max_drop_height_agl": 20,
@@ -1988,7 +1988,7 @@
         ],
         "repair_crate": null,
         "repair_cost": 0,
-        "cost": 60,
+        "cost": 50,
         "ewr": null,
         "jtac": {
           "range": 1000,
@@ -2013,7 +2013,7 @@
         "crates": [
           {
             "name": "Akatsia Crate",
-            "weight": 1500,
+            "weight": 1000,
             "required": 3,
             "pos_unit": null,
             "max_drop_height_agl": 20,
@@ -2022,7 +2022,7 @@
         ],
         "repair_crate": {
           "name": "Akatsia Repair/Rearm",
-          "weight": 1500,
+          "weight": 1000,
           "required": 1,
           "pos_unit": null,
           "max_drop_height_agl": 10,
@@ -2051,7 +2051,7 @@
         "crates": [
           {
             "name": "Grad Crate",
-            "weight": 1500,
+            "weight": 1000,
             "required": 4,
             "pos_unit": null,
             "max_drop_height_agl": 20,
@@ -2060,7 +2060,7 @@
         ],
         "repair_crate": {
           "name": "Grad Repair/Rearm",
-          "weight": 1500,
+          "weight": 1000,
           "required": 1,
           "pos_unit": null,
           "max_drop_height_agl": 10,
@@ -2085,7 +2085,7 @@
         "crates": [
           {
             "name": "T-72B Crate",
-            "weight": 1500,
+            "weight": 1000,
             "required": 4,
             "pos_unit": null,
             "max_drop_height_agl": 20,
@@ -2116,7 +2116,7 @@
         "crates": [
           {
             "name": "T-80U Crate",
-            "weight": 1500,
+            "weight": 1000,
             "required": 4,
             "pos_unit": null,
             "max_drop_height_agl": 20,
@@ -2150,7 +2150,7 @@
         "crates": [
           {
             "name": "Group ATGM Crate",
-            "weight": 1500,
+            "weight": 1000,
             "required": 4,
             "pos_unit": null,
             "max_drop_height_agl": 20,
@@ -2181,7 +2181,7 @@
         "crates": [
           {
             "name": "Group Armor Crate",
-            "weight": 1500,
+            "weight": 1000,
             "required": 6,
             "pos_unit": null,
             "max_drop_height_agl": 20,
@@ -2212,7 +2212,7 @@
         "crates": [
           {
             "name": "1L13 Crate",
-            "weight": 1500,
+            "weight": 1000,
             "required": 2,
             "pos_unit": null,
             "max_drop_height_agl": 10,
@@ -2240,7 +2240,7 @@
         "crates": [
           {
             "name": "Ground FARP Crate",
-            "weight": 1500,
+            "weight": 1000,
             "required": 6,
             "pos_unit": null,
             "max_drop_height_agl": 10,
@@ -2385,7 +2385,7 @@
         "crates": [
           {
             "name": "Rapier Launchers",
-            "weight": 1500,
+            "weight": 1000,
             "required": 1,
             "pos_unit": "rapier_fsa_launcher",
             "max_drop_height_agl": 10,
@@ -2393,7 +2393,7 @@
           },
           {
             "name": "Rapier Search Radar",
-            "weight": 1500,
+            "weight": 1000,
             "required": 1,
             "pos_unit": "rapier_fsa_blindfire_radar",
             "max_drop_height_agl": 10,
@@ -2401,7 +2401,7 @@
           },
           {
             "name": "Rapier Optical Tracker",
-            "weight": 1500,
+            "weight": 1000,
             "required": 1,
             "pos_unit": "rapier_fsa_optical_tracker_unit",
             "max_drop_height_agl": 10,
@@ -2410,7 +2410,7 @@
         ],
         "repair_crate": {
           "name": "Rapier Repair/Rearm",
-          "weight": 1500,
+          "weight": 1000,
           "required": 1,
           "pos_unit": null,
           "max_drop_height_agl": 10,
@@ -2441,7 +2441,7 @@
         "crates": [
           {
             "name": "Roland ADS",
-            "weight": 1500,
+            "weight": 1000,
             "required": 2,
             "pos_unit": null,
             "max_drop_height_agl": 10,
@@ -2449,7 +2449,7 @@
           },
           {
             "name": "Roland Search Radar",
-            "weight": 1500,
+            "weight": 1000,
             "required": 1,
             "pos_unit": "Roland Radar",
             "max_drop_height_agl": 10,
@@ -2458,7 +2458,7 @@
         ],
         "repair_crate": {
           "name": "Roland Repair/Rearm",
-          "weight": 1500,
+          "weight": 1000,
           "required": 1,
           "pos_unit": null,
           "max_drop_height_agl": 10,
@@ -2489,7 +2489,7 @@
         "crates": [
           {
             "name": "Hawk Launchers",
-            "weight": 1500,
+            "weight": 1000,
             "required": 1,
             "pos_unit": "Hawk ln",
             "max_drop_height_agl": 10,
@@ -2497,7 +2497,7 @@
           },
           {
             "name": "Hawk Search Radar",
-            "weight": 1500,
+            "weight": 1000,
             "required": 1,
             "pos_unit": "Hawk sr",
             "max_drop_height_agl": 10,
@@ -2505,7 +2505,7 @@
           },
           {
             "name": "Hawk Track Radar",
-            "weight": 1500,
+            "weight": 1000,
             "required": 1,
             "pos_unit": "Hawk tr",
             "max_drop_height_agl": 10,
@@ -2513,7 +2513,7 @@
           },
           {
             "name": "Hawk CC",
-            "weight": 1500,
+            "weight": 1000,
             "required": 1,
             "pos_unit": "Hawk pcp",
             "max_drop_height_agl": 10,
@@ -2522,7 +2522,7 @@
         ],
         "repair_crate": {
           "name": "Hawk Repair/Rearm",
-          "weight": 1500,
+          "weight": 1000,
           "required": 1,
           "pos_unit": null,
           "max_drop_height_agl": 10,
@@ -2553,7 +2553,7 @@
         "crates": [
           {
             "name": "Avenger Crate",
-            "weight": 1500,
+            "weight": 1000,
             "required": 2,
             "pos_unit": null,
             "max_drop_height_agl": 10,
@@ -2584,7 +2584,7 @@
         "crates": [
           {
             "name": "Linebacker Crate",
-            "weight": 1500,
+            "weight": 1000,
             "required": 2,
             "pos_unit": null,
             "max_drop_height_agl": 10,
@@ -2615,7 +2615,7 @@
         "crates": [
           {
             "name": "Chaparral Crate",
-            "weight": 1500,
+            "weight": 1000,
             "required": 2,
             "pos_unit": null,
             "max_drop_height_agl": 10,
@@ -2646,7 +2646,7 @@
         "crates": [
           {
             "name": "ZU-23 Emplacement",
-            "weight": 1500,
+            "weight": 1000,
             "required": 1,
             "pos_unit": null,
             "max_drop_height_agl": 10,
@@ -2677,7 +2677,7 @@
         "crates": [
           {
             "name": "Vulcan Crate",
-            "weight": 1500,
+            "weight": 1000,
             "required": 2,
             "pos_unit": null,
             "max_drop_height_agl": 20,
@@ -2708,7 +2708,7 @@
         "crates": [
           {
             "name": "KS-19 Cannons",
-            "weight": 1500,
+            "weight": 1000,
             "required": 2,
             "pos_unit": "KS-19",
             "max_drop_height_agl": 10,
@@ -2716,7 +2716,7 @@
           },
           {
             "name": "KS-19 Track Radar",
-            "weight": 1500,
+            "weight": 1000,
             "required": 1,
             "pos_unit": "SON_9",
             "max_drop_height_agl": 10,
@@ -2725,7 +2725,7 @@
         ],
         "repair_crate": {
           "name": "KS-19 Repair/Rearm",
-          "weight": 1500,
+          "weight": 1000,
           "required": 1,
           "pos_unit": null,
           "max_drop_height_agl": 10,
@@ -2756,7 +2756,7 @@
         "crates": [
           {
             "name": "Silkworm Launchers",
-            "weight": 1500,
+            "weight": 1000,
             "required": 3,
             "pos_unit": "hy_launcher",
             "max_drop_height_agl": 10,
@@ -2764,7 +2764,7 @@
           },
           {
             "name": "Silkworm Search Radar",
-            "weight": 1500,
+            "weight": 1000,
             "required": 1,
             "pos_unit": "Silkworm_SR",
             "max_drop_height_agl": 10,
@@ -2773,7 +2773,7 @@
         ],
         "repair_crate": {
           "name": "Silkworm Repair/Rearm",
-          "weight": 1500,
+          "weight": 1000,
           "required": 1,
           "pos_unit": null,
           "max_drop_height_agl": 10,
@@ -2804,7 +2804,7 @@
         "crates": [
           {
             "name": "JTAC Crate",
-            "weight": 1500,
+            "weight": 1000,
             "required": 2,
             "pos_unit": null,
             "max_drop_height_agl": 20,
@@ -2838,7 +2838,7 @@
         "crates": [
           {
             "name": "Ammo Truck Crate",
-            "weight": 1500,
+            "weight": 1000,
             "required": 2,
             "pos_unit": null,
             "max_drop_height_agl": 20,
@@ -2869,7 +2869,7 @@
         "crates": [
           {
             "name": "LAV25 Crate",
-            "weight": 1500,
+            "weight": 1000,
             "required": 3,
             "pos_unit": null,
             "max_drop_height_agl": 20,
@@ -2903,7 +2903,7 @@
         "crates": [
           {
             "name": "Bradley Crate",
-            "weight": 1500,
+            "weight": 1000,
             "required": 4,
             "pos_unit": null,
             "max_drop_height_agl": 20,
@@ -2937,7 +2937,7 @@
         "crates": [
           {
             "name": "Paladin Crate",
-            "weight": 1500,
+            "weight": 1000,
             "required": 3,
             "pos_unit": null,
             "max_drop_height_agl": 20,
@@ -2946,7 +2946,7 @@
         ],
         "repair_crate": {
           "name": "Paladin Repair/Rearm",
-          "weight": 1500,
+          "weight": 1000,
           "required": 1,
           "pos_unit": null,
           "max_drop_height_agl": 10,
@@ -2971,7 +2971,7 @@
         "crates": [
           {
             "name": "Chieftain Crate",
-            "weight": 1500,
+            "weight": 1000,
             "required": 4,
             "pos_unit": null,
             "max_drop_height_agl": 20,
@@ -3002,7 +3002,7 @@
         "crates": [
           {
             "name": "Abrams Crate",
-            "weight": 1500,
+            "weight": 1000,
             "required": 4,
             "pos_unit": null,
             "max_drop_height_agl": 20,
@@ -3036,7 +3036,7 @@
         "crates": [
           {
             "name": "Group ATGM Crate",
-            "weight": 1500,
+            "weight": 1000,
             "required": 4,
             "pos_unit": null,
             "max_drop_height_agl": 20,
@@ -3067,7 +3067,7 @@
         "crates": [
           {
             "name": "Group Armor Crate",
-            "weight": 1500,
+            "weight": 1000,
             "required": 6,
             "pos_unit": null,
             "max_drop_height_agl": 20,
@@ -3098,7 +3098,7 @@
         "crates": [
           {
             "name": "FPS-117 Crate",
-            "weight": 1500,
+            "weight": 1000,
             "required": 2,
             "pos_unit": null,
             "max_drop_height_agl": 10,
@@ -3126,7 +3126,7 @@
         "crates": [
           {
             "name": "Ground FARP Crate",
-            "weight": 1500,
+            "weight": 1000,
             "required": 6,
             "pos_unit": null,
             "max_drop_height_agl": 10,

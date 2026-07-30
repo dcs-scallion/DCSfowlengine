@@ -1549,12 +1549,13 @@ pub struct DynamicCargoDeliveryCfg {
     /// Radius (m) around the player for Supplies → To stock.
     #[serde(default = "default_to_stock_dynamic_crate_distance")]
     pub to_stock_dynamic_crate_distance: u32,
-    /// Points to the player who runs To stock when crate source ≠ destination objective.
-    #[serde(default = "default_to_stock_points")]
-    pub to_stock_points: u32,
-    /// Points to the registered spawner on cross-objective To stock.
-    #[serde(default = "default_source_spawner_points")]
-    pub source_spawner_points: u32,
+    /// Points per ton (1000 kg) to the deliverer on cross-objective To stock / DCS absorb.
+    /// Final award is `round(max(kg/1000, 1) * rate)`.
+    #[serde(default = "default_to_stock_points_per_ton")]
+    pub to_stock_points_per_ton: u32,
+    /// Points per ton to the registered spawner on cross-objective To stock / DCS absorb.
+    #[serde(default = "default_source_spawner_points_per_ton")]
+    pub source_spawner_points_per_ton: u32,
 }
 
 impl Default for DynamicCargoDeliveryCfg {
@@ -1563,8 +1564,8 @@ impl Default for DynamicCargoDeliveryCfg {
             enabled: false,
             maximum_dynamic_crates_per_coalition: default_maximum_dynamic_crates_per_coalition(),
             to_stock_dynamic_crate_distance: default_to_stock_dynamic_crate_distance(),
-            to_stock_points: default_to_stock_points(),
-            source_spawner_points: default_source_spawner_points(),
+            to_stock_points_per_ton: default_to_stock_points_per_ton(),
+            source_spawner_points_per_ton: default_source_spawner_points_per_ton(),
         }
     }
 }
@@ -1577,11 +1578,11 @@ fn default_to_stock_dynamic_crate_distance() -> u32 {
     50
 }
 
-fn default_to_stock_points() -> u32 {
+fn default_to_stock_points_per_ton() -> u32 {
     5
 }
 
-fn default_source_spawner_points() -> u32 {
+fn default_source_spawner_points_per_ton() -> u32 {
     15
 }
 
