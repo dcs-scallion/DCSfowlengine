@@ -1260,25 +1260,37 @@ impl Db {
                         Err(e) => reasons.push(format_compact!("{e}")),
                         Ok(from_obj) => match &spec.kind {
                             DeployableKind::Objective(parts) => {
-                                for cr in have.values().flat_map(|c| c.iter()) {
-                                    self.delete_group(&cr.group)?
+                                match self.ground_farp_site_clear_of_water(
+                                    &spctx, idx, st.side, centroid, &spec, parts,
+                                ) {
+                                    Err(e) => reasons.push(format_compact!("{e}")),
+                                    Ok(()) => {
+                                        match self.add_farp(
+                                            lua, &spctx, idx, st.side, centroid, &spec, parts,
+                                        ) {
+                                            Err(e) => reasons.push(format_compact!("{e}")),
+                                            Ok(oid) => {
+                                                for cr in have.values().flat_map(|c| c.iter()) {
+                                                    self.delete_group(&cr.group)?
+                                                }
+                                                self.ephemeral.stat(Stat::DeployFarp {
+                                                    oid,
+                                                    by: st.ucid,
+                                                    deployable: dep,
+                                                });
+                                                self.charge_for_item(
+                                                    &st.ucid,
+                                                    from_obj,
+                                                    spec.cost,
+                                                    "for farp spawn",
+                                                    InvestBucket::Ground,
+                                                );
+                                                let name = objective!(self, oid)?.name.clone();
+                                                return Ok(Unpakistan::UnpackedFarp(name));
+                                            }
+                                        }
+                                    }
                                 }
-                                let oid = self
-                                    .add_farp(lua, &spctx, idx, st.side, centroid, &spec, parts)?;
-                                self.ephemeral.stat(Stat::DeployFarp {
-                                    oid,
-                                    by: st.ucid,
-                                    deployable: dep,
-                                });
-                                self.charge_for_item(
-                                    &st.ucid,
-                                    from_obj,
-                                    spec.cost,
-                                    "for farp spawn",
-                                    InvestBucket::Ground,
-                                );
-                                let name = objective!(self, oid)?.name.clone();
-                                return Ok(Unpakistan::UnpackedFarp(name));
                             }
                             DeployableKind::Group { template } => {
                                 let pos = self.ephemeral.slot_instance_pos(lua, slot)?;

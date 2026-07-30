@@ -675,6 +675,20 @@ impl Ephemeral {
         })
     }
 
+    /// Next free pad name without marking it used (preflight checks).
+    pub fn peek_pad_template(&self, side: Side, name: &String) -> Option<String> {
+        self.deployable_idx.get(&side).and_then(|idx| {
+            if let Some(templates) = idx.pad_templates.get(name) {
+                for pad in templates {
+                    if !self.used_pad_templates.contains(pad) {
+                        return Some(pad.clone());
+                    }
+                }
+            }
+            None
+        })
+    }
+
     pub fn return_pad_template(&mut self, pad: &str) {
         self.used_pad_templates.remove(pad);
     }

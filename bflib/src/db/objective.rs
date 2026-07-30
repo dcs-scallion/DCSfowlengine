@@ -26,7 +26,7 @@ use crate::{
     spawnctx::{Despawn, SpawnCtx, SpawnLoc},
     unit, unit_mut,
 };
-use anyhow::{Context, Result, anyhow};
+use anyhow::{Context, Result, anyhow, bail};
 use bfprotocols::{
     cfg::{Deployable, DeployableObjective, UnitTag, Vehicle, VictoryCondition},
     db::{
@@ -48,7 +48,7 @@ use dcso3::{
     cvt_err,
     env::miz::{GroupKind, MizIndex},
     group::Group,
-    land::Land,
+    land::{Land, SurfaceType},
     net::Ucid,
     object::DcsObject,
     warehouse::LiquidType,
@@ -1137,6 +1137,140 @@ impl Db {
         Ok(())
     }
 
+    fn farp_spawn_loc(
+        spctx: &SpawnCtx,
+        idx: &MizIndex,
+        side: Side,
+        pos: Vector2,
+        parts: &DeployableObjective,
+    ) -> Result<SpawnLoc> {
+        let mut points: SmallVec<[Vector2; 16]> = smallvec![];
+        let defenses = parts
+            .defenses_template
+            .as_ref()
+            .map(|t| spctx.get_template_ref(idx, GroupKind::Any, side, t))
+            .transpose()?;
+        let ammo = parts
+            .ammo_template
+            .as_ref()
+            .map(|t| spctx.get_template_ref(idx, GroupKind::Any, side, t))
+            .transpose()?;
+        let fuel = parts
+            .fuel_template
+            .as_ref()
+            .map(|t| spctx.get_template_ref(idx, GroupKind::Any, side, t))
+            .transpose()?;
+        let barracks = parts
+            .barracks_template
+            .as_ref()
+            .map(|t| spctx.get_template_ref(idx, GroupKind::Any, side, t))
+            .transpose()?;
+        macro_rules! acc_points {
+            ($group:expr) => {
+                if let Some(g) = $group.as_ref() {
+                    for unit in g.group.units()? {
+                        let unit = unit?;
+                        points.push(unit.pos()?);
+                    }
+                }
+            };
+        }
+        acc_points!(defenses);
+        acc_points!(ammo);
+        acc_points!(fuel);
+        acc_points!(barracks);
+        if points.is_empty() {
+            Ok(SpawnLoc::AtPosWithCenter {
+                pos,
+                center: pos,
+                heading_add: 0.,
+            })
+        } else {
+            let center = centroid2d(points);
+            Ok(SpawnLoc::AtPosWithCenter {
+                pos,
+                center,
+                heading_add: 0.,
+            })
+        }
+    }
+
+    fn pad_template_is_boat(
+        &self,
+        spctx: &SpawnCtx,
+        idx: &MizIndex,
+        side: Side,
+        pad_template: &str,
+    ) -> bool {
+        (|| -> Result<bool> {
+            let gifo = spctx.get_template_ref(idx, GroupKind::Any, side, pad_template)?;
+            let unit = gifo.group.units()?.first()?;
+            let typ = unit.typ()?;
+            Ok(self
+                .ephemeral
+                .cfg
+                .unit_classification
+                .get(&Vehicle(typ))
+                .map(|tags| tags.contains(UnitTag::Boat))
+                .unwrap_or(false))
+        })()
+        .unwrap_or(false)
+    }
+
+    /// Ground DEP FARP: same surface rules as spawn (`Land`/`Road`/`Runway` only).
+    pub fn ground_farp_site_clear_of_water(
+        &self,
+        spctx: &SpawnCtx,
+        idx: &MizIndex,
+        side: Side,
+        pos: Vector2,
+        spec: &Deployable,
+        parts: &DeployableObjective,
+    ) -> Result<()> {
+        let dep_name = spec
+            .path
+            .last()
+            .ok_or_else(|| anyhow!("deployable has no name"))?;
+        let pad_template = self
+            .ephemeral
+            .peek_pad_template(side, dep_name)
+            .ok_or_else(|| anyhow!("not enough farp pads available to build this farp"))?;
+        if self.pad_template_is_boat(spctx, idx, side, pad_template.as_str()) {
+            return Ok(());
+        }
+        let land = Land::singleton(spctx.lua())?;
+        let location = Self::farp_spawn_loc(spctx, idx, side, pos, parts)?;
+        let (spawn_pos, center) = match location {
+            SpawnLoc::AtPosWithCenter { pos, center, .. } => (pos, center),
+            other => bail!("unexpected FARP spawn location {other:?}"),
+        };
+        let mut check = |p: Vector2| -> Result<()> {
+            match land.get_surface_type(LuaVec2(p))? {
+                SurfaceType::Land | SurfaceType::Road | SurfaceType::Runway => Ok(()),
+                SurfaceType::ShallowWater | SurfaceType::Water => bail!(
+                    "Cannot build DEP FARP here: too close to water. Move the crates farther inland."
+                ),
+            }
+        };
+        check(spawn_pos)?;
+        for name in [
+            &parts.defenses_template,
+            &parts.ammo_template,
+            &parts.fuel_template,
+            &parts.barracks_template,
+        ] {
+            let Some(name) = name else {
+                continue;
+            };
+            let gifo = spctx.get_template_ref(idx, GroupKind::Any, side, name)?;
+            for unit in gifo.group.units()? {
+                let unit = unit?;
+                check(unit.pos()? - center + spawn_pos)?;
+            }
+        }
+        Ok(())
+    }
+
     pub(super) fn delete_objective(&mut self, oid: &ObjectiveId) -> Result<()> {
         let obj = self
             .persisted
@@ -1203,53 +1337,7 @@ impl Db {
             fuel_template,
             barracks_template,
         } = parts;
-        let location = {
-            let mut points: SmallVec<[Vector2; 16]> = smallvec![];
-            let defenses = defenses_template
-                .as_ref()
-                .map(|t| spctx.get_template_ref(idx, GroupKind::Any, side, t))
-                .transpose()?;
-            let ammo = ammo_template
-                .as_ref()
-                .map(|t| spctx.get_template_ref(idx, GroupKind::Any, side, t))
-                .transpose()?;
-            let fuel = fuel_template
-                .as_ref()
-                .map(|t| spctx.get_template_ref(idx, GroupKind::Any, side, t))
-                .transpose()?;
-            let barracks = barracks_template
-                .as_ref()
-                .map(|t| spctx.get_template_ref(idx, GroupKind::Any, side, t))
-                .transpose()?;
-            macro_rules! acc_points {
-                ($group:expr) => {
-                    if let Some(g) = $group.as_ref() {
-                        for unit in g.group.units()? {
-                            let unit = unit?;
-                            points.push(unit.pos()?);
-                        }
-                    }
-                };
-            }
-            acc_points!(defenses);
-            acc_points!(ammo);
-            acc_points!(fuel);
-            acc_points!(barracks);
-            if points.is_empty() {
-                SpawnLoc::AtPosWithCenter {
-                    pos,
-                    center: pos,
-                    heading_add: 0.,
-                }
-            } else {
-                let center = centroid2d(points);
-                SpawnLoc::AtPosWithCenter {
-                    pos,
-                    center,
-                    heading_add: 0.,
-                }
-            }
-        };
+        let location = Self::farp_spawn_loc(spctx, idx, side, pos, parts)?;
         let dep_name = spec
             .path
             .last()
@@ -1318,6 +1406,7 @@ impl Db {
                         for gid in &groups {
                             let _ = self.delete_group(gid);
                         }
+                        self.ephemeral.return_pad_template(&pad_template);
                         return Err(e);
                     }
                 };

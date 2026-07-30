@@ -19,7 +19,7 @@ use super::{
     as_tbl, as_tbl_ref, lua_err, object::{optional_event_object, Object}, unit::Unit,
     value_to_json, weapon::Weapon, world::MarkPanel, String, Time,
 };
-use anyhow::{bail, Result};
+use anyhow::Result;
 use log::{error, info};
 use mlua::{prelude::*, Value};
 use serde_derive::Serialize;
@@ -281,7 +281,18 @@ pub enum Event<'lua> {
     MissionWinner,
     PostponedTakeoff(AtPlace<'lua>),
     PostponedLand(AtPlace<'lua>),
+    /// S_EVENT_SIMULATION_FREEZE (DCS 2.9.6+)
+    SimulationFreeze,
+    /// S_EVENT_SIMULATION_UNFREEZE
+    SimulationUnfreeze,
+    /// S_EVENT_HUMAN_AIRCRAFT_REPAIR_START
+    HumanAircraftRepairStart,
+    /// S_EVENT_HUMAN_AIRCRAFT_REPAIR_FINISH
+    HumanAircraftRepairFinish,
+    /// S_EVENT_MAX sentinel (DCS may still emit id=61)
     Max,
+    /// Future / unknown DCS event id — accepted to avoid log spam
+    Unhandled(i64),
 }
 
 fn translate<'a, 'lua: 'a>(
@@ -350,8 +361,13 @@ fn translate<'a, 'lua: 'a>(
         }
         55 => Event::PostponedTakeoff(AtPlace::from_lua(value, lua)?),
         56 => Event::PostponedLand(AtPlace::from_lua(value, lua)?),
-        57 => Event::Max,
-        n => bail!("unknown event {n}"),
+        // Hoggit: 2.9.6+ (S_EVENT_MAX = 61)
+        57 => Event::SimulationFreeze,
+        58 => Event::SimulationUnfreeze,
+        59 => Event::HumanAircraftRepairStart,
+        60 => Event::HumanAircraftRepairFinish,
+        61 => Event::Max,
+        n => Event::Unhandled(n),
     })
 }
 

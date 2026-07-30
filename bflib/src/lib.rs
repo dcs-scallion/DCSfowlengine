@@ -1317,6 +1317,7 @@ fn on_event(lua: MizLua, ev: Event) -> Result<()> {
         {
             ()
         }
+        Event::Max | Event::Unhandled(_) => (),
         ev => info!("onEvent: {:?}", ev),
     }
     match ev {
