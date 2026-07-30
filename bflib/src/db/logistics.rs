@@ -1795,6 +1795,12 @@ fn clamp_non_olo_airframe_rows_to_export(
     }
 }
 
+/// DT registration / filler pattern: empty 0/1 (or capacity 1) rows must not skew Supply %.
+/// Warehouse rows are unchanged — this is only for the Supply % average.
+fn equipment_counts_toward_supply_pct(inv: &Inventory) -> bool {
+    !(inv.stored == 0 && inv.capacity <= 1)
+}
+
 /// SETTINGS-Ai supplement airframes (`production == 0`): align virtual capacity to DCS stock.
 /// Legacy exports doubled baseline via `merge_ai_template_stock_export`; skip when already matched.
 fn reconcile_objective_stock_aircraft_capacity_to_dcs(
@@ -4601,6 +4607,9 @@ impl Db {
                     if !tracked.contains(name.as_str()) {
                         continue;
                     }
+                }
+                if !equipment_counts_toward_supply_pct(inv) {
+                    continue;
                 }
                 if let Some(pct) = inv.percent() {
                     sum += pct as u32;
