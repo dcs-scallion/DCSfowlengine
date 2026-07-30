@@ -64,6 +64,13 @@ pub struct CoalitionPointStats {
     pub invested_navy: u64,
 }
 
+/// Cross-objective ED dynamic cargo deliveries (persisted kg; HTML shows floor tons).
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct CoalitionDynamicCargoStats {
+    pub deliveries: u32,
+    pub tonnage_kg: u64,
+}
+
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct CoalitionCampaignStats {
     pub objectives_taken: u32,
@@ -72,6 +79,8 @@ pub struct CoalitionCampaignStats {
     pub online_secs: u64,
     pub losses: CoalitionLossStats,
     pub points: CoalitionPointStats,
+    #[serde(default)]
+    pub dynamic_cargo: CoalitionDynamicCargoStats,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -255,6 +264,22 @@ pub fn render_sidebar_html(view: &CampaignStatsView) -> String {
     out.push_str(&vs_row("Building logi", bl.building_logi, rl.building_logi, false));
     out.push_str(&vs_row("Building prod", bl.building_prod, rl.building_prod, false));
     out.push_str(&vs_row("Building static", bl.building_static, rl.building_static, false));
+    out.push_str(r#"</div></div>"#);
+
+    // Dynamic Cargo Logistics
+    let bdc = &s.blue.dynamic_cargo;
+    let rdc = &s.red.dynamic_cargo;
+    out.push_str(
+        r#"<div class="stat"><div class="stat-h">Dynamic Cargo Logistics</div><div class="stat-body">"#,
+    );
+    out.push_str(&section_hdr("Statistic"));
+    out.push_str(&vs_row("Deliveries", bdc.deliveries, rdc.deliveries, false));
+    out.push_str(&vs_row(
+        "Total Tonnage",
+        (bdc.tonnage_kg / 1000) as u32,
+        (rdc.tonnage_kg / 1000) as u32,
+        false,
+    ));
     out.push_str(r#"</div></div>"#);
 
     // Points
@@ -530,6 +555,24 @@ impl Db {
         }
         if let Some(c) = self.persisted.campaign_stats.coalition_mut(side) {
             c.online_secs += secs;
+            self.ephemeral.dirty();
+        }
+    }
+
+    /// Cross-objective dynamic cargo stocked at `dest_side` (kg floored; deliveries = events).
+    pub fn campaign_on_dynamic_cargo_delivery(
+        &mut self,
+        dest_side: Side,
+        weight_kg: f64,
+        deliveries: u32,
+    ) {
+        if !self.campaign_stats_active() || deliveries == 0 {
+            return;
+        }
+        let kg = weight_kg.max(0.).floor() as u64;
+        if let Some(c) = self.persisted.campaign_stats.coalition_mut(dest_side) {
+            c.dynamic_cargo.deliveries = c.dynamic_cargo.deliveries.saturating_add(deliveries);
+            c.dynamic_cargo.tonnage_kg = c.dynamic_cargo.tonnage_kg.saturating_add(kg);
             self.ephemeral.dirty();
         }
     }

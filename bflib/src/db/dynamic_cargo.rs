@@ -549,6 +549,17 @@ impl Db {
                         if spawn_pts != 0 {
                             *point_awards.entry(entry.spawner).or_default() += spawn_pts;
                         }
+                        let dest_side = self
+                            .persisted
+                            .objectives
+                            .get(&pad)
+                            .map(|o| o.owner)
+                            .unwrap_or(entry.side);
+                        self.campaign_on_dynamic_cargo_delivery(
+                            dest_side,
+                            entry.last_weight_kg,
+                            1,
+                        );
                         info!(
                             "dynamic cargo DCS absorb delivery: {} -> {:?} tons={:.2} deliverer={:?} spawner={:?}",
                             entry.name, pad, tons, deliverer, entry.spawner
@@ -843,6 +854,7 @@ impl Db {
         let mut point_awards: FxHashMap<Ucid, i32> = FxHashMap::default();
         let mut skipped_loaded = 0u32;
         let mut rejected_same_objective = 0u32;
+        let mut delivered_weight_kg = 0f64;
         for name in names {
             let Some(entry) = self.persisted.dynamic_cargo_crates.get(&name).cloned() else {
                 continue;
@@ -914,6 +926,7 @@ impl Db {
                 *point_awards.entry(entry.spawner).or_default() += spawn_pts;
             }
             self.persisted.dynamic_cargo_crates.remove_cow(&name);
+            delivered_weight_kg += weight_kg.max(0.);
             result.crates += 1;
         }
         if result.crates == 0 {
@@ -934,6 +947,13 @@ impl Db {
             }
             bail!("no dynamic cargo crates could be stocked");
         }
+        let dest_side = self
+            .persisted
+            .objectives
+            .get(&dest_oid)
+            .map(|o| o.owner)
+            .unwrap_or(Side::Neutral);
+        self.campaign_on_dynamic_cargo_delivery(dest_side, delivered_weight_kg, 1);
         self.sync_objective_to_warehouse(lua, dest_oid)
             .context("syncing destination warehouse after To stock")?;
         self.update_supply_status()
