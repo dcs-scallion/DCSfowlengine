@@ -671,6 +671,12 @@ impl<'lua> SpawnCtx<'lua> {
                     .first()
                     .context("getting first unit in static group")?
                     .clone();
+                // MOOSE SPAWNSTATIC: Template.alt = land.getHeight(map x/y)
+                let pos = unit.pos().context("static unit pos")?;
+                let alt = Land::singleton(self.lua)?
+                    .get_height(LuaVec2(pos))
+                    .context("land.getHeight for static spawn")?;
+                unit.set_alt(alt).context("set static spawn alt")?;
                 self.coalition
                     .add_static_object(template.country, unit)
                     .with_context(|| {

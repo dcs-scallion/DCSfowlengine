@@ -117,7 +117,7 @@ impl fmt::Display for Unpakistan {
                 write!(f, "queued production repair at {opr} (production {pct}%)")
             }
             Self::RepairedStaticQueue(base, queued, need) => {
-                write!(f, "queued ME static repair at {base} ({queued}/{need})")
+                write!(f, "queued static repair at {base} ({queued}/{need})")
             }
             Self::TransferedSupplies(from, to) => {
                 write!(f, "transfered supplies from {from} to {to}")
@@ -1079,14 +1079,14 @@ impl Db {
                         &st.ucid,
                         oid,
                         cost,
-                        "ME static repair",
+                        "static repair",
                     )?;
                     charge_repair_cost(
                         self,
                         &st.ucid,
                         oid,
                         cost,
-                        "for ME static repair crate queue",
+                        "for static repair crate queue",
                     );
                     let rate = self.ephemeral.cfg.static_repair_rate_seconds;
                     let now = Utc::now();
@@ -1105,7 +1105,7 @@ impl Db {
                         self,
                         &st.ucid,
                         cost,
-                        "for ME static repair crate queue",
+                        "for static repair crate queue",
                     );
                     let obj = objective!(self, oid)?;
                     return Ok(Unpakistan::RepairedStaticQueue(
@@ -1115,7 +1115,7 @@ impl Db {
                     ));
                 } else if obj.static_repair_need > 0 {
                     reasons.push(
-                        "ME static repair queue is full (unload more repair crates)".into(),
+                        "static repair queue is full (unload more repair crates)".into(),
                     );
                 } else {
                     reasons.push("objective logistics are completely repaired".into());
