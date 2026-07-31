@@ -3797,9 +3797,6 @@ impl Db {
                         );
                         self.update_supply_status()
                             .context("supply status after bootstrap")?;
-                        if let Err(e) = self.maybe_do_spawnable_logi_repairs(ts) {
-                            error!("spawnable logi auto-repair {e:?}");
-                        }
                         self.ephemeral.logistics_stage = LogiStage::Complete { last_tick: ts };
                     } else {
                         wh_diag("no transfers; balance hubs then sync-to DCS");
@@ -3841,9 +3838,6 @@ impl Db {
                 }
                 LogiStage::SyncToWarehouses { objectives } => match objectives.pop() {
                     None => {
-                        if let Err(e) = self.maybe_do_spawnable_logi_repairs(ts) {
-                            error!("spawnable logi auto-repair {e:?}");
-                        }
                         self.update_supply_status()
                             .context("supply status after logistics sync-to")?;
                         self.ephemeral.logistics_stage = LogiStage::Complete { last_tick: ts };

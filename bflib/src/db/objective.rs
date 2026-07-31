@@ -2158,33 +2158,6 @@ impl Db {
         Ok(true)
     }
 
-    /// Spawnable `RLOGI`/`BLOGI` only; ME `ObjectiveStatic` uses repair-crate queue.
-    pub fn maybe_do_spawnable_logi_repairs(&mut self, now: DateTime<Utc>) -> Result<()> {
-        let oids: Vec<ObjectiveId> = self
-            .persisted
-            .objectives
-            .into_iter()
-            .filter(|(_, obj)| {
-                !matches!(obj.kind, ObjectiveKind::Production)
-                    && !obj.captureable()
-                    && obj.supply > 0
-                    && !obj.spawnable_logi_repaired
-            })
-            .map(|(id, _)| *id)
-            .collect();
-        for oid in oids {
-            let side = objective!(self, oid)?.owner;
-            let prev_logi = objective!(self, oid)?.logi;
-            self.repair_one_logi_step(side, now, oid)?;
-            let obj = objective!(self, oid)?;
-            if prev_logi != obj.logi {
-                self.ephemeral
-                    .update_objective_markup(&self.persisted, obj, &[]);
-            }
-        }
-        Ok(())
-    }
-
     pub fn maybe_do_static_repairs(
         &mut self,
         lua: MizLua,
