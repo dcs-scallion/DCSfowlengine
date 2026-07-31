@@ -12,17 +12,22 @@ pub fn run(writedir: &Path, cfg: &ServerMaintenanceCfg) {
     if let Some(days) = cfg.tracks_multiplayer_retain_days {
         // CFG 0 → 1 day minimum (never "delete all").
         let days = days.max(1);
-        cleanup_tracks_multiplayer(writedir, days);
+        cleanup_by_age(
+            &writedir.join("Tracks").join("Multiplayer"),
+            days,
+            &["trk"],
+            "Tracks/Multiplayer",
+        );
+    }
+    if let Some(days) = cfg.logs_multiplayer_retain_days {
+        let days = days.max(1);
+        cleanup_by_age(&writedir.join("Logs"), days, &["txt", "log"], "Logs");
     }
 }
 
-fn cleanup_tracks_multiplayer(writedir: &Path, retain_days: u32) {
-    let dir = writedir.join("Tracks").join("Multiplayer");
+fn cleanup_by_age(dir: &Path, retain_days: u32, extensions: &[&str], label: &str) {
     if !dir.is_dir() {
-        info!(
-            "server_maintenance: Tracks/Multiplayer missing ({:?}), skip",
-            dir
-        );
+        info!("server_maintenance: {label} missing ({:?}), skip", dir);
         return;
     }
     let Some(cutoff) =
@@ -33,7 +38,7 @@ fn cleanup_tracks_multiplayer(writedir: &Path, retain_days: u32) {
     };
     let mut deleted = 0u32;
     let mut skipped = 0u32;
-    let entries = match fs::read_dir(&dir) {
+    let entries = match fs::read_dir(dir) {
         Ok(e) => e,
         Err(e) => {
             warn!("server_maintenance: cannot read {:?}: {e}", dir);
@@ -52,11 +57,15 @@ fn cleanup_tracks_multiplayer(writedir: &Path, retain_days: u32) {
         if !path.is_file() {
             continue;
         }
-        let is_trk = path
+        let ext_ok = path
             .extension()
             .and_then(|e| e.to_str())
-            .is_some_and(|e| e.eq_ignore_ascii_case("trk"));
-        if !is_trk {
+            .is_some_and(|e| {
+                extensions
+                    .iter()
+                    .any(|want| e.eq_ignore_ascii_case(want))
+            });
+        if !ext_ok {
             continue;
         }
         let meta = match entry.metadata() {
@@ -87,7 +96,7 @@ fn cleanup_tracks_multiplayer(writedir: &Path, retain_days: u32) {
         }
     }
     info!(
-        "server_maintenance: Tracks/Multiplayer retain_days={retain_days} deleted={deleted} skipped={skipped} ({:?})",
+        "server_maintenance: {label} retain_days={retain_days} deleted={deleted} skipped={skipped} ({:?})",
         dir
     );
 }

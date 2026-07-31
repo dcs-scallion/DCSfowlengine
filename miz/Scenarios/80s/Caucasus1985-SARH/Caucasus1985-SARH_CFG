@@ -84,7 +84,8 @@
     "source_spawner_points_per_ton": 15
   },
   "server_maintenance": {
-    "tracks_multiplayer_retain_days": 2
+    "tracks_multiplayer_retain_days": 7,
+    "logs_multiplayer_retain_days": 30
   },
   "acmi_sanitize": {
     "process_inbox_bat": "C:\\acmi-sanitize\\process_inbox.bat",

@@ -1351,6 +1351,10 @@ pub struct ServerMaintenanceCfg {
     /// Omit / null: disabled. `0` is treated as `1` (minimum retain age).
     #[serde(default)]
     pub tracks_multiplayer_retain_days: Option<u32>,
+    /// Delete `.txt` / `.log` under `Logs` older than this many days (mtime).
+    /// Omit / null: disabled. `0` is treated as `1` (minimum retain age).
+    #[serde(default)]
+    pub logs_multiplayer_retain_days: Option<u32>,
 }
 
 fn default_mission_datetime_post_round_delay_secs() -> u32 {
