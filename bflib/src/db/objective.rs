@@ -45,8 +45,9 @@ use dcso3::{
     azumith2d_to, centroid2d,
     coalition::Side,
     coord::Coord,
+    country::Country,
     cvt_err,
-    env::miz::{GroupKind, MizIndex},
+    env::miz::{GroupKind, Miz, MizIndex},
     group::Group,
     land::{Land, SurfaceType},
     net::Ucid,
@@ -63,6 +64,16 @@ use std::{cmp::max, str::FromStr, sync::Arc};
 
 fn naval_carrier_pad(db: &Db, pad: &str) -> bool {
     db.ephemeral.global_pad_templates.contains(pad)
+}
+
+fn coalition_country_for_side(lua: MizLua, side: Side) -> Result<Country> {
+    let miz = Miz::singleton(lua)?;
+    let coa = miz.coalition(side)?;
+    let countries = coa.countries()?;
+    let country = countries
+        .first()
+        .with_context(|| format!("no countries for coalition {side:?}"))?;
+    country.id()
 }
 
 /// Ground XZ for FARP markup / zone (persisted unit.pos can lag ME template after spawn).
@@ -2224,6 +2235,7 @@ impl Db {
         use dcso3::{coalition::Static, static_object::StaticObject};
 
         let obj = objective!(self, oid)?;
+        let owner = obj.owner;
         let mut targets: SmallVec<[(UnitId, i64, CompactString, Side); 8]> = smallvec![];
         for (_, groups) in &obj.groups {
             for gid in groups {
@@ -2249,25 +2261,53 @@ impl Db {
         let Some((uid, _, _, template_side)) = targets.first() else {
             return Ok(false);
         };
-        let (unit_name, template_name) = {
+        let (unit_name, template_name, gid) = {
             let unit = unit!(self, uid)?;
-            (unit.name.clone(), {
-                let group = group!(self, unit.group)?;
-                group.template_name.clone()
-            })
+            let group = group!(self, unit.group)?;
+            (
+                unit.name.clone(),
+                group.template_name.clone(),
+                unit.group,
+            )
         };
         if let Ok(Static::Static(st)) = StaticObject::get_by_name(lua, unit_name.as_str()) {
             let _ = st.destroy();
         }
-        let tpl = spctx
-            .get_template_ref(idx, GroupKind::Any, *template_side, template_name.as_str())
+        // ME template lives under placement side; spawn country follows current objective owner.
+        let mut tpl = spctx
+            .get_template(idx, GroupKind::Any, *template_side, template_name.as_str())
             .with_context(|| format_compact!("objective static template {template_name}"))?;
+        if owner != *template_side {
+            tpl.country = coalition_country_for_side(lua, owner)?;
+            tpl.side = owner;
+        }
         spctx
             .spawn(tpl)
             .with_context(|| format_compact!("respawning objective static {unit_name}"))?;
-        if let Some(unit) = self.persisted.units.get_mut_cow(&uid) {
+        let old_side = {
+            let group = group_mut!(self, gid)?;
+            let old = group.side;
+            group.side = owner;
+            old
+        };
+        if let Some(unit) = self.persisted.units.get_mut_cow(uid) {
             unit.dead = false;
             unit.hp_percent = 100;
+            unit.side = owner;
+        }
+        if old_side != owner {
+            let obj = objective_mut!(self, oid)?;
+            if let Some(set) = obj.groups.get_mut_cow(&old_side) {
+                set.remove_cow(&gid);
+            }
+            obj.groups.get_or_default_cow(owner).insert_cow(gid);
+            if let Some(set) = self.persisted.groups_by_side.get_mut_cow(&old_side) {
+                set.remove_cow(&gid);
+            }
+            self.persisted
+                .groups_by_side
+                .get_or_default_cow(owner)
+                .insert_cow(gid);
         }
         self.ephemeral.dirty();
         let _ = now;
@@ -2401,6 +2441,11 @@ impl Db {
                 obj.last_threatened_ts = now;
                 obj.last_activate = now;
                 obj.owner = new_owner;
+                if previous_owner != new_owner {
+                    // Queued ME static repairs belong to the previous owner; cancel on flip.
+                    obj.static_repair = 0;
+                    obj.static_repair_due = now;
+                }
                 actually_captured.push((*side, oid));
                 for gid in obj.groups.get(&obj.owner).unwrap_or(&Set::new()) {
                     to_mark.push(*gid);
