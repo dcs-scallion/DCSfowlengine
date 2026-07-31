@@ -1344,6 +1344,15 @@ impl AcmiSanitizeCfg {
     }
 }
 
+/// Writedir housekeeping run once at mission start (`Lfs.writedir()`).
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct ServerMaintenanceCfg {
+    /// Delete `.trk` under `Tracks/Multiplayer` older than this many days (mtime).
+    /// Omit / null: disabled. `0` is treated as `1` (minimum retain age).
+    #[serde(default)]
+    pub tracks_multiplayer_retain_days: Option<u32>,
+}
+
 fn default_mission_datetime_post_round_delay_secs() -> u32 {
     15
 }
@@ -1811,6 +1820,9 @@ pub struct Cfg {
     /// After each round, rewrite ME start time (and optionally date) in the on-disk `.miz`.
     #[serde(default)]
     pub setmissionstartdatetime: SetMissionStartDatetimeCfg,
+    /// Writedir housekeeping at mission start (tracks, future similar ops).
+    #[serde(default)]
+    pub server_maintenance: ServerMaintenanceCfg,
     /// Available actions per side
     #[serde(default)]
     pub actions: FxHashMap<Side, IndexMap<String, Action, FxBuildHasher>>,

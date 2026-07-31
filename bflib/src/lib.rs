@@ -2757,6 +2757,10 @@ fn delayed_init_miz(lua: MizLua) -> Result<()> {
     };
     debug!("sortie is {:?}", ctx.sortie);
     let cfg = Arc::new(Cfg::load(&path)?);
+    {
+        let writedir = PathBuf::from(Lfs::singleton(lua)?.writedir()?.as_str());
+        crate::db::server_maintenance::run(&writedir, &cfg.server_maintenance);
+    }
     info!(
         "campaign cfg: airborne_deslot_block={} airborne_deslot_penalty_secs={} airborne_deslot_penalty_points={} csar={} virtual_resupply={} virtual_resupply_threatened_without_deliveries={}",
         cfg.airborne_deslot_block,
