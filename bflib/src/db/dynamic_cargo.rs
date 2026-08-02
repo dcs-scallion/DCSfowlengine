@@ -270,6 +270,56 @@ impl Db {
         })
     }
 
+    /// Dest for DCS absorb: last crate pos, else carrier / spawner objective (≠ source).
+    fn resolve_dynamic_cargo_absorb_dest(
+        &self,
+        entry: &DynamicCargoCrate,
+    ) -> Option<ObjectiveId> {
+        if let Some(pad) = self.objective_containing(entry.side, entry.pos()) {
+            if pad != entry.source {
+                return Some(pad);
+            }
+        }
+        let carrier = entry.last_carrier.unwrap_or(entry.spawner);
+        self.player_cross_objective_for_absorb(entry.side, &carrier, entry.source)
+    }
+
+    fn player_cross_objective_for_absorb(
+        &self,
+        side: Side,
+        ucid: &Ucid,
+        source: ObjectiveId,
+    ) -> Option<ObjectiveId> {
+        let player = self.persisted.players.get(ucid)?;
+        if player.side != side {
+            return None;
+        }
+        let Some((_, Some(inst))) = player.current_slot.as_ref() else {
+            return None;
+        };
+        if let Some(oid) = inst.landed_at_objective {
+            if oid != source {
+                let ok = self.persisted.objectives.get(&oid).is_some_and(|o| {
+                    o.owner == side && o.logi() > 0 && !matches!(o.kind, ObjectiveKind::Production)
+                });
+                if ok {
+                    return Some(oid);
+                }
+            }
+        }
+        let p = Vector2::new(inst.position.p.0.x, inst.position.p.0.z);
+        let pad = self.objective_containing(side, p)?;
+        (pad != source).then_some(pad)
+    }
+
+    fn player_instance_world_pos(&self, ucid: &Ucid) -> Option<(f64, f64, f64)> {
+        let player = self.persisted.players.get(ucid)?;
+        let (_, Some(inst)) = player.current_slot.as_ref()? else {
+            return None;
+        };
+        Some((inst.position.p.0.x, inst.position.p.0.z, inst.position.p.0.y))
+    }
+
     /// Checked-out equipment qty still in registered crates from this source.
     pub(super) fn dynamic_cargo_equipment_reserved(&self, oid: ObjectiveId, item: &str) -> u32 {
         self.persisted
@@ -549,14 +599,15 @@ impl Db {
         }
         let mut sync_oids: FxHashMap<ObjectiveId, ()> = FxHashMap::default();
         let mut point_awards: FxHashMap<Ucid, i32> = FxHashMap::default();
+        let mut log_awards: FxHashMap<Ucid, ()> = FxHashMap::default();
         for name in gone {
             let Some(entry) = self.persisted.dynamic_cargo_crates.get(&name).cloned() else {
                 continue;
             };
             self.clamp_dynamic_cargo_checkout(entry.source);
             sync_oids.insert(entry.source, ());
-            if let Some(pad) = self.objective_containing(entry.side, entry.pos()) {
-                if pad != entry.source {
+            match self.resolve_dynamic_cargo_absorb_dest(&entry) {
+                Some(pad) => {
                     // DCS absorb at destination: credit Fowl stock + award per-ton points.
                     if let Err(e) = self.credit_objective_from_dynamic_cargo(
                         pad,
@@ -578,6 +629,8 @@ impl Db {
                         if spawn_pts != 0 {
                             *point_awards.entry(entry.spawner).or_default() += spawn_pts;
                         }
+                        log_awards.insert(deliverer, ());
+                        log_awards.insert(entry.spawner, ());
                         let dest_side = self
                             .persisted
                             .objectives
@@ -595,17 +648,17 @@ impl Db {
                         );
                     }
                     sync_oids.insert(pad, ());
-                } else {
+                }
+                None => {
                     info!(
-                        "dynamic cargo gone at source (no delivery points): {} source={:?}",
-                        entry.name, entry.source
+                        "dynamic cargo gone (no cross-objective dest): {} source={:?} pos=({:.0},{:.0}) carrier={:?}",
+                        entry.name,
+                        entry.source,
+                        entry.x,
+                        entry.y,
+                        entry.last_carrier
                     );
                 }
-            } else {
-                info!(
-                    "dynamic cargo gone (destroy / no pad): {} source={:?}",
-                    entry.name, entry.source
-                );
             }
             self.persisted.dynamic_cargo_crates.remove_cow(&name);
             self.clamp_dynamic_cargo_checkout(entry.source);
@@ -618,8 +671,10 @@ impl Db {
         for (ucid, amount) in point_awards {
             if amount != 0 {
                 self.adjust_points(&ucid, amount, "for dynamic cargo delivery (DCS absorb)");
-                self.campaign_top10_on_logistics(ucid);
             }
+        }
+        for ucid in log_awards.into_keys() {
+            self.campaign_top10_on_logistics(ucid);
         }
         if let Err(e) = self.update_supply_status() {
             warn!("dynamic cargo absorb supply status: {e:?}");
@@ -765,10 +820,18 @@ impl Db {
             };
             let weight = st.get_cargo_weight().unwrap_or(0.);
             let carrier = carrier_ucid_if_aboard(self, lua, side, &st);
+            let carrier_pos = carrier.and_then(|u| self.player_instance_world_pos(&u));
             if let Some(entry) = self.persisted.dynamic_cargo_crates.get_mut_cow(&name) {
-                entry.x = point.0.x;
-                entry.y = point.0.z;
-                entry.alt = point.0.y;
+                // Prefer carrier aircraft pos while aboard — cargo get_point can stay at source.
+                if let Some((x, y, alt)) = carrier_pos {
+                    entry.x = x;
+                    entry.y = y;
+                    entry.alt = alt;
+                } else {
+                    entry.x = point.0.x;
+                    entry.y = point.0.z;
+                    entry.alt = point.0.y;
+                }
                 entry.equipment = equipment;
                 entry.liquids = liquids;
                 if weight > 0. {
@@ -1068,7 +1131,7 @@ impl Db {
     }
 }
 
-/// MOOSE DynamicCargo: bay load = inside length×width while landed; sling = within rope 3D.
+/// MOOSE DynamicCargo: bay = length×width footprint (landed or airborne); sling = rope 3D.
 pub(crate) fn dynamic_cargo_is_aboard_unit(
     unit_pt: Vector3,
     landed: bool,
@@ -1082,7 +1145,8 @@ pub(crate) fn dynamic_cargo_is_aboard_unit(
     let cargo2 = Vector2::new(cargo_pt.0.x, cargo_pt.0.z);
     let hpos = Vector2::new(unit_pt.x, unit_pt.z);
     let delta2 = (hpos - cargo2).magnitude();
-    if landed && delta2 < dim.length && delta2 < dim.width {
+    // Bay cargo (e.g. C-130 ropelength 0) must count while airborne too.
+    if delta2 < dim.length && delta2 < dim.width {
         return Ok(true);
     }
     if !landed && dim.ropelength > 0. {
