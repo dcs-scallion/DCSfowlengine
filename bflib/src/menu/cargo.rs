@@ -154,48 +154,64 @@ pub(crate) fn list_cargo_for_slot(ctx: &mut Context, lua: MizLua, slot: &SlotId)
         .cargo_capacity(&sifo.typ)
         .context("getting unit cargo capacity")?;
     let mut msg = CompactString::new("Current Cargo\n--------------------------------------------\n");
+    let ucid = ctx.db.ephemeral.player_in_slot(slot);
+    let ed_bay_crates = ctx.db.fowl_crates_on_ed_bay(lua, slot);
+    let (crate_n, troop_n) = match ucid {
+        Some(_) => (
+            cargo.num_crates().saturating_add(ed_bay_crates.len()),
+            cargo.num_troops(),
+        ),
+        None => (cargo.num_crates(), cargo.num_troops()),
+    };
     msg.push_str(&format_compact!(
         "troops: {} of {}\n",
-        cargo.num_troops(),
+        troop_n,
         capacity.troop_slots
     ));
     msg.push_str(&format_compact!(
         "crates: {} of {}\n",
-        cargo.num_crates(),
+        crate_n,
         capacity.crate_slots
     ));
     msg.push_str(&format_compact!(
         "total : {} of {}\n",
-        cargo.num_total(),
+        crate_n.saturating_add(troop_n),
         capacity.total_slots
     ));
-    msg.push_str("--------------------------------------------\n");
-    let mut fowl_total = 0u32;
+    let mut detail = CompactString::new("");
+    let mut fowl_hybrid_kg = 0u32;
     for (_, cr) in &cargo.crates {
-        msg.push_str(&format_compact!(
+        detail.push_str(&format_compact!(
             "{} crate weighing: {} kg\n",
             cr.name,
             cr.weight
         ));
-        fowl_total = fowl_total.saturating_add(cr.weight);
+        fowl_hybrid_kg = fowl_hybrid_kg.saturating_add(cr.weight);
+    }
+    // Fowl ED bay crates: names above Dynamic line; mass is included in Dynamic total.
+    for (name, _) in &ed_bay_crates {
+        detail.push_str(&format_compact!("{name} crate\n"));
     }
     for it in &cargo.troops {
-        msg.push_str(&format_compact!(
+        detail.push_str(&format_compact!(
             "{} troop weighing: {} kg\n",
             it.troop.name,
             it.troop.weight
         ));
-        fowl_total = fowl_total.saturating_add(it.troop.weight);
+        fowl_hybrid_kg = fowl_hybrid_kg.saturating_add(it.troop.weight);
     }
-    let dynamic_kg = ctx.db.loaded_dynamic_cargo_weight_kg(lua, slot);
-    if fowl_total > 0 || dynamic_kg > 0 {
+    if !detail.is_empty() {
         msg.push_str("--------------------------------------------\n");
+        msg.push_str(&detail);
     }
+    // All ED bay cargo (Fowl + warehouse); Fowl names are itemized above.
+    let dynamic_kg = ctx.db.loaded_dynamic_cargo_weight_kg(lua, slot);
+    msg.push_str("--------------------------------------------\n");
     msg.push_str(&format_compact!(
         "Dynamic cargo weight: {} kg\n",
         dynamic_kg
     ));
-    let total = fowl_total.saturating_add(dynamic_kg);
+    let total = fowl_hybrid_kg.saturating_add(dynamic_kg);
     msg.push_str("======================\n");
     msg.push_str(&format_compact!("Total cargo weight: {} kg", total));
     ctx.db
@@ -342,8 +358,10 @@ pub(super) fn add_cargo_menu_for_group(
         unpakistan,
         group,
     )?;
-    let ed_bay = cfg.dynamic_cargo_delivery.enabled
-        && crate::db::dynamic_cargo::uses_ed_dynamic_cargo_bay(unit_typ);
+    let ed_bay = crate::db::dynamic_cargo::uses_shared_ed_cargo_bay(
+        &cfg.dynamic_cargo_delivery,
+        unit_typ,
+    );
     if !ed_bay {
         mc.add_command_for_group(
             group,

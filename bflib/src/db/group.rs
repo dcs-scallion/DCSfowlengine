@@ -912,6 +912,9 @@ impl Db {
         // to their destination.
         let group_name = if extra_tags.contains(UnitTag::NavalSpawnPoint) {
             template_name.clone()
+        } else if let DeployKind::Crate { spec, .. } = &origin {
+            // ED LOAD CARGOS shows unit name — prefer Fowl crate label over RCRATE/BCRATE.
+            String::from(format_compact!("{}-{}", spec.name, gid))
         } else if let Some(lbl) = spawn_group_label {
             String::from(lbl)
         } else {
@@ -994,7 +997,9 @@ impl Db {
             let unit_tpl_name = unit.name()?;
             let unit_name = if extra_tags.contains(UnitTag::NavalSpawnPoint) {
                 unit_tpl_name.clone()
-            } else if spawn_group_label.is_some() && template_unit_count == 1 {
+            } else if matches!(spawned.origin, DeployKind::Crate { .. })
+                || (spawn_group_label.is_some() && template_unit_count == 1)
+            {
                 group_name.clone()
             } else {
                 String::from(format_compact!("{}-{}", group_name, uid))
@@ -1568,7 +1573,7 @@ impl Db {
         id: &DcsOid<ClassUnit>,
         now: DateTime<Utc>,
     ) -> Result<()> {
-        let uid = match self.ephemeral.unit_dead(&self.persisted, id) {
+        let (uid, player_ucid) = match self.ephemeral.unit_dead(&self.persisted, id) {
             None => return Ok(()),
             Some((uid, ucid)) => {
                 if let Some(ucid) = ucid {
@@ -1578,8 +1583,10 @@ impl Db {
                         .get(&ucid)
                         .and_then(|p| p.current_slot.as_ref().map(|(s, _)| *s));
                     self.sync_player_deslot_state(&ucid, slot);
+                    (uid, Some(ucid))
+                } else {
+                    (uid, None)
                 }
-                uid
             }
         };
         match self.persisted.units.get_mut_cow(&uid) {
@@ -1591,7 +1598,10 @@ impl Db {
                 unit.position = unit.spawn_position;
                 let gid = unit.group;
                 let typ = unit.typ.clone();
-                self.campaign_record_unit_loss(gid, &typ);
+                // Player airframes are counted via campaign_record_player_airframe_loss.
+                if player_ucid.is_none() {
+                    self.campaign_record_unit_loss(gid, &typ);
+                }
                 self.ephemeral.dirty();
                 if self.persisted.actions.contains(&gid) {
                     crate::db::ai_air::mark_ai_air_attrition(self, gid);
@@ -1783,6 +1793,7 @@ impl Db {
                             }
                         }
                         // F8 / sling despawn — keep DeployKind::Crate for unload revive.
+                        // Bay capacity is enforced by ED dynamic cargo (no Fowl delete-on-full).
                         if let Some(id) = self.ephemeral.group_marks.remove(&gid) {
                             self.ephemeral.msgs.delete_mark(id);
                         }
@@ -1823,7 +1834,10 @@ impl Db {
             let Some((_, Some(inst))) = player.current_slot.as_ref() else {
                 continue;
             };
-            if !super::dynamic_cargo::is_ed_cargo_transport(inst.typ.as_str()) {
+            if !super::dynamic_cargo::uses_shared_ed_cargo_bay(
+                &self.ephemeral.cfg.dynamic_cargo_delivery,
+                inst.typ.as_str(),
+            ) {
                 continue;
             }
             let pos = match self.ephemeral.slot_instance_unit(lua, slot) {

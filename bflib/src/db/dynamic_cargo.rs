@@ -15,7 +15,6 @@ for more details.
 */
 
 use super::{
-    group::DeployKind,
     logistics::{dcs_liquid_kg_to_fowl_tons, objective_liquids_stored_as_tons},
     Db, MapM, MapS,
 };
@@ -118,12 +117,12 @@ fn dynamic_cargo_aircraft_dim(type_name: &str) -> Option<DynamicCargoAircraftDim
     }
 }
 
-/// Airframes that use ED F8 / bay for Fowl crates when `dynamic_cargo_delivery.enabled`.
-pub fn uses_ed_dynamic_cargo_bay(typ: &str) -> bool {
-    matches!(typ, "C-130J-30")
+/// Airframes that use ED F8 / bay for Fowl crates when listed in CFG `shared_ed_cargo_airframes`.
+pub fn uses_shared_ed_cargo_bay(cfg: &DynamicCargoDeliveryCfg, typ: &str) -> bool {
+    cfg.enabled && cfg.shared_ed_cargo_airframes.contains(typ)
 }
 
-/// Airframes that can F8 or sling ED canCargo crates.
+/// Airframes that can F8 or sling ED canCargo crates (geometry / weight detection).
 pub fn is_ed_cargo_transport(typ: &str) -> bool {
     dynamic_cargo_aircraft_dim(typ).is_some()
 }
@@ -158,6 +157,14 @@ impl Db {
             return Ok(());
         }
         let name = st.get_name()?;
+        // Fowl R/BCRATE (canCargo) must not enter the warehouse dynamic-cargo registry.
+        if let Some(uid) = self.persisted.units_by_name.get(name.as_str()) {
+            if let Some(unit) = self.persisted.units.get(uid) {
+                if self.persisted.crates.contains(&unit.group) {
+                    return Ok(());
+                }
+            }
+        }
         if self.persisted.dynamic_cargo_crates.get(name.as_str()).is_some() {
             return Ok(());
         }
@@ -500,6 +507,28 @@ impl Db {
     pub fn prune_missing_dynamic_cargo(&mut self, lua: MizLua) {
         if !self.dynamic_cargo_enabled() {
             return;
+        }
+        // Drop Fowl R/BCRATE entries wrongly registered while canCargo was on.
+        let fowl_wrong: Vec<String> = self
+            .persisted
+            .dynamic_cargo_crates
+            .into_iter()
+            .filter_map(|(name, _)| {
+                let uid = self.persisted.units_by_name.get(name.as_str())?;
+                let unit = self.persisted.units.get(uid)?;
+                if self.persisted.crates.contains(&unit.group) {
+                    Some(name.clone())
+                } else {
+                    None
+                }
+            })
+            .collect();
+        for name in fowl_wrong {
+            if let Some(entry) = self.persisted.dynamic_cargo_crates.remove_cow(&name) {
+                self.clamp_dynamic_cargo_checkout(entry.source);
+                info!("dynamic cargo: removed Fowl crate registry entry {name}");
+                self.ephemeral.dirty();
+            }
         }
         let gone: Vec<String> = self
             .persisted
@@ -968,9 +997,12 @@ impl Db {
         Ok(result)
     }
 
-    /// Sum of ED dynamic cargo crate masses (kg) currently aboard this slot's airframe.
-    /// Includes warehouse registry crates and Fowl crates loaded via F8/sling.
-    pub fn loaded_dynamic_cargo_weight_kg(&self, lua: MizLua, slot: &dcso3::net::SlotId) -> u32 {
+    /// Sum of ED warehouse dynamic cargo masses (kg) aboard this slot (excludes Fowl crates).
+    pub fn loaded_warehouse_dynamic_cargo_weight_kg(
+        &self,
+        lua: MizLua,
+        slot: &dcso3::net::SlotId,
+    ) -> u32 {
         if !self.dynamic_cargo_enabled() {
             return 0;
         }
@@ -999,6 +1031,13 @@ impl Db {
             if entry.side != side {
                 continue;
             }
+            if let Some(uid) = self.persisted.units_by_name.get(name.as_str()) {
+                if let Some(unit) = self.persisted.units.get(uid) {
+                    if self.persisted.crates.contains(&unit.group) {
+                        continue;
+                    }
+                }
+            }
             let Ok(Static::Static(st)) = StaticObject::get_by_name(lua, name.as_str()) else {
                 continue;
             };
@@ -1013,50 +1052,24 @@ impl Db {
                 _ => {}
             }
         }
-        for gid in &self.persisted.crates {
-            let Some(group) = self.persisted.groups.get(gid) else {
-                continue;
-            };
-            if group.side != side {
-                continue;
-            }
-            let DeployKind::Crate {
-                spec, ed_carrier, ..
-            } = &group.origin
-            else {
-                continue;
-            };
-            let mut from_static = false;
-            for uid in &group.units {
-                let Some(unit) = self.persisted.units.get(uid) else {
-                    continue;
-                };
-                let Ok(Static::Static(st)) = StaticObject::get_by_name(lua, unit.name.as_str())
-                else {
-                    continue;
-                };
-                match dynamic_cargo_is_aboard_unit(hpt, landed, typ.as_str(), &st) {
-                    Ok(true) => {}
-                    _ => continue,
-                }
-                let w = match st.get_cargo_weight() {
-                    Ok(w) if w > 0. => w.round() as u32,
-                    _ => spec.weight,
-                };
-                total = total.saturating_add(w);
-                from_static = true;
-                break;
-            }
-            if !from_static && ed_carrier.as_ref() == Some(ucid) {
-                total = total.saturating_add(spec.weight);
-            }
-        }
         total
+    }
+
+    /// Sum of ED dynamic cargo crate masses (kg) currently aboard this slot's airframe.
+    /// Warehouse registry crates + Fowl crates loaded via F8/sling.
+    pub fn loaded_dynamic_cargo_weight_kg(&self, lua: MizLua, slot: &dcso3::net::SlotId) -> u32 {
+        let warehouse = self.loaded_warehouse_dynamic_cargo_weight_kg(lua, slot);
+        let fowl: u32 = self
+            .fowl_crates_on_ed_bay(lua, slot)
+            .into_iter()
+            .map(|(_, w)| w)
+            .sum();
+        warehouse.saturating_add(fowl)
     }
 }
 
 /// MOOSE DynamicCargo: bay load = inside length×width while landed; sling = within rope 3D.
-fn dynamic_cargo_is_aboard_unit(
+pub(crate) fn dynamic_cargo_is_aboard_unit(
     unit_pt: Vector3,
     landed: bool,
     type_name: &str,

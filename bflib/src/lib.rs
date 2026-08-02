@@ -1103,7 +1103,8 @@ fn player_slotted_in_aircraft_or_helicopter(ctx: &Context, ucid: &Ucid) -> bool 
     }
 }
 
-/// DCS often reports CA ground `getPlayerName()` as `"PLAYER"` on enter; Shot often has the real callsign.
+/// Resolve who took direct control on `PlayerEnterUnit`.
+/// DCS often reports CA ground `getPlayerName()` as `"PLAYER"`; fall back to CA-slot / sole non-air.
 fn resolve_combined_arms_controller(
     ctx: &Context,
     unit: &Unit,
@@ -1123,7 +1124,6 @@ fn resolve_combined_arms_controller(
         .and_then(|uid| ctx.db.persisted.units.get(uid))
         .map(|u| u.side)?;
 
-    // Shot path: not in air ⇒ can only be firing from Combined Arms.
     let mut non_air: SmallVec<[Ucid; 4]> = smallvec![];
     for (ucid, player) in &ctx.db.persisted.players {
         if player.side != unit_side {
@@ -1237,12 +1237,13 @@ fn handle_combined_arms_enter(
     apply_combined_arms_control(lua, ctx, unit, id, ucid, now)
 }
 
-/// Shot (and ShootingStart for MG/autocannon): real callsign often appears here; not-in-air ⇒ CA.
+/// Shot / ShootingStart: refresh `who()` mapping only — never escrow CA lives.
+/// Lives are taken solely on `PlayerEnterUnit` (direct control).
 fn handle_combined_arms_shot(
-    lua: MizLua,
+    _lua: MizLua,
     ctx: &mut Context,
     unit: &Unit,
-    now: DateTime<Utc>,
+    _now: DateTime<Utc>,
 ) -> Result<()> {
     let cat = match unit.get_category_ex() {
         Ok(c) => c,
@@ -1261,11 +1262,20 @@ fn handle_combined_arms_shot(
     if ctx.db.ca_controller(&id).is_some() {
         return Ok(());
     }
-    let Some(ucid) = resolve_combined_arms_controller(ctx, unit, &id) else {
-        warn!("CA shot: could not resolve controller for {id:?}");
+    // Real in-unit name + existing enter escrow → remount for kill attribution.
+    let Ok(Some(name)) = unit.get_player_name() else {
         return Ok(());
     };
-    apply_combined_arms_control(lua, ctx, unit, id, ucid, now)
+    if name.is_empty() || name.eq_ignore_ascii_case("PLAYER") {
+        return Ok(());
+    }
+    let Some(ucid) = lookup_ucid_by_player_name(ctx, name.as_str()) else {
+        return Ok(());
+    };
+    if ctx.db.ca_player_has_escrow(&ucid) {
+        ctx.db.register_ca_control(id, ucid);
+    }
+    Ok(())
 }
 
 fn unit_killed(
@@ -1274,15 +1284,19 @@ fn unit_killed(
     id: DcsOid<ClassUnit>,
     now: DateTime<Utc>,
 ) -> Result<()> {
+    // Player slots usually have no persisted uid; unit_dead then skips war-loss.
+    let player_ucid = ctx.db.player_in_unit(false, &id);
+    if let Some(ref ucid) = player_ucid {
+        ctx.db.campaign_record_player_airframe_loss(ucid, &id);
+    }
     if ctx.db.ephemeral.cfg.airborne_deslot_block {
-        if let Some(ucid) = ctx.db.player_in_unit(false, &id) {
+        if let Some(ucid) = player_ucid {
             if ctx.db.persisted.players.get(&ucid).and_then(|p| p.airborne).is_some()
                 || airborne_deslot_block(ctx, lua, ucid, Some(&id)).is_some()
             {
                 info!("suppressed campaign unit death after airborne exit for {ucid:?}");
-                // Still count war losses / kill bookkeeping; skip persisted unit_dead.
+                // Kill bookkeeping only; airframe already recorded above.
                 ctx.shots_out.dead(id.clone(), now);
-                ctx.db.campaign_record_player_airframe_loss(&ucid, &id);
                 return Ok(());
             }
         }
@@ -1534,7 +1548,7 @@ fn on_event(lua: MizLua, ev: Event) -> Result<()> {
             }
         }
         Event::Shot(e) => {
-            // Register CA controller before shot bookkeeping so who() sees the player.
+            // Remount CA who() mapping only (no life escrow — that is PlayerEnterUnit).
             if let Err(err) = handle_combined_arms_shot(lua, ctx, &e.initiator, start_ts) {
                 error!("combined arms shot failed: {err:?}");
             }
@@ -1544,7 +1558,7 @@ fn on_event(lua: MizLua, ev: Event) -> Result<()> {
             ()
         }
         Event::ShootingStart(e) => {
-            // MG/autocannon do not emit Shot (Hoggit); same CA identity rule as Shot.
+            // MG/autocannon do not emit Shot (Hoggit); same who() remount as Shot.
             if let Some(initiator) = e.initiator.as_ref().and_then(|o| o.as_unit().ok()) {
                 if let Err(err) = handle_combined_arms_shot(lua, ctx, &initiator, start_ts) {
                     error!("combined arms shooting_start failed: {err:?}");

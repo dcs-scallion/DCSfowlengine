@@ -1800,6 +1800,11 @@ impl Db {
         self.ephemeral.ca_controller_by_oid.get(id).copied()
     }
 
+    /// True when this player already has a Combined Arms life in escrow (from enter).
+    pub fn ca_player_has_escrow(&self, ucid: &Ucid) -> bool {
+        self.ephemeral.ca_oid_by_controller.contains_key(ucid)
+    }
+
     pub fn clear_ca_control(&mut self, id: &DcsOid<ClassUnit>) {
         if let Some(ucid) = self.ephemeral.ca_controller_by_oid.remove(id) {
             if self
@@ -1915,8 +1920,8 @@ impl Db {
         true
     }
 
-    /// Player entered a Combined Arms–eligible unit; deny if no lives.
-    /// Escrows one Combined Arms life (same model as aircraft `lives_birth` slotting).
+    /// Direct control enter (`PlayerEnterUnit`): escrow one Combined Arms life.
+    /// Do not call from Shot / map-command paths — AI fire must not take lives.
     pub fn on_combined_arms_enter(
         &mut self,
         id: DcsOid<ClassUnit>,

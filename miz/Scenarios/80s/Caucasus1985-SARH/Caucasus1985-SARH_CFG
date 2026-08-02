@@ -81,7 +81,14 @@
     "maximum_dynamic_crates_per_coalition": 100,
     "to_stock_dynamic_crate_distance": 50,
     "to_stock_points_per_ton": 5,
-    "source_spawner_points_per_ton": 15
+    "source_spawner_points_per_ton": 15,
+    "shared_ed_cargo_airframes": [
+      "C-130J-30",
+      "CH-47Fbl1",
+      "Mi-8MT",
+      "Mi-24P",
+      "UH-1H"
+    ]
   },
   "server_maintenance": {
     "tracks_multiplayer_retain_days": 7,
@@ -334,7 +341,7 @@
   "calcm_mission_range": 600000,
   "lock_sides": true,
   "side_switches": 1,
-  "max_crates": 6,
+  "max_crates": 8,
   "life_types": {
     "Su-25": "Attack",
     "C-101CC": "Recon",
@@ -3755,6 +3762,10 @@
       "Unarmed"
     ],
     "container_cargo": [
+      "Logistics",
+      "Unarmed"
+    ],
+    "uh1h_cargo": [
       "Logistics",
       "Unarmed"
     ],

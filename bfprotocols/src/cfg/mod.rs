@@ -1569,6 +1569,10 @@ pub struct DynamicCargoDeliveryCfg {
     /// Points per ton to the registered spawner on cross-objective To stock / DCS absorb.
     #[serde(default = "default_source_spawner_points_per_ton")]
     pub source_spawner_points_per_ton: u32,
+    /// DCS type names that use ED F8/bay for Fowl crates (no Fowl Load/Unload) when `enabled`.
+    /// Physical bay fit is enforced by ED dynamic cargo; CFG `cargo` still covers hybrid troops / List Cargo.
+    #[serde(default)]
+    pub shared_ed_cargo_airframes: FxHashSet<String>,
 }
 
 impl Default for DynamicCargoDeliveryCfg {
@@ -1579,6 +1583,7 @@ impl Default for DynamicCargoDeliveryCfg {
             to_stock_dynamic_crate_distance: default_to_stock_dynamic_crate_distance(),
             to_stock_points_per_ton: default_to_stock_points_per_ton(),
             source_spawner_points_per_ton: default_source_spawner_points_per_ton(),
+            shared_ed_cargo_airframes: FxHashSet::default(),
         }
     }
 }

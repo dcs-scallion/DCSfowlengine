@@ -316,54 +316,77 @@ pub fn render_top10_sidebar_html(
         "A2A",
         &view.a2a,
         dm.campaign_top10_A2A_closed as usize,
+        true,
     ));
     out.push_str(&top10_section(
         &format!("Top {} Killboard", dm.campaign_top10_A2G_open),
         "A2G",
         &view.a2g,
         dm.campaign_top10_A2G_closed as usize,
+        true,
     ));
     out.push_str(&top10_section(
         &format!("Top {} Killboard", dm.campaign_top10_A2S_open),
         "A2S",
         &view.a2s,
         dm.campaign_top10_A2S_closed as usize,
+        true,
     ));
     out.push_str(&top10_section(
         &format!("Top {} Support", dm.campaign_top10_LOG_open),
         "LOG",
         &view.logistics,
         dm.campaign_top10_LOG_closed as usize,
+        false,
     ));
     out.push_str(&top10_section(
         &format!("Top {} Killboard  (CA)", dm.campaign_top10_G2A_open),
         "G2A",
         &view.g2a,
         dm.campaign_top10_G2A_closed as usize,
+        true,
     ));
     out.push_str(&top10_section(
         &format!("Top {} Killboard  (CA)", dm.campaign_top10_G2G_open),
         "G2G",
         &view.g2g,
         dm.campaign_top10_G2G_closed as usize,
+        true,
     ));
     out.push_str(&top10_section(
         &format!("Top {} Killboard  (CA)", dm.campaign_top10_G2S_open),
         "G2S",
         &view.g2s,
         dm.campaign_top10_G2S_closed as usize,
+        true,
     ));
     out.push_str("</div>");
     out
 }
 
-fn top10_section(title: &str, badge: &str, rows: &[Top10Row], preview: usize) -> String {
+fn top10_section(
+    title: &str,
+    badge: &str,
+    rows: &[Top10Row],
+    preview: usize,
+    kills_use_enemy_color: bool,
+) -> String {
     let mut body = String::new();
     for (i, r) in rows.iter().enumerate() {
-        let cls = match r.side {
+        let name_cls = match r.side {
             Side::Blue => "top10-blue",
             Side::Red => "top10-red",
             _ => "top10-neutral",
+        };
+        // Kill counts = damage to the enemy coalition → enemy color. LOG stays player color.
+        let count_cls = if kills_use_enemy_color {
+            match r.side {
+                Side::Blue => "top10-red",
+                Side::Red => "top10-blue",
+                _ => "top10-neutral",
+            }
+        } else {
+            name_cls
         };
         let extra = if i < preview {
             " top10-row-preview"
@@ -371,9 +394,10 @@ fn top10_section(title: &str, badge: &str, rows: &[Top10Row], preview: usize) ->
             " top10-row-more"
         };
         body.push_str(&format!(
-            r#"<div class="pilot-row{extra}"><span class="rank-col" aria-hidden="true"></span><span class="pilot-name {cls}">{name}</span><span class="pilot-ping {cls}">{count}</span></div>"#,
+            r#"<div class="pilot-row{extra}"><span class="rank-col" aria-hidden="true"></span><span class="pilot-name {name_cls}">{name}</span><span class="pilot-ping {count_cls}">{count}</span></div>"#,
             extra = extra,
-            cls = cls,
+            name_cls = name_cls,
+            count_cls = count_cls,
             name = html_escape(&r.name),
             count = r.count,
         ));

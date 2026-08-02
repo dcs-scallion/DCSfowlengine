@@ -3281,8 +3281,20 @@ fn cas_patrol_offsets(center: Vector2, radius: f64) -> [Vector2; 3] {
     })
 }
 
+fn cas_ship_attributes() -> Vec<Attribute> {
+    vec![
+        Attribute::LightArmedShips,
+        Attribute::HeavyArmedShips,
+        Attribute::ArmedShips,
+        Attribute::UnarmedShips,
+    ]
+}
+
 /// ME-style CAS enroute combo (test mission `test CAS`).
+/// Attack helicopters: ships excluded from engage lists / `noTargetTypes`.
 pub(super) fn cas_combo_task<'lua>(kind: AiPlaneKind, zone: Vector2) -> Task<'lua> {
+    let heli = matches!(kind, AiPlaneKind::Helicopter);
+    let ships = cas_ship_attributes();
     let aa_engage = Task::EngageTargets {
         target_types: vec![
             Attribute::AirDefence,
@@ -3292,7 +3304,7 @@ pub(super) fn cas_combo_task<'lua>(kind: AiPlaneKind, zone: Vector2) -> Task<'lu
         ],
         max_dist: Some(cas_engage_max_dist(kind)),
         max_dist_enabled: Some(true),
-        no_target_types: None,
+        no_target_types: heli.then(|| ships.clone()),
         priority: Some(0),
         preset_key: None,
     };
@@ -3307,18 +3319,26 @@ pub(super) fn cas_combo_task<'lua>(kind: AiPlaneKind, zone: Vector2) -> Task<'lu
         ],
         priority: Some(1),
     };
+    let mut cas_preset_types = vec![Attribute::Helicopters, Attribute::GroundUnits];
+    if !heli {
+        cas_preset_types.push(Attribute::LightArmedShips);
+    }
     let cas_preset = Task::EngageTargets {
-        target_types: vec![
-            Attribute::Helicopters,
-            Attribute::GroundUnits,
-            Attribute::LightArmedShips,
-        ],
+        target_types: cas_preset_types,
         max_dist: None,
         max_dist_enabled: None,
-        no_target_types: None,
+        no_target_types: heli.then(|| ships.clone()),
         priority: Some(2),
         preset_key: Some(String::from("CAS")),
     };
+    let mut main_exclude = vec![Attribute::Fortifications, Attribute::LightArmedShips];
+    if heli {
+        main_exclude.extend([
+            Attribute::HeavyArmedShips,
+            Attribute::ArmedShips,
+            Attribute::UnarmedShips,
+        ]);
+    }
     let main_engage = Task::EngageTargets {
         target_types: vec![
             Attribute::Helicopters,
@@ -3328,10 +3348,7 @@ pub(super) fn cas_combo_task<'lua>(kind: AiPlaneKind, zone: Vector2) -> Task<'lu
         ],
         max_dist: Some(cas_engage_max_dist(kind)),
         max_dist_enabled: Some(true),
-        no_target_types: Some(vec![
-            Attribute::Fortifications,
-            Attribute::LightArmedShips,
-        ]),
+        no_target_types: Some(main_exclude),
         priority: Some(3),
         preset_key: None,
     };

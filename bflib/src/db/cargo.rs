@@ -508,6 +508,130 @@ impl Db {
         Ok(cargo_capacity)
     }
 
+    /// Fowl crates attributed to this player via ED F8/bay (`ed_carrier`).
+    pub fn fowl_ed_carrier_crate_count(&self, ucid: &Ucid) -> usize {
+        let mut n = 0usize;
+        for gid in &self.persisted.crates {
+            let Some(group) = self.persisted.groups.get(gid) else {
+                continue;
+            };
+            if let DeployKind::Crate {
+                ed_carrier: Some(carrier),
+                ..
+            } = &group.origin
+            {
+                if carrier == ucid {
+                    n += 1;
+                }
+            }
+        }
+        n
+    }
+
+    /// Fowl crates on this slot via ED bay: ground statics inside bay and/or `ed_carrier`.
+    /// Returns (display name, weight kg) for List Cargo.
+    pub fn fowl_crates_on_ed_bay(
+        &self,
+        lua: MizLua,
+        slot: &SlotId,
+    ) -> SmallVec<[(String, u32); 4]> {
+        let mut out: SmallVec<[(String, u32); 4]> = smallvec![];
+        let Some(ucid) = self.ephemeral.players_by_slot.get(slot) else {
+            return out;
+        };
+        let Some(player) = self.persisted.players.get(ucid) else {
+            return out;
+        };
+        let Some((_, Some(inst))) = player.current_slot.as_ref() else {
+            return out;
+        };
+        let side = player.side;
+        let (hpt, landed, typ) = match self.ephemeral.slot_instance_unit(lua, slot) {
+            Ok(unit) => {
+                let Ok(pt) = unit.get_point() else {
+                    return out;
+                };
+                let landed = unit.in_air().map(|a| !a).unwrap_or(!inst.in_air);
+                (pt.0, landed, inst.typ.0.clone())
+            }
+            Err(_) => (inst.position.p.0, !inst.in_air, inst.typ.0.clone()),
+        };
+        for gid in &self.persisted.crates {
+            let Some(group) = self.persisted.groups.get(gid) else {
+                continue;
+            };
+            if group.side != side {
+                continue;
+            }
+            let DeployKind::Crate {
+                spec, ed_carrier, ..
+            } = &group.origin
+            else {
+                continue;
+            };
+            let mut aboard = false;
+            let mut w = spec.weight;
+            for uid in &group.units {
+                let Some(unit) = self.persisted.units.get(uid) else {
+                    continue;
+                };
+                let Ok(Static::Static(st)) = StaticObject::get_by_name(lua, unit.name.as_str())
+                else {
+                    continue;
+                };
+                match crate::db::dynamic_cargo::dynamic_cargo_is_aboard_unit(
+                    hpt,
+                    landed,
+                    typ.as_str(),
+                    &st,
+                ) {
+                    Ok(true) => {
+                        aboard = true;
+                        if let Ok(cw) = st.get_cargo_weight() {
+                            if cw > 0. {
+                                w = cw.round() as u32;
+                            }
+                        }
+                        break;
+                    }
+                    _ => {}
+                }
+            }
+            if !aboard && ed_carrier.as_ref() != Some(ucid) {
+                continue;
+            }
+            out.push((spec.name.clone(), w));
+        }
+        out
+    }
+
+    /// Hybrid inventory + ED-bay Fowl crates for CFG `cargo` slot display / troop checks.
+    pub fn fowl_crate_and_troop_slot_usage(
+        &self,
+        slot: &SlotId,
+        ucid: &Ucid,
+    ) -> (usize, usize) {
+        let hybrid = self.ephemeral.cargo.get(slot);
+        let crates = hybrid.map(|c| c.num_crates()).unwrap_or(0)
+            + self.fowl_ed_carrier_crate_count(ucid);
+        let troops = hybrid.map(|c| c.num_troops()).unwrap_or(0);
+        (crates, troops)
+    }
+
+    /// Like `fowl_crate_and_troop_slot_usage`, but also counts Fowl statics currently in the ED bay.
+    pub fn fowl_crate_and_troop_slot_usage_with_bay(
+        &self,
+        lua: MizLua,
+        slot: &SlotId,
+        ucid: &Ucid,
+    ) -> (usize, usize) {
+        let hybrid = self.ephemeral.cargo.get(slot);
+        let troops = hybrid.map(|c| c.num_troops()).unwrap_or(0);
+        let hybrid_crates = hybrid.map(|c| c.num_crates()).unwrap_or(0);
+        let ed_bay = self.fowl_crates_on_ed_bay(lua, slot).len();
+        (hybrid_crates.saturating_add(ed_bay), troops)
+    }
+
     pub fn number_deployed(&self, side: Side, name: &str) -> Result<(usize, Option<Oldest>)> {
         let mut n = 0;
         let mut oldest = None;
@@ -1563,9 +1687,16 @@ impl Db {
         let unit = self.ephemeral.slot_instance_unit(lua, slot)?;
         ensure_cargo_bay_ready(&unit)?;
         let (cargo_capacity, side, unit_name) = self.unit_cargo_cfg(slot)?;
+        let ucid = self.ephemeral.player_in_slot(slot).cloned();
+        let ed_crates = ucid
+            .as_ref()
+            .map(|_| self.fowl_crates_on_ed_bay(lua, slot).len())
+            .unwrap_or(0);
         let cargo = self.ephemeral.cargo.entry(slot.clone()).or_default();
-        if cargo_capacity.crate_slots as usize <= cargo.num_crates()
-            || cargo_capacity.total_slots as usize <= cargo.num_total()
+        let crates = cargo.num_crates().saturating_add(ed_crates);
+        let troops = cargo.num_troops();
+        if cargo_capacity.crate_slots as usize <= crates
+            || cargo_capacity.total_slots as usize <= crates.saturating_add(troops)
         {
             bail!("you already have a full load onboard")
         }
@@ -1630,9 +1761,9 @@ impl Db {
                 }
             }
         }
-        let cargo = self.ephemeral.cargo.entry(slot.clone()).or_default();
-        if cargo_capacity.troop_slots as usize <= cargo.num_troops()
-            || cargo_capacity.total_slots as usize <= cargo.num_total()
+        let (crates, troops) = self.fowl_crate_and_troop_slot_usage_with_bay(lua, slot, &ucid);
+        if cargo_capacity.troop_slots as usize <= troops
+            || cargo_capacity.total_slots as usize <= crates.saturating_add(troops)
         {
             bail!("you already have a full load onboard")
         }
@@ -1883,12 +2014,18 @@ impl Db {
                 })
                 .ok_or_else(|| anyhow!("no troops in range"))?
         };
-        let cargo = self.ephemeral.cargo.entry(slot.clone()).or_default();
-        if cargo_capacity.troop_slots as usize <= cargo.num_troops()
-            || cargo_capacity.total_slots as usize <= cargo.num_total()
+        let ucid = self
+            .ephemeral
+            .player_in_slot(slot)
+            .cloned()
+            .ok_or_else(|| anyhow!("can't find player in slot {slot:?}"))?;
+        let (crates, troops) = self.fowl_crate_and_troop_slot_usage_with_bay(lua, slot, &ucid);
+        if cargo_capacity.troop_slots as usize <= troops
+            || cargo_capacity.total_slots as usize <= crates.saturating_add(troops)
         {
             bail!("you already have a full load onboard")
         }
+        let cargo = self.ephemeral.cargo.entry(slot.clone()).or_default();
         let troop_cfg = it.troop.clone();
         cargo.troops.push(it);
         Trigger::singleton(lua)?
