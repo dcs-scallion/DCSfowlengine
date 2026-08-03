@@ -1211,6 +1211,16 @@ fn dynamic_cargo_is_aboard_transport(
     Ok(carrier_ucid_if_aboard(db, lua, side, cargo).is_some())
 }
 
+/// Player transport bay/sling footprint (any shared-dim airframe in slot).
+pub(crate) fn dynamic_cargo_is_aboard_any_player_transport(
+    db: &Db,
+    lua: MizLua,
+    side: Side,
+    cargo: &StaticObject,
+) -> Result<bool> {
+    dynamic_cargo_is_aboard_transport(db, lua, side, cargo)
+}
+
 fn snapshot_cargo_warehouse(
     lua: MizLua,
     st: &StaticObject,

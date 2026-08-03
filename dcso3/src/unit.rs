@@ -17,6 +17,7 @@ use crate::{
     net::SlotId,
     object::{DcsObject, DcsOid, ObjectCategory},
     record_perf, simple_enum, wrapped_table, LuaEnv, LuaVec2, LuaVec3, MizLua, Position3, Sequence,
+    static_object::StaticObject,
 };
 use anyhow::{bail, Result};
 use log::warn;
@@ -207,6 +208,27 @@ impl<'lua> Unit<'lua> {
 
     pub fn get_ammo(&self) -> Result<Sequence<'lua, Ammo<'lua>>> {
         Ok(record_perf!(get_ammo, self.t.call_method("getAmmo", ())?))
+    }
+
+    /// ED dynamic cargo currently in this aircraft's bay (F8 / ground-crew unload list).
+    pub fn get_cargos_on_board(&self) -> Result<Option<Sequence<'lua, StaticObject<'lua>>>> {
+        match self.t.call_method::<_, Value>("getCargosOnBoard", ())? {
+            Value::Nil => Ok(None),
+            v => Ok(Some(Sequence::from_lua(v, self.lua)?)),
+        }
+    }
+
+    /// ED UI `unit:UnloadCargo(cargo)` — removes cargo from bay without orphaning the slot.
+    pub fn unload_cargo(&self, cargo: &StaticObject<'_>) -> Result<()> {
+        Ok(self.t.call_method("UnloadCargo", cargo.clone())?)
+    }
+
+    pub fn check_open_ramp(&self) -> Result<bool> {
+        Ok(self.t.call_method("checkOpenRamp", ())?)
+    }
+
+    pub fn open_ramp(&self, open: bool) -> Result<()> {
+        Ok(self.t.call_method("openRamp", open)?)
     }
 }
 

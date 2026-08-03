@@ -417,15 +417,15 @@ impl Db {
                     if self.persisted.units_by_name.get(unit_name.as_str()).is_some() {
                         continue;
                     }
+                    // Zone + kind only; ME coalition may differ from current owner.
                     let oid = self
                         .persisted
                         .objectives
                         .into_iter()
                         .filter(|(_, obj)| {
-                            obj.owner == side
-                                && statics
-                                    .get(unit_type.as_str())
-                                    .is_some_and(|c| c.allows_kind(&obj.kind))
+                            statics
+                                .get(unit_type.as_str())
+                                .is_some_and(|c| c.allows_kind(&obj.kind))
                                 && obj.zone.contains(pos)
                         })
                         .min_by(|(_, a), (_, b)| {
@@ -742,6 +742,8 @@ impl Db {
         t.link_objective_statics_from_miz(miz)?;
         t.sync_production_static_uid_map(lua)
             .context("syncing production factory static object ids")?;
+        t.realign_me_objective_static_owners(lua, &spctx, idx, None)
+            .context("realigning ME objective static coalitions at init")?;
         t.sync_production_factory_hp_from_dcs(lua, now)
             .context("syncing production factory HP from DCS at init")?;
         for id in ids {
@@ -787,6 +789,8 @@ impl Db {
             .context("syncing production factory static object ids after load")?;
         self.apply_persisted_production_factory_statics(lua)
             .context("applying persisted production factory static state")?;
+        self.realign_me_objective_static_owners(lua, spctx, idx, None)
+            .context("realigning ME objective static coalitions after load")?;
         self.apply_persisted_production_factory_hp(lua)
             .context("applying persisted production factory HP after load")?;
         self.refresh_all_production_objectives(Utc::now())

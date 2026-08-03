@@ -222,6 +222,16 @@ pub struct Ephemeral {
     pub(super) campaign_online_since: FxHashMap<dcso3::net::Ucid, DateTime<Utc>>,
     /// Player airframe war-loss already counted (PilotDead + UnitLost both hit unit_killed).
     pub(super) campaign_airframe_loss_ids: FxHashSet<DcsOid<ClassUnit>>,
+    /// Over-limit Fowl crate eject waiting on cargo ramp — panel once per gid.
+    pub(super) shared_ed_eject_ramp_warned: FxHashSet<GroupId>,
+    /// UnloadCargo clear attempts while over CFG limit (force place after retries).
+    pub(super) shared_ed_eject_attempts: FxHashMap<GroupId, u8>,
+    /// Intentional destroy for ED unload place — ignore Dead (no ed_carrier / dead flip).
+    pub(super) shared_ed_place_ignore_dead: FxHashSet<GroupId>,
+    /// After ED unload place: suppress bay re-count / relocate until this time (UTC).
+    pub(super) shared_ed_fowl_eject_grace_until: FxHashMap<GroupId, DateTime<Utc>>,
+    /// Fowl crates last seen geometrically in a shared-ED bay (gid → carrier). F8 unload detect.
+    pub(super) shared_ed_fowl_aboard: FxHashMap<GroupId, Ucid>,
     /// Combined Arms: object id → UCID of player currently controlling a Fowl deployable/troop.
     pub(crate) ca_controller_by_oid: FxHashMap<DcsOid<ClassUnit>, Ucid>,
     /// Reverse of `ca_controller_by_oid` (one controlled unit per player).
@@ -311,6 +321,11 @@ impl Default for Ephemeral {
             restart_display_skew_secs: 0,
             campaign_online_since: FxHashMap::default(),
             campaign_airframe_loss_ids: FxHashSet::default(),
+            shared_ed_eject_ramp_warned: FxHashSet::default(),
+            shared_ed_eject_attempts: FxHashMap::default(),
+            shared_ed_place_ignore_dead: FxHashSet::default(),
+            shared_ed_fowl_eject_grace_until: FxHashMap::default(),
+            shared_ed_fowl_aboard: FxHashMap::default(),
             ca_controller_by_oid: FxHashMap::default(),
             ca_oid_by_controller: FxHashMap::default(),
             overlay_underlay_dirty: false,

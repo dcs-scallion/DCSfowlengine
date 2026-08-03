@@ -2452,6 +2452,8 @@ fn run_slow_timed_events(
         if ctx.db.dynamic_cargo_enabled() {
             ctx.db.prune_missing_dynamic_cargo(lua);
             ctx.db.refresh_dynamic_cargo_snapshots(lua);
+            ctx.db.enforce_shared_ed_fowl_cargo_limits(lua);
+            ctx.db.relocate_fowl_crates_after_shared_ed_unload(lua);
         } else {
             ctx.db.clear_dynamic_cargo_if_disabled();
         }

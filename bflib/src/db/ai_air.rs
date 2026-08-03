@@ -596,6 +596,40 @@ pub(super) fn resolve_ship_crate_deck_spawn(
     bail!("cannot spawn off the deck; move farther onto the flight deck")
 }
 
+/// Place a crate at an exact world point on a naval hub deck (F8 unload lateral packing).
+pub(super) fn try_ship_crate_at_world_pos(
+    lua: MizLua,
+    db: &Db,
+    oid: ObjectiveId,
+    world_pos: Vector2,
+    group_heading: f64,
+    deck_alt_hint: f64,
+) -> Result<Option<(Vector2, f64, super::group::ShipCrateOffsets)>> {
+    let obj = objective!(db, oid)?;
+    if !objective_is_naval_carrier(db, obj) {
+        return Ok(None);
+    }
+    let Some(pad) = farp_pad_template(obj) else {
+        return Ok(None);
+    };
+    let Some((_ship_id, ship_pos, ship_alt, ship_unit)) =
+        carrier_ship_unit(lua, db, pad.as_str())?
+    else {
+        return Ok(None);
+    };
+    let lim = ship_deck_offset_limits(&ship_unit)?;
+    let altitude = if (deck_alt_hint - ship_alt).abs() < 80. {
+        deck_alt_hint
+    } else {
+        ship_alt + 18.
+    };
+    let offsets = world_to_ship_crate_offsets(ship_pos, world_pos, group_heading);
+    if offsets_on_ship_deck(&offsets, lim) {
+        return Ok(Some((world_pos, altitude, offsets)));
+    }
+    Ok(None)
+}
+
     pub(super) fn apply_static_ship_link<'lua>(
     lua: MizLua<'lua>,
     unit: &miz::Unit<'lua>,

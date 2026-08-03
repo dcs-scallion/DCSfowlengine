@@ -76,6 +76,30 @@ fn coalition_country_for_side(lua: MizLua, side: Side) -> Result<Country> {
     country.id()
 }
 
+/// ME template side for `get_template` (probe preferred, then other coalitions).
+fn resolve_static_template_side(
+    spctx: &SpawnCtx,
+    idx: &MizIndex,
+    template_name: &str,
+    preferred: Side,
+) -> Result<Side> {
+    let mut order: SmallVec<[Side; 3]> = smallvec![preferred];
+    for s in Side::ALL {
+        if s != preferred {
+            order.push(s);
+        }
+    }
+    for s in order {
+        if spctx
+            .get_template_ref(idx, GroupKind::Any, s, template_name)
+            .is_ok()
+        {
+            return Ok(s);
+        }
+    }
+    bail!("no such template {template_name}")
+}
+
 /// Ground XZ for FARP markup / zone (persisted unit.pos can lag ME template after spawn).
 pub(super) fn mobile_farp_anchor_ground2(lua: MizLua<'_>, pad_template: &str) -> Option<Vector2> {
     let name = String::from(pad_template);
@@ -2197,63 +2221,51 @@ impl Db {
         Ok(())
     }
 
-    fn repair_one_objective_static(
+    /// Respawn one ME objective static under `owner` (ME template side kept for lookup).
+    fn respawn_objective_static_with_owner(
         &mut self,
         lua: MizLua,
         spctx: &SpawnCtx,
         idx: &MizIndex,
-        oid: ObjectiveId,
-        now: DateTime<Utc>,
-    ) -> Result<bool> {
+        uid: UnitId,
+        owner: Side,
+    ) -> Result<()> {
         use dcso3::{coalition::Static, static_object::StaticObject};
 
-        let obj = objective!(self, oid)?;
-        let owner = obj.owner;
-        let mut targets: SmallVec<[(UnitId, i64, CompactString, Side); 8]> = smallvec![];
-        for (_, groups) in &obj.groups {
-            for gid in groups {
-                let group = group!(self, gid)?;
-                if group.class != ObjGroupClass::ObjectiveStatic {
-                    continue;
-                }
-                let group_side = group.side;
-                for uid in &group.units {
-                    let unit = unit!(self, uid)?;
-                    if unit.dead {
-                        targets.push((
-                            *uid,
-                            self.objective_static_durability(unit),
-                            CompactString::from(unit.name.as_str()),
-                            group_side,
-                        ));
-                    }
-                }
-            }
-        }
-        targets.sort_by(|a, b| a.1.cmp(&b.1).then_with(|| a.2.cmp(&b.2)));
-        let Some((uid, _, _, template_side)) = targets.first() else {
-            return Ok(false);
-        };
-        let (unit_name, template_name, gid) = {
+        let (unit_name, template_name, gid, preferred_tpl) = {
             let unit = unit!(self, uid)?;
             let group = group!(self, unit.group)?;
             (
                 unit.name.clone(),
                 group.template_name.clone(),
                 unit.group,
+                group.template_side.unwrap_or(group.side),
             )
         };
+        let me_side = resolve_static_template_side(
+            spctx,
+            idx,
+            template_name.as_str(),
+            preferred_tpl,
+        )
+        .with_context(|| format_compact!("objective static template {template_name}"))?;
+        {
+            let group = group_mut!(self, gid)?;
+            if group.template_side != Some(me_side) {
+                group.template_side = Some(me_side);
+            }
+        }
         if let Ok(Static::Static(st)) = StaticObject::get_by_name(lua, unit_name.as_str()) {
+            if let Ok(id) = st.object_id() {
+                self.ephemeral.uid_by_static.remove(&id);
+            }
             let _ = st.destroy();
         }
-        // ME template lives under placement side; spawn country follows current objective owner.
         let mut tpl = spctx
-            .get_template(idx, GroupKind::Any, *template_side, template_name.as_str())
+            .get_template(idx, GroupKind::Any, me_side, template_name.as_str())
             .with_context(|| format_compact!("objective static template {template_name}"))?;
-        if owner != *template_side {
-            tpl.country = coalition_country_for_side(lua, owner)?;
-            tpl.side = owner;
-        }
+        tpl.country = coalition_country_for_side(lua, owner)?;
+        tpl.side = owner;
         spctx
             .spawn(tpl)
             .with_context(|| format_compact!("respawning objective static {unit_name}"))?;
@@ -2263,17 +2275,19 @@ impl Db {
             group.side = owner;
             old
         };
-        if let Some(unit) = self.persisted.units.get_mut_cow(uid) {
+        if let Some(unit) = self.persisted.units.get_mut_cow(&uid) {
             unit.dead = false;
             unit.hp_percent = 100;
             unit.side = owner;
         }
         if old_side != owner {
-            let obj = objective_mut!(self, oid)?;
-            if let Some(set) = obj.groups.get_mut_cow(&old_side) {
-                set.remove_cow(&gid);
+            if let Some(oid) = self.persisted.objectives_by_group.get(&gid).copied() {
+                let obj = objective_mut!(self, oid)?;
+                if let Some(set) = obj.groups.get_mut_cow(&old_side) {
+                    set.remove_cow(&gid);
+                }
+                obj.groups.get_or_default_cow(owner).insert_cow(gid);
             }
-            obj.groups.get_or_default_cow(owner).insert_cow(gid);
             if let Some(set) = self.persisted.groups_by_side.get_mut_cow(&old_side) {
                 set.remove_cow(&gid);
             }
@@ -2282,7 +2296,108 @@ impl Db {
                 .get_or_default_cow(owner)
                 .insert_cow(gid);
         }
+        if let Ok(Static::Static(st)) = StaticObject::get_by_name(lua, unit_name.as_str()) {
+            if let Ok(id) = st.object_id() {
+                self.ephemeral.uid_by_static.insert(id, uid);
+            }
+            if let Some(l0) = st.try_get_life0() {
+                if let Some(unit) = self.persisted.units.get_mut_cow(&uid) {
+                    unit.static_max_life = l0;
+                }
+            }
+        }
         self.ephemeral.dirty();
+        Ok(())
+    }
+
+    /// Living ME objective statics whose DCS coalition != objective owner → respawn.
+    pub(super) fn realign_me_objective_static_owners(
+        &mut self,
+        lua: MizLua,
+        spctx: &SpawnCtx,
+        idx: &MizIndex,
+        only_oids: Option<&[ObjectiveId]>,
+    ) -> Result<()> {
+        use dcso3::{coalition::Static, static_object::StaticObject};
+
+        let mut to_fix: SmallVec<[(UnitId, Side); 16]> = smallvec![];
+        for (uid, unit) in &self.persisted.units {
+            if unit.dead {
+                continue;
+            }
+            let Some(group) = self.persisted.groups.get(&unit.group) else {
+                continue;
+            };
+            if group.class != ObjGroupClass::ObjectiveStatic {
+                continue;
+            }
+            let Some(oid) = self.persisted.objectives_by_group.get(&unit.group).copied() else {
+                continue;
+            };
+            if let Some(filter) = only_oids {
+                if !filter.contains(&oid) {
+                    continue;
+                }
+            }
+            let owner = objective!(self, oid)?.owner;
+            match StaticObject::get_by_name(lua, unit.name.as_str()) {
+                Ok(Static::Static(st)) => {
+                    if st.get_coalition()? != owner {
+                        to_fix.push((*uid, owner));
+                    }
+                }
+                Ok(Static::Airbase(_)) | Err(_) => {}
+            }
+        }
+        for (uid, owner) in &to_fix {
+            self.respawn_objective_static_with_owner(lua, spctx, idx, *uid, *owner)?;
+        }
+        if !to_fix.is_empty() {
+            info!(
+                "realigned {} ME objective static(s) to objective owner coalition",
+                to_fix.len()
+            );
+        }
+        Ok(())
+    }
+
+    fn repair_one_objective_static(
+        &mut self,
+        lua: MizLua,
+        spctx: &SpawnCtx,
+        idx: &MizIndex,
+        oid: ObjectiveId,
+        now: DateTime<Utc>,
+    ) -> Result<bool> {
+        let owner = objective!(self, oid)?.owner;
+        let gids: SmallVec<[GroupId; 16]> = objective!(self, oid)?
+            .groups
+            .into_iter()
+            .flat_map(|(_, gs)| gs.into_iter().copied())
+            .collect();
+        let mut targets: SmallVec<[(UnitId, i64, CompactString); 8]> = smallvec![];
+        for gid in &gids {
+            let group = group!(self, gid)?;
+            if group.class != ObjGroupClass::ObjectiveStatic {
+                continue;
+            }
+            for uid in &group.units {
+                let unit = unit!(self, uid)?;
+                if unit.dead {
+                    targets.push((
+                        *uid,
+                        self.objective_static_durability(unit),
+                        CompactString::from(unit.name.as_str()),
+                    ));
+                }
+            }
+        }
+        targets.sort_by(|a, b| a.1.cmp(&b.1).then_with(|| a.2.cmp(&b.2)));
+        let Some((uid, _, _)) = targets.first() else {
+            return Ok(false);
+        };
+        let uid = *uid;
+        self.respawn_objective_static_with_owner(lua, spctx, idx, uid, owner)?;
         let _ = now;
         Ok(true)
     }
@@ -2518,6 +2633,24 @@ impl Db {
                 .with_context(|| format_compact!("marking gid {gid} after capture"))
             {
                 error!("{e:?}")
+            }
+        }
+        if !actually_captured.is_empty() {
+            let oids: SmallVec<[ObjectiveId; 1]> =
+                actually_captured.iter().map(|(_, oid)| *oid).collect();
+            let idx = self.ephemeral.miz_idx.clone();
+            match SpawnCtx::new(lua) {
+                Ok(spctx) => {
+                    if let Err(e) = self.realign_me_objective_static_owners(
+                        lua,
+                        &spctx,
+                        &idx,
+                        Some(oids.as_slice()),
+                    ) {
+                        error!("realign ME objective statics after capture: {e:?}");
+                    }
+                }
+                Err(e) => error!("spawn ctx after capture for static realign: {e:?}"),
             }
         }
         Ok(actually_captured)

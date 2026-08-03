@@ -109,6 +109,10 @@ impl<'lua> StaticObject<'lua> {
     pub fn get_cargo_weight(&self) -> Result<f64> {
         Ok(self.t.call_method("getCargoWeight", ())?)
     }
+
+    pub fn get_cargo_display_name(&self) -> Result<String> {
+        Ok(self.t.call_method("getCargoDisplayName", ())?)
+    }
 }
 
 

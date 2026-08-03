@@ -1570,7 +1570,8 @@ pub struct DynamicCargoDeliveryCfg {
     #[serde(default = "default_source_spawner_points_per_ton")]
     pub source_spawner_points_per_ton: u32,
     /// DCS type names that use ED F8/bay for Fowl crates (no Fowl Load/Unload) when `enabled`.
-    /// Physical bay fit is enforced by ED dynamic cargo; CFG `cargo` still covers hybrid troops / List Cargo.
+    /// ED still enforces bay geometry/weight; CFG `cargo` slot limits apply to Fowl crates + troops
+    /// (excess Fowl crates are rejected back to the ground). Warehouse ED supply/fuel crates are unaffected.
     #[serde(default)]
     pub shared_ed_cargo_airframes: FxHashSet<String>,
 }

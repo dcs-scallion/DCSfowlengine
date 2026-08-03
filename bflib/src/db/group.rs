@@ -226,6 +226,9 @@ pub struct SpawnedGroup {
     pub name: String,
     pub template_name: String,
     pub side: Side,
+    /// ME coalition of the `.miz` template (`get_template` lookup). Not ownership.
+    #[serde(default)]
+    pub template_side: Option<Side>,
     pub kind: Option<GroupCategory>,
     pub class: ObjGroupClass,
     pub origin: DeployKind,
@@ -925,6 +928,7 @@ impl Db {
             name: group_name.clone(),
             template_name: template_name.clone(),
             side,
+            template_side: None,
             kind,
             origin,
             class: if extra_tags.contains(UnitTag::NavalSpawnPoint) {
@@ -1299,7 +1303,7 @@ impl Db {
 
     fn register_me_objective_static_group(
         &mut self,
-        side: Side,
+        me_side: Side,
         oid: ObjectiveId,
         group_name: String,
         unit_name: String,
@@ -1312,6 +1316,7 @@ impl Db {
         if self.persisted.units_by_name.get(unit_name.as_str()).is_some() {
             return Ok(());
         }
+        let owner = objective!(self, oid)?.owner;
         let mut tags = *self
             .ephemeral
             .cfg
@@ -1331,7 +1336,7 @@ impl Db {
         let spawned_unit = SpawnedUnit {
             id: uid,
             group: gid,
-            side,
+            side: owner,
             typ: Vehicle(unit_type.clone()),
             tags,
             name: unit_name.clone(),
@@ -1353,7 +1358,8 @@ impl Db {
             id: gid,
             name: group_name.clone(),
             template_name: group_name.clone(),
-            side,
+            side: owner,
+            template_side: Some(me_side),
             kind: None,
             origin: DeployKind::Objective { origin: oid },
             class,
@@ -1366,10 +1372,10 @@ impl Db {
         self.persisted.groups_by_name.insert_cow(group_name, gid);
         self.persisted
             .groups_by_side
-            .get_or_default_cow(side)
+            .get_or_default_cow(owner)
             .insert_cow(gid);
         let obj = objective_mut!(self, oid)?;
-        obj.groups.get_or_default_cow(side).insert_cow(gid);
+        obj.groups.get_or_default_cow(owner).insert_cow(gid);
         self.persisted.objectives_by_group.insert_cow(gid, oid);
         self.ephemeral.dirty();
         Ok(())
@@ -1379,6 +1385,11 @@ impl Db {
         let id = st.object_id()?;
         let name = st.get_name()?;
         if let Some(uid) = self.persisted.units_by_name.get(name.as_str()) {
+            if let Some(unit) = self.persisted.units.get(uid) {
+                self.ephemeral
+                    .shared_ed_place_ignore_dead
+                    .remove(&unit.group);
+            }
             self.ephemeral.uid_by_static.insert(id, *uid);
             Self::cache_unit_static_max_life(self, *uid, st);
         }
@@ -1703,6 +1714,19 @@ impl Db {
         let Some(uid) = uid else {
             return Ok(());
         };
+        if let Some(unit) = self.persisted.units.get(&uid) {
+            if self
+                .ephemeral
+                .shared_ed_place_ignore_dead
+                .remove(&unit.group)
+            {
+                info!(
+                    "static_dead: ignore intentional ED unload place for crate {:?}",
+                    unit.group
+                );
+                return Ok(());
+            }
+        }
         if self.persisted.units.get(&uid).is_some_and(|u| u.dead) {
             return Ok(());
         }
@@ -1787,17 +1811,27 @@ impl Db {
                     && self.ephemeral.cfg.dynamic_cargo_delivery.enabled
                 {
                     if let Some(carrier) = self.crate_static_ed_carrier(lua, uid) {
-                        if let Some(group) = self.persisted.groups.get_mut_cow(&gid) {
-                            if let DeployKind::Crate { ed_carrier, .. } = &mut group.origin {
-                                *ed_carrier = Some(carrier);
+                        if self.shared_ed_fowl_load_exceeds_cargo_cfg(lua, &carrier) {
+                            if let Err(e) = self.reject_shared_ed_fowl_crate_over_limit(
+                                lua, gid, uid, &carrier,
+                            ) {
+                                warn!(
+                                    "crate {gid}: Fowl cargo limit reject failed: {e:?}; deleting"
+                                );
+                                self.delete_group(&gid)?
                             }
+                        } else {
+                            if let Some(group) = self.persisted.groups.get_mut_cow(&gid) {
+                                if let DeployKind::Crate { ed_carrier, .. } = &mut group.origin {
+                                    *ed_carrier = Some(carrier);
+                                }
+                            }
+                            // F8 / sling despawn — keep DeployKind::Crate for unload revive.
+                            if let Some(id) = self.ephemeral.group_marks.remove(&gid) {
+                                self.ephemeral.msgs.delete_mark(id);
+                            }
+                            info!("crate {gid} despawned near transport; keeping for ED cargo load");
                         }
-                        // F8 / sling despawn — keep DeployKind::Crate for unload revive.
-                        // Bay capacity is enforced by ED dynamic cargo (no Fowl delete-on-full).
-                        if let Some(id) = self.ephemeral.group_marks.remove(&gid) {
-                            self.ephemeral.msgs.delete_mark(id);
-                        }
-                        info!("crate {gid} despawned near transport; keeping for ED cargo load");
                     } else {
                         self.delete_group(&gid)?
                     }
@@ -1806,6 +1840,460 @@ impl Db {
                 }
             }
         }
+        Ok(())
+    }
+
+    /// True if adding one more Fowl crate would exceed CFG `cargo` for this shared-ED carrier.
+    fn shared_ed_fowl_load_exceeds_cargo_cfg(&self, lua: MizLua, carrier: &Ucid) -> bool {
+        let Some(player) = self.persisted.players.get(carrier) else {
+            return false;
+        };
+        let Some((slot, Some(inst))) = player.current_slot.as_ref() else {
+            return false;
+        };
+        let Ok(capacity) = self.cargo_capacity(&inst.typ) else {
+            return false;
+        };
+        let (crates, troops) = self.fowl_crate_and_troop_slot_usage_with_bay(lua, slot, carrier);
+        capacity.crate_slots as usize <= crates
+            || capacity.total_slots as usize <= crates.saturating_add(troops)
+    }
+
+    /// ED already took the crate into the bay; spit it back out for CFG Fowl slot limits.
+    /// Force-open ramp, UnloadCargo (even if doors still closing), verify off board when possible,
+    /// then relocate outside the bay footprint. After a few failed clears, force place anyway.
+    pub(super) fn reject_shared_ed_fowl_crate_over_limit(
+        &mut self,
+        lua: MizLua,
+        gid: GroupId,
+        uid: UnitId,
+        carrier: &Ucid,
+    ) -> Result<()> {
+        const BAY_DOOR_ARG: i32 = 86;
+        const BAY_READY_MIN: f64 = 0.5;
+        const MAX_UNLOAD_ATTEMPTS: u8 = 3;
+
+        let (slot, name) = {
+            let player = self
+                .persisted
+                .players
+                .get(carrier)
+                .ok_or_else(|| anyhow!("reject Fowl crate: missing carrier player"))?;
+            let Some((slot, Some(_))) = player.current_slot.as_ref() else {
+                bail!("reject Fowl crate: carrier has no slot instance");
+            };
+            let unit_name = self
+                .persisted
+                .units
+                .get(&uid)
+                .map(|u| u.name.clone())
+                .ok_or_else(|| anyhow!("reject Fowl crate: missing unit {uid:?}"))?;
+            (slot.clone(), unit_name)
+        };
+
+        let ac = self
+            .ephemeral
+            .slot_instance_unit(lua, &slot)
+            .context("reject Fowl crate: carrier unit")?;
+
+        let _ = ac.open_ramp(true);
+        let bay_ready = ac.check_open_ramp().unwrap_or(false)
+            || ac
+                .get_draw_argument_value(BAY_DOOR_ARG)
+                .map(|v| v >= BAY_READY_MIN)
+                .unwrap_or(false);
+        if !bay_ready {
+            if self.ephemeral.shared_ed_eject_ramp_warned.insert(gid) {
+                self.ephemeral.panel_to_player(
+                    &self.persisted,
+                    12,
+                    carrier,
+                    "Deployables cargo limit exceeded; cargo bay forced open to unload the over-limit crate.",
+                );
+            }
+        }
+
+        let on_board = |ac: &Unit, crate_name: &str| -> bool {
+            let Ok(Some(cargos)) = ac.get_cargos_on_board() else {
+                return false;
+            };
+            let mut found = false;
+            let _ = cargos.for_each(|c| {
+                let Ok(c) = c else {
+                    return Ok(());
+                };
+                if c.get_name()
+                    .map(|n| n.as_str() == crate_name)
+                    .unwrap_or(false)
+                {
+                    found = true;
+                }
+                Ok(())
+            });
+            found
+        };
+
+        let attempts = self
+            .ephemeral
+            .shared_ed_eject_attempts
+            .entry(gid)
+            .or_insert(0);
+        *attempts = attempts.saturating_add(1);
+        let attempt = *attempts;
+
+        if on_board(&ac, name.as_str()) {
+            let mut matched: Option<StaticObject> = None;
+            if let Ok(Some(cargos)) = ac.get_cargos_on_board() {
+                let _ = cargos.for_each(|c| {
+                    let Ok(c) = c else {
+                        return Ok(());
+                    };
+                    if c.get_name()
+                        .map(|n| n.as_str() == name.as_str())
+                        .unwrap_or(false)
+                    {
+                        matched = Some(c);
+                    }
+                    Ok(())
+                });
+            }
+            if let Some(cargo) = matched {
+                if let Err(e) = ac.unload_cargo(&cargo) {
+                    warn!("crate {gid}: UnloadCargo failed for {name}: {e:?}");
+                }
+            }
+            if on_board(&ac, name.as_str()) {
+                if attempt < MAX_UNLOAD_ATTEMPTS {
+                    info!(
+                        "crate {gid}: still on board after UnloadCargo ({name}); retry {attempt}/{MAX_UNLOAD_ATTEMPTS}"
+                    );
+                    return Ok(());
+                }
+                warn!(
+                    "crate {gid}: UnloadCargo did not clear bay after {attempt} tries; forcing ground place ({name})"
+                );
+                // Force-clear ED bay slot object before respawn (avoids airborne ghost).
+                if let Ok(Some(cargos)) = ac.get_cargos_on_board() {
+                    let mut matched: Option<StaticObject> = None;
+                    let _ = cargos.for_each(|c| {
+                        let Ok(c) = c else {
+                            return Ok(());
+                        };
+                        if c.get_name()
+                            .map(|n| n.as_str() == name.as_str())
+                            .unwrap_or(false)
+                        {
+                            matched = Some(c);
+                        }
+                        Ok(())
+                    });
+                    if let Some(cargo) = matched {
+                        self.ephemeral.shared_ed_place_ignore_dead.insert(gid);
+                        let _ = cargo.destroy();
+                    }
+                }
+            } else {
+                info!("crate {gid}: UnloadCargo cleared bay slot for {name}");
+            }
+        }
+
+        self.place_fowl_crate_on_ed_unload_line(lua, gid, uid, carrier)?;
+        self.ephemeral.panel_to_player(
+            &self.persisted,
+            12,
+            carrier,
+            "Deployables cargo limit exceeded; crate returned to the ground. Warehouse supply and fuel containers are unaffected.",
+        );
+        info!(
+            "crate {gid}: ejected over-limit Fowl crate {name} for {carrier:?} (respawn outside bay)"
+        );
+        Ok(())
+    }
+
+    /// Model horizontal extent + 1 m (F8 unload lateral packing).
+    fn fowl_crate_spacing_m(lua: MizLua, name: &str) -> f64 {
+        const FALLBACK_EXTENT_M: f64 = 3.0;
+        const GAP_M: f64 = 1.0;
+        let extent = match StaticObject::get_by_name(lua, name) {
+            Ok(Static::Static(st)) if st.is_exist().unwrap_or(false) => st
+                .get_desc()
+                .ok()
+                .and_then(|desc| desc.raw_get::<_, dcso3::Box3>("box").ok())
+                .map(|b| {
+                    let dx = (b.max.x - b.min.x).abs();
+                    let dz = (b.max.z - b.min.z).abs();
+                    dx.max(dz).max(1.0)
+                })
+                .unwrap_or(FALLBACK_EXTENT_M),
+            _ => FALLBACK_EXTENT_M,
+        };
+        extent + GAP_M
+    }
+
+    /// Nose distance for Fowl ED unload line (F10-style + 2 m clearance for rotors).
+    const FOWL_ED_UNLOAD_NOSE_M: f64 = 22.;
+
+    /// Nose then alternating left/right from pilot view; spacing = crate size + 1 m.
+    fn fowl_ed_unload_line_pos(
+        &self,
+        lua: MizLua,
+        ac_pos: Vector2,
+        forward: Vector2,
+        exclude_gid: GroupId,
+        spacing: f64,
+    ) -> Vector2 {
+        let nose = ac_pos + forward * Self::FOWL_ED_UNLOAD_NOSE_M;
+        // Pilot-right: looking along forward in XZ (Vector2 = x,z).
+        let right = Vector2::new(forward.y, -forward.x);
+        let search_r = Self::FOWL_ED_UNLOAD_NOSE_M + spacing * 12.;
+        let mut occupied: SmallVec<[(GroupId, Vector2); 16]> = smallvec![];
+        for gid in &self.persisted.crates {
+            if *gid == exclude_gid {
+                continue;
+            }
+            let Some(group) = self.persisted.groups.get(gid) else {
+                continue;
+            };
+            if !matches!(group.origin, DeployKind::Crate { .. }) {
+                continue;
+            }
+            for uid in &group.units {
+                let Some(unit) = self.persisted.units.get(uid) else {
+                    continue;
+                };
+                if unit.dead {
+                    continue;
+                }
+                let pos = match StaticObject::get_by_name(lua, unit.name.as_str()) {
+                    Ok(Static::Static(st)) if st.is_exist().unwrap_or(false) => st
+                        .get_point()
+                        .map(|p| Vector2::new(p.0.x, p.0.z))
+                        .unwrap_or(unit.pos),
+                    _ => unit.pos,
+                };
+                if (pos - nose).magnitude() <= search_r {
+                    occupied.push((*gid, pos));
+                }
+            }
+        }
+        for i in 0..24usize {
+            let candidate = if i == 0 {
+                nose
+            } else {
+                let rank = ((i + 1) / 2) as f64;
+                let sign = if i % 2 == 1 { 1.0 } else { -1.0 };
+                nose + right * (sign * rank * spacing)
+            };
+            let free = occupied
+                .iter()
+                .all(|(_, p)| (candidate - *p).magnitude() >= spacing * 0.95);
+            if free {
+                return candidate;
+            }
+        }
+        nose
+    }
+
+    /// Destroy + respawn Fowl crate on F10-style unload line (nose + lateral packing).
+    pub(super) fn place_fowl_crate_on_ed_unload_line(
+        &mut self,
+        lua: MizLua,
+        gid: GroupId,
+        uid: UnitId,
+        carrier: &Ucid,
+    ) -> Result<()> {
+        let (slot, side, name) = {
+            let player = self
+                .persisted
+                .players
+                .get(carrier)
+                .ok_or_else(|| anyhow!("ED unload place: missing carrier player"))?;
+            let Some((slot, Some(_))) = player.current_slot.as_ref() else {
+                bail!("ED unload place: carrier has no slot instance");
+            };
+            let unit_name = self
+                .persisted
+                .units
+                .get(&uid)
+                .map(|u| u.name.clone())
+                .ok_or_else(|| anyhow!("ED unload place: missing unit {uid:?}"))?;
+            (slot.clone(), player.side, unit_name)
+        };
+
+        let (ac_pos, dir, heading, ac_alt) = {
+            let player = self
+                .persisted
+                .players
+                .get(carrier)
+                .ok_or_else(|| anyhow!("ED unload place: missing carrier player"))?;
+            let Some((_, Some(inst))) = player.current_slot.as_ref() else {
+                bail!("ED unload place: carrier has no slot instance");
+            };
+            match self.ephemeral.slot_instance_unit(lua, &slot) {
+                Ok(unit) => {
+                    let pos = unit.get_position().unwrap_or(inst.position);
+                    let p = unit.get_point().map(|v| v.0).unwrap_or(pos.p.0);
+                    (
+                        Vector2::new(p.x, p.z),
+                        Vector2::new(pos.x.x, pos.x.z),
+                        azumith3d(pos.x.0),
+                        p.y,
+                    )
+                }
+                Err(_) => (
+                    Vector2::new(inst.position.p.x, inst.position.p.z),
+                    Vector2::new(inst.position.x.x, inst.position.x.z),
+                    azumith3d(inst.position.x.0),
+                    inst.position.p.y,
+                ),
+            }
+        };
+        let mag = (dir.x * dir.x + dir.y * dir.y).sqrt();
+        let dir = if mag > 1e-3 {
+            dir / mag
+        } else {
+            Vector2::new(1., 0.)
+        };
+        let spacing = Self::fowl_crate_spacing_m(lua, name.as_str());
+        let drop_pos =
+            self.fowl_ed_unload_line_pos(lua, ac_pos, dir, gid, spacing);
+
+        let (final_pos, alt, ship_hub, ship_offsets) =
+            match self.point_near_logistics(side, ac_pos).ok() {
+                Some((link_oid, _)) => {
+                    match ai_air::try_ship_crate_at_world_pos(
+                        lua,
+                        self,
+                        link_oid,
+                        drop_pos,
+                        heading,
+                        ac_alt,
+                    ) {
+                        Ok(Some((deck_pos, altitude, offsets))) => {
+                            (deck_pos, altitude, Some(link_oid), Some(offsets))
+                        }
+                        Ok(None) | Err(_) => {
+                            match ai_air::resolve_ship_crate_deck_spawn(
+                                lua,
+                                self,
+                                link_oid,
+                                ac_pos,
+                                dir,
+                                heading,
+                                ac_alt,
+                            ) {
+                                Ok(Some((deck_pos, altitude, offsets))) => {
+                                    (deck_pos, altitude, Some(link_oid), Some(offsets))
+                                }
+                                Ok(None) | Err(_) => {
+                                    let alt = Land::singleton(lua)?
+                                        .get_height(LuaVec2(drop_pos))
+                                        .unwrap_or(0.);
+                                    (drop_pos, alt, None, None)
+                                }
+                            }
+                        }
+                    }
+                }
+                None => {
+                    let alt = Land::singleton(lua)?
+                        .get_height(LuaVec2(drop_pos))
+                        .unwrap_or(0.);
+                    (drop_pos, alt, None, None)
+                }
+            };
+        // Never keep aircraft-bay altitude on land; re-sample ground under final pos.
+        let (final_pos, alt, ship_hub, ship_offsets) = if ship_offsets.is_some() {
+            (final_pos, alt, ship_hub, ship_offsets)
+        } else {
+            let ground = Land::singleton(lua)?
+                .get_height(LuaVec2(final_pos))
+                .unwrap_or(alt);
+            (final_pos, ground, None, None)
+        };
+
+        // Prefer destroying the ED bay cargo object (same name) so unload height isn't kept.
+        if let Ok(ac) = self.ephemeral.slot_instance_unit(lua, &slot) {
+            if let Ok(Some(cargos)) = ac.get_cargos_on_board() {
+                let mut matched: Option<StaticObject> = None;
+                let _ = cargos.for_each(|c| {
+                    let Ok(c) = c else {
+                        return Ok(());
+                    };
+                    if c.get_name()
+                        .map(|n| n.as_str() == name.as_str())
+                        .unwrap_or(false)
+                    {
+                        matched = Some(c);
+                    }
+                    Ok(())
+                });
+                if let Some(cargo) = matched {
+                    let _ = ac.unload_cargo(&cargo);
+                    self.ephemeral.shared_ed_place_ignore_dead.insert(gid);
+                    let _ = cargo.destroy();
+                }
+            }
+        }
+        if let Ok(Static::Static(st)) = StaticObject::get_by_name(lua, name.as_str()) {
+            if st.is_exist().unwrap_or(false) {
+                self.ephemeral.shared_ed_place_ignore_dead.insert(gid);
+                let _ = st.destroy();
+            }
+        }
+
+        let mut position = Position3::default();
+        position.p.x = final_pos.x;
+        position.p.y = alt;
+        position.p.z = final_pos.y;
+
+        if let Some(group) = self.persisted.groups.get_mut_cow(&gid) {
+            if let DeployKind::Crate {
+                ed_carrier,
+                ship_hub: sh,
+                ship_offsets: so,
+                ..
+            } = &mut group.origin
+            {
+                *ed_carrier = None;
+                *sh = ship_hub;
+                *so = ship_offsets;
+            }
+        }
+        if let Some(unit) = self.persisted.units.get_mut_cow(&uid) {
+            unit.dead = false;
+            unit.hp_percent = 100;
+            unit.pos = final_pos;
+            unit.spawn_pos = final_pos;
+            unit.heading = heading;
+            unit.spawn_heading = heading;
+            unit.position = position;
+            unit.spawn_position = position;
+        }
+        if let Some(id) = self.ephemeral.object_id_by_uid.remove(&uid) {
+            self.ephemeral.uid_by_object_id.remove(&id);
+        }
+        if let Some(id) = self.ephemeral.object_id_by_gid.remove(&gid) {
+            self.ephemeral.gid_by_object_id.remove(&id);
+        }
+        if let Some(id) = self.ephemeral.group_marks.remove(&gid) {
+            self.ephemeral.msgs.delete_mark(id);
+        }
+
+        self.ephemeral.shared_ed_eject_ramp_warned.remove(&gid);
+        self.ephemeral.shared_ed_eject_attempts.remove(&gid);
+        self.ephemeral.shared_ed_fowl_aboard.remove(&gid);
+        self.ephemeral
+            .shared_ed_fowl_eject_grace_until
+            .insert(gid, Utc::now() + chrono::Duration::seconds(60));
+        // Keep shared_ed_place_ignore_dead until static_dead (may be deferred).
+        self.ephemeral.push_spawn(gid);
+        self.mark_group(lua, &gid)?;
+        self.ephemeral.dirty();
+        info!(
+            "crate {gid}: placed on ED unload line for {carrier:?} at ({:.1},{:.1})",
+            final_pos.x, final_pos.y
+        );
         Ok(())
     }
 
@@ -1867,14 +2355,22 @@ impl Db {
         let Some(uid) = self.persisted.units_by_name.get(name.as_str()).copied() else {
             return Ok(());
         };
-        let (gid, was_dead) = {
+        let (gid, was_dead, carrier) = {
             let Some(unit) = self.persisted.units.get(&uid) else {
                 return Ok(());
             };
             if !self.persisted.crates.contains(&unit.group) {
                 return Ok(());
             }
-            (unit.group, unit.dead)
+            let carrier = self
+                .persisted
+                .groups
+                .get(&unit.group)
+                .and_then(|g| match &g.origin {
+                    DeployKind::Crate { ed_carrier, .. } => ed_carrier.clone(),
+                    _ => None,
+                });
+            (unit.group, unit.dead, carrier)
         };
         if !was_dead {
             return Ok(());
@@ -1894,6 +2390,11 @@ impl Db {
         self.mark_group(lua, &gid)?;
         self.ephemeral.dirty();
         info!("revived Fowl crate {gid} after ED cargo unload ({name})");
+        if let Some(carrier) = carrier {
+            if let Err(e) = self.place_fowl_crate_on_ed_unload_line(lua, gid, uid, &carrier) {
+                warn!("crate {gid}: ED unload place after revive failed: {e:?}");
+            }
+        }
         Ok(())
     }
 
