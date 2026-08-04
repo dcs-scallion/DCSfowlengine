@@ -43,7 +43,7 @@
   },
   "discord_map": {
     "enabled": false,
-    "refresh_interval_secs":90,
+    "refresh_interval_secs": 90,
     "webhook_url": "",
     "mapbox_access_token": "",
     "style": "",
@@ -101,7 +101,10 @@
   "setmissionstartdatetime": {
     "enabled": false,
     "skript_path": "",
-    "mission_start_time_cycle": ["06:00", "15:00"],
+    "mission_start_time_cycle": [
+      "06:00",
+      "15:00"
+    ],
     "mission_date_base": "1985-06-19",
     "mission_date_on_new_campaign": "reset",
     "post_round_delay_secs": 15
@@ -114,7 +117,12 @@
   "shutdown": null,
   "DCSServerBot_scheduled_restart": {
     "timezone": "Europe/Prague",
-    "times": ["00:00", "06:00", "12:00", "18:00"]
+    "times": [
+      "00:00",
+      "06:00",
+      "12:00",
+      "18:00"
+    ]
   },
   "points": {
     "new_player_join": 300,
@@ -137,7 +145,10 @@
     "strict": false,
     "airframe_cost": {},
     "weapon_cost": {},
-    "periodic_point_gain": [5, 600],
+    "periodic_point_gain": [
+      5,
+      600
+    ],
     "periodic_award_airborne": true,
     "balancing_point_gain": true
   },
@@ -189,15 +200,24 @@
   ],
   "objective_static_units": {
     ".Ammunition depot": {
-      "zones": ["AB", "LO"],
+      "zones": [
+        "AB",
+        "LO"
+      ],
       "kill_points": 50
     },
     ".Command Center": {
-      "zones": ["AB", "LO"],
+      "zones": [
+        "AB",
+        "LO"
+      ],
       "kill_points": 25
     },
     "FARP CP Blindage": {
-      "zones": ["FO", "LO"],
+      "zones": [
+        "FO",
+        "LO"
+      ],
       "kill_points": 10
     }
   },
@@ -451,9 +471,9 @@
         "kind": "AttackersWaypoint",
         "cost": 5,
         "penalty": null,
-        "limit": 3
+        "limit": null
       },
-            "sead": {
+      "sead": {
         "kind": {
           "Sead": {
             "kind": "FixedWing",
@@ -490,12 +510,6 @@
         "cost": 200,
         "penalty": 40,
         "limit": 4
-      },
-      "attack-waypoint": {
-        "kind": "AttackersWaypoint",
-        "cost": 5,
-        "penalty": null,
-        "limit": null
       },
       "awacs": {
         "kind": {
@@ -625,7 +639,7 @@
             "plane": null
           }
         },
-        "cost": 800, 
+        "cost": 800,
         "penalty": 80,
         "limit": 1,
         "geo_limit": {
@@ -641,7 +655,7 @@
             "plane": null
           }
         },
-        "cost": 900, 
+        "cost": 900,
         "penalty": 90,
         "limit": 1,
         "geo_limit": {
@@ -1105,7 +1119,7 @@
             "plane": null
           }
         },
-        "cost": 700, 
+        "cost": 700,
         "penalty": 70,
         "limit": 1,
         "geo_limit": {
@@ -1121,7 +1135,7 @@
             "plane": null
           }
         },
-        "cost": 1000, 
+        "cost": 1000,
         "penalty": 100,
         "limit": 1,
         "geo_limit": {
@@ -1485,7 +1499,8 @@
         "ewr": null,
         "jtac": null,
         "template": null,
-        "logistics": null
+        "logistics": null,
+        "spawn_delay_secs": 5
       },
       {
         "path": [
@@ -1541,8 +1556,9 @@
         },
         "jtac": null,
         "template": null,
-        "logistics": null
-      },      
+        "logistics": null,
+        "spawn_delay_secs": 60
+      },
       {
         "path": [
           "Radar SAMs",
@@ -1589,7 +1605,8 @@
         },
         "jtac": null,
         "template": null,
-        "logistics": null
+        "logistics": null,
+        "spawn_delay_secs": 60
       },
       {
         "path": [
@@ -1653,7 +1670,8 @@
         },
         "jtac": null,
         "template": null,
-        "logistics": null
+        "logistics": null,
+        "spawn_delay_secs": 60
       },
       {
         "path": [
@@ -1684,7 +1702,8 @@
         "ewr": null,
         "jtac": null,
         "template": null,
-        "logistics": null
+        "logistics": null,
+        "spawn_delay_secs": 5
       },
       {
         "path": [
@@ -1715,7 +1734,8 @@
         "ewr": null,
         "jtac": null,
         "template": null,
-        "logistics": null
+        "logistics": null,
+        "spawn_delay_secs": 5
       },
       {
         "path": [
@@ -1763,7 +1783,8 @@
         },
         "jtac": null,
         "template": null,
-        "logistics": null
+        "logistics": null,
+        "spawn_delay_secs": 60
       },
       {
         "path": [
@@ -1794,7 +1815,8 @@
         "ewr": null,
         "jtac": null,
         "template": null,
-        "logistics": null
+        "logistics": null,
+        "spawn_delay_secs": 5
       },
       {
         "path": [
@@ -1825,7 +1847,8 @@
         "ewr": null,
         "jtac": null,
         "template": null,
-        "logistics": null
+        "logistics": null,
+        "spawn_delay_secs": 5
       },
       {
         "path": [
@@ -1873,7 +1896,8 @@
         },
         "jtac": null,
         "template": null,
-        "logistics": null
+        "logistics": null,
+        "spawn_delay_secs": 60
       },
       {
         "path": [
@@ -1907,7 +1931,8 @@
           "nolos": false
         },
         "template": null,
-        "logistics": null
+        "logistics": null,
+        "spawn_delay_secs": 5
       },
       {
         "path": [
@@ -1938,7 +1963,8 @@
         "ewr": null,
         "jtac": null,
         "template": null,
-        "logistics": null
+        "logistics": null,
+        "spawn_delay_secs": 5
       },
       {
         "path": [
@@ -1972,7 +1998,8 @@
           "nolos": false
         },
         "template": null,
-        "logistics": null
+        "logistics": null,
+        "spawn_delay_secs": 5
       },
       {
         "path": [
@@ -2006,7 +2033,8 @@
           "nolos": false
         },
         "template": null,
-        "logistics": null
+        "logistics": null,
+        "spawn_delay_secs": 5
       },
       {
         "path": [
@@ -2044,7 +2072,8 @@
         "ewr": null,
         "jtac": null,
         "template": null,
-        "logistics": null
+        "logistics": null,
+        "spawn_delay_secs": 5
       },
       {
         "path": [
@@ -2082,7 +2111,8 @@
         "ewr": null,
         "jtac": null,
         "template": null,
-        "logistics": null
+        "logistics": null,
+        "spawn_delay_secs": 5
       },
       {
         "path": [
@@ -2109,7 +2139,8 @@
         "ewr": null,
         "jtac": {
           "range": 1000
-        }
+        },
+        "spawn_delay_secs": 5
       },
       {
         "path": [
@@ -2143,7 +2174,8 @@
           "nolos": false
         },
         "template": null,
-        "logistics": null
+        "logistics": null,
+        "spawn_delay_secs": 5
       },
       {
         "path": [
@@ -2174,7 +2206,8 @@
         "ewr": null,
         "jtac": null,
         "template": null,
-        "logistics": null
+        "logistics": null,
+        "spawn_delay_secs": 60
       },
       {
         "path": [
@@ -2205,7 +2238,8 @@
         "ewr": null,
         "jtac": null,
         "template": null,
-        "logistics": null
+        "logistics": null,
+        "spawn_delay_secs": 60
       },
       {
         "path": [
@@ -2238,7 +2272,8 @@
         },
         "jtac": null,
         "template": null,
-        "logistics": null
+        "logistics": null,
+        "spawn_delay_secs": 30
       },
       {
         "path": [
@@ -2272,7 +2307,8 @@
         },
         "cost": 200,
         "ewr": null,
-        "jtac": null
+        "jtac": null,
+        "spawn_delay_secs": 70
       },
       {
         "path": [
@@ -2297,8 +2333,9 @@
         "ewr": null,
         "jtac": null,
         "template": "RCorvette",
-        "logistics": null
-      }, 
+        "logistics": null,
+        "spawn_delay_secs": 5
+      },
       {
         "path": [
           "Naval Frigate"
@@ -2322,7 +2359,8 @@
         "ewr": null,
         "jtac": null,
         "template": "RFrigate",
-        "logistics": null
+        "logistics": null,
+        "spawn_delay_secs": 5
       },
       {
         "path": [
@@ -2337,8 +2375,8 @@
             "ammo_template": null,
             "fuel_template": null,
             "barracks_template": null
-        }
-      },
+          }
+        },
         "persist": "Forever",
         "limit": 1,
         "limit_enforce": "DeleteOldest",
@@ -2349,7 +2387,8 @@
         "ewr": null,
         "jtac": null,
         "template": null,
-        "logistics": null
+        "logistics": null,
+        "spawn_delay_secs": 60
       },
       {
         "path": [
@@ -2364,8 +2403,8 @@
             "ammo_template": null,
             "fuel_template": null,
             "barracks_template": null
-        }
-      },
+          }
+        },
         "persist": "Forever",
         "limit": 1,
         "limit_enforce": "DeleteOldest",
@@ -2376,7 +2415,8 @@
         "ewr": null,
         "jtac": null,
         "template": null,
-        "logistics": null
+        "logistics": null,
+        "spawn_delay_secs": 60
       }
     ],
     "Blue": [
@@ -2434,7 +2474,8 @@
         },
         "jtac": null,
         "template": null,
-        "logistics": null
+        "logistics": null,
+        "spawn_delay_secs": 60
       },
       {
         "path": [
@@ -2482,7 +2523,8 @@
         },
         "jtac": null,
         "template": null,
-        "logistics": null
+        "logistics": null,
+        "spawn_delay_secs": 60
       },
       {
         "path": [
@@ -2546,7 +2588,8 @@
         },
         "jtac": null,
         "template": null,
-        "logistics": null
+        "logistics": null,
+        "spawn_delay_secs": 60
       },
       {
         "path": [
@@ -2577,7 +2620,8 @@
         "ewr": null,
         "jtac": null,
         "template": null,
-        "logistics": null
+        "logistics": null,
+        "spawn_delay_secs": 5
       },
       {
         "path": [
@@ -2608,7 +2652,8 @@
         "ewr": null,
         "jtac": null,
         "template": null,
-        "logistics": null
+        "logistics": null,
+        "spawn_delay_secs": 5
       },
       {
         "path": [
@@ -2639,7 +2684,8 @@
         "ewr": null,
         "jtac": null,
         "template": null,
-        "logistics": null
+        "logistics": null,
+        "spawn_delay_secs": 5
       },
       {
         "path": [
@@ -2670,7 +2716,8 @@
         "ewr": null,
         "jtac": null,
         "template": null,
-        "logistics": null
+        "logistics": null,
+        "spawn_delay_secs": 5
       },
       {
         "path": [
@@ -2701,7 +2748,8 @@
         "ewr": null,
         "jtac": null,
         "template": null,
-        "logistics": null
+        "logistics": null,
+        "spawn_delay_secs": 5
       },
       {
         "path": [
@@ -2749,12 +2797,13 @@
         },
         "jtac": null,
         "template": null,
-        "logistics": null
+        "logistics": null,
+        "spawn_delay_secs": 60
       },
       {
         "path": [
           "Anti-ship missile",
-          "CSS-C-2 Silkworm"		  
+          "CSS-C-2 Silkworm"
         ],
         "kind": {
           "Group": {
@@ -2797,7 +2846,8 @@
         },
         "jtac": null,
         "template": null,
-        "logistics": null
+        "logistics": null,
+        "spawn_delay_secs": 60
       },
       {
         "path": [
@@ -2831,7 +2881,8 @@
           "nolos": false
         },
         "template": null,
-        "logistics": null
+        "logistics": null,
+        "spawn_delay_secs": 5
       },
       {
         "path": [
@@ -2862,7 +2913,8 @@
         "ewr": null,
         "jtac": null,
         "template": null,
-        "logistics": null
+        "logistics": null,
+        "spawn_delay_secs": 5
       },
       {
         "path": [
@@ -2896,7 +2948,8 @@
           "nolos": false
         },
         "template": null,
-        "logistics": null
+        "logistics": null,
+        "spawn_delay_secs": 5
       },
       {
         "path": [
@@ -2930,7 +2983,8 @@
           "nolos": false
         },
         "template": null,
-        "logistics": null
+        "logistics": null,
+        "spawn_delay_secs": 5
       },
       {
         "path": [
@@ -2968,7 +3022,8 @@
         "ewr": null,
         "jtac": null,
         "template": null,
-        "logistics": null
+        "logistics": null,
+        "spawn_delay_secs": 5
       },
       {
         "path": [
@@ -2995,7 +3050,8 @@
         "ewr": null,
         "jtac": {
           "range": 1000
-        }
+        },
+        "spawn_delay_secs": 5
       },
       {
         "path": [
@@ -3029,7 +3085,8 @@
           "nolos": false
         },
         "template": null,
-        "logistics": null
+        "logistics": null,
+        "spawn_delay_secs": 5
       },
       {
         "path": [
@@ -3060,7 +3117,8 @@
         "ewr": null,
         "jtac": null,
         "template": null,
-        "logistics": null
+        "logistics": null,
+        "spawn_delay_secs": 60
       },
       {
         "path": [
@@ -3091,7 +3149,8 @@
         "ewr": null,
         "jtac": null,
         "template": null,
-        "logistics": null
+        "logistics": null,
+        "spawn_delay_secs": 60
       },
       {
         "path": [
@@ -3124,7 +3183,8 @@
         },
         "jtac": null,
         "template": null,
-        "logistics": null
+        "logistics": null,
+        "spawn_delay_secs": 30
       },
       {
         "path": [
@@ -3158,7 +3218,8 @@
         },
         "cost": 200,
         "ewr": null,
-        "jtac": null
+        "jtac": null,
+        "spawn_delay_secs": 70
       },
       {
         "path": [
@@ -3183,8 +3244,9 @@
         "ewr": null,
         "jtac": null,
         "template": "BCorvette",
-        "logistics": null
-      }, 
+        "logistics": null,
+        "spawn_delay_secs": 5
+      },
       {
         "path": [
           "Naval Frigate"
@@ -3208,7 +3270,8 @@
         "ewr": null,
         "jtac": null,
         "template": "BFrigate",
-        "logistics": null
+        "logistics": null,
+        "spawn_delay_secs": 5
       },
       {
         "path": [
@@ -3235,7 +3298,8 @@
         "ewr": null,
         "jtac": null,
         "template": null,
-        "logistics": null
+        "logistics": null,
+        "spawn_delay_secs": 60
       },
       {
         "path": [
@@ -3262,7 +3326,8 @@
         "ewr": null,
         "jtac": null,
         "template": null,
-        "logistics": null
+        "logistics": null,
+        "spawn_delay_secs": 60
       }
     ]
   },
@@ -3433,7 +3498,7 @@
     ],
     "Building04_PBR": [
       "Unarmed"
-    ],    
+    ],
     "Building05_PBR": [
       "Unarmed"
     ],
@@ -3537,7 +3602,9 @@
       "Unarmed"
     ],
     "E-2C": [
-      "Unarmed"
+      "Aircraft",
+      "AWACS",
+      "Link16"
     ],
     "Ka-27": [
       "Unarmed"
@@ -3897,7 +3964,7 @@
       "APC",
       "MR",
       "ATGM",
-      "SmallArms",
+      "LightCannon",
       "Driveable"
     ],
     "BTR-82A": [
@@ -3956,13 +4023,6 @@
       "RadarGuided",
       "AuxRadarUnit"
     ],
-    "BMP-2": [
-      "APC",
-      "MR",
-      "ATGM",
-      "LightCannon",
-      "Driveable"
-    ],
     "F-15E": [
       "Aircraft"
     ],
@@ -3996,7 +4056,7 @@
     "UAZ-469": [
       "Logistics",
       "Unarmed",
-      "Driveable"	  
+      "Driveable"
     ],
     "TF-51D": [
       "Aircraft"
@@ -4161,11 +4221,6 @@
       "Logistics",
       "Unarmed"
     ],
-    "E-2C": [
-      "Aircraft",
-      "AWACS",
-      "Link16"
-    ],
     "E-3A": [
       "Aircraft",
       "AWACS",
@@ -4196,7 +4251,7 @@
     ],
     "Land_Rover_109_S3": [
       "Unarmed"
-    ],    
+    ],
     "tt_ZU-23": [
       "AAA",
       "SR",
@@ -4211,10 +4266,10 @@
     "F-14A-135-GR": [
       "Aircraft"
     ],
-      "MiG-29A": [
+    "MiG-29A": [
       "Aircraft"
     ],
-      "MiG-29 Fulcrum": [
+    "MiG-29 Fulcrum": [
       "Aircraft"
     ],
     "5p73 s-125 ln": [

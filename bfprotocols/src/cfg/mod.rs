@@ -403,6 +403,10 @@ fn default_deployable_kind() -> DeployableKind {
     }
 }
 
+fn default_deployable_spawn_delay_secs() -> u32 {
+    5
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Deployable {
@@ -428,6 +432,9 @@ pub struct Deployable {
     /// How many points does this deployable cost (if any)
     #[serde(default)]
     pub cost: u32,
+    /// Seconds between unpack and unit spawn (FARP-style clear window). `0` = immediate.
+    #[serde(default = "default_deployable_spawn_delay_secs")]
+    pub spawn_delay_secs: u32,
     /// Is this unit an early warning radar
     pub ewr: Option<DeployableEwr>,
     /// Is this unit a jtac

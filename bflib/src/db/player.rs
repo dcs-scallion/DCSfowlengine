@@ -217,6 +217,7 @@ impl Db {
     }
 
     pub fn player_deslot_slot(&mut self, ucid: &Ucid, slot: &SlotId) {
+        self.delete_fowl_crates_on_carrier_deslot(None, ucid, Some(slot));
         let _ = self
             .ephemeral
             .player_deslot(&self.persisted, slot, Some(*ucid));
@@ -231,6 +232,7 @@ impl Db {
             .filter(|(_, u)| **u == *ucid)
             .map(|(s, _)| *s)
             .collect();
+        self.delete_fowl_crates_on_carrier_deslot(None, ucid, None);
         for slot in slots {
             let _ = self
                 .ephemeral
@@ -1309,7 +1311,9 @@ impl Db {
         if let Some(slot) = self.ephemeral.slot_by_object_id.get(&objid) {
             if let Some(ucid) = self.ephemeral.player_in_slot(slot) {
                 let ucid = ucid.clone();
-                deslot = Some((ucid, *slot));
+                let slot = *slot;
+                self.delete_fowl_crates_on_carrier_deslot(Some(lua), &ucid, Some(&slot));
+                deslot = Some((ucid.clone(), slot));
                 let player = maybe_mut!(self.persisted.players, ucid, "player")?;
                 if let Some((_, Some(inst))) = player.current_slot.as_mut() {
                     let typ = inst.typ.clone();
@@ -1329,7 +1333,7 @@ impl Db {
                                         id: ucid,
                                         lives: player.lives.clone(),
                                     });
-                                    returned_life = Some((ucid, *slot, life_type));
+                                    returned_life = Some((ucid, slot, life_type));
                                     info!(
                                         "life returned on deslot for {ucid} ({life_type})"
                                     );
@@ -1395,6 +1399,7 @@ impl Db {
                 self.ephemeral.push_sync_warehouse(oid, inst.typ.clone());
             }
         }
+        self.delete_fowl_crates_on_carrier_deslot(None, ucid, None);
         self.ephemeral.stat(Stat::Disconnect { id: *ucid });
         self.player_deslot(ucid);
     }

@@ -1368,7 +1368,7 @@ fn on_event(lua: MizLua, ev: Event) -> Result<()> {
                     }
                 }
             } else if let Ok(st) = b.initiator.as_static() {
-                if let Err(e) = ctx.db.static_born(&st) {
+                if let Err(e) = ctx.db.static_born(lua, &st) {
                     error!("static born failed {:?} {:?}", st, e);
                 }
                 if let Err(e) = ctx.db.try_revive_fowl_crate_static(lua, &st) {
@@ -1393,6 +1393,9 @@ fn on_event(lua: MizLua, ev: Event) -> Result<()> {
             if let Some(initiator) = e.initiator {
                 if let Some(ucid) = ctx.db.player_in_unit(false, &initiator) {
                     if airborne_deslot_block(ctx, lua, ucid, Some(&initiator)).is_some() {
+                        // True airborne deslot — count airframe war loss (not life-not-returned).
+                        ctx.db
+                            .campaign_record_player_airframe_loss(&ucid, &initiator);
                         schedule_airborne_deslot_penalty(ctx, ucid, start_ts);
                         finish_airborne_exit(ctx, ucid, &initiator);
                         ctx.db.player_deslot(&ucid);
@@ -2450,8 +2453,8 @@ fn run_slow_timed_events(
             }
         }
         if ctx.db.dynamic_cargo_enabled() {
-            ctx.db.prune_missing_dynamic_cargo(lua);
             ctx.db.refresh_dynamic_cargo_snapshots(lua);
+            ctx.db.prune_missing_dynamic_cargo(lua);
             ctx.db.enforce_shared_ed_fowl_cargo_limits(lua);
             ctx.db.relocate_fowl_crates_after_shared_ed_unload(lua);
         } else {

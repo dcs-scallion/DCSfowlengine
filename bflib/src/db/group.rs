@@ -1381,17 +1381,39 @@ impl Db {
         Ok(())
     }
 
-    pub fn static_born(&mut self, st: &StaticObject) -> Result<()> {
+    pub fn static_born(&mut self, lua: MizLua, st: &StaticObject) -> Result<()> {
         let id = st.object_id()?;
         let name = st.get_name()?;
         if let Some(uid) = self.persisted.units_by_name.get(name.as_str()) {
-            if let Some(unit) = self.persisted.units.get(uid) {
-                self.ephemeral
+            let uid = *uid;
+            let remake_mark = if let Some(unit) = self.persisted.units.get(&uid) {
+                let gid = unit.group;
+                let was_place = self
+                    .ephemeral
                     .shared_ed_place_ignore_dead
-                    .remove(&unit.group);
+                    .remove(&gid);
+                was_place
+                    && matches!(
+                        self.persisted.groups.get(&gid).map(|g| &g.origin),
+                        Some(DeployKind::Crate { .. })
+                    )
+            } else {
+                false
+            };
+            self.ephemeral.uid_by_static.insert(id, uid);
+            Self::cache_unit_static_max_life(self, uid, st);
+            if remake_mark {
+                if let Some(unit) = self.persisted.units.get_mut_cow(&uid) {
+                    unit.dead = false;
+                    unit.hp_percent = 100;
+                    if let Ok(pt) = st.get_point() {
+                        unit.position.p = pt;
+                        unit.pos = Vector2::new(pt.0.x, pt.0.z);
+                    }
+                }
+                let gid = unit!(self, uid)?.group;
+                let _ = self.mark_group(lua, &gid);
             }
-            self.ephemeral.uid_by_static.insert(id, *uid);
-            Self::cache_unit_static_max_life(self, *uid, st);
         }
         Ok(())
     }
@@ -1715,10 +1737,11 @@ impl Db {
             return Ok(());
         };
         if let Some(unit) = self.persisted.units.get(&uid) {
+            // Keep flag until static_born so late Dead after respawn cannot mark the crate dead.
             if self
                 .ephemeral
                 .shared_ed_place_ignore_dead
-                .remove(&unit.group)
+                .contains(&unit.group)
             {
                 info!(
                     "static_dead: ignore intentional ED unload place for crate {:?}",
@@ -2001,7 +2024,7 @@ impl Db {
                         .insert(gid, carrier.clone());
                     self.ephemeral
                         .shared_ed_fowl_eject_grace_until
-                        .insert(gid, Utc::now() + chrono::Duration::seconds(90));
+                        .insert(gid, Utc::now() + chrono::Duration::seconds(30));
                     if self.ephemeral.shared_ed_eject_ramp_warned.insert(gid) {
                         self.ephemeral.panel_to_player(
                             &self.persisted,
@@ -2018,7 +2041,7 @@ impl Db {
         }
 
         self.ephemeral.shared_ed_eject_pending_place.remove(&gid);
-        self.place_fowl_crate_on_ed_unload_line(lua, gid, uid, carrier)?;
+        self.place_fowl_crate_on_ed_unload_line(lua, gid, uid, carrier, &[])?;
         self.ephemeral.panel_to_player(
             &self.persisted,
             12,
@@ -2031,45 +2054,66 @@ impl Db {
         Ok(())
     }
 
-    /// Model horizontal extent + 1 m (F8 unload lateral packing).
-    fn fowl_crate_spacing_m(lua: MizLua, name: &str) -> f64 {
+    /// Model horizontal extent + 1 m (nose-line lateral packing).
+    pub(super) fn fowl_crate_spacing_m(lua: MizLua, name: Option<&str>) -> f64 {
         const FALLBACK_EXTENT_M: f64 = 3.0;
         const GAP_M: f64 = 1.0;
-        let extent = match StaticObject::get_by_name(lua, name) {
-            Ok(Static::Static(st)) if st.is_exist().unwrap_or(false) => st
-                .get_desc()
-                .ok()
-                .and_then(|desc| desc.raw_get::<_, dcso3::Box3>("box").ok())
-                .map(|b| {
-                    let dx = (b.max.x - b.min.x).abs();
-                    let dz = (b.max.z - b.min.z).abs();
-                    dx.max(dz).max(1.0)
-                })
-                .unwrap_or(FALLBACK_EXTENT_M),
-            _ => FALLBACK_EXTENT_M,
-        };
+        let extent = name
+            .and_then(|n| StaticObject::get_by_name(lua, n).ok())
+            .and_then(|s| match s {
+                Static::Static(st) if st.is_exist().unwrap_or(false) => Some(st),
+                _ => None,
+            })
+            .and_then(|st| st.get_desc().ok())
+            .and_then(|desc| desc.raw_get::<_, dcso3::Box3>("box").ok())
+            .map(|b| {
+                let dx = (b.max.x - b.min.x).abs();
+                let dz = (b.max.z - b.min.z).abs();
+                dx.max(dz).max(1.0)
+            })
+            .unwrap_or(FALLBACK_EXTENT_M);
         extent + GAP_M
     }
 
-    /// Nose distance for Fowl ED unload line (F10-style + 2 m clearance for rotors).
-    const FOWL_ED_UNLOAD_NOSE_M: f64 = 22.;
+    /// Nose packing distance past bay OBB (airframe-specific; C-130 > 25 m).
+    pub(super) fn fowl_crate_nose_m_for_carrier(&self, carrier: &Ucid) -> f64 {
+        self.persisted
+            .players
+            .get(carrier)
+            .and_then(|p| p.current_slot.as_ref())
+            .and_then(|(_, inst)| inst.as_ref())
+            .map(|inst| {
+                crate::db::dynamic_cargo::fowl_crate_nose_distance_m(inst.typ.as_str())
+            })
+            .unwrap_or(25.)
+    }
 
     /// Nose then alternating left/right from pilot view; spacing = crate size + 1 m.
-    fn fowl_ed_unload_line_pos(
+    /// `extra_occupied`: same-tick unload reservations (spawn may still be deferred).
+    pub(super) fn fowl_crate_nose_line_pos(
         &self,
         lua: MizLua,
         ac_pos: Vector2,
         forward: Vector2,
-        exclude_gid: GroupId,
+        exclude_gid: Option<GroupId>,
         spacing: f64,
+        nose_m: f64,
+        extra_occupied: &[Vector2],
     ) -> Vector2 {
-        let nose = ac_pos + forward * Self::FOWL_ED_UNLOAD_NOSE_M;
+        let flen = (forward.x * forward.x + forward.y * forward.y).sqrt();
+        let forward = if flen > 1e-3 {
+            forward / flen
+        } else {
+            Vector2::new(1., 0.)
+        };
+        let nose = ac_pos + forward * nose_m;
         // Pilot-right: looking along forward in XZ (Vector2 = x,z).
         let right = Vector2::new(forward.y, -forward.x);
-        let search_r = Self::FOWL_ED_UNLOAD_NOSE_M + spacing * 12.;
-        let mut occupied: SmallVec<[(GroupId, Vector2); 16]> = smallvec![];
+        let search_r = nose_m + spacing * 12.;
+        let mut occupied: SmallVec<[Vector2; 16]> = smallvec![];
+        occupied.extend_from_slice(extra_occupied);
         for gid in &self.persisted.crates {
-            if *gid == exclude_gid {
+            if exclude_gid == Some(*gid) {
                 continue;
             }
             let Some(group) = self.persisted.groups.get(gid) else {
@@ -2093,7 +2137,7 @@ impl Db {
                     _ => unit.pos,
                 };
                 if (pos - nose).magnitude() <= search_r {
-                    occupied.push((*gid, pos));
+                    occupied.push(pos);
                 }
             }
         }
@@ -2107,7 +2151,7 @@ impl Db {
             };
             let free = occupied
                 .iter()
-                .all(|(_, p)| (candidate - *p).magnitude() >= spacing * 0.95);
+                .all(|p| (candidate - *p).magnitude() >= spacing * 0.95);
             if free {
                 return candidate;
             }
@@ -2116,13 +2160,15 @@ impl Db {
     }
 
     /// Destroy + respawn Fowl crate on F10-style unload line (nose + lateral packing).
+    /// `extra_occupied`: same-tick nose-line reservations from sibling unloads.
     pub(super) fn place_fowl_crate_on_ed_unload_line(
         &mut self,
         lua: MizLua,
         gid: GroupId,
         uid: UnitId,
         carrier: &Ucid,
-    ) -> Result<()> {
+        extra_occupied: &[Vector2],
+    ) -> Result<Vector2> {
         let (slot, side, name) = {
             let player = self
                 .persisted
@@ -2175,9 +2221,17 @@ impl Db {
         } else {
             Vector2::new(1., 0.)
         };
-        let spacing = Self::fowl_crate_spacing_m(lua, name.as_str());
-        let drop_pos =
-            self.fowl_ed_unload_line_pos(lua, ac_pos, dir, gid, spacing);
+        let spacing = Self::fowl_crate_spacing_m(lua, Some(name.as_str()));
+        let nose_m = self.fowl_crate_nose_m_for_carrier(carrier);
+        let drop_pos = self.fowl_crate_nose_line_pos(
+            lua,
+            ac_pos,
+            dir,
+            Some(gid),
+            spacing,
+            nose_m,
+            extra_occupied,
+        );
 
         let (final_pos, alt, ship_hub, ship_offsets) =
             match self.point_near_logistics(side, ac_pos).ok() {
@@ -2265,7 +2319,7 @@ impl Db {
                         .insert(gid, carrier.clone());
                     self.ephemeral
                         .shared_ed_fowl_eject_grace_until
-                        .insert(gid, Utc::now() + chrono::Duration::seconds(90));
+                        .insert(gid, Utc::now() + chrono::Duration::seconds(30));
                     bail!(
                         "ED unload place deferred: {name} still on getCargosOnBoard"
                     );
@@ -2284,6 +2338,28 @@ impl Db {
         position.p.y = alt;
         position.p.z = final_pos.y;
 
+        // New static name so ED F8 ghost slots (old name) can be scrubbed separately.
+        let old_name = name.clone();
+        let new_name = format_compact!("fowl{}-{}", uid, Utc::now().timestamp_millis());
+        self.ephemeral
+            .shared_ed_bay_ghost_names
+            .insert(gid, old_name.clone());
+        if let Some(unit) = self.persisted.units.get_mut_cow(&uid) {
+            self.persisted.units_by_name.remove_cow(&unit.name);
+            unit.name = String::from(new_name.as_str());
+            unit.dead = false;
+            unit.hp_percent = 100;
+            unit.pos = final_pos;
+            unit.spawn_pos = final_pos;
+            unit.heading = heading;
+            unit.spawn_heading = heading;
+            unit.position = position;
+            unit.spawn_position = position;
+        }
+        self.persisted
+            .units_by_name
+            .insert_cow(String::from(new_name.as_str()), uid);
+
         if let Some(group) = self.persisted.groups.get_mut_cow(&gid) {
             if let DeployKind::Crate {
                 ed_carrier,
@@ -2296,16 +2372,6 @@ impl Db {
                 *sh = ship_hub;
                 *so = ship_offsets;
             }
-        }
-        if let Some(unit) = self.persisted.units.get_mut_cow(&uid) {
-            unit.dead = false;
-            unit.hp_percent = 100;
-            unit.pos = final_pos;
-            unit.spawn_pos = final_pos;
-            unit.heading = heading;
-            unit.spawn_heading = heading;
-            unit.position = position;
-            unit.spawn_position = position;
         }
         if let Some(id) = self.ephemeral.object_id_by_uid.remove(&uid) {
             self.ephemeral.uid_by_object_id.remove(&id);
@@ -2323,16 +2389,29 @@ impl Db {
         self.ephemeral.shared_ed_eject_pending_place.remove(&gid);
         self.ephemeral
             .shared_ed_fowl_eject_grace_until
-            .insert(gid, Utc::now() + chrono::Duration::seconds(60));
-        // Keep shared_ed_place_ignore_dead until static_dead (may be deferred).
+            .insert(gid, Utc::now() + chrono::Duration::seconds(30));
+        // Scrub ED F8 ghost under the pre-rename name (classic cargo menu).
+        let _ = self.try_clear_ed_bay_cargo_named(lua, gid, old_name.as_str());
+        let old_gone = self
+            .ephemeral
+            .slot_instance_unit(lua, &slot)
+            .ok()
+            .map(|ac| {
+                !crate::db::dynamic_cargo::unit_has_cargo_named(&ac, old_name.as_str())
+            })
+            .unwrap_or(false);
+        if old_gone {
+            self.ephemeral.shared_ed_bay_ghost_names.remove(&gid);
+        }
+        // Keep shared_ed_place_ignore_dead until static_born (may be deferred).
         self.ephemeral.push_spawn(gid);
         self.mark_group(lua, &gid)?;
         self.ephemeral.dirty();
         info!(
-            "crate {gid}: placed on ED unload line for {carrier:?} at ({:.1},{:.1})",
+            "crate {gid}: placed on ED unload line for {carrier:?} as {new_name} at ({:.1},{:.1})",
             final_pos.x, final_pos.y
         );
-        Ok(())
+        Ok(final_pos)
     }
 
     /// Nearest same-side ED cargo transport player when Dead is likely F8/sling.
@@ -2429,7 +2508,7 @@ impl Db {
         self.ephemeral.dirty();
         info!("revived Fowl crate {gid} after ED cargo unload ({name})");
         if let Some(carrier) = carrier {
-            if let Err(e) = self.place_fowl_crate_on_ed_unload_line(lua, gid, uid, &carrier) {
+            if let Err(e) = self.place_fowl_crate_on_ed_unload_line(lua, gid, uid, &carrier, &[]) {
                 warn!("crate {gid}: ED unload place after revive failed: {e:?}");
             }
         }

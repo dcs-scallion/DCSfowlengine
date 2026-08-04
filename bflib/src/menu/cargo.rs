@@ -41,8 +41,8 @@ fn unpakistan(lua: MizLua, gid: GroupId) -> Result<()> {
                 ctx.db.campaign_top10_on_logistics(ucid);
             }
             let sound_key = match &unpakistan {
-                Unpakistan::Unpacked(_)
-                | Unpakistan::UnpackedFarp(_)
+                Unpakistan::Unpacked(_, _)
+                | Unpakistan::UnpackedFarp(_, _)
                 | Unpakistan::TransferedSupplies(_, _) => "crate_unpack",
                 Unpakistan::Repaired(_)
                 | Unpakistan::RepairedBase(_, _)
@@ -255,12 +255,19 @@ fn list_nearby_crates(lua: MizLua, gid: GroupId) -> Result<()> {
     if nearby.len() > 0 {
         let mut msg = CompactString::new("");
         for nc in nearby {
-            msg.push_str(&format_compact!(
-                "{} crate, bearing {}, {} meters away\n",
-                nc.crate_def.name,
-                nc.heading as u32,
-                nc.distance as u32
-            ));
+            if nc.loaded {
+                msg.push_str(&format_compact!(
+                    "{} crate, loaded aboard\n",
+                    nc.crate_def.name
+                ));
+            } else {
+                msg.push_str(&format_compact!(
+                    "{} crate, bearing {}, {} meters away\n",
+                    nc.crate_def.name,
+                    nc.heading as u32,
+                    nc.distance as u32
+                ));
+            }
         }
         ctx.db.ephemeral.msgs().panel_to_group(10, false, gid, msg)
     } else {

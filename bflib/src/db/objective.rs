@@ -1415,8 +1415,12 @@ impl Db {
                 }
             }
         }
-        // delay the spawn of the other components so the unpacker can
-        // get out of the way
+        // Delay other components so the unpacker can clear (CFG spawn_delay_secs).
+        let component_delay = if spec.spawn_delay_secs == 0 {
+            None
+        } else {
+            Some(now + Duration::seconds(spec.spawn_delay_secs as i64))
+        };
         for name in [
             &defenses_template,
             &ammo_template,
@@ -1432,7 +1436,7 @@ impl Db {
                     &name,
                     DeployKind::Objective { origin: oid },
                     BitFlags::empty(),
-                    Some(now + Duration::seconds(60)),
+                    component_delay,
                     None,
                     None,
                 ) {

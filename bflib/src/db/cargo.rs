@@ -84,12 +84,14 @@ pub struct NearbyCrate<'a> {
     pub pos: Vector2,
     pub heading: f64,
     pub distance: f64,
+    /// True when this Fowl crate is in an ED bay / sling (not on the ground).
+    pub loaded: bool,
 }
 
 #[derive(Debug, Clone)]
 pub enum Unpakistan {
-    Unpacked(String),
-    UnpackedFarp(String),
+    Unpacked(String, u32),
+    UnpackedFarp(String, u32),
     Repaired(String),
     RepairedBase(String, u8),
     RepairedProduction(String, u8),
@@ -106,10 +108,15 @@ pub enum Oldest {
 impl fmt::Display for Unpakistan {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Self::Unpacked(unit) => write!(f, "unpacked a {unit}"),
-            Self::UnpackedFarp(loc) => write!(
+            Self::Unpacked(unit, 0) => write!(f, "unpacked a {unit}"),
+            Self::Unpacked(unit, secs) => write!(
                 f,
-                "unpacked {loc}, units will spawn in 60 seconds get clear"
+                "unpacked a {unit}, units will spawn in {secs} seconds get clear"
+            ),
+            Self::UnpackedFarp(loc, 0) => write!(f, "unpacked {loc}"),
+            Self::UnpackedFarp(loc, secs) => write!(
+                f,
+                "unpacked {loc}, units will spawn in {secs} seconds get clear"
             ),
             Self::Repaired(unit) => write!(f, "repaired a {unit}"),
             Self::RepairedBase(base, logi) => write!(f, "repaired logistics at {base} to %{logi}"),
@@ -238,17 +245,33 @@ impl Db {
         if st.in_air {
             bail!("you must land to spawn crates")
         }
-        let dir = Vector2::new(st.pos.x.x, st.pos.x.z);
+        let dir = {
+            let mut d = Vector2::new(st.pos.x.x, st.pos.x.z);
+            let mag = (d.x * d.x + d.y * d.y).sqrt();
+            if mag > 1e-3 {
+                d / mag
+            } else {
+                Vector2::new(1., 0.)
+            }
+        };
         let group_heading = azumith2d(dir);
         let (oid, _) = self.point_near_logistics(st.side, st.point)?;
-        // Single-unit crate templates: prefer 20m ahead; on ships walk back onto deck box.
-        let (spawnpos, ship_hub, ship_offsets, deck_alt, near_check) =
-            match crate::db::ai_air::resolve_ship_crate_deck_spawn(
+        let spacing = Self::fowl_crate_spacing_m(lua, None);
+        let nose_m = self
+            .ephemeral
+            .slot_info
+            .get(slot)
+            .map(|s| crate::db::dynamic_cargo::fowl_crate_nose_distance_m(s.typ.as_str()))
+            .unwrap_or(25.);
+        let drop_pos =
+            self.fowl_crate_nose_line_pos(lua, st.point, dir, None, spacing, nose_m, &[]);
+        // Pack on nose line past bay OBB; on ships walk back onto deck box.
+        let (spawnpos, ship_hub, ship_offsets, deck_alt) =
+            match crate::db::ai_air::try_ship_crate_at_world_pos(
                 lua,
                 self,
                 oid,
-                st.point,
-                dir,
+                drop_pos,
                 group_heading,
                 st.pos.p.y,
             )? {
@@ -261,26 +284,38 @@ impl Db {
                     Some(oid),
                     Some(offsets),
                     Some(altitude),
-                    deck_spawn,
                 ),
-                None => (
-                    SpawnLoc::AtPos {
-                        pos: st.point,
-                        offset_direction: dir,
-                        group_heading,
-                    },
-                    None,
-                    None,
-                    None,
-                    st.point + dir * 20.,
-                ),
+                None => match crate::db::ai_air::resolve_ship_crate_deck_spawn(
+                    lua,
+                    self,
+                    oid,
+                    st.point,
+                    dir,
+                    group_heading,
+                    st.pos.p.y,
+                )? {
+                    Some((deck_spawn, altitude, offsets)) => (
+                        SpawnLoc::AtPosOnShip {
+                            pos: deck_spawn,
+                            group_heading,
+                            altitude,
+                        },
+                        Some(oid),
+                        Some(offsets),
+                        Some(altitude),
+                    ),
+                    None => (
+                        SpawnLoc::AtPos {
+                            pos: drop_pos,
+                            offset_direction: Vector2::new(0., 0.),
+                            group_heading,
+                        },
+                        None,
+                        None,
+                        None,
+                    ),
+                },
             };
-        if !self
-            .list_crates_near_point(lua, near_check, 10.)?
-            .is_empty()
-        {
-            bail!("move away from other crates or pick up the existing crate")
-        }
         let to_delete = self.ephemeral.cfg.max_crates.and_then(|max_crates| {
             let crates = &self.persisted.players[&st.ucid].crates;
             if crates.len() < max_crates as usize {
@@ -450,6 +485,7 @@ impl Db {
                 let distance = na::distance(&point.into(), &pos.into());
                 if distance <= max_dist {
                     let heading = radians_to_degrees(azumith2d_to(point, pos));
+                    let loaded = self.fowl_crate_is_on_ed_bay(lua, *gid);
                     res.push(NearbyCrate {
                         group,
                         origin: *oid,
@@ -457,6 +493,7 @@ impl Db {
                         pos,
                         heading,
                         distance,
+                        loaded,
                     })
                 }
             }
@@ -482,10 +519,57 @@ impl Db {
         let nearby = self.list_nearby_crates(lua, &st)?;
         let closest = nearby
             .into_iter()
-            .next()
-            .ok_or_else(|| anyhow!("no nearby crates"))?;
+            .find(|nc| !nc.loaded)
+            .ok_or_else(|| anyhow!("no nearby crates on the ground"))?;
         let gid = closest.group.id;
         self.delete_group(&gid)
+    }
+
+    /// Delete Fowl crates still in this player's ED bay when they leave the airframe.
+    pub fn delete_fowl_crates_on_carrier_deslot(
+        &mut self,
+        lua: Option<MizLua>,
+        ucid: &Ucid,
+        slot: Option<&SlotId>,
+    ) {
+        let mut gids: SmallVec<[GroupId; 8]> = smallvec![];
+        for gid in &self.persisted.crates {
+            let Some(group) = self.persisted.groups.get(gid) else {
+                continue;
+            };
+            if let DeployKind::Crate {
+                ed_carrier: Some(carrier),
+                ..
+            } = &group.origin
+            {
+                if carrier == ucid {
+                    gids.push(*gid);
+                }
+            }
+        }
+        for (gid, carrier) in &self.ephemeral.shared_ed_fowl_aboard {
+            if carrier == ucid {
+                gids.push(*gid);
+            }
+        }
+        for (gid, carrier) in &self.ephemeral.shared_ed_eject_pending_place {
+            if carrier == ucid {
+                gids.push(*gid);
+            }
+        }
+        if let (Some(lua), Some(slot)) = (lua, slot) {
+            for gid in self.fowl_crate_gids_on_ed_bay(lua, slot) {
+                gids.push(gid);
+            }
+        }
+        gids.sort_unstable();
+        gids.dedup();
+        for gid in gids {
+            info!("deslot {ucid}: deleting Fowl crate {gid} left in cargo bay");
+            if let Err(e) = self.delete_group(&gid) {
+                warn!("deslot {ucid}: delete Fowl crate {gid} failed: {e:?}");
+            }
+        }
     }
 
     pub fn list_cargo(&self, slot: &SlotId) -> Option<&Cargo> {
@@ -528,9 +612,9 @@ impl Db {
         n
     }
 
-    /// Fowl crates on this slot via ED bay: ground statics inside bay footprint,
-    /// or dead F8-loaded crates (`ed_carrier`) until revive.
-    /// Returns (display name, weight kg) for List Cargo.
+    /// Fowl crates on this slot via ED bay for List Cargo.
+    /// Living crates: only `getCargosOnBoard` (OBB is too large — nose packing sits inside C-130 box).
+    /// Dead F8-loaded: `ed_carrier` and/or still listed on board.
     pub fn fowl_crates_on_ed_bay(
         &self,
         lua: MizLua,
@@ -547,39 +631,8 @@ impl Db {
             return out;
         };
         let side = player.side;
-        let (hpt, fwd, landed, typ, ac) = match self.ephemeral.slot_instance_unit(lua, slot) {
-            Ok(unit) => {
-                let Ok(pt) = unit.get_point() else {
-                    return out;
-                };
-                let landed = unit.in_air().map(|a| !a).unwrap_or(!inst.in_air);
-                let pos = unit.get_position().unwrap_or(inst.position);
-                (
-                    pt.0,
-                    Vector2::new(pos.x.x, pos.x.z),
-                    landed,
-                    inst.typ.0.clone(),
-                    Some(unit),
-                )
-            }
-            Err(_) => (
-                inst.position.p.0,
-                Vector2::new(inst.position.x.x, inst.position.x.z),
-                !inst.in_air,
-                inst.typ.0.clone(),
-                None,
-            ),
-        };
-        let now = Utc::now();
+        let ac = self.ephemeral.slot_instance_unit(lua, slot).ok();
         for gid in &self.persisted.crates {
-            if self
-                .ephemeral
-                .shared_ed_fowl_eject_grace_until
-                .get(gid)
-                .is_some_and(|until| now < *until)
-            {
-                continue;
-            }
             let Some(group) = self.persisted.groups.get(gid) else {
                 continue;
             };
@@ -599,27 +652,22 @@ impl Db {
                 let Some(unit) = self.persisted.units.get(uid) else {
                     continue;
                 };
+                let on_board = ac
+                    .as_ref()
+                    .map(|u| {
+                        crate::db::dynamic_cargo::unit_has_cargo_named(u, unit.name.as_str())
+                    })
+                    .unwrap_or(false);
                 if unit.dead {
                     if ed_carrier.as_ref() == Some(ucid) {
                         dead_on_carrier = true;
                     }
-                    // F8 ghost / Dead-loaded: still on getCargosOnBoard.
-                    if ac
-                        .as_ref()
-                        .map(|u| {
-                            crate::db::dynamic_cargo::unit_has_cargo_named(u, unit.name.as_str())
-                        })
-                        .unwrap_or(false)
-                    {
+                    if on_board {
                         aboard = true;
                     }
                     continue;
                 }
-                if ac
-                    .as_ref()
-                    .map(|u| crate::db::dynamic_cargo::unit_has_cargo_named(u, unit.name.as_str()))
-                    .unwrap_or(false)
-                {
+                if on_board {
                     aboard = true;
                     if let Ok(Static::Static(st)) =
                         StaticObject::get_by_name(lua, unit.name.as_str())
@@ -632,30 +680,7 @@ impl Db {
                     }
                     break;
                 }
-                let Ok(Static::Static(st)) = StaticObject::get_by_name(lua, unit.name.as_str())
-                else {
-                    continue;
-                };
-                match crate::db::dynamic_cargo::dynamic_cargo_is_aboard_unit(
-                    hpt,
-                    fwd,
-                    landed,
-                    typ.as_str(),
-                    &st,
-                ) {
-                    Ok(true) => {
-                        aboard = true;
-                        if let Ok(cw) = st.get_cargo_weight() {
-                            if cw > 0. {
-                                w = cw.round() as u32;
-                            }
-                        }
-                        break;
-                    }
-                    _ => {}
-                }
             }
-            // Living crates outside the bay must not stay listed via stale ed_carrier.
             if !aboard && !dead_on_carrier {
                 continue;
             }
@@ -664,7 +689,7 @@ impl Db {
         out
     }
 
-    /// True if this Fowl crate static is currently in an ED bay / sling of a player transport.
+    /// True if this Fowl crate is in an ED bay / sling (List Nearby "loaded", unpack gate).
     pub fn fowl_crate_is_on_ed_bay(&self, lua: MizLua, gid: GroupId) -> bool {
         let Some(group) = self.persisted.groups.get(&gid) else {
             return false;
@@ -683,27 +708,15 @@ impl Db {
                     }
                 }
             }
-            if unit.dead {
-                continue;
-            }
-            let Ok(Static::Static(st)) = StaticObject::get_by_name(lua, unit.name.as_str()) else {
-                continue;
-            };
-            if crate::db::dynamic_cargo::dynamic_cargo_is_aboard_any_player_transport(
-                self, lua, group.side, &st,
-            )
-            .unwrap_or(false)
-            {
-                return true;
-            }
         }
-        // Dead + ed_carrier: still counted as loaded for unpack refusal.
         matches!(
             &group.origin,
             DeployKind::Crate {
                 ed_carrier: Some(_),
                 ..
-            }
+            } if group.units.into_iter().any(|uid| {
+                self.persisted.units.get(uid).is_some_and(|u| u.dead)
+            })
         )
     }
 
@@ -748,16 +761,7 @@ impl Db {
                 None,
             ),
         };
-        let now = Utc::now();
         for gid in &self.persisted.crates {
-            if self
-                .ephemeral
-                .shared_ed_fowl_eject_grace_until
-                .get(gid)
-                .is_some_and(|until| now < *until)
-            {
-                continue;
-            }
             let Some(group) = self.persisted.groups.get(gid) else {
                 continue;
             };
@@ -855,15 +859,35 @@ impl Db {
             let hybrid = self.ephemeral.cargo.get(&slot);
             let hybrid_crates = hybrid.map(|c| c.num_crates()).unwrap_or(0);
             let troops = hybrid.map(|c| c.num_troops()).unwrap_or(0);
-            // Geometry only — ed_carrier ghosts must not drive eject/menu.
+            // Geometry for living F8 crates; ed_carrier ghosts must not drive eject.
             let mut bay_gids = self.fowl_crate_gids_geometry_on_ed_bay(lua, &slot);
+            let ac = self.ephemeral.slot_instance_unit(lua, &slot).ok();
             bay_gids.retain(|gid| {
-                !self
-                    .ephemeral
-                    .shared_ed_fowl_eject_grace_until
+                if self.ephemeral.shared_ed_eject_pending_place.contains_key(gid) {
+                    return false;
+                }
+                let on_board = self
+                    .persisted
+                    .groups
                     .get(gid)
-                    .is_some_and(|until| Utc::now() < *until)
-                    && !self.ephemeral.shared_ed_eject_pending_place.contains_key(gid)
+                    .and_then(|g| g.units.into_iter().next())
+                    .and_then(|uid| self.persisted.units.get(uid))
+                    .zip(ac.as_ref())
+                    .is_some_and(|(unit, ac)| {
+                        crate::db::dynamic_cargo::unit_has_cargo_named(ac, unit.name.as_str())
+                    });
+                // Grace only ignores geometry false-positives near the nose — never
+                // skip crates that ED still lists on board (CFG capacity must count them).
+                if !on_board
+                    && self
+                        .ephemeral
+                        .shared_ed_fowl_eject_grace_until
+                        .get(gid)
+                        .is_some_and(|until| Utc::now() < *until)
+                {
+                    return false;
+                }
+                true
             });
             let crate_room = (capacity.crate_slots as usize).saturating_sub(hybrid_crates);
             let total_room = (capacity.total_slots as usize)
@@ -896,6 +920,8 @@ impl Db {
     }
 
     /// UnloadCargo leftovers / deferred ground place after over-limit eject.
+    /// Ghost scrub uses only pre-rename names — never the living crate's current name
+    /// (that would F8-unload a legitimately reloaded crate during grace).
     fn sweep_shared_ed_eject_bay_ghosts(&mut self, lua: MizLua) {
         let now = Utc::now();
         self.ephemeral
@@ -908,27 +934,34 @@ impl Db {
             .iter()
             .map(|(g, u)| (*g, u.clone()))
             .collect();
-        let grace: SmallVec<[GroupId; 8]> = self
+        let ghost_scrub: SmallVec<[(GroupId, String); 8]> = self
             .ephemeral
-            .shared_ed_fowl_eject_grace_until
-            .keys()
-            .copied()
+            .shared_ed_bay_ghost_names
+            .iter()
+            .map(|(g, n)| (*g, n.clone()))
             .collect();
 
-        for gid in grace {
+        for (gid, old_name) in ghost_scrub {
             if self.ephemeral.shared_ed_eject_pending_place.contains_key(&gid) {
                 continue;
             }
-            let Some(name) = self
+            // Never scrub the post-rename living name.
+            if self
                 .persisted
                 .groups
                 .get(&gid)
                 .and_then(|g| g.units.into_iter().next())
-                .and_then(|uid| self.persisted.units.get(uid).map(|u| u.name.clone()))
-            else {
+                .and_then(|uid| self.persisted.units.get(uid))
+                .is_some_and(|u| u.name.as_str() == old_name.as_str())
+            {
+                self.ephemeral.shared_ed_bay_ghost_names.remove(&gid);
                 continue;
-            };
-            self.try_clear_ed_bay_cargo_named(lua, gid, name.as_str());
+            }
+            if !self.try_clear_ed_bay_cargo_named(lua, gid, old_name.as_str()) {
+                self.ephemeral.shared_ed_bay_ghost_names.remove(&gid);
+                // Old F8 ghost gone — no need to keep grace blocking relocate/count.
+                self.ephemeral.shared_ed_fowl_eject_grace_until.remove(&gid);
+            }
         }
 
         for (gid, ucid) in pending {
@@ -949,7 +982,7 @@ impl Db {
                 continue;
             }
             self.ephemeral.shared_ed_eject_pending_place.remove(&gid);
-            if let Err(e) = self.place_fowl_crate_on_ed_unload_line(lua, gid, uid, &ucid) {
+            if let Err(e) = self.place_fowl_crate_on_ed_unload_line(lua, gid, uid, &ucid, &[]) {
                 warn!("crate {gid}: deferred ED unload place failed: {e:?}");
                 self.ephemeral
                     .shared_ed_eject_pending_place
@@ -967,7 +1000,12 @@ impl Db {
     }
 
     /// Returns true if the crate name is still listed on some player ED bay.
-    fn try_clear_ed_bay_cargo_named(&mut self, lua: MizLua, gid: GroupId, name: &str) -> bool {
+    pub(super) fn try_clear_ed_bay_cargo_named(
+        &mut self,
+        lua: MizLua,
+        gid: GroupId,
+        name: &str,
+    ) -> bool {
         let mut still = false;
         for (slot, _) in self.ephemeral.players_by_slot.clone() {
             let Ok(ac) = self.ephemeral.slot_instance_unit(lua, &slot) else {
@@ -1120,8 +1158,44 @@ impl Db {
 
         let mut current: FxHashMap<GroupId, Ucid> = FxHashMap::default();
         for (slot, ucid) in &carriers {
+            let ac = self.ephemeral.slot_instance_unit(lua, slot).ok();
             for gid in self.fowl_crate_gids_geometry_on_ed_bay(lua, slot) {
-                current.insert(gid, ucid.clone());
+                let Some(group) = self.persisted.groups.get(&gid) else {
+                    continue;
+                };
+                let DeployKind::Crate { ed_carrier, .. } = &group.origin else {
+                    continue;
+                };
+                let mut on_board = false;
+                let mut dead_on_carrier = false;
+                for uid in &group.units {
+                    let Some(unit) = self.persisted.units.get(uid) else {
+                        continue;
+                    };
+                    if ac
+                        .as_ref()
+                        .map(|u| {
+                            crate::db::dynamic_cargo::unit_has_cargo_named(u, unit.name.as_str())
+                        })
+                        .unwrap_or(false)
+                    {
+                        on_board = true;
+                    }
+                    if unit.dead && ed_carrier.as_ref() == Some(ucid) {
+                        dead_on_carrier = true;
+                    }
+                }
+                // OBB alone is not "aboard" — F8 rear dumps sit inside the C-130 box.
+                if on_board || dead_on_carrier {
+                    current.insert(gid, ucid.clone());
+                }
+            }
+        }
+
+        // F8 can keep crates alive in-bay without Dead — drop stale F10 marks.
+        for gid in current.keys() {
+            if let Some(id) = self.ephemeral.group_marks.remove(gid) {
+                self.ephemeral.msgs.delete_mark(id);
             }
         }
 
@@ -1133,14 +1207,9 @@ impl Db {
             .map(|(gid, ucid)| (*gid, ucid.clone()))
             .collect();
 
+        let mut reserved: SmallVec<[Vector2; 8]> = smallvec![];
         for (gid, ucid) in unloaded {
-            if self
-                .ephemeral
-                .shared_ed_fowl_eject_grace_until
-                .get(&gid)
-                .is_some_and(|until| Utc::now() < *until)
-                || self.ephemeral.shared_ed_eject_pending_place.contains_key(&gid)
-            {
+            if self.ephemeral.shared_ed_eject_pending_place.contains_key(&gid) {
                 continue;
             }
             let Some(uid) = self
@@ -1161,8 +1230,27 @@ impl Db {
             if unit.dead {
                 continue;
             }
-            if let Err(e) = self.place_fowl_crate_on_ed_unload_line(lua, gid, uid, &ucid) {
-                warn!("crate {gid}: F8 unload place failed: {e:?}");
+            let in_grace = self
+                .ephemeral
+                .shared_ed_fowl_eject_grace_until
+                .get(&gid)
+                .is_some_and(|until| Utc::now() < *until);
+            if in_grace {
+                // Skip re-place only when already outside the bay OBB; if still inside
+                // (F8 rear dump / failed scrub), move to the nose line anyway.
+                let still_in_bay = carriers.iter().any(|(slot, cu)| {
+                    cu == &ucid
+                        && self
+                            .fowl_crate_gids_geometry_on_ed_bay(lua, slot)
+                            .contains(&gid)
+                });
+                if !still_in_bay {
+                    continue;
+                }
+            }
+            match self.place_fowl_crate_on_ed_unload_line(lua, gid, uid, &ucid, &reserved) {
+                Ok(pos) => reserved.push(pos),
+                Err(e) => warn!("crate {gid}: F8 unload place failed: {e:?}"),
             }
         }
 
@@ -1983,7 +2071,10 @@ impl Db {
                                                     InvestBucket::Ground,
                                                 );
                                                 let name = objective!(self, oid)?.name.clone();
-                                                return Ok(Unpakistan::UnpackedFarp(name));
+                                                return Ok(Unpakistan::UnpackedFarp(
+                                                    name,
+                                                    spec.spawn_delay_secs,
+                                                ));
                                             }
                                         }
                                     }
@@ -2000,18 +2091,17 @@ impl Db {
                                     cost_fraction: 1.,
                                     origin: Some(from_obj),
                                 };
-                                let (n, _) = self.number_deployed(st.side, dep.as_str())?;
-                                let spawn_group_label: Option<std::string::String> =
-                                    if spec.limit > 1 {
-                                        let i = n;
-                                        Some(if i == 0 {
-                                            template.to_string()
-                                        } else {
-                                            format!("{}-{}", template.as_str(), i)
-                                        })
-                                    } else {
-                                        None
-                                    };
+                                // Unique vs ME template (`{template}-{gid}`); never bare template name.
+                                let delay = if spec.spawn_delay_secs == 0 {
+                                    None
+                                } else {
+                                    Some(
+                                        Utc::now()
+                                            + chrono::Duration::seconds(
+                                                spec.spawn_delay_secs as i64,
+                                            ),
+                                    )
+                                };
                                 let gid = self.add_and_queue_group(
                                     &spctx,
                                     idx,
@@ -2020,8 +2110,8 @@ impl Db {
                                     template.as_str(),
                                     origin,
                                     BitFlags::empty(),
+                                    delay,
                                     None,
-                                    spawn_group_label.as_deref(),
                                     None,
                                 )?;
                                 for cr in have.values().flat_map(|c| c.iter()) {
@@ -2045,7 +2135,7 @@ impl Db {
                                 {
                                     *cost_fraction = frac;
                                 }
-                                return Ok(Unpakistan::Unpacked(dep));
+                                return Ok(Unpakistan::Unpacked(dep, spec.spawn_delay_secs));
                             }
                         },
                     }
@@ -2149,18 +2239,34 @@ impl Db {
             .get(&st.side)
             .ok_or_else(|| anyhow!("missing crate template for {:?}", st.side))?
             .clone();
-        let dir = Vector2::new(st.pos.x.x, st.pos.x.z);
+        let dir = {
+            let mut d = Vector2::new(st.pos.x.x, st.pos.x.z);
+            let mag = (d.x * d.x + d.y * d.y).sqrt();
+            if mag > 1e-3 {
+                d / mag
+            } else {
+                Vector2::new(1., 0.)
+            }
+        };
         let group_heading = azumith3d(st.pos.x.0);
+        let spacing = Self::fowl_crate_spacing_m(lua, None);
+        let nose_m = self
+            .ephemeral
+            .slot_info
+            .get(slot)
+            .map(|s| crate::db::dynamic_cargo::fowl_crate_nose_distance_m(s.typ.as_str()))
+            .unwrap_or(25.);
+        let drop_pos =
+            self.fowl_crate_nose_line_pos(lua, st.point, dir, None, spacing, nose_m, &[]);
         // Deck path only when standing on a friendly logistics hub (never crate origin/carrier fallback).
         let near_logi = self.point_near_logistics(st.side, st.point).ok();
         let (spawnpos, ship_hub, ship_offsets, deck_alt) = match near_logi {
             Some((link_oid, _)) => {
-                match crate::db::ai_air::resolve_ship_crate_deck_spawn(
+                match crate::db::ai_air::try_ship_crate_at_world_pos(
                     lua,
                     self,
                     link_oid,
-                    st.point,
-                    dir,
+                    drop_pos,
                     group_heading,
                     st.pos.p.y,
                 ) {
@@ -2174,23 +2280,44 @@ impl Db {
                         Some(offsets),
                         Some(altitude),
                     ),
-                    // Land spawn if not naval, or deck reject (same as unload_troops).
-                    Ok(None) | Err(_) => (
-                        SpawnLoc::AtPos {
-                            pos: st.point,
-                            offset_direction: dir,
+                    Ok(None) | Err(_) => {
+                        match crate::db::ai_air::resolve_ship_crate_deck_spawn(
+                            lua,
+                            self,
+                            link_oid,
+                            st.point,
+                            dir,
                             group_heading,
-                        },
-                        None,
-                        None,
-                        None,
-                    ),
+                            st.pos.p.y,
+                        ) {
+                            Ok(Some((deck_spawn, altitude, offsets))) => (
+                                SpawnLoc::AtPosOnShip {
+                                    pos: deck_spawn,
+                                    group_heading,
+                                    altitude,
+                                },
+                                Some(link_oid),
+                                Some(offsets),
+                                Some(altitude),
+                            ),
+                            Ok(None) | Err(_) => (
+                                SpawnLoc::AtPos {
+                                    pos: drop_pos,
+                                    offset_direction: Vector2::new(0., 0.),
+                                    group_heading,
+                                },
+                                None,
+                                None,
+                                None,
+                            ),
+                        }
+                    }
                 }
             }
             None => (
                 SpawnLoc::AtPos {
-                    pos: st.point,
-                    offset_direction: dir,
+                    pos: drop_pos,
+                    offset_direction: Vector2::new(0., 0.),
                     group_heading,
                 },
                 None,

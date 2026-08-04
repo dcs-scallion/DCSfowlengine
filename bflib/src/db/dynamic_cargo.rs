@@ -21,6 +21,7 @@ use super::{
 use anyhow::{anyhow, bail, Context, Result};
 use bfprotocols::cfg::DynamicCargoDeliveryCfg;
 use bfprotocols::db::objective::{ObjectiveId, ObjectiveKind};
+use chrono::prelude::*;
 use compact_str::format_compact;
 use dcso3::{
     coalition::{Coalition, Side, Static},
@@ -116,6 +117,15 @@ fn dynamic_cargo_aircraft_dim(type_name: &str) -> Option<DynamicCargoAircraftDim
         }),
         _ => None,
     }
+}
+
+/// Nose packing distance: past bay OBB so ground crates are not "aboard" / colliding.
+pub(crate) fn fowl_crate_nose_distance_m(type_name: &str) -> f64 {
+    const MIN_NOSE_M: f64 = 25.;
+    const PAST_BAY_M: f64 = 5.;
+    dynamic_cargo_aircraft_dim(type_name)
+        .map(|d| (d.length + PAST_BAY_M).max(MIN_NOSE_M))
+        .unwrap_or(MIN_NOSE_M)
 }
 
 /// Airframes that use ED F8 / bay for Fowl crates when listed in CFG `shared_ed_cargo_airframes`.
@@ -509,6 +519,9 @@ impl Db {
         self.persisted
             .dynamic_cargo_crates
             .insert_cow(name.clone(), entry);
+        self.ephemeral
+            .dynamic_cargo_registered_at
+            .insert(name.clone(), Utc::now());
         info!("dynamic cargo registered {name} index={next} side={side:?}");
         while self.count_dynamic_cargo_side(side) > max {
             self.evict_oldest_dynamic_cargo(lua, side)?;
@@ -555,6 +568,19 @@ impl Db {
         Ok(())
     }
 
+    /// True if any player ED transport still lists this cargo name on board.
+    fn dynamic_cargo_name_on_any_board(&self, lua: MizLua, name: &str) -> bool {
+        for (slot, _) in &self.ephemeral.players_by_slot {
+            let Ok(ac) = self.ephemeral.slot_instance_unit(lua, slot) else {
+                continue;
+            };
+            if unit_has_cargo_named(&ac, name) {
+                return true;
+            }
+        }
+        false
+    }
+
     pub fn prune_missing_dynamic_cargo(&mut self, lua: MizLua) {
         if !self.dynamic_cargo_enabled() {
             return;
@@ -576,23 +602,40 @@ impl Db {
             .collect();
         for name in fowl_wrong {
             if let Some(entry) = self.persisted.dynamic_cargo_crates.remove_cow(&name) {
+                self.ephemeral.dynamic_cargo_registered_at.remove(&name);
                 self.clamp_dynamic_cargo_checkout(entry.source);
                 info!("dynamic cargo: removed Fowl crate registry entry {name}");
                 self.ephemeral.dirty();
             }
         }
+        const REGISTER_GRACE: chrono::Duration = chrono::Duration::seconds(15);
+        let now = Utc::now();
         let gone: Vec<String> = self
             .persisted
             .dynamic_cargo_crates
             .into_iter()
             .filter_map(|(name, _)| {
-                match StaticObject::get_by_name(lua, name.as_str()) {
-                    Ok(Static::Static(st)) => match st.is_exist() {
-                        Ok(true) => None,
-                        _ => Some(name.clone()),
-                    },
-                    _ => Some(name.clone()),
+                // Still in an ED bay — F8 load hides/moves the world static.
+                if self.dynamic_cargo_name_on_any_board(lua, name.as_str()) {
+                    return None;
                 }
+                let world_gone = match StaticObject::get_by_name(lua, name.as_str()) {
+                    Ok(Static::Static(st)) => !st.is_exist().unwrap_or(false),
+                    _ => true,
+                };
+                if !world_gone {
+                    return None;
+                }
+                // Brief grace: fill/load UI can briefly drop the static.
+                if self
+                    .ephemeral
+                    .dynamic_cargo_registered_at
+                    .get(name)
+                    .is_some_and(|t| now - *t < REGISTER_GRACE)
+                {
+                    return None;
+                }
+                Some(name.clone())
             })
             .collect();
         if gone.is_empty() {
@@ -607,9 +650,14 @@ impl Db {
             };
             self.clamp_dynamic_cargo_checkout(entry.source);
             sync_oids.insert(entry.source, ());
-            match self.resolve_dynamic_cargo_absorb_dest(&entry) {
+            let dest = self
+                .resolve_dynamic_cargo_absorb_dest(&entry)
+                .or_else(|| {
+                    // Round-trip / multi-stop: transported crate absorbed at source pad.
+                    entry.last_carrier.is_some().then_some(entry.source)
+                });
+            match dest {
                 Some(pad) => {
-                    // DCS absorb at destination: credit Fowl stock + award per-ton points.
                     if let Err(e) = self.credit_objective_from_dynamic_cargo(
                         pad,
                         &entry.equipment,
@@ -644,23 +692,31 @@ impl Db {
                             1,
                         );
                         info!(
-                            "dynamic cargo DCS absorb delivery: {} -> {:?} tons={:.2} deliverer={:?} spawner={:?}",
-                            entry.name, pad, tons, deliverer, entry.spawner
+                            "dynamic cargo DCS absorb delivery: {} -> {:?} tons={:.2} deliverer={:?} spawner={:?} carrier={:?} weight_kg={:.0}",
+                            entry.name,
+                            pad,
+                            tons,
+                            deliverer,
+                            entry.spawner,
+                            entry.last_carrier,
+                            entry.last_weight_kg
                         );
                     }
                     sync_oids.insert(pad, ());
                 }
                 None => {
                     info!(
-                        "dynamic cargo gone (no cross-objective dest): {} source={:?} pos=({:.0},{:.0}) carrier={:?}",
+                        "dynamic cargo gone (no delivery): {} source={:?} pos=({:.0},{:.0}) carrier={:?} weight_kg={:.0}",
                         entry.name,
                         entry.source,
                         entry.x,
                         entry.y,
-                        entry.last_carrier
+                        entry.last_carrier,
+                        entry.last_weight_kg
                     );
                 }
             }
+            self.ephemeral.dynamic_cargo_registered_at.remove(&name);
             self.persisted.dynamic_cargo_crates.remove_cow(&name);
             self.clamp_dynamic_cargo_checkout(entry.source);
         }

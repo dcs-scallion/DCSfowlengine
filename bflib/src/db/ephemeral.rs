@@ -232,8 +232,12 @@ pub struct Ephemeral {
     pub(super) shared_ed_fowl_eject_grace_until: FxHashMap<GroupId, DateTime<Utc>>,
     /// Over-limit eject waiting for ED bay slot clear before ground respawn (gid → carrier).
     pub(super) shared_ed_eject_pending_place: FxHashMap<GroupId, Ucid>,
+    /// Old crate static names to scrub from `getCargosOnBoard` after eject rename/respawn.
+    pub(super) shared_ed_bay_ghost_names: FxHashMap<GroupId, String>,
     /// Fowl crates last seen geometrically in a shared-ED bay (gid → carrier). F8 unload detect.
     pub(super) shared_ed_fowl_aboard: FxHashMap<GroupId, Ucid>,
+    /// Warehouse dynamic cargo name → register time (brief prune grace during F8 fill/load).
+    pub(super) dynamic_cargo_registered_at: FxHashMap<String, DateTime<Utc>>,
     /// Combined Arms: object id → UCID of player currently controlling a Fowl deployable/troop.
     pub(crate) ca_controller_by_oid: FxHashMap<DcsOid<ClassUnit>, Ucid>,
     /// Reverse of `ca_controller_by_oid` (one controlled unit per player).
@@ -328,7 +332,9 @@ impl Default for Ephemeral {
             shared_ed_place_ignore_dead: FxHashSet::default(),
             shared_ed_fowl_eject_grace_until: FxHashMap::default(),
             shared_ed_eject_pending_place: FxHashMap::default(),
+            shared_ed_bay_ghost_names: FxHashMap::default(),
             shared_ed_fowl_aboard: FxHashMap::default(),
+            dynamic_cargo_registered_at: FxHashMap::default(),
             ca_controller_by_oid: FxHashMap::default(),
             ca_oid_by_controller: FxHashMap::default(),
             overlay_underlay_dirty: false,
