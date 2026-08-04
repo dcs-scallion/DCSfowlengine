@@ -867,10 +867,10 @@ impl Db {
                     )?;
                     return Ok(());
                 }
-                if let ActionKind::Drone(ai) = &spec.kind {
+                if let ActionKind::Drone(_ai) = &spec.kind {
                     let player = *player;
                     let mission = self
-                        .drone_mission(side, player, spawn_pos, args)
+                        .drone_mission_with_climb(spctx.lua(), side, player, spawn_pos, args)
                         .context("generate drone mission")?;
                     let group = group!(self, gid)?;
                     self.ephemeral.spawn_group(
@@ -963,6 +963,19 @@ impl Db {
         )
     }
 
+    fn drone_mission_with_climb<'lua>(
+        &mut self,
+        lua: MizLua<'lua>,
+        side: Side,
+        ucid: Option<Ucid>,
+        spawn_point: Vector2,
+        args: WithPosAndGroup<()>,
+    ) -> Result<Vec<MissionPoint<'lua>>> {
+        let mut route = self.drone_mission(side, ucid, spawn_point, args)?;
+        ai_air::insert_drone_climb_waypoints(lua, &mut route)?;
+        Ok(route)
+    }
+
     fn move_drone(
         &mut self,
         spctx: &SpawnCtx,
@@ -971,9 +984,10 @@ impl Db {
         args: WithPosAndGroup<()>,
     ) -> Result<Option<GroupId>> {
         let gid = args.group;
-        let pos = action_group_position(self, spctx.lua(), gid).context("getting pos")?;
+        let lua = spctx.lua();
+        let pos = action_group_position(self, lua, gid).context("getting pos")?;
         let mission = self
-            .drone_mission(side, ucid, pos, args)
+            .drone_mission_with_climb(lua, side, ucid, pos, args)
             .context("generate drone mission")?;
         self.set_ai_mission(spctx, gid, mission, true)
             .context("setting ai mission")?;
@@ -2563,7 +2577,7 @@ impl Db {
 
     pub(super) fn regenerate_ai_air_mission<'lua>(
         &mut self,
-        lua: MizLua,
+        lua: MizLua<'lua>,
         spctx: &SpawnCtx<'lua>,
         idx: &MizIndex,
         gid: GroupId,
@@ -2601,7 +2615,7 @@ impl Db {
             ActionKind::Sead(_) => self.ai_sead_mission(side, ucid, spawn_pos, args),
             ActionKind::Tanker(_) => self.tanker_mission(side, ucid, spawn_pos, args),
             ActionKind::Awacs(_) => self.awacs_mission(side, ucid, spawn_pos, args),
-            ActionKind::Drone(_) => self.drone_mission(side, ucid, spawn_pos, args),
+            ActionKind::Drone(_) => self.drone_mission_with_climb(lua, side, ucid, spawn_pos, args),
             ActionKind::CruiseMissileSpawn(_) => {
                 self.cruise_missile_mission(side, ucid, spawn_pos, args)
             }
@@ -2627,7 +2641,9 @@ impl Db {
                     ai_air::AiAirMissionKind::Sead => self.ai_sead_mission(side, ucid, spawn_pos, args),
                     ai_air::AiAirMissionKind::Tanker => self.tanker_mission(side, ucid, spawn_pos, args),
                     ai_air::AiAirMissionKind::Awacs => self.awacs_mission(side, ucid, spawn_pos, args),
-                    ai_air::AiAirMissionKind::Drone => self.drone_mission(side, ucid, spawn_pos, args),
+                    ai_air::AiAirMissionKind::Drone => {
+                        self.drone_mission_with_climb(lua, side, ucid, spawn_pos, args)
+                    }
                     ai_air::AiAirMissionKind::CruiseMissileSpawn => {
                         self.cruise_missile_mission(side, ucid, spawn_pos, args)
                     }
@@ -2670,7 +2686,9 @@ impl Db {
                     ai_air::AiAirMissionKind::Sead => self.ai_sead_mission(side, ucid, spawn_pos, args),
                     ai_air::AiAirMissionKind::Tanker => self.tanker_mission(side, ucid, spawn_pos, args),
                     ai_air::AiAirMissionKind::Awacs => self.awacs_mission(side, ucid, spawn_pos, args),
-                    ai_air::AiAirMissionKind::Drone => self.drone_mission(side, ucid, spawn_pos, args),
+                    ai_air::AiAirMissionKind::Drone => {
+                        self.drone_mission_with_climb(lua, side, ucid, spawn_pos, args)
+                    }
                     ai_air::AiAirMissionKind::CruiseMissileSpawn => {
                         self.cruise_missile_mission(side, ucid, spawn_pos, args)
                     }

@@ -3462,6 +3462,119 @@ pub(super) fn cas_patrol_mission<'lua>(
     ]
 }
 
+/// AGL clearance baked into drone enroute BARO (m).
+const DRONE_ENROUTE_CLEARANCE_M: f64 = 800.;
+/// Sample spacing for drone climb Turning Points (m).
+const DRONE_CLIMB_SAMPLE_M: f64 = 10_000.;
+/// Lookahead when picking BARO for a climb sample (m).
+const DRONE_CLIMB_LOOKAHEAD_M: f64 = 40_000.;
+/// First climb WP distance from IP when the leg is long enough (m).
+const DRONE_CLIMB_FIRST_LEG_M: f64 = 8_000.;
+/// Skip climb insertion when IP→orbit is shorter than this (m).
+const DRONE_CLIMB_MIN_RANGE_M: f64 = 8_000.;
+const DRONE_CLIMB_MAX_WPS: usize = 16;
+
+fn drone_peak_baro_along(
+    land: &Land,
+    from: Vector2,
+    dir: Vector2,
+    start_m: f64,
+    end_m: f64,
+    cruise_alt: f64,
+) -> Result<f64> {
+    let mut peak = cruise_alt;
+    let mut d = start_m;
+    while d <= end_m {
+        let pos = from + dir * d;
+        let ground = land.get_height(LuaVec2(pos))?;
+        peak = peak.max(ground + DRONE_ENROUTE_CLEARANCE_M);
+        d += DRONE_CLIMB_SAMPLE_M * 0.5;
+    }
+    Ok(peak)
+}
+
+fn drone_climb_turning_point<'lua>(
+    name: String,
+    pos: Vector2,
+    alt: f64,
+    alt_typ: AltType,
+    speed: f64,
+) -> MissionPoint<'lua> {
+    MissionPoint {
+        typ: PointType::TurningPoint,
+        airdrome_id: None,
+        helipad: None,
+        time_re_fu_ar: None,
+        link_unit: None,
+        action: Some(ActionTyp::Air(TurnMethod::FlyOverPoint)),
+        pos: LuaVec2(pos),
+        alt,
+        alt_typ: Some(alt_typ),
+        speed,
+        speed_locked: None,
+        eta: None,
+        eta_locked: None,
+        name: Some(name),
+        parking: None,
+        task: Box::new(Task::ComboTask(vec![])),
+    }
+}
+
+/// Insert terrain-aware climb Turning Points between IP and orbit (drones only).
+/// MOOSE-style intermediate `WaypointAirTurningPoint` + `Land.getHeight` clearance.
+pub(super) fn insert_drone_climb_waypoints<'lua>(
+    lua: MizLua<'lua>,
+    route: &mut Vec<MissionPoint<'lua>>,
+) -> Result<()> {
+    if route.len() < 2 {
+        return Ok(());
+    }
+    let from = route[0].pos.0;
+    let to = route[route.len() - 1].pos.0;
+    let cruise_alt = route[route.len() - 1].alt;
+    let alt_typ = route[route.len() - 1]
+        .alt_typ
+        .clone()
+        .unwrap_or(AltType::BARO);
+    let speed = route[route.len() - 1].speed;
+    let delta = to - from;
+    let dist = delta.magnitude();
+    let land = Land::singleton(lua)?;
+    if dist < DRONE_CLIMB_MIN_RANGE_M {
+        let ground = land.get_height(LuaVec2(from))?;
+        route[0].alt = cruise_alt.max(ground + DRONE_ENROUTE_CLEARANCE_M);
+        return Ok(());
+    }
+    let dir = delta / dist;
+    let ip_end = DRONE_CLIMB_LOOKAHEAD_M.min(dist);
+    route[0].alt = drone_peak_baro_along(&land, from, dir, 0., ip_end, cruise_alt)?;
+    let mut climb = Vec::new();
+    let mut d = DRONE_CLIMB_FIRST_LEG_M.min(dist * 0.5);
+    let mut i = 0usize;
+    while d < dist - 2_000. && climb.len() < DRONE_CLIMB_MAX_WPS {
+        let look_end = (d + DRONE_CLIMB_LOOKAHEAD_M).min(dist);
+        let alt = drone_peak_baro_along(&land, from, dir, d, look_end, cruise_alt)?;
+        let pos = from + dir * d;
+        climb.push(drone_climb_turning_point(
+            String::from(format_compact!("climb-{i}")),
+            pos,
+            alt,
+            alt_typ.clone(),
+            speed,
+        ));
+        i += 1;
+        d += DRONE_CLIMB_SAMPLE_M;
+    }
+    let tail = route.split_off(1);
+    route.extend(climb);
+    route.extend(tail);
+    if let Some(last) = route.last_mut() {
+        let ground = land.get_height(LuaVec2(last.pos.0))?;
+        last.alt = cruise_alt.max(ground + DRONE_ENROUTE_CLEARANCE_M);
+    }
+    Ok(())
+}
+
 /// CAP-style orbit at `snap.pos` after an ingress point at `spawn_pos`.
 pub(super) fn cap_orbit_mission<'lua>(
     snap: &ActiveMissionSnapshot,
