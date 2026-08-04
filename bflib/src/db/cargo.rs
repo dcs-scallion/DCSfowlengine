@@ -547,15 +547,28 @@ impl Db {
             return out;
         };
         let side = player.side;
-        let (hpt, landed, typ) = match self.ephemeral.slot_instance_unit(lua, slot) {
+        let (hpt, fwd, landed, typ, ac) = match self.ephemeral.slot_instance_unit(lua, slot) {
             Ok(unit) => {
                 let Ok(pt) = unit.get_point() else {
                     return out;
                 };
                 let landed = unit.in_air().map(|a| !a).unwrap_or(!inst.in_air);
-                (pt.0, landed, inst.typ.0.clone())
+                let pos = unit.get_position().unwrap_or(inst.position);
+                (
+                    pt.0,
+                    Vector2::new(pos.x.x, pos.x.z),
+                    landed,
+                    inst.typ.0.clone(),
+                    Some(unit),
+                )
             }
-            Err(_) => (inst.position.p.0, !inst.in_air, inst.typ.0.clone()),
+            Err(_) => (
+                inst.position.p.0,
+                Vector2::new(inst.position.x.x, inst.position.x.z),
+                !inst.in_air,
+                inst.typ.0.clone(),
+                None,
+            ),
         };
         let now = Utc::now();
         for gid in &self.persisted.crates {
@@ -590,7 +603,34 @@ impl Db {
                     if ed_carrier.as_ref() == Some(ucid) {
                         dead_on_carrier = true;
                     }
+                    // F8 ghost / Dead-loaded: still on getCargosOnBoard.
+                    if ac
+                        .as_ref()
+                        .map(|u| {
+                            crate::db::dynamic_cargo::unit_has_cargo_named(u, unit.name.as_str())
+                        })
+                        .unwrap_or(false)
+                    {
+                        aboard = true;
+                    }
                     continue;
+                }
+                if ac
+                    .as_ref()
+                    .map(|u| crate::db::dynamic_cargo::unit_has_cargo_named(u, unit.name.as_str()))
+                    .unwrap_or(false)
+                {
+                    aboard = true;
+                    if let Ok(Static::Static(st)) =
+                        StaticObject::get_by_name(lua, unit.name.as_str())
+                    {
+                        if let Ok(cw) = st.get_cargo_weight() {
+                            if cw > 0. {
+                                w = cw.round() as u32;
+                            }
+                        }
+                    }
+                    break;
                 }
                 let Ok(Static::Static(st)) = StaticObject::get_by_name(lua, unit.name.as_str())
                 else {
@@ -598,6 +638,7 @@ impl Db {
                 };
                 match crate::db::dynamic_cargo::dynamic_cargo_is_aboard_unit(
                     hpt,
+                    fwd,
                     landed,
                     typ.as_str(),
                     &st,
@@ -635,6 +676,13 @@ impl Db {
             let Some(unit) = self.persisted.units.get(uid) else {
                 continue;
             };
+            for (slot, _) in &self.ephemeral.players_by_slot {
+                if let Ok(ac) = self.ephemeral.slot_instance_unit(lua, slot) {
+                    if crate::db::dynamic_cargo::unit_has_cargo_named(&ac, unit.name.as_str()) {
+                        return true;
+                    }
+                }
+            }
             if unit.dead {
                 continue;
             }
@@ -677,15 +725,28 @@ impl Db {
             return out;
         };
         let side = player.side;
-        let (hpt, landed, typ) = match self.ephemeral.slot_instance_unit(lua, slot) {
+        let (hpt, fwd, landed, typ, ac) = match self.ephemeral.slot_instance_unit(lua, slot) {
             Ok(unit) => {
                 let Ok(pt) = unit.get_point() else {
                     return out;
                 };
                 let landed = unit.in_air().map(|a| !a).unwrap_or(!inst.in_air);
-                (pt.0, landed, inst.typ.0.clone())
+                let pos = unit.get_position().unwrap_or(inst.position);
+                (
+                    pt.0,
+                    Vector2::new(pos.x.x, pos.x.z),
+                    landed,
+                    inst.typ.0.clone(),
+                    Some(unit),
+                )
             }
-            Err(_) => (inst.position.p.0, !inst.in_air, inst.typ.0.clone()),
+            Err(_) => (
+                inst.position.p.0,
+                Vector2::new(inst.position.x.x, inst.position.x.z),
+                !inst.in_air,
+                inst.typ.0.clone(),
+                None,
+            ),
         };
         let now = Utc::now();
         for gid in &self.persisted.crates {
@@ -716,7 +777,24 @@ impl Db {
                     if ed_carrier.as_ref() == Some(ucid) {
                         dead_on_carrier = true;
                     }
+                    if ac
+                        .as_ref()
+                        .map(|u| {
+                            crate::db::dynamic_cargo::unit_has_cargo_named(u, unit.name.as_str())
+                        })
+                        .unwrap_or(false)
+                    {
+                        aboard = true;
+                    }
                     continue;
+                }
+                if ac
+                    .as_ref()
+                    .map(|u| crate::db::dynamic_cargo::unit_has_cargo_named(u, unit.name.as_str()))
+                    .unwrap_or(false)
+                {
+                    aboard = true;
+                    break;
                 }
                 let Ok(Static::Static(st)) = StaticObject::get_by_name(lua, unit.name.as_str())
                 else {
@@ -724,6 +802,7 @@ impl Db {
                 };
                 if crate::db::dynamic_cargo::dynamic_cargo_is_aboard_unit(
                     hpt,
+                    fwd,
                     landed,
                     typ.as_str(),
                     &st,
@@ -784,6 +863,7 @@ impl Db {
                     .shared_ed_fowl_eject_grace_until
                     .get(gid)
                     .is_some_and(|until| Utc::now() < *until)
+                    && !self.ephemeral.shared_ed_eject_pending_place.contains_key(gid)
             });
             let crate_room = (capacity.crate_slots as usize).saturating_sub(hybrid_crates);
             let total_room = (capacity.total_slots as usize)
@@ -815,19 +895,30 @@ impl Db {
         self.sweep_shared_ed_eject_bay_ghosts(lua);
     }
 
-    /// UnloadCargo leftovers after force place — clear ED bay slot without respawn spam.
+    /// UnloadCargo leftovers / deferred ground place after over-limit eject.
     fn sweep_shared_ed_eject_bay_ghosts(&mut self, lua: MizLua) {
         let now = Utc::now();
         self.ephemeral
             .shared_ed_fowl_eject_grace_until
             .retain(|_, until| now < *until);
+
+        let pending: SmallVec<[(GroupId, Ucid); 8]> = self
+            .ephemeral
+            .shared_ed_eject_pending_place
+            .iter()
+            .map(|(g, u)| (*g, u.clone()))
+            .collect();
         let grace: SmallVec<[GroupId; 8]> = self
             .ephemeral
             .shared_ed_fowl_eject_grace_until
             .keys()
             .copied()
             .collect();
+
         for gid in grace {
+            if self.ephemeral.shared_ed_eject_pending_place.contains_key(&gid) {
+                continue;
+            }
             let Some(name) = self
                 .persisted
                 .groups
@@ -837,39 +928,89 @@ impl Db {
             else {
                 continue;
             };
-            for (slot, _) in self.ephemeral.players_by_slot.clone() {
-                let Ok(ac) = self.ephemeral.slot_instance_unit(lua, &slot) else {
-                    continue;
-                };
-                let mut matched: Option<StaticObject> = None;
-                if let Ok(Some(cargos)) = ac.get_cargos_on_board() {
-                    let _ = cargos.for_each(|c| {
-                        let Ok(c) = c else {
-                            return Ok(());
-                        };
-                        if c.get_name()
-                            .map(|n| n.as_str() == name.as_str())
-                            .unwrap_or(false)
-                        {
-                            matched = Some(c);
-                        }
-                        Ok(())
-                    });
-                }
-                let Some(cargo) = matched else {
-                    continue;
-                };
-                let _ = ac.open_ramp(true);
-                let _ = ac.unload_cargo(&cargo);
-                self.ephemeral.shared_ed_place_ignore_dead.insert(gid);
-                let _ = cargo.destroy();
-                info!("crate {gid}: swept ED bay ghost after eject ({name})");
-                break;
+            self.try_clear_ed_bay_cargo_named(lua, gid, name.as_str());
+        }
+
+        for (gid, ucid) in pending {
+            let Some(uid) = self
+                .persisted
+                .groups
+                .get(&gid)
+                .and_then(|g| g.units.into_iter().next().copied())
+            else {
+                self.ephemeral.shared_ed_eject_pending_place.remove(&gid);
+                continue;
+            };
+            let Some(name) = self.persisted.units.get(&uid).map(|u| u.name.clone()) else {
+                self.ephemeral.shared_ed_eject_pending_place.remove(&gid);
+                continue;
+            };
+            if self.try_clear_ed_bay_cargo_named(lua, gid, name.as_str()) {
+                continue;
+            }
+            self.ephemeral.shared_ed_eject_pending_place.remove(&gid);
+            if let Err(e) = self.place_fowl_crate_on_ed_unload_line(lua, gid, uid, &ucid) {
+                warn!("crate {gid}: deferred ED unload place failed: {e:?}");
+                self.ephemeral
+                    .shared_ed_eject_pending_place
+                    .insert(gid, ucid);
+            } else {
+                self.ephemeral.panel_to_player(
+                    &self.persisted,
+                    12,
+                    &ucid,
+                    "Deployables cargo limit exceeded; crate returned to the ground. Warehouse supply and fuel containers are unaffected.",
+                );
+                info!("crate {gid}: deferred eject place after ED bay clear for {ucid:?}");
             }
         }
     }
 
-    /// Geometry-only: Fowl crates currently inside this slot's ED bay footprint.
+    /// Returns true if the crate name is still listed on some player ED bay.
+    fn try_clear_ed_bay_cargo_named(&mut self, lua: MizLua, gid: GroupId, name: &str) -> bool {
+        let mut still = false;
+        for (slot, _) in self.ephemeral.players_by_slot.clone() {
+            let Ok(ac) = self.ephemeral.slot_instance_unit(lua, &slot) else {
+                continue;
+            };
+            if !crate::db::dynamic_cargo::unit_has_cargo_named(&ac, name) {
+                continue;
+            }
+            still = true;
+            let _ = ac.open_ramp(true);
+            let mut matched: Option<StaticObject> = None;
+            if let Ok(Some(cargos)) = ac.get_cargos_on_board() {
+                let _ = cargos.for_each(|c| {
+                    let Ok(c) = c else {
+                        return Ok(());
+                    };
+                    if c.get_name()
+                        .map(|n| n.as_str() == name)
+                        .unwrap_or(false)
+                    {
+                        matched = Some(c);
+                    }
+                    Ok(())
+                });
+            }
+            if let Some(cargo) = matched {
+                let _ = ac.unload_cargo(&cargo);
+                if crate::db::dynamic_cargo::unit_has_cargo_named(&ac, name) {
+                    self.ephemeral.shared_ed_place_ignore_dead.insert(gid);
+                    let _ = cargo.destroy();
+                }
+            }
+            if crate::db::dynamic_cargo::unit_has_cargo_named(&ac, name) {
+                still = true;
+            } else {
+                still = false;
+                info!("crate {gid}: cleared ED bay ghost ({name})");
+            }
+        }
+        still
+    }
+
+    /// Fowl crates on this slot's ED bay: OBB footprint and/or `getCargosOnBoard`.
     fn fowl_crate_gids_geometry_on_ed_bay(
         &self,
         lua: MizLua,
@@ -886,15 +1027,28 @@ impl Db {
             return out;
         };
         let side = player.side;
-        let (hpt, landed, typ) = match self.ephemeral.slot_instance_unit(lua, slot) {
+        let (hpt, fwd, landed, typ, ac) = match self.ephemeral.slot_instance_unit(lua, slot) {
             Ok(unit) => {
                 let Ok(pt) = unit.get_point() else {
                     return out;
                 };
                 let landed = unit.in_air().map(|a| !a).unwrap_or(!inst.in_air);
-                (pt.0, landed, inst.typ.0.clone())
+                let pos = unit.get_position().unwrap_or(inst.position);
+                (
+                    pt.0,
+                    Vector2::new(pos.x.x, pos.x.z),
+                    landed,
+                    inst.typ.0.clone(),
+                    Some(unit),
+                )
             }
-            Err(_) => (inst.position.p.0, !inst.in_air, inst.typ.0.clone()),
+            Err(_) => (
+                inst.position.p.0,
+                Vector2::new(inst.position.x.x, inst.position.x.z),
+                !inst.in_air,
+                inst.typ.0.clone(),
+                None,
+            ),
         };
         for gid in &self.persisted.crates {
             let Some(group) = self.persisted.groups.get(gid) else {
@@ -910,12 +1064,24 @@ impl Db {
                 let Some(unit) = self.persisted.units.get(uid) else {
                     continue;
                 };
+                if ac
+                    .as_ref()
+                    .map(|u| crate::db::dynamic_cargo::unit_has_cargo_named(u, unit.name.as_str()))
+                    .unwrap_or(false)
+                {
+                    out.push(*gid);
+                    break;
+                }
+                if unit.dead {
+                    continue;
+                }
                 let Ok(Static::Static(st)) = StaticObject::get_by_name(lua, unit.name.as_str())
                 else {
                     continue;
                 };
                 if crate::db::dynamic_cargo::dynamic_cargo_is_aboard_unit(
                     hpt,
+                    fwd,
                     landed,
                     typ.as_str(),
                     &st,
@@ -973,6 +1139,7 @@ impl Db {
                 .shared_ed_fowl_eject_grace_until
                 .get(&gid)
                 .is_some_and(|until| Utc::now() < *until)
+                || self.ephemeral.shared_ed_eject_pending_place.contains_key(&gid)
             {
                 continue;
             }

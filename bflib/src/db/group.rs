@@ -1970,9 +1970,9 @@ impl Db {
                     return Ok(());
                 }
                 warn!(
-                    "crate {gid}: UnloadCargo did not clear bay after {attempt} tries; forcing ground place ({name})"
+                    "crate {gid}: UnloadCargo did not clear bay after {attempt} tries; defer place until bay clear ({name})"
                 );
-                // Force-clear ED bay slot object before respawn (avoids airborne ghost).
+                // Force-clear ED bay object; do not respawn while still on board (ED ghost).
                 if let Ok(Some(cargos)) = ac.get_cargos_on_board() {
                     let mut matched: Option<StaticObject> = None;
                     let _ = cargos.for_each(|c| {
@@ -1988,15 +1988,36 @@ impl Db {
                         Ok(())
                     });
                     if let Some(cargo) = matched {
-                        self.ephemeral.shared_ed_place_ignore_dead.insert(gid);
-                        let _ = cargo.destroy();
+                        let _ = ac.unload_cargo(&cargo);
+                        if on_board(&ac, name.as_str()) {
+                            self.ephemeral.shared_ed_place_ignore_dead.insert(gid);
+                            let _ = cargo.destroy();
+                        }
                     }
+                }
+                if on_board(&ac, name.as_str()) {
+                    self.ephemeral
+                        .shared_ed_eject_pending_place
+                        .insert(gid, carrier.clone());
+                    self.ephemeral
+                        .shared_ed_fowl_eject_grace_until
+                        .insert(gid, Utc::now() + chrono::Duration::seconds(90));
+                    if self.ephemeral.shared_ed_eject_ramp_warned.insert(gid) {
+                        self.ephemeral.panel_to_player(
+                            &self.persisted,
+                            12,
+                            carrier,
+                            "Deployables cargo limit exceeded; clearing cargo bay ghost before returning the crate to the ground.",
+                        );
+                    }
+                    return Ok(());
                 }
             } else {
                 info!("crate {gid}: UnloadCargo cleared bay slot for {name}");
             }
         }
 
+        self.ephemeral.shared_ed_eject_pending_place.remove(&gid);
         self.place_fowl_crate_on_ed_unload_line(lua, gid, uid, carrier)?;
         self.ephemeral.panel_to_player(
             &self.persisted,
@@ -2212,26 +2233,42 @@ impl Db {
             (final_pos, ground, None, None)
         };
 
-        // Prefer destroying the ED bay cargo object (same name) so unload height isn't kept.
+        // Prefer clearing ED bay before destroy+respawn (same name must leave getCargosOnBoard).
         if let Ok(ac) = self.ephemeral.slot_instance_unit(lua, &slot) {
-            if let Ok(Some(cargos)) = ac.get_cargos_on_board() {
+            if crate::db::dynamic_cargo::unit_has_cargo_named(&ac, name.as_str()) {
+                let _ = ac.open_ramp(true);
                 let mut matched: Option<StaticObject> = None;
-                let _ = cargos.for_each(|c| {
-                    let Ok(c) = c else {
-                        return Ok(());
-                    };
-                    if c.get_name()
-                        .map(|n| n.as_str() == name.as_str())
-                        .unwrap_or(false)
-                    {
-                        matched = Some(c);
-                    }
-                    Ok(())
-                });
+                if let Ok(Some(cargos)) = ac.get_cargos_on_board() {
+                    let _ = cargos.for_each(|c| {
+                        let Ok(c) = c else {
+                            return Ok(());
+                        };
+                        if c.get_name()
+                            .map(|n| n.as_str() == name.as_str())
+                            .unwrap_or(false)
+                        {
+                            matched = Some(c);
+                        }
+                        Ok(())
+                    });
+                }
                 if let Some(cargo) = matched {
                     let _ = ac.unload_cargo(&cargo);
-                    self.ephemeral.shared_ed_place_ignore_dead.insert(gid);
-                    let _ = cargo.destroy();
+                    if crate::db::dynamic_cargo::unit_has_cargo_named(&ac, name.as_str()) {
+                        self.ephemeral.shared_ed_place_ignore_dead.insert(gid);
+                        let _ = cargo.destroy();
+                    }
+                }
+                if crate::db::dynamic_cargo::unit_has_cargo_named(&ac, name.as_str()) {
+                    self.ephemeral
+                        .shared_ed_eject_pending_place
+                        .insert(gid, carrier.clone());
+                    self.ephemeral
+                        .shared_ed_fowl_eject_grace_until
+                        .insert(gid, Utc::now() + chrono::Duration::seconds(90));
+                    bail!(
+                        "ED unload place deferred: {name} still on getCargosOnBoard"
+                    );
                 }
             }
         }
@@ -2283,6 +2320,7 @@ impl Db {
         self.ephemeral.shared_ed_eject_ramp_warned.remove(&gid);
         self.ephemeral.shared_ed_eject_attempts.remove(&gid);
         self.ephemeral.shared_ed_fowl_aboard.remove(&gid);
+        self.ephemeral.shared_ed_eject_pending_place.remove(&gid);
         self.ephemeral
             .shared_ed_fowl_eject_grace_until
             .insert(gid, Utc::now() + chrono::Duration::seconds(60));

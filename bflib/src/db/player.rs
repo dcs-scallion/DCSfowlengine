@@ -1342,15 +1342,17 @@ impl Db {
                             let id = maybe!(self.ephemeral.airbase_by_oid, oid, "airbase")?;
                             let airbase = Airbase::get_instance(lua, &id).context("get airbase")?;
                             let wh = airbase.get_warehouse().context("get warehouse")?;
-                            let airbase = obj.kind.is_airbase()
+                            let is_airbase = obj.kind.is_airbase()
                                 || self
                                     .ephemeral
                                     .cfg
                                     .extra_fixed_wing_objectives
                                     .contains(obj.name());
+                            // Credit landing objective (DCS often returns airframes to slot home, not land field).
                             let mut sync: SmallVec<[String; 4]> = smallvec![typ.0.clone()];
-                            if !airbase && let Ok(unit) = Unit::get_instance(lua, &objid) {
-                                wh.add_item(typ.0.clone(), 1)?;
+                            wh.add_item(typ.0.clone(), 1)
+                                .context("add airframe to landed warehouse")?;
+                            if !is_airbase && let Ok(unit) = Unit::get_instance(lua, &objid) {
                                 for ammo in unit.get_ammo().context("get ammo")? {
                                     let ammo = ammo.context("ammo")?;
                                     let count = ammo.count().context("ammo count")?;
@@ -1360,10 +1362,13 @@ impl Db {
                                 }
                             }
                             for typ in sync {
-                                if let Some(inv) = obj.warehouse.equipment.get_mut_cow(&typ) {
-                                    inv.stored = wh.get_item_count(typ).context("getting item")?;
-                                    self.ephemeral.dirty();
+                                let count = wh.get_item_count(typ.clone()).context("getting item")?;
+                                let inv = obj.warehouse.equipment.get_or_default_cow(typ);
+                                inv.stored = count;
+                                if inv.capacity < count {
+                                    inv.capacity = count.max(1);
                                 }
+                                self.ephemeral.dirty();
                             }
                             Ok(())
                         };

@@ -29,6 +29,7 @@ use dcso3::{
     net::Ucid,
     object::ObjectCategory,
     static_object::StaticObject,
+    unit::Unit,
     warehouse::{LiquidType, Warehouse},
     LuaEnv, MizLua, String, Vector2, Vector3,
 };
@@ -1079,15 +1080,26 @@ impl Db {
             return 0;
         };
         let side = player.side;
-        let (hpt, landed, typ) = match self.ephemeral.slot_instance_unit(lua, slot) {
+        let (hpt, fwd, landed, typ) = match self.ephemeral.slot_instance_unit(lua, slot) {
             Ok(unit) => {
                 let Ok(pt) = unit.get_point() else {
                     return 0;
                 };
                 let landed = unit.in_air().map(|a| !a).unwrap_or(!inst.in_air);
-                (pt.0, landed, inst.typ.0.clone())
+                let pos = unit.get_position().unwrap_or(inst.position);
+                (
+                    pt.0,
+                    Vector2::new(pos.x.x, pos.x.z),
+                    landed,
+                    inst.typ.0.clone(),
+                )
             }
-            Err(_) => (inst.position.p.0, !inst.in_air, inst.typ.0.clone()),
+            Err(_) => (
+                inst.position.p.0,
+                Vector2::new(inst.position.x.x, inst.position.x.z),
+                !inst.in_air,
+                inst.typ.0.clone(),
+            ),
         };
         let mut total = 0u32;
         for (name, entry) in &self.persisted.dynamic_cargo_crates {
@@ -1104,7 +1116,7 @@ impl Db {
             let Ok(Static::Static(st)) = StaticObject::get_by_name(lua, name.as_str()) else {
                 continue;
             };
-            match dynamic_cargo_is_aboard_unit(hpt, landed, typ.as_str(), &st) {
+            match dynamic_cargo_is_aboard_unit(hpt, fwd, landed, typ.as_str(), &st) {
                 Ok(true) => {}
                 _ => continue,
             }
@@ -1131,9 +1143,11 @@ impl Db {
     }
 }
 
-/// MOOSE DynamicCargo: bay = length×width footprint (landed or airborne); sling = rope 3D.
+/// MOOSE DynamicCargo bay footprint: oriented box (table values = half-extents from model origin)
+/// plus sling sphere when airborne. Long bays (C-130) need OBB, not isotropic min(L,W).
 pub(crate) fn dynamic_cargo_is_aboard_unit(
     unit_pt: Vector3,
+    unit_forward_xz: Vector2,
     landed: bool,
     type_name: &str,
     cargo: &StaticObject,
@@ -1144,9 +1158,18 @@ pub(crate) fn dynamic_cargo_is_aboard_unit(
     let cargo_pt = cargo.get_point()?;
     let cargo2 = Vector2::new(cargo_pt.0.x, cargo_pt.0.z);
     let hpos = Vector2::new(unit_pt.x, unit_pt.z);
-    let delta2 = (hpos - cargo2).magnitude();
-    // Bay cargo (e.g. C-130 ropelength 0) must count while airborne too.
-    if delta2 < dim.length && delta2 < dim.width {
+    let rel = cargo2 - hpos;
+    let flen = (unit_forward_xz.x * unit_forward_xz.x + unit_forward_xz.y * unit_forward_xz.y).sqrt();
+    let fwd = if flen > 1e-3 {
+        unit_forward_xz / flen
+    } else {
+        Vector2::new(1., 0.)
+    };
+    let right = Vector2::new(fwd.y, -fwd.x);
+    let along = rel.x * fwd.x + rel.y * fwd.y;
+    let lat = rel.x * right.x + rel.y * right.y;
+    // Table length/width are half-extents (MOOSE CH-47 comment).
+    if along.abs() <= dim.length && lat.abs() <= dim.width {
         return Ok(true);
     }
     if !landed && dim.ropelength > 0. {
@@ -1159,6 +1182,27 @@ pub(crate) fn dynamic_cargo_is_aboard_unit(
         }
     }
     Ok(false)
+}
+
+/// True if `Unit.getCargosOnBoard` still lists this crate name (F8 / ghost slots).
+pub(crate) fn unit_has_cargo_named(ac: &Unit, crate_name: &str) -> bool {
+    let Ok(Some(cargos)) = ac.get_cargos_on_board() else {
+        return false;
+    };
+    let mut found = false;
+    let _ = cargos.for_each(|c| {
+        let Ok(c) = c else {
+            return Ok(());
+        };
+        if c.get_name()
+            .map(|n| n.as_str() == crate_name)
+            .unwrap_or(false)
+        {
+            found = true;
+        }
+        Ok(())
+    });
+    found
 }
 
 fn delivery_tons(weight_kg: f64) -> f64 {
@@ -1185,17 +1229,28 @@ fn carrier_ucid_if_aboard(
         let Some((_, Some(inst))) = player.current_slot.as_ref() else {
             continue;
         };
-        let (hpt, landed, typ) = match db.ephemeral.slot_instance_unit(lua, slot) {
+        let (hpt, fwd, landed, typ) = match db.ephemeral.slot_instance_unit(lua, slot) {
             Ok(unit) => {
                 let Ok(pt) = unit.get_point() else {
                     continue;
                 };
                 let landed = unit.in_air().map(|a| !a).unwrap_or(!inst.in_air);
-                (pt.0, landed, inst.typ.0.as_str())
+                let pos = unit.get_position().unwrap_or(inst.position);
+                (
+                    pt.0,
+                    Vector2::new(pos.x.x, pos.x.z),
+                    landed,
+                    inst.typ.0.as_str(),
+                )
             }
-            Err(_) => (inst.position.p.0, !inst.in_air, inst.typ.0.as_str()),
+            Err(_) => (
+                inst.position.p.0,
+                Vector2::new(inst.position.x.x, inst.position.x.z),
+                !inst.in_air,
+                inst.typ.0.as_str(),
+            ),
         };
-        if dynamic_cargo_is_aboard_unit(hpt, landed, typ, cargo).unwrap_or(false) {
+        if dynamic_cargo_is_aboard_unit(hpt, fwd, landed, typ, cargo).unwrap_or(false) {
             return Some(*ucid);
         }
     }

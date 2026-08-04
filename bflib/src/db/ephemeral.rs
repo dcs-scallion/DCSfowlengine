@@ -230,6 +230,8 @@ pub struct Ephemeral {
     pub(super) shared_ed_place_ignore_dead: FxHashSet<GroupId>,
     /// After ED unload place: suppress bay re-count / relocate until this time (UTC).
     pub(super) shared_ed_fowl_eject_grace_until: FxHashMap<GroupId, DateTime<Utc>>,
+    /// Over-limit eject waiting for ED bay slot clear before ground respawn (gid → carrier).
+    pub(super) shared_ed_eject_pending_place: FxHashMap<GroupId, Ucid>,
     /// Fowl crates last seen geometrically in a shared-ED bay (gid → carrier). F8 unload detect.
     pub(super) shared_ed_fowl_aboard: FxHashMap<GroupId, Ucid>,
     /// Combined Arms: object id → UCID of player currently controlling a Fowl deployable/troop.
@@ -325,6 +327,7 @@ impl Default for Ephemeral {
             shared_ed_eject_attempts: FxHashMap::default(),
             shared_ed_place_ignore_dead: FxHashSet::default(),
             shared_ed_fowl_eject_grace_until: FxHashMap::default(),
+            shared_ed_eject_pending_place: FxHashMap::default(),
             shared_ed_fowl_aboard: FxHashMap::default(),
             ca_controller_by_oid: FxHashMap::default(),
             ca_oid_by_controller: FxHashMap::default(),

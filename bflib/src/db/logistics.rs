@@ -728,6 +728,7 @@ fn sync_warehouse_to_obj(
 
 /// ME build may leave `initialAmount=1` on opposite DT rows so DCS registers `linkDynTempl`.
 /// After SyncFrom with preserve_fill, zero those aircraft if they are not in the owner export profile.
+/// Do not wipe ferried airframes already tracked in virtual stock (`stored > 0`).
 fn prune_registration_aircraft_outside_export_profile(
     obj: &mut Objective,
     warehouse: &warehouse::Warehouse<'_>,
@@ -761,12 +762,20 @@ fn prune_registration_aircraft_outside_export_profile(
             if qty == 0 || allowed.contains(name.as_str()) {
                 return Ok(());
             }
+            let key = String::from(name.as_str());
+            if obj
+                .warehouse
+                .equipment
+                .get(&key)
+                .map(|i| i.stored > 0)
+                .unwrap_or(false)
+            {
+                return Ok(());
+            }
             warehouse
                 .set_item(name.clone(), 0)
                 .with_context(|| format_compact!("zero registration A/C {name}"))?;
-            obj.warehouse
-                .equipment
-                .remove_cow(&String::from(name.as_str()));
+            obj.warehouse.equipment.remove_cow(&key);
             pruned += 1;
             Ok(())
         })?;
@@ -1768,6 +1777,7 @@ fn record_objective_dcs_equipment_names(
 }
 
 /// Non-OLO: drop airframe demand for types not in the objective export template (baseline 0 / missing).
+/// Keep ferried stock (`stored > 0`) like delivered weapons outside the local template.
 fn clamp_non_olo_airframe_rows_to_export(
     obj: &mut Objective,
     export: &FowlMizExport,
@@ -1789,6 +1799,10 @@ fn clamp_non_olo_airframe_rows_to_export(
             .map(|item| item.baseline)
             .unwrap_or(0);
         if baseline == 0 {
+            if inv.stored > 0 {
+                inv.capacity = inv.capacity.max(inv.stored);
+                continue;
+            }
             inv.capacity = 0;
             inv.stored = 0;
         }
