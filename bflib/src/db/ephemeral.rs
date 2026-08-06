@@ -238,6 +238,9 @@ pub struct Ephemeral {
     pub(super) shared_ed_fowl_aboard: FxHashMap<GroupId, Ucid>,
     /// Warehouse dynamic cargo name → register time (brief prune grace during F8 fill/load).
     pub(super) dynamic_cargo_registered_at: FxHashMap<String, DateTime<Utc>>,
+    /// Deslot airframe: re-clamp DCS count after leave-unit (engine often returns late).
+    /// `(due_utc, land_oid, typ_name, target_stored)`.
+    pub(super) pending_deslot_airframe_fix: Vec<(DateTime<Utc>, ObjectiveId, String, u32)>,
     /// Combined Arms: object id → UCID of player currently controlling a Fowl deployable/troop.
     pub(crate) ca_controller_by_oid: FxHashMap<DcsOid<ClassUnit>, Ucid>,
     /// Reverse of `ca_controller_by_oid` (one controlled unit per player).
@@ -335,6 +338,7 @@ impl Default for Ephemeral {
             shared_ed_bay_ghost_names: FxHashMap::default(),
             shared_ed_fowl_aboard: FxHashMap::default(),
             dynamic_cargo_registered_at: FxHashMap::default(),
+            pending_deslot_airframe_fix: Vec::default(),
             ca_controller_by_oid: FxHashMap::default(),
             ca_oid_by_controller: FxHashMap::default(),
             overlay_underlay_dirty: false,

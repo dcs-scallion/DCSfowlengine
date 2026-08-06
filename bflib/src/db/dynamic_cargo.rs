@@ -15,6 +15,7 @@ for more details.
 */
 
 use super::{
+    group::DeployKind,
     logistics::{dcs_liquid_kg_to_fowl_tons, objective_liquids_stored_as_tons},
     Db, MapM, MapS,
 };
@@ -34,7 +35,7 @@ use dcso3::{
     warehouse::{LiquidType, Warehouse},
     LuaEnv, MizLua, String, Vector2, Vector3,
 };
-use fxhash::FxHashMap;
+use fxhash::{FxHashMap, FxHashSet};
 use log::{info, warn};
 use mlua::{FromLua, Value};
 use serde_derive::{Deserialize, Serialize};
@@ -608,7 +609,7 @@ impl Db {
                 self.ephemeral.dirty();
             }
         }
-        const REGISTER_GRACE: chrono::Duration = chrono::Duration::seconds(15);
+        const REGISTER_GRACE: chrono::Duration = chrono::Duration::seconds(90);
         let now = Utc::now();
         let gone: Vec<String> = self
             .persisted
@@ -626,7 +627,7 @@ impl Db {
                 if !world_gone {
                     return None;
                 }
-                // Brief grace: fill/load UI can briefly drop the static.
+                // Fill / F8 load can drop the world static before getCargosOnBoard lists it.
                 if self
                     .ephemeral
                     .dynamic_cargo_registered_at
@@ -641,7 +642,8 @@ impl Db {
         if gone.is_empty() {
             return;
         }
-        let mut sync_oids: FxHashMap<ObjectiveId, ()> = FxHashMap::default();
+        let mut sync_from_oids: FxHashMap<ObjectiveId, ()> = FxHashMap::default();
+        let mut sync_to_oids: FxHashMap<ObjectiveId, ()> = FxHashMap::default();
         let mut point_awards: FxHashMap<Ucid, i32> = FxHashMap::default();
         let mut log_awards: FxHashMap<Ucid, ()> = FxHashMap::default();
         for name in gone {
@@ -649,7 +651,7 @@ impl Db {
                 continue;
             };
             self.clamp_dynamic_cargo_checkout(entry.source);
-            sync_oids.insert(entry.source, ());
+            sync_to_oids.insert(entry.source, ());
             let dest = self
                 .resolve_dynamic_cargo_absorb_dest(&entry)
                 .or_else(|| {
@@ -658,13 +660,41 @@ impl Db {
                 });
             match dest {
                 Some(pad) => {
-                    if let Err(e) = self.credit_objective_from_dynamic_cargo(
-                        pad,
-                        &entry.equipment,
-                        &entry.liquids,
-                    ) {
-                        warn!("dynamic cargo absorb credit {pad:?}: {e:?}");
+                    let snapshot_nonempty =
+                        entry.equipment.len() > 0 || entry.liquids.len() > 0;
+                    let credited = if snapshot_nonempty {
+                        match self.credit_objective_from_dynamic_cargo(
+                            pad,
+                            &entry.equipment,
+                            &entry.liquids,
+                        ) {
+                            Ok(()) => {
+                                sync_to_oids.insert(pad, ());
+                                true
+                            }
+                            Err(e) => {
+                                warn!("dynamic cargo absorb credit {pad:?}: {e:?}");
+                                false
+                            }
+                        }
                     } else {
+                        // ED already wrote warehouse stock; pull into virtual — do not SyncTo wipe.
+                        match self.sync_warehouse_to_objective(lua, pad) {
+                            Ok(_) => {
+                                sync_from_oids.insert(pad, ());
+                                info!(
+                                    "dynamic cargo absorb SyncFrom {pad:?} (empty snapshot for {})",
+                                    entry.name
+                                );
+                                true
+                            }
+                            Err(e) => {
+                                warn!("dynamic cargo absorb SyncFrom {pad:?}: {e:?}");
+                                false
+                            }
+                        }
+                    };
+                    if credited {
                         let tons = delivery_tons(entry.last_weight_kg);
                         let cfg = self.dynamic_cargo_cfg();
                         let deliverer = entry.last_carrier.unwrap_or(entry.spawner);
@@ -692,19 +722,36 @@ impl Db {
                             1,
                         );
                         info!(
-                            "dynamic cargo DCS absorb delivery: {} -> {:?} tons={:.2} deliverer={:?} spawner={:?} carrier={:?} weight_kg={:.0}",
+                            "dynamic cargo DCS absorb delivery: {} -> {:?} tons={:.2} deliverer={:?} spawner={:?} carrier={:?} weight_kg={:.0} snapshot={}",
                             entry.name,
                             pad,
                             tons,
                             deliverer,
                             entry.spawner,
                             entry.last_carrier,
-                            entry.last_weight_kg
+                            entry.last_weight_kg,
+                            if snapshot_nonempty { "credit" } else { "sync-from" }
                         );
                     }
-                    sync_oids.insert(pad, ());
                 }
                 None => {
+                    // False loss / despawn at source: put checked-out stock back.
+                    if entry.source_checked_out
+                        && (entry.equipment.len() > 0 || entry.liquids.len() > 0)
+                    {
+                        if let Err(e) = self.credit_objective_from_dynamic_cargo(
+                            entry.source,
+                            &entry.equipment,
+                            &entry.liquids,
+                        ) {
+                            warn!(
+                                "dynamic cargo restore checkout to {:?}: {e:?}",
+                                entry.source
+                            );
+                        } else {
+                            sync_to_oids.insert(entry.source, ());
+                        }
+                    }
                     info!(
                         "dynamic cargo gone (no delivery): {} source={:?} pos=({:.0},{:.0}) carrier={:?} weight_kg={:.0}",
                         entry.name,
@@ -720,7 +767,10 @@ impl Db {
             self.persisted.dynamic_cargo_crates.remove_cow(&name);
             self.clamp_dynamic_cargo_checkout(entry.source);
         }
-        for oid in sync_oids.keys() {
+        for oid in sync_to_oids.keys() {
+            if sync_from_oids.contains_key(oid) {
+                continue;
+            }
             if let Err(e) = self.sync_objective_to_warehouse(lua, *oid) {
                 warn!("dynamic cargo prune SyncTo {oid:?}: {e:?}");
             }
@@ -889,8 +939,12 @@ impl Db {
                     entry.y = point.0.z;
                     entry.alt = point.0.y;
                 }
-                entry.equipment = equipment;
-                entry.liquids = liquids;
+                // Aboard / fill UI often returns empty cargo warehouse — keep last good snapshot.
+                let snap_empty = equipment.len() == 0 && liquids.len() == 0;
+                if !snap_empty {
+                    entry.equipment = equipment;
+                    entry.liquids = liquids;
+                }
                 if weight > 0. {
                     entry.last_weight_kg = weight;
                 }
@@ -1117,85 +1171,127 @@ impl Db {
         Ok(result)
     }
 
-    /// Sum of ED warehouse dynamic cargo masses (kg) aboard this slot (excludes Fowl crates).
-    pub fn loaded_warehouse_dynamic_cargo_weight_kg(
-        &self,
-        lua: MizLua,
-        slot: &dcso3::net::SlotId,
-    ) -> u32 {
-        if !self.dynamic_cargo_enabled() {
-            return 0;
+    /// Sum of ED bay / sling dynamic cargo masses (kg) for List Cargo.
+    /// Prefer `Unit.getCargosOnBoard` — F8-aboard crates keep pad `get_point`, so OBB alone misses warehouse stock.
+    pub fn loaded_dynamic_cargo_weight_kg(&self, lua: MizLua, slot: &dcso3::net::SlotId) -> u32 {
+        let mut total = 0u32;
+        let mut counted: FxHashSet<String> = FxHashSet::default();
+        if let Ok(ac) = self.ephemeral.slot_instance_unit(lua, slot) {
+            if let Ok(Some(cargos)) = ac.get_cargos_on_board() {
+                let _ = cargos.for_each(|c| {
+                    let Ok(c) = c else {
+                        return Ok(());
+                    };
+                    let Ok(name) = c.get_name() else {
+                        return Ok(());
+                    };
+                    counted.insert(String::from(name.as_str()));
+                    match c.get_cargo_weight() {
+                        Ok(w) if w > 0. => {
+                            total = total.saturating_add(w.round() as u32);
+                        }
+                        _ => {}
+                    }
+                    Ok(())
+                });
+            }
         }
         let Some(ucid) = self.ephemeral.players_by_slot.get(slot) else {
-            return 0;
+            return total;
         };
         let Some(player) = self.persisted.players.get(ucid) else {
-            return 0;
+            return total;
         };
         let Some((_, Some(inst))) = player.current_slot.as_ref() else {
-            return 0;
+            return total;
         };
         let side = player.side;
-        let (hpt, fwd, landed, typ) = match self.ephemeral.slot_instance_unit(lua, slot) {
-            Ok(unit) => {
-                let Ok(pt) = unit.get_point() else {
-                    return 0;
-                };
-                let landed = unit.in_air().map(|a| !a).unwrap_or(!inst.in_air);
-                let pos = unit.get_position().unwrap_or(inst.position);
-                (
-                    pt.0,
-                    Vector2::new(pos.x.x, pos.x.z),
-                    landed,
+        // Sling / OBB: registry warehouse crates not listed on board (get_point usable).
+        if self.dynamic_cargo_enabled() {
+            let (hpt, fwd, landed, typ) = match self.ephemeral.slot_instance_unit(lua, slot) {
+                Ok(unit) => {
+                    let Ok(pt) = unit.get_point() else {
+                        return total;
+                    };
+                    let landed = unit.in_air().map(|a| !a).unwrap_or(!inst.in_air);
+                    let pos = unit.get_position().unwrap_or(inst.position);
+                    (
+                        pt.0,
+                        Vector2::new(pos.x.x, pos.x.z),
+                        landed,
+                        inst.typ.0.clone(),
+                    )
+                }
+                Err(_) => (
+                    inst.position.p.0,
+                    Vector2::new(inst.position.x.x, inst.position.x.z),
+                    !inst.in_air,
                     inst.typ.0.clone(),
-                )
-            }
-            Err(_) => (
-                inst.position.p.0,
-                Vector2::new(inst.position.x.x, inst.position.x.z),
-                !inst.in_air,
-                inst.typ.0.clone(),
-            ),
-        };
-        let mut total = 0u32;
-        for (name, entry) in &self.persisted.dynamic_cargo_crates {
-            if entry.side != side {
-                continue;
-            }
-            if let Some(uid) = self.persisted.units_by_name.get(name.as_str()) {
-                if let Some(unit) = self.persisted.units.get(uid) {
-                    if self.persisted.crates.contains(&unit.group) {
-                        continue;
+                ),
+            };
+            for (name, entry) in &self.persisted.dynamic_cargo_crates {
+                if entry.side != side || counted.contains(name.as_str()) {
+                    continue;
+                }
+                if let Some(uid) = self.persisted.units_by_name.get(name.as_str()) {
+                    if let Some(unit) = self.persisted.units.get(uid) {
+                        if self.persisted.crates.contains(&unit.group) {
+                            continue;
+                        }
                     }
                 }
-            }
-            let Ok(Static::Static(st)) = StaticObject::get_by_name(lua, name.as_str()) else {
-                continue;
-            };
-            match dynamic_cargo_is_aboard_unit(hpt, fwd, landed, typ.as_str(), &st) {
-                Ok(true) => {}
-                _ => continue,
-            }
-            match st.get_cargo_weight() {
-                Ok(w) if w > 0. => {
-                    total = total.saturating_add(w.round() as u32);
+                let Ok(Static::Static(st)) = StaticObject::get_by_name(lua, name.as_str()) else {
+                    continue;
+                };
+                match dynamic_cargo_is_aboard_unit(hpt, fwd, landed, typ.as_str(), &st) {
+                    Ok(true) => {}
+                    _ => continue,
                 }
-                _ => {}
+                match st.get_cargo_weight() {
+                    Ok(w) if w > 0. => {
+                        total = total.saturating_add(w.round() as u32);
+                        counted.insert(name.clone());
+                    }
+                    _ => {}
+                }
             }
         }
+        // Dead Fowl still tagged ed_carrier (may be absent from getCargosOnBoard).
+        for gid in &self.persisted.crates {
+            let Some(group) = self.persisted.groups.get(gid) else {
+                continue;
+            };
+            if group.side != side {
+                continue;
+            }
+            let DeployKind::Crate {
+                spec, ed_carrier, ..
+            } = &group.origin
+            else {
+                continue;
+            };
+            if ed_carrier.as_ref() != Some(ucid) {
+                continue;
+            }
+            let mut already = false;
+            let mut any_dead = false;
+            for uid in &group.units {
+                let Some(unit) = self.persisted.units.get(uid) else {
+                    continue;
+                };
+                if counted.contains(unit.name.as_str()) {
+                    already = true;
+                }
+                if unit.dead {
+                    any_dead = true;
+                }
+            }
+            if already || !any_dead {
+                continue;
+            }
+            total = total.saturating_add(spec.weight);
+        }
         total
-    }
-
-    /// Sum of ED dynamic cargo crate masses (kg) currently aboard this slot's airframe.
-    /// Warehouse registry crates + Fowl crates loaded via F8/sling.
-    pub fn loaded_dynamic_cargo_weight_kg(&self, lua: MizLua, slot: &dcso3::net::SlotId) -> u32 {
-        let warehouse = self.loaded_warehouse_dynamic_cargo_weight_kg(lua, slot);
-        let fowl: u32 = self
-            .fowl_crates_on_ed_bay(lua, slot)
-            .into_iter()
-            .map(|(_, w)| w)
-            .sum();
-        warehouse.saturating_add(fowl)
     }
 }
 
@@ -1275,6 +1371,7 @@ fn carrier_ucid_if_aboard(
     side: Side,
     cargo: &StaticObject,
 ) -> Option<Ucid> {
+    let cargo_name = cargo.get_name().ok();
     for (slot, ucid) in &db.ephemeral.players_by_slot {
         let Some(player) = db.persisted.players.get(ucid) else {
             continue;
@@ -1285,6 +1382,12 @@ fn carrier_ucid_if_aboard(
         let Some((_, Some(inst))) = player.current_slot.as_ref() else {
             continue;
         };
+        if let (Some(cname), Ok(ac)) = (cargo_name.as_ref(), db.ephemeral.slot_instance_unit(lua, slot))
+        {
+            if unit_has_cargo_named(&ac, cname.as_str()) {
+                return Some(*ucid);
+            }
+        }
         let (hpt, fwd, landed, typ) = match db.ephemeral.slot_instance_unit(lua, slot) {
             Ok(unit) => {
                 let Ok(pt) = unit.get_point() else {

@@ -1287,6 +1287,185 @@ impl Db {
         Ok(())
     }
 
+    /// Credit airframe (and FARP ammo) to the landing objective warehouse on deslot.
+    /// Use absolute `set_item(prev+1)` — DCS often returns the airframe *after* leave-unit,
+    /// so `add_item` races and double-counts (seen as 0→2 C-130 on ferry deslot).
+    fn credit_airframe_on_deslot(
+        &mut self,
+        lua: MizLua,
+        objid: &DcsOid<ClassUnit>,
+        land_oid: ObjectiveId,
+        slot: &SlotId,
+        typ: &Vehicle,
+    ) -> Result<()> {
+        let typ_name = typ.0.clone();
+        let home_oid = self
+            .ephemeral
+            .slot_info
+            .get(slot)
+            .map(|s| s.objective);
+        let land_ab = {
+            let id = maybe!(self.ephemeral.airbase_by_oid, land_oid, "airbase")?;
+            Airbase::get_instance(lua, &id).context("get land airbase")?
+        };
+        let land_wh = land_ab.get_warehouse().context("get land warehouse")?;
+        let land_dcs = land_wh
+            .get_item_count(typ_name.clone())
+            .context("land get_item_count")?;
+        let land_prev = self
+            .persisted
+            .objectives
+            .get(&land_oid)
+            .and_then(|o| o.warehouse.equipment.get(&typ_name))
+            .map(|i| i.stored)
+            .unwrap_or(0);
+        let target = land_prev.saturating_add(1);
+        let is_airbase = {
+            let obj = objective!(self, land_oid)?;
+            obj.kind.is_airbase()
+                || self
+                    .ephemeral
+                    .cfg
+                    .extra_fixed_wing_objectives
+                    .contains(obj.name())
+        };
+
+        // Undo DCS return to slot home when ferrying to another pad.
+        if let Some(home) = home_oid.filter(|h| *h != land_oid) {
+            let home_prev = self
+                .persisted
+                .objectives
+                .get(&home)
+                .and_then(|o| o.warehouse.equipment.get(&typ_name))
+                .map(|i| i.stored)
+                .unwrap_or(0);
+            let home_ab = {
+                let id = maybe!(self.ephemeral.airbase_by_oid, home, "home airbase")?;
+                Airbase::get_instance(lua, &id).context("get home airbase")?
+            };
+            let home_wh = home_ab.get_warehouse().context("get home warehouse")?;
+            let home_dcs = home_wh
+                .get_item_count(typ_name.clone())
+                .context("home get_item_count")?;
+            if home_dcs > home_prev {
+                home_wh
+                    .set_item(typ_name.clone(), home_prev)
+                    .context("clamp airframe at slot home")?;
+                let home_obj = objective_mut!(self, home).context("home objective")?;
+                let inv = home_obj
+                    .warehouse
+                    .equipment
+                    .get_or_default_cow(typ_name.clone());
+                inv.stored = home_prev;
+                info!(
+                    "deslot airframe: clamped home {home:?} {typ_name} {home_dcs}->{home_prev} (ferry to {land_oid:?})"
+                );
+            }
+        }
+
+        land_wh
+            .set_item(typ_name.clone(), target)
+            .context("set airframe at landed warehouse")?;
+        let land_after = land_wh
+            .get_item_count(typ_name.clone())
+            .unwrap_or(target);
+        info!(
+            "deslot airframe: set {typ_name} at {land_oid:?} to {target} (dcs_before={land_dcs} prev={land_prev} dcs_after={land_after})"
+        );
+
+        let mut sync: SmallVec<[String; 4]> = smallvec![typ_name.clone()];
+        if !is_airbase && let Ok(unit) = Unit::get_instance(lua, objid) {
+            for ammo in unit.get_ammo().context("get ammo")? {
+                let ammo = ammo.context("ammo")?;
+                let count = ammo.count().context("ammo count")?;
+                let ammo_typ = ammo.type_name().context("ammo typ")?;
+                sync.push(ammo_typ.clone());
+                land_wh
+                    .add_item(ammo_typ, count)
+                    .context("add item to warehouse")?;
+            }
+        }
+
+        {
+            let obj = objective_mut!(self, land_oid).context("get objective")?;
+            for name in &sync {
+                let count = if name.as_str() == typ_name.as_str() {
+                    target
+                } else {
+                    land_wh
+                        .get_item_count(name.clone())
+                        .context("getting item")?
+                };
+                let inv = obj.warehouse.equipment.get_or_default_cow(name.clone());
+                inv.stored = count;
+                if inv.capacity < count {
+                    inv.capacity = count.max(1);
+                }
+            }
+        }
+        // DCS often applies warehouse return a beat after leave-unit — re-clamp once.
+        let due = Utc::now() + Duration::seconds(2);
+        self.ephemeral
+            .pending_deslot_airframe_fix
+            .push((due, land_oid, typ_name, target));
+        self.ephemeral.dirty();
+        Ok(())
+    }
+
+    pub fn process_pending_deslot_airframe_fixes(&mut self, lua: MizLua, now: DateTime<Utc>) {
+        if self.ephemeral.pending_deslot_airframe_fix.is_empty() {
+            return;
+        }
+        let pending = std::mem::take(&mut self.ephemeral.pending_deslot_airframe_fix);
+        let mut keep = Vec::new();
+        for (due, oid, typ_name, target) in pending {
+            if now < due {
+                keep.push((due, oid, typ_name, target));
+                continue;
+            }
+            if let Err(e) = self.apply_deslot_airframe_clamp(lua, oid, &typ_name, target) {
+                warn!("deslot airframe deferred clamp {oid:?} {typ_name}: {e:?}");
+            }
+        }
+        self.ephemeral.pending_deslot_airframe_fix = keep;
+    }
+
+    fn apply_deslot_airframe_clamp(
+        &mut self,
+        lua: MizLua,
+        oid: ObjectiveId,
+        typ_name: &str,
+        target: u32,
+    ) -> Result<()> {
+        let id = maybe!(self.ephemeral.airbase_by_oid, oid, "airbase")?;
+        let wh = Airbase::get_instance(lua, &id)
+            .context("get airbase")?
+            .get_warehouse()
+            .context("get warehouse")?;
+        let dcs = wh
+            .get_item_count(String::from(typ_name))
+            .context("get_item_count")?;
+        if dcs == target {
+            return Ok(());
+        }
+        wh.set_item(String::from(typ_name), target)
+            .context("set_item clamp")?;
+        let obj = objective_mut!(self, oid).context("objective")?;
+        let inv = obj
+            .warehouse
+            .equipment
+            .get_or_default_cow(String::from(typ_name));
+        inv.stored = target;
+        if inv.capacity < target {
+            inv.capacity = target.max(1);
+        }
+        self.ephemeral.dirty();
+        info!(
+            "deslot airframe: deferred clamp {typ_name} at {oid:?} {dcs}->{target}"
+        );
+        Ok(())
+    }
+
     pub fn player_left_unit(
         &mut self,
         lua: MizLua,
@@ -1341,42 +1520,15 @@ impl Db {
                                 }
                             }
                         }
-                        let mut fix_warehouse = || -> Result<()> {
-                            let obj = objective_mut!(self, oid).context("get objective")?;
-                            let id = maybe!(self.ephemeral.airbase_by_oid, oid, "airbase")?;
-                            let airbase = Airbase::get_instance(lua, &id).context("get airbase")?;
-                            let wh = airbase.get_warehouse().context("get warehouse")?;
-                            let is_airbase = obj.kind.is_airbase()
-                                || self
-                                    .ephemeral
-                                    .cfg
-                                    .extra_fixed_wing_objectives
-                                    .contains(obj.name());
-                            // Credit landing objective (DCS often returns airframes to slot home, not land field).
-                            let mut sync: SmallVec<[String; 4]> = smallvec![typ.0.clone()];
-                            wh.add_item(typ.0.clone(), 1)
-                                .context("add airframe to landed warehouse")?;
-                            if !is_airbase && let Ok(unit) = Unit::get_instance(lua, &objid) {
-                                for ammo in unit.get_ammo().context("get ammo")? {
-                                    let ammo = ammo.context("ammo")?;
-                                    let count = ammo.count().context("ammo count")?;
-                                    let typ = ammo.type_name().context("ammo typ")?;
-                                    sync.push(typ.clone());
-                                    wh.add_item(typ, count).context("add item to warehouse")?;
-                                }
-                            }
-                            for typ in sync {
-                                let count = wh.get_item_count(typ.clone()).context("getting item")?;
-                                let inv = obj.warehouse.equipment.get_or_default_cow(typ);
-                                inv.stored = count;
-                                if inv.capacity < count {
-                                    inv.capacity = count.max(1);
-                                }
-                                self.ephemeral.dirty();
-                            }
-                            Ok(())
-                        };
-                        if let Err(e) = fix_warehouse() {
+                        // DCS often already returns the airframe to the landing (or slot-home)
+                        // warehouse on leave-unit. Blind add_item double-counts (e.g. 0→2 C-130).
+                        if let Err(e) = self.credit_airframe_on_deslot(
+                            lua,
+                            &objid,
+                            oid,
+                            &slot,
+                            &typ,
+                        ) {
                             error!("unable to fix warehouse {:?}", e)
                         }
                     }

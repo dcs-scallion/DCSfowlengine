@@ -2609,6 +2609,7 @@ fn run_timed_events(
     }
     sanitize_connected_airborne_locks(ctx, lua, ts);
     process_pending_airborne_deslot_penalties(ctx, ts);
+    ctx.db.process_pending_deslot_airframe_fixes(lua, ts);
 
     match run_slow_timed_events(lua, ctx, perf, path, ts) {
         Ok(AdminResult::Continue) => (),

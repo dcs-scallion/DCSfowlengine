@@ -80,8 +80,8 @@
     "enabled": true,
     "maximum_dynamic_crates_per_coalition": 100,
     "to_stock_dynamic_crate_distance": 50,
-    "to_stock_points_per_ton": 5,
-    "source_spawner_points_per_ton": 15,
+    "to_stock_points_per_ton": 1,
+    "source_spawner_points_per_ton": 2,
     "shared_ed_cargo_airframes": [
       "C-130J-30",
       "CH-47Fbl1",
@@ -102,8 +102,8 @@
     "enabled": false,
     "skript_path": "",
     "mission_start_time_cycle": [
-      "06:00",
-      "15:00"
+      "06:30",
+      "14:00"
     ],
     "mission_date_base": "1985-06-19",
     "mission_date_on_new_campaign": "reset",
