@@ -241,6 +241,10 @@ pub struct Ephemeral {
     /// Deslot airframe: re-clamp DCS count after leave-unit (engine often returns late).
     /// `(due_utc, land_oid, typ_name, target_stored)`.
     pub(super) pending_deslot_airframe_fix: Vec<(DateTime<Utc>, ObjectiveId, String, u32)>,
+    /// Hub/crate transfer credits for sync-to (target oid + item → amount).
+    /// Sync-to may raise DCS stock only up to this credit (prevents phantom free stock).
+    pub(super) sync_to_equipment_credit: FxHashMap<(ObjectiveId, String), u32>,
+    pub(super) sync_to_liquid_credit: FxHashMap<(ObjectiveId, LiquidType), u32>,
     /// Combined Arms: object id → UCID of player currently controlling a Fowl deployable/troop.
     pub(crate) ca_controller_by_oid: FxHashMap<DcsOid<ClassUnit>, Ucid>,
     /// Reverse of `ca_controller_by_oid` (one controlled unit per player).
@@ -339,6 +343,8 @@ impl Default for Ephemeral {
             shared_ed_fowl_aboard: FxHashMap::default(),
             dynamic_cargo_registered_at: FxHashMap::default(),
             pending_deslot_airframe_fix: Vec::default(),
+            sync_to_equipment_credit: FxHashMap::default(),
+            sync_to_liquid_credit: FxHashMap::default(),
             ca_controller_by_oid: FxHashMap::default(),
             ca_oid_by_controller: FxHashMap::default(),
             overlay_underlay_dirty: false,

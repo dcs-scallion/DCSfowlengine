@@ -1609,7 +1609,7 @@ impl Db {
         self.setup_supply_lines().context("setup supply lines")?;
         if !self.ephemeral.defer_initial_hub_distribute {
             let mut trs = self
-                .deliver_supplies_from_logistics_hubs()
+                .deliver_supplies_from_logistics_hubs(lua)
                 .context("distributing supplies")?;
             trs.retain(|t| t.target() != oid);
             match &mut self.ephemeral.logistics_stage {
@@ -2584,7 +2584,7 @@ impl Db {
                 self.capture_warehouse(lua, oid, previous_owner)
                     .context("capturing warehouse")?;
                 self.setup_supply_lines().context("setup supply lines")?;
-                self.deliver_supplies_from_logistics_hubs()
+                self.deliver_supplies_from_logistics_hubs(lua)
                     .context("delivering supplies")?;
                 let mut ucids: SmallVec<[Ucid; 1]> = smallvec![];
                 for (_, ucid, troop_origin, gid) in gids {

@@ -587,6 +587,37 @@ pub struct WarehouseConfig {
     /// How many logistics ticks does it take before supplies are delivered
     /// from outside
     pub ticks_per_delivery: u32,
+    /// Hub→FARP **non-airframe** Supply % gate (weapons + other; 1–100). Default 100.
+    /// Fuel stays at 100%. Ground DEP FARPs; naval mobile pads use carrier.
+    #[serde(default = "default_tick_kind_minimum_global_supply_percentage")]
+    pub tick_farp_minimum_global_supply_percentage: u8,
+    /// Hub→FOB (OFO) non-airframe Supply % gate (1–100). Default 100.
+    #[serde(default = "default_tick_kind_minimum_global_supply_percentage")]
+    pub tick_fob_minimum_global_supply_percentage: u8,
+    /// Hub→carrier non-airframe Supply % gate (1–100). Default 100.
+    #[serde(default = "default_tick_kind_minimum_global_supply_percentage")]
+    pub tick_carrier_minimum_global_supply_percentage: u8,
+    /// Hub→land airbase non-airframe Supply % gate (1–100). Default 100.
+    #[serde(default = "default_tick_kind_minimum_global_supply_percentage")]
+    pub tick_airbase_minimum_global_supply_percentage: u8,
+    /// Occupied hub non-airframe Supply % gate (1–100). Default 100.
+    #[serde(default = "default_tick_kind_minimum_global_supply_percentage")]
+    pub tick_occupiedhub_minimum_global_supply_percentage: u8,
+    /// Hub→FARP **airframe** Supply % gate (1–100). Default 100.
+    #[serde(default = "default_tick_kind_minimum_global_supply_percentage")]
+    pub tick_farp_minimum_airframe_global_supply_percentage: u8,
+    /// Hub→FOB airframe Supply % gate (1–100). Default 100.
+    #[serde(default = "default_tick_kind_minimum_global_supply_percentage")]
+    pub tick_fob_minimum_airframe_global_supply_percentage: u8,
+    /// Hub→carrier airframe Supply % gate (1–100). Default 100.
+    #[serde(default = "default_tick_kind_minimum_global_supply_percentage")]
+    pub tick_carrier_minimum_airframe_global_supply_percentage: u8,
+    /// Hub→land airbase airframe Supply % gate (1–100). Default 100.
+    #[serde(default = "default_tick_kind_minimum_global_supply_percentage")]
+    pub tick_airbase_minimum_airframe_global_supply_percentage: u8,
+    /// Occupied hub airframe Supply % gate (1–100). Default 100.
+    #[serde(default = "default_tick_kind_minimum_global_supply_percentage")]
+    pub tick_occupiedhub_minimum_airframe_global_supply_percentage: u8,
     /// The supply transfer crate
     pub supply_transfer_crate: FxHashMap<Side, Crate>,
     /// The percentage of supply that is transfered by a transfer crate
@@ -645,7 +676,70 @@ fn default_captured_stock_percentage() -> u8 {
     0
 }
 
+fn default_tick_kind_minimum_global_supply_percentage() -> u8 {
+    100
+}
+
 impl WarehouseConfig {
+    /// Non-airframe (weapons + other) destination Supply % gate (clamped 1–100).
+    /// Occupied hubs: use `tick_occupiedhub_*` via the caller.
+    pub fn tick_minimum_global_supply_percentage_for(
+        &self,
+        kind: &ObjectiveKind,
+        airbase_on_water: bool,
+    ) -> u8 {
+        let raw = match kind {
+            ObjectiveKind::Fob => self.tick_fob_minimum_global_supply_percentage,
+            ObjectiveKind::Farp { mobile: true, .. } => {
+                self.tick_carrier_minimum_global_supply_percentage
+            }
+            ObjectiveKind::Farp { .. } => self.tick_farp_minimum_global_supply_percentage,
+            ObjectiveKind::Airbase => {
+                if airbase_on_water {
+                    self.tick_carrier_minimum_global_supply_percentage
+                } else {
+                    self.tick_airbase_minimum_global_supply_percentage
+                }
+            }
+            ObjectiveKind::Logistics | ObjectiveKind::Production => 100,
+        };
+        raw.clamp(1, 100)
+    }
+
+    /// Airframe-only destination Supply % gate (clamped 1–100).
+    pub fn tick_minimum_airframe_global_supply_percentage_for(
+        &self,
+        kind: &ObjectiveKind,
+        airbase_on_water: bool,
+    ) -> u8 {
+        let raw = match kind {
+            ObjectiveKind::Fob => self.tick_fob_minimum_airframe_global_supply_percentage,
+            ObjectiveKind::Farp { mobile: true, .. } => {
+                self.tick_carrier_minimum_airframe_global_supply_percentage
+            }
+            ObjectiveKind::Farp { .. } => self.tick_farp_minimum_airframe_global_supply_percentage,
+            ObjectiveKind::Airbase => {
+                if airbase_on_water {
+                    self.tick_carrier_minimum_airframe_global_supply_percentage
+                } else {
+                    self.tick_airbase_minimum_airframe_global_supply_percentage
+                }
+            }
+            ObjectiveKind::Logistics | ObjectiveKind::Production => 100,
+        };
+        raw.clamp(1, 100)
+    }
+
+    pub fn tick_occupiedhub_minimum_global_supply_percentage_clamped(&self) -> u8 {
+        self.tick_occupiedhub_minimum_global_supply_percentage
+            .clamp(1, 100)
+    }
+
+    pub fn tick_occupiedhub_minimum_airframe_global_supply_percentage_clamped(&self) -> u8 {
+        self.tick_occupiedhub_minimum_airframe_global_supply_percentage
+            .clamp(1, 100)
+    }
+
     /// `airbase_on_water`: true when objective is `Airbase` and zone center is over water (carrier).
     pub fn capacity_multiplier(&self, kind: &ObjectiveKind, airbase_on_water: bool) -> u32 {
         match kind {

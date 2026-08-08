@@ -349,6 +349,14 @@ pub struct AiAirState {
     /// CALCM rack empty; bingo waits for in-flight missiles to impact.
     #[serde(default)]
     pub calcm_rack_empty_since: Option<DateTime<Utc>>,
+    /// Drone: LOS climb WP (map XY); reuse for RTB while hub unchanged.
+    #[serde(default)]
+    pub drone_climb_pos: Option<Vector2>,
+    #[serde(default)]
+    pub drone_climb_hub: Option<ObjectiveId>,
+    /// Orbit mark used when `drone_climb_pos` was planned (invalidate on waypoint move).
+    #[serde(default)]
+    pub drone_climb_orbit: Option<Vector2>,
 }
 
 #[derive(Debug, Clone)]
@@ -3048,7 +3056,8 @@ fn push_bootstrap_missions(
             .get(i)
             .or(hub.slots.first())
             .ok_or_else(|| anyhow!("no hub slot for bootstrap"))?;
-        let route = bootstrap_route(lua, db, hub, slot, mode, post_service_refuel)?;
+        let route =
+            bootstrap_route_for_group(lua, db, gid, hub, slot, mode, post_service_refuel)?;
         db.ai_air_push_mission_to_name(spctx, dcs_name, route, false)?;
     }
     let group = group_mut!(db, gid)?;
@@ -3058,6 +3067,104 @@ fn push_bootstrap_missions(
     }
     log::info!("ai air {gid}: bootstrap takeoff pushed at spawn");
     Ok(())
+}
+
+/// Drone: TakeOffParking → LOS climb @ CFG BARO → orbit (TEST-style continuous route).
+fn extend_drone_bootstrap_route<'lua>(
+    lua: MizLua<'lua>,
+    db: &mut Db,
+    gid: GroupId,
+    route: &mut Vec<MissionPoint<'lua>>,
+) -> Result<()> {
+    if route.is_empty() {
+        return Ok(());
+    }
+    let (orbit_pos, cruise_alt, alt_typ, speed, hub) = {
+        let group = group!(db, gid)?;
+        let DeployKind::Action { ai_air, .. } = &group.origin else {
+            return Ok(());
+        };
+        if ai_air.mission_kind != AiAirMissionKind::Drone {
+            return Ok(());
+        }
+        (
+            ai_air.active_mission.pos,
+            ai_air.active_mission.alt,
+            ai_air.active_mission.alt_typ.clone(),
+            ai_air.active_mission.speed,
+            ai_air.hub,
+        )
+    };
+    if orbit_pos == Vector2::default() {
+        return Ok(());
+    }
+    let from = route[0].pos.0;
+    route[0].speed_locked = Some(true);
+
+    let planned = plan_drone_los_climb_point(lua, from, orbit_pos, cruise_alt)?;
+    {
+        let group = group_mut!(db, gid)?;
+        let DeployKind::Action { ai_air, .. } = &mut group.origin else {
+            return Ok(());
+        };
+        ai_air.drone_climb_orbit = Some(orbit_pos);
+        ai_air.drone_climb_hub = hub;
+        ai_air.drone_climb_pos = planned.map(|(p, _)| p);
+    }
+    if let Some((climb_pos, dist_m)) = planned {
+        log::info!(
+            "ai air {gid}: drone bootstrap climb {:.0} km (leg {:.0} km)",
+            dist_m / 1000.,
+            (orbit_pos - from).magnitude() / 1000.
+        );
+        let climb_speed = drone_climb_enroute_speed(speed);
+        route.push(drone_climb_turning_point(
+            String::from("climb"),
+            climb_pos,
+            cruise_alt,
+            alt_typ.clone(),
+            climb_speed,
+        ));
+    }
+    route.push(MissionPoint {
+        typ: PointType::TurningPoint,
+        airdrome_id: None,
+        helipad: None,
+        time_re_fu_ar: None,
+        link_unit: None,
+        action: Some(ActionTyp::Air(TurnMethod::FlyOverPoint)),
+        pos: LuaVec2(orbit_pos),
+        alt: cruise_alt,
+        alt_typ: Some(alt_typ),
+        speed,
+        speed_locked: Some(true),
+        eta: None,
+        eta_locked: None,
+        name: Some(String::from("orbit")),
+        parking: None,
+        task: Box::new(Task::ComboTask(vec![Task::Orbit {
+            pattern: OrbitPattern::Circle,
+            point: Some(LuaVec2(orbit_pos)),
+            point2: None,
+            speed: Some(speed),
+            altitude: Some(cruise_alt),
+        }])),
+    });
+    Ok(())
+}
+
+pub(super) fn bootstrap_route_for_group<'lua>(
+    lua: MizLua<'lua>,
+    db: &mut Db,
+    gid: GroupId,
+    hub: &HubPick,
+    slot: &HubSlot,
+    mode: BootstrapMode,
+    post_service_refuel: bool,
+) -> Result<Vec<MissionPoint<'lua>>> {
+    let mut route = bootstrap_route(lua, db, hub, slot, mode, post_service_refuel)?;
+    extend_drone_bootstrap_route(lua, db, gid, &mut route)?;
+    Ok(route)
 }
 
 fn template_weapon_ammo_keys(template_unit: &miz::Unit<'_>) -> Vec<std::string::String> {
@@ -3462,37 +3569,20 @@ pub(super) fn cas_patrol_mission<'lua>(
     ]
 }
 
-/// AGL clearance baked into drone enroute BARO (m).
-const DRONE_ENROUTE_CLEARANCE_M: f64 = 800.;
-/// Sample spacing for drone climb Turning Points (m).
-const DRONE_CLIMB_SAMPLE_M: f64 = 10_000.;
-/// Lookahead when picking BARO for a climb sample (m).
-const DRONE_CLIMB_LOOKAHEAD_M: f64 = 40_000.;
-/// First climb WP distance from IP when the leg is long enough (m).
-const DRONE_CLIMB_FIRST_LEG_M: f64 = 8_000.;
-/// Skip climb insertion when IP→orbit is shorter than this (m).
-const DRONE_CLIMB_MIN_RANGE_M: f64 = 8_000.;
-const DRONE_CLIMB_MAX_WPS: usize = 16;
+/// Candidate climb distances (m) along start→orbit; only rings strictly below leg length are tested.
+const DRONE_CLIMB_RINGS_M: [f64; 5] = [10_000., 20_000., 30_000., 40_000., 50_000.];
+/// Eye height above start MSL for `Land.isVisible` (m).
+const DRONE_LOS_EYE_ABOVE_START_M: f64 = 50.;
+/// ME TEST small drone climb WP speed (~280 km/h); CFG 68 m/s is too slow for AI climb.
+const DRONE_TEST_CLIMB_SPEED_M: f64 = 77.777_777_777_778;
+/// Orbit mark moved farther than this (m) → replan climb.
+pub(super) const DRONE_CLIMB_MARK_EPS_M: f64 = 500.;
 
-fn drone_peak_baro_along(
-    land: &Land,
-    from: Vector2,
-    dir: Vector2,
-    start_m: f64,
-    end_m: f64,
-    cruise_alt: f64,
-) -> Result<f64> {
-    let mut peak = cruise_alt;
-    let mut d = start_m;
-    while d <= end_m {
-        let pos = from + dir * d;
-        let ground = land.get_height(LuaVec2(pos))?;
-        peak = peak.max(ground + DRONE_ENROUTE_CLEARANCE_M);
-        d += DRONE_CLIMB_SAMPLE_M * 0.5;
-    }
-    Ok(peak)
+fn drone_climb_enroute_speed(cfg_speed: f64) -> f64 {
+    cfg_speed.max(DRONE_TEST_CLIMB_SPEED_M)
 }
 
+/// ME TEST climb WP: type+action Turning Point, BARO cruise, speed_locked.
 fn drone_climb_turning_point<'lua>(
     name: String,
     pos: Vector2,
@@ -3506,12 +3596,12 @@ fn drone_climb_turning_point<'lua>(
         helipad: None,
         time_re_fu_ar: None,
         link_unit: None,
-        action: Some(ActionTyp::Air(TurnMethod::FlyOverPoint)),
+        action: Some(ActionTyp::Air(TurnMethod::TurningPoint)),
         pos: LuaVec2(pos),
         alt,
         alt_typ: Some(alt_typ),
         speed,
-        speed_locked: None,
+        speed_locked: Some(true),
         eta: None,
         eta_locked: None,
         name: Some(name),
@@ -3520,10 +3610,91 @@ fn drone_climb_turning_point<'lua>(
     }
 }
 
-/// Insert terrain-aware climb Turning Points between IP and orbit (drones only).
-/// MOOSE-style intermediate `WaypointAirTurningPoint` + `Land.getHeight` clearance.
+/// Departure BARO for IP (unit MSL if airborne, else terrain) — TEST keeps takeoff WP at ground.
+fn drone_departure_baro_alt(lua: MizLua, db: &Db, gid: GroupId, pos: Vector2) -> Result<f64> {
+    if let Ok(names) = dcs_spawn_names_for(db, gid) {
+        for name in &names {
+            let Ok(group) = Group::get_by_name(lua, name) else {
+                continue;
+            };
+            let Ok(unit) = group.get_unit(1) else {
+                continue;
+            };
+            if !unit.is_exist().unwrap_or(false) {
+                continue;
+            }
+            if let Ok(p) = unit.get_point() {
+                return Ok(p.y);
+            }
+        }
+    }
+    Ok(Land::singleton(lua)?.get_height(LuaVec2(pos))?)
+}
+
+/// Farthest ring &lt; `leg_m` with LOS from (start MSL+50) to (ring, cruise BARO); else nearest ring / None if leg &lt; 10 km.
+fn plan_drone_los_climb_point(
+    lua: MizLua,
+    start: Vector2,
+    orbit: Vector2,
+    cruise_baro: f64,
+) -> Result<Option<(Vector2, f64)>> {
+    let delta = orbit - start;
+    let leg = delta.magnitude();
+    if leg < DRONE_CLIMB_RINGS_M[0] {
+        return Ok(None);
+    }
+    let dir = delta / leg;
+    let land = Land::singleton(lua)?;
+    let start_msl = land.get_height(LuaVec2(start))?;
+    let eye = Vector3::new(start.x, start_msl + DRONE_LOS_EYE_ABOVE_START_M, start.y);
+    let rings: SmallVec<[f64; 5]> = DRONE_CLIMB_RINGS_M
+        .into_iter()
+        .filter(|r| *r < leg)
+        .collect();
+    if rings.is_empty() {
+        return Ok(None);
+    }
+    for &r in rings.iter().rev() {
+        let p = start + dir * r;
+        let dest = Vector3::new(p.x, cruise_baro, p.y);
+        if land.is_visible(LuaVec3(eye), LuaVec3(dest))? {
+            log::info!(
+                "drone LOS climb: {:.0} km (leg {:.0} km, eye MSL {:.0})",
+                r / 1000.,
+                leg / 1000.,
+                start_msl + DRONE_LOS_EYE_ABOVE_START_M
+            );
+            return Ok(Some((p, r)));
+        }
+    }
+    let r = rings[0];
+    let p = start + dir * r;
+    log::info!(
+        "drone LOS climb: fallback {:.0} km (no LOS on rings, leg {:.0} km)",
+        r / 1000.,
+        leg / 1000.
+    );
+    Ok(Some((p, r)))
+}
+
+fn drone_climb_cache_valid(ai_air: &AiAirState, orbit: Vector2, hub: Option<ObjectiveId>) -> bool {
+    let Some(cached_orbit) = ai_air.drone_climb_orbit else {
+        return false;
+    };
+    if (cached_orbit - orbit).magnitude() > DRONE_CLIMB_MARK_EPS_M {
+        return false;
+    }
+    if ai_air.drone_climb_hub != hub {
+        return false;
+    }
+    true
+}
+
+/// ME-style: one climb WP at CFG BARO via LOS rings; cache for RTB while hub unchanged.
 pub(super) fn insert_drone_climb_waypoints<'lua>(
     lua: MizLua<'lua>,
+    db: &mut Db,
+    gid: GroupId,
     route: &mut Vec<MissionPoint<'lua>>,
 ) -> Result<()> {
     if route.len() < 2 {
@@ -3537,42 +3708,141 @@ pub(super) fn insert_drone_climb_waypoints<'lua>(
         .clone()
         .unwrap_or(AltType::BARO);
     let speed = route[route.len() - 1].speed;
-    let delta = to - from;
-    let dist = delta.magnitude();
-    let land = Land::singleton(lua)?;
-    if dist < DRONE_CLIMB_MIN_RANGE_M {
-        let ground = land.get_height(LuaVec2(from))?;
-        route[0].alt = cruise_alt.max(ground + DRONE_ENROUTE_CLEARANCE_M);
+
+    let hub = {
+        let group = group!(db, gid)?;
+        match &group.origin {
+            DeployKind::Action { ai_air, .. } => ai_air.hub,
+            _ => None,
+        }
+    };
+
+    let cached = {
+        let group = group!(db, gid)?;
+        let DeployKind::Action { ai_air, .. } = &group.origin else {
+            return Ok(());
+        };
+        drone_climb_cache_valid(ai_air, to, hub).then_some(ai_air.drone_climb_pos)
+    };
+
+    let climb_pos = if let Some(cached_pos) = cached {
+        cached_pos
+    } else {
+        let planned = plan_drone_los_climb_point(lua, from, to, cruise_alt)?;
+        let group = group_mut!(db, gid)?;
+        let DeployKind::Action { ai_air, .. } = &mut group.origin else {
+            return Ok(());
+        };
+        ai_air.drone_climb_orbit = Some(to);
+        ai_air.drone_climb_hub = hub;
+        ai_air.drone_climb_pos = planned.map(|(p, _)| p);
+        planned.map(|(p, _)| p)
+    };
+
+    // TEST: takeoff/IP stays near ground (or current AGL); only climb+orbit use CFG BARO.
+    let depart_alt = drone_departure_baro_alt(lua, db, gid, from)?;
+    {
+        let ip = &mut route[0];
+        ip.alt = depart_alt;
+        ip.alt_typ = Some(AltType::BARO);
+        ip.speed_locked = Some(true);
+        ip.action = Some(ActionTyp::Air(TurnMethod::TurningPoint));
+    }
+    for wp in route.iter_mut().skip(1) {
+        wp.alt = cruise_alt;
+        wp.alt_typ = Some(alt_typ.clone());
+        wp.speed_locked = Some(true);
+    }
+    let Some(climb_pos) = climb_pos else {
+        return Ok(());
+    };
+    let climb_speed = drone_climb_enroute_speed(speed);
+    let climb = drone_climb_turning_point(
+        String::from("climb"),
+        climb_pos,
+        cruise_alt,
+        alt_typ,
+        climb_speed,
+    );
+    let mut tail = route.split_off(1);
+    // TEST orbit WP uses Fly Over Point (climb uses Turning Point).
+    if let Some(orbit) = tail.last_mut() {
+        orbit.action = Some(ActionTyp::Air(TurnMethod::FlyOverPoint));
+        orbit.speed_locked = Some(true);
+    }
+    route.push(climb);
+    route.extend(tail);
+    Ok(())
+}
+
+/// Prepend cached / planned LOS climb ahead of an RTB inbound route (same hub reuse).
+pub(super) fn prepend_drone_rtb_climb<'lua>(
+    lua: MizLua<'lua>,
+    db: &mut Db,
+    gid: GroupId,
+    from: Vector2,
+    hub_oid: ObjectiveId,
+    hub_pos: Vector2,
+    alt: f64,
+    alt_typ: AltType,
+    speed: f64,
+    route: &mut Vec<MissionPoint<'lua>>,
+) -> Result<()> {
+    let (cached_pos, cache_hub, cache_filled) = {
+        let group = group!(db, gid)?;
+        let DeployKind::Action { ai_air, .. } = &group.origin else {
+            return Ok(());
+        };
+        (
+            ai_air.drone_climb_pos,
+            ai_air.drone_climb_hub,
+            ai_air.drone_climb_orbit.is_some(),
+        )
+    };
+    // Same hub: reuse planned climb (including "no climb WP").
+    if cache_hub == Some(hub_oid) && cache_filled {
+        let Some(climb_pos) = cached_pos else {
+            return Ok(());
+        };
+        let climb_speed = drone_climb_enroute_speed(speed);
+        route.insert(
+            0,
+            drone_climb_turning_point(String::from("climb"), climb_pos, alt, alt_typ, climb_speed),
+        );
         return Ok(());
     }
-    let dir = delta / dist;
-    let ip_end = DRONE_CLIMB_LOOKAHEAD_M.min(dist);
-    route[0].alt = drone_peak_baro_along(&land, from, dir, 0., ip_end, cruise_alt)?;
-    let mut climb = Vec::new();
-    let mut d = DRONE_CLIMB_FIRST_LEG_M.min(dist * 0.5);
-    let mut i = 0usize;
-    while d < dist - 2_000. && climb.len() < DRONE_CLIMB_MAX_WPS {
-        let look_end = (d + DRONE_CLIMB_LOOKAHEAD_M).min(dist);
-        let alt = drone_peak_baro_along(&land, from, dir, d, look_end, cruise_alt)?;
-        let pos = from + dir * d;
-        climb.push(drone_climb_turning_point(
-            String::from(format_compact!("climb-{i}")),
-            pos,
-            alt,
-            alt_typ.clone(),
-            speed,
-        ));
-        i += 1;
-        d += DRONE_CLIMB_SAMPLE_M;
-    }
-    let tail = route.split_off(1);
-    route.extend(climb);
-    route.extend(tail);
-    if let Some(last) = route.last_mut() {
-        let ground = land.get_height(LuaVec2(last.pos.0))?;
-        last.alt = cruise_alt.max(ground + DRONE_ENROUTE_CLEARANCE_M);
-    }
+    let climb_pos = {
+        let planned = plan_drone_los_climb_point(lua, from, hub_pos, alt)?;
+        let group = group_mut!(db, gid)?;
+        let DeployKind::Action { ai_air, .. } = &mut group.origin else {
+            return Ok(());
+        };
+        ai_air.drone_climb_hub = Some(hub_oid);
+        ai_air.drone_climb_orbit = Some(hub_pos);
+        match planned {
+            Some((p, _)) => {
+                ai_air.drone_climb_pos = Some(p);
+                p
+            }
+            None => {
+                ai_air.drone_climb_pos = None;
+                return Ok(());
+            }
+        }
+    };
+    let climb_speed = drone_climb_enroute_speed(speed);
+    route.insert(
+        0,
+        drone_climb_turning_point(String::from("climb"), climb_pos, alt, alt_typ, climb_speed),
+    );
     Ok(())
+}
+
+/// Clear drone climb cache (orbit mark move / despawn).
+pub(super) fn clear_drone_climb_cache(ai_air: &mut AiAirState) {
+    ai_air.drone_climb_pos = None;
+    ai_air.drone_climb_hub = None;
+    ai_air.drone_climb_orbit = None;
 }
 
 /// CAP-style orbit at `snap.pos` after an ingress point at `spawn_pos`.
@@ -4768,13 +5038,16 @@ fn ensure_airborne_mission_task(
     } else {
         ORBIT_DRIFT_RADIUS_M
     };
-    let orbit_lost = flight_center_pos(lua, dcs_names)
-        .ok()
+    let cur_pos = flight_center_pos(lua, dcs_names).ok();
+    let near_orbit = cur_pos
+        .filter(|_| orbit_center != Vector2::default())
+        .map(|cur| near_point(cur, orbit_center, drift_limit))
+        .unwrap_or(false);
+    let orbit_lost = cur_pos
         .filter(|_| orbit_center != Vector2::default())
         .map(|cur| !near_point(cur, orbit_center, ORBIT_LOST_RADIUS_M))
         .unwrap_or(false);
-    let orbit_drifted = flight_center_pos(lua, dcs_names)
-        .ok()
+    let orbit_drifted = cur_pos
         .filter(|_| orbit_center != Vector2::default())
         .map(|cur| !near_point(cur, orbit_center, drift_limit))
         .unwrap_or(false);
@@ -4786,8 +5059,21 @@ fn ensure_airborne_mission_task(
     } else {
         "orbit"
     };
+
+    // Drones enroute: never spam setTask for "far from orbit" — only if DCS lost the task.
+    let drone_enroute = mission_kind == AiAirMissionKind::Drone && !near_orbit;
+
     for dcs_name in dcs_names {
         if group_on_ground(lua, dcs_name).unwrap_or(false) {
+            continue;
+        }
+        if drone_enroute {
+            if controller_has_active_task(lua, dcs_name) || !repush_due {
+                continue;
+            }
+            let route = db.regenerate_ai_air_mission(lua, spctx, idx, gid, false)?;
+            db.ai_air_push_mission_to_name(spctx, dcs_name, route, true)?;
+            log::info!("ai air {gid}: drone enroute re-push (no DCS task)");
             continue;
         }
         if controller_has_active_task(lua, dcs_name) && !orbit_lost && !orbit_drifted {
@@ -6288,7 +6574,15 @@ pub(super) fn advance_ai_air(
                         .get(i)
                         .or(slots.first())
                         .ok_or_else(|| anyhow!("no hub slot for bootstrap"))?;
-                    let route = bootstrap_route(lua, db, &hub_pick, slot, BootstrapMode::ColdSpawn, false)?;
+                    let route = bootstrap_route_for_group(
+                        lua,
+                        db,
+                        gid,
+                        &hub_pick,
+                        slot,
+                        BootstrapMode::ColdSpawn,
+                        false,
+                    )?;
                     db.ai_air_push_mission_to_name(spctx, dcs_name, route, false)?;
                 }
                 let group = group_mut!(db, gid)?;
@@ -6310,19 +6604,31 @@ pub(super) fn advance_ai_air(
                 }
             };
             if in_air && grounded && flight_all_in_air(lua, &dcs_names).unwrap_or(false) {
-                let _snap = {
+                {
                     let group = group_mut!(db, gid)?;
                     let DeployKind::Action { ai_air, .. } = &mut group.origin else {
                         return Ok(());
                     };
-                    let snap = ai_air.active_mission.clone();
                     set_phase(ai_air, AiAirPhase::OnMission);
-                    snap
-                };
+                }
                 // After `timeReFuAr` / `LandingReFuAr`, DCS should have taken stock from
                 // the hub warehouse; sync virtual stock so later spawns/servicing stay consistent.
                 if let Err(e) = db.sync_warehouse_to_objective(lua, hub) {
                     log::warn!("ai air {gid}: warehouse sync after bootstrap failed: {e:#}");
+                }
+                // Drone: one airborne Mission like TEST WP2+WP3 (LOS climb + orbit); no further re-push while has_task.
+                if mission_kind == AiAirMissionKind::Drone {
+                    let route = db.regenerate_ai_air_mission(lua, spctx, idx, gid, false)?;
+                    log::info!(
+                        "ai air {gid}: airborne -> on-mission climb+orbit ({} wpts)",
+                        route.len()
+                    );
+                    db.ai_air_push_mission(spctx, gid, route, true)?;
+                    let group = group_mut!(db, gid)?;
+                    if let DeployKind::Action { ai_air, .. } = &mut group.origin {
+                        ai_air.last_airborne_task_push = Some(now);
+                    }
+                    return Ok(());
                 }
                 let route = db.regenerate_ai_air_mission(lua, spctx, idx, gid, false)?;
                 let kind = match mission_kind {
@@ -6355,25 +6661,61 @@ pub(super) fn advance_ai_air(
                     now - ai_air.phase_since > Duration::seconds(120)
                 };
                 if retry {
-                    let group = group_mut!(db, gid)?;
-                    if let DeployKind::Action { ai_air, .. } = &mut group.origin {
-                        ai_air.bootstrap_retries = ai_air.bootstrap_retries.saturating_add(1);
-                        set_phase(ai_air, ai_air.phase);
-                    }
-                    let slots = {
-                        let group = group!(db, gid)?;
-                        let DeployKind::Action { ai_air, .. } = &group.origin else {
-                            return Ok(());
-                        };
-                        ai_air.hub_slots.clone()
+                    // Drone: re-setTask only if DCS lost the task (blind skip caused home RTB).
+                    let need_repush = if mission_kind == AiAirMissionKind::Drone {
+                        dcs_names
+                            .iter()
+                            .any(|n| !controller_has_active_task(lua, n))
+                    } else {
+                        true
                     };
-                    for (i, dcs_name) in dcs_names.iter().enumerate() {
-                        let slot = slots
-                            .get(i)
-                            .or(slots.first())
-                            .ok_or_else(|| anyhow!("no hub slot for bootstrap retry"))?;
-                        let route = bootstrap_route(lua, db, &hub_pick, slot, BootstrapMode::ColdSpawn, false)?;
-                        db.ai_air_push_mission_to_name(spctx, dcs_name, route, false)?;
+                    if !need_repush {
+                        log::info!(
+                            "ai air {gid}: drone bootstrap retry skipped (DCS has_task)"
+                        );
+                        let group = group_mut!(db, gid)?;
+                        if let DeployKind::Action { ai_air, .. } = &mut group.origin {
+                            set_phase(ai_air, ai_air.phase);
+                        }
+                    } else {
+                        let group = group_mut!(db, gid)?;
+                        if let DeployKind::Action { ai_air, .. } = &mut group.origin {
+                            ai_air.bootstrap_retries = ai_air.bootstrap_retries.saturating_add(1);
+                            set_phase(ai_air, ai_air.phase);
+                        }
+                        let slots = {
+                            let group = group!(db, gid)?;
+                            let DeployKind::Action { ai_air, .. } = &group.origin else {
+                                return Ok(());
+                            };
+                            ai_air.hub_slots.clone()
+                        };
+                        for (i, dcs_name) in dcs_names.iter().enumerate() {
+                            if mission_kind == AiAirMissionKind::Drone
+                                && controller_has_active_task(lua, dcs_name)
+                            {
+                                continue;
+                            }
+                            let slot = slots
+                                .get(i)
+                                .or(slots.first())
+                                .ok_or_else(|| anyhow!("no hub slot for bootstrap retry"))?;
+                            let route = bootstrap_route_for_group(
+                                lua,
+                                db,
+                                gid,
+                                &hub_pick,
+                                slot,
+                                BootstrapMode::ColdSpawn,
+                                false,
+                            )?;
+                            db.ai_air_push_mission_to_name(spctx, dcs_name, route, false)?;
+                        }
+                        if mission_kind == AiAirMissionKind::Drone {
+                            log::info!(
+                                "ai air {gid}: drone bootstrap retry (no DCS task)"
+                            );
+                        }
                     }
                 }
             }
@@ -7294,13 +7636,23 @@ pub(super) fn issue_rtb(
         }
     }
     let dcs_names = dcs_spawn_names_for(db, req.group)?;
+    let is_drone = {
+        let group = group!(db, req.group)?;
+        matches!(
+            &group.origin,
+            DeployKind::Action {
+                ai_air,
+                ..
+            } if ai_air.mission_kind == AiAirMissionKind::Drone
+        )
+    };
     for (i, dcs_name) in dcs_names.iter().enumerate() {
         let slot = hub
             .slots
             .get(i)
             .or(hub.slots.first())
             .ok_or_else(|| anyhow!("hub has no landing slot"))?;
-        let route = rtb_inbound_route(
+        let mut route = rtb_inbound_route(
             lua,
             &hub,
             slot,
@@ -7309,6 +7661,20 @@ pub(super) fn issue_rtb(
             land_mode,
             Some(pos),
         )?;
+        if is_drone {
+            prepend_drone_rtb_climb(
+                lua,
+                db,
+                req.group,
+                pos,
+                hub.oid,
+                rtb_pos,
+                inbound_alt,
+                inbound_alt_typ.clone(),
+                plane.speed,
+                &mut route,
+            )?;
+        }
         log::info!(
             "ai air rtb {} -> {:?} slot {} airdrome {:?} parking {:?}",
             req.group,

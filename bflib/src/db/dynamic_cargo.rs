@@ -695,43 +695,56 @@ impl Db {
                         }
                     };
                     if credited {
-                        let tons = delivery_tons(entry.last_weight_kg);
-                        let cfg = self.dynamic_cargo_cfg();
-                        let deliverer = entry.last_carrier.unwrap_or(entry.spawner);
-                        let deliv_pts =
-                            points_from_tons(tons, cfg.to_stock_points_per_ton);
-                        let spawn_pts =
-                            points_from_tons(tons, cfg.source_spawner_points_per_ton);
-                        if deliv_pts != 0 {
-                            *point_awards.entry(deliverer).or_default() += deliv_pts;
+                        let same_objective = pad == entry.source;
+                        if same_objective {
+                            // Load+unload at source: put stock back, no points / HTML logistics.
+                            info!(
+                                "dynamic cargo absorb restore (same objective, no points/stats): {} -> {:?} carrier={:?} weight_kg={:.0} snapshot={}",
+                                entry.name,
+                                pad,
+                                entry.last_carrier,
+                                entry.last_weight_kg,
+                                if snapshot_nonempty { "credit" } else { "sync-from" }
+                            );
+                        } else {
+                            let tons = delivery_tons(entry.last_weight_kg);
+                            let cfg = self.dynamic_cargo_cfg();
+                            let deliverer = entry.last_carrier.unwrap_or(entry.spawner);
+                            let deliv_pts =
+                                points_from_tons(tons, cfg.to_stock_points_per_ton);
+                            let spawn_pts =
+                                points_from_tons(tons, cfg.source_spawner_points_per_ton);
+                            if deliv_pts != 0 {
+                                *point_awards.entry(deliverer).or_default() += deliv_pts;
+                            }
+                            if spawn_pts != 0 {
+                                *point_awards.entry(entry.spawner).or_default() += spawn_pts;
+                            }
+                            log_awards.insert(deliverer, ());
+                            log_awards.insert(entry.spawner, ());
+                            let dest_side = self
+                                .persisted
+                                .objectives
+                                .get(&pad)
+                                .map(|o| o.owner)
+                                .unwrap_or(entry.side);
+                            self.campaign_on_dynamic_cargo_delivery(
+                                dest_side,
+                                entry.last_weight_kg,
+                                1,
+                            );
+                            info!(
+                                "dynamic cargo DCS absorb delivery: {} -> {:?} tons={:.2} deliverer={:?} spawner={:?} carrier={:?} weight_kg={:.0} snapshot={}",
+                                entry.name,
+                                pad,
+                                tons,
+                                deliverer,
+                                entry.spawner,
+                                entry.last_carrier,
+                                entry.last_weight_kg,
+                                if snapshot_nonempty { "credit" } else { "sync-from" }
+                            );
                         }
-                        if spawn_pts != 0 {
-                            *point_awards.entry(entry.spawner).or_default() += spawn_pts;
-                        }
-                        log_awards.insert(deliverer, ());
-                        log_awards.insert(entry.spawner, ());
-                        let dest_side = self
-                            .persisted
-                            .objectives
-                            .get(&pad)
-                            .map(|o| o.owner)
-                            .unwrap_or(entry.side);
-                        self.campaign_on_dynamic_cargo_delivery(
-                            dest_side,
-                            entry.last_weight_kg,
-                            1,
-                        );
-                        info!(
-                            "dynamic cargo DCS absorb delivery: {} -> {:?} tons={:.2} deliverer={:?} spawner={:?} carrier={:?} weight_kg={:.0} snapshot={}",
-                            entry.name,
-                            pad,
-                            tons,
-                            deliverer,
-                            entry.spawner,
-                            entry.last_carrier,
-                            entry.last_weight_kg,
-                            if snapshot_nonempty { "credit" } else { "sync-from" }
-                        );
                     }
                 }
                 None => {

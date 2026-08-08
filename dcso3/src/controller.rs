@@ -58,6 +58,7 @@ string_enum!(OrbitPattern, u8, [
 
 string_enum!(TurnMethod, u8, [
     FlyOverPoint => "Fly Over Point",
+    TurningPoint => "Turning Point",
     OffRoad => "Off Road",
     FromParkingArea => "From Parking Area",
     FromRunway => "From Runway"
@@ -337,9 +338,13 @@ pub struct MissionPoint<'lua> {
 impl<'lua> FromLua<'lua> for MissionPoint<'lua> {
     fn from_lua(value: Value<'lua>, lua: &'lua Lua) -> LuaResult<Self> {
         let tbl: LuaTable = FromLua::from_lua(value, lua)?;
+        // ME/Hoggit: `airdromeId`; accept legacy typo `airdromId`.
+        let airdrome_id = tbl
+            .raw_get("airdromeId")
+            .or_else(|_| tbl.raw_get("airdromId"))?;
         Ok(Self {
             typ: tbl.raw_get("type")?,
-            airdrome_id: tbl.raw_get("airdromId")?,
+            airdrome_id,
             time_re_fu_ar: tbl.raw_get("timeReFuAr")?,
             helipad: tbl.raw_get("helipadId")?,
             link_unit: tbl.raw_get("linkUnit")?,
@@ -362,7 +367,7 @@ impl<'lua> IntoLua<'lua> for MissionPoint<'lua> {
     fn into_lua(self, lua: &'lua Lua) -> LuaResult<Value<'lua>> {
         let iter = [
             ("type", self.typ.into_lua(lua)?),
-            ("airdromId", self.airdrome_id.into_lua(lua)?),
+            ("airdromeId", self.airdrome_id.into_lua(lua)?),
             ("timeReFuAr", self.time_re_fu_ar.into_lua(lua)?),
             ("helipadId", self.helipad.into_lua(lua)?),
             ("linkUnit", self.link_unit.into_lua(lua)?),
@@ -1969,12 +1974,13 @@ impl<'lua> FromLua<'lua> for DetectedTarget<'lua> {
     }
 }
 
+// Hoggit `Controller.setAltitude` altType: "BARO" / "RADIO" (not title-case).
 string_enum!(AltitudeKind, u8, [
-    Radio => "Radio",
-    Baro => "Baro"
-], [
     Radio => "RADIO",
     Baro => "BARO"
+], [
+    Radio => "Radio",
+    Baro => "Baro"
 ]);
 
 wrapped_table!(Controller, Some("Controller"));

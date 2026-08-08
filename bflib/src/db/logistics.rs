@@ -592,32 +592,62 @@ pub struct Warehouse {
 }
 
 fn sync_obj_to_warehouse(
-    obj: &Objective,
+    oid: ObjectiveId,
+    obj: &mut Objective,
     warehouse: &warehouse::Warehouse,
     export_farp_liquids_tons: bool,
+    mut credits: Option<(
+        &mut FxHashMap<(ObjectiveId, String), u32>,
+        &mut FxHashMap<(ObjectiveId, LiquidType), u32>,
+    )>,
 ) -> Result<()> {
     let perf = unsafe { Perf::get_mut() };
     let perf = Arc::make_mut(&mut perf.inner);
     let mut eq_deltas = 0u32;
     let mut liq_deltas = 0u32;
-    for (item, inv) in &obj.warehouse.equipment {
+    for (item, inv) in obj.warehouse.equipment.iter_mut_cow() {
         perf.logistics_items.insert((item.clone(), obj.id));
         let current = warehouse
             .get_item_count(item.clone())
             .with_context(|| format_compact!("getting item count for {item}"))?;
         if current < inv.stored {
-            let delta = inv.stored - current;
-            warehouse
-                .add_item(item.clone(), delta)
-                .with_context(|| format_compact!("adding item {item}"))?;
-            if eq_deltas < 12 {
-                wh_diag(format_compact!(
-                    "sync-to {} eq:{item} DCS {current}->{} (+{delta})",
-                    obj.name,
-                    inv.stored
-                ));
+            let want = inv.stored - current;
+            let add = match credits.as_mut() {
+                None => want,
+                Some((eq_credit, _)) => {
+                    let key = (oid, item.clone());
+                    let allowed = eq_credit.get(&key).copied().unwrap_or(0);
+                    let add = min(want, allowed);
+                    if add < want {
+                        wh_diag(format_compact!(
+                            "sync-to {} eq:{item} clamp virtual {}->{} (uncredited +{})",
+                            obj.name,
+                            inv.stored,
+                            current + add,
+                            want - add
+                        ));
+                        inv.stored = current + add;
+                    }
+                    if add > 0 {
+                        let left = eq_credit.entry(key).or_default();
+                        *left = left.saturating_sub(add);
+                    }
+                    add
+                }
+            };
+            if add > 0 {
+                warehouse
+                    .add_item(item.clone(), add)
+                    .with_context(|| format_compact!("adding item {item}"))?;
+                if eq_deltas < 12 {
+                    wh_diag(format_compact!(
+                        "sync-to {} eq:{item} DCS {current}->{} (+{add})",
+                        obj.name,
+                        current + add
+                    ));
+                }
+                eq_deltas += 1;
             }
-            eq_deltas += 1;
         } else if current > inv.stored {
             let delta = current - inv.stored;
             warehouse
@@ -633,39 +663,81 @@ fn sync_obj_to_warehouse(
             eq_deltas += 1;
         }
     }
-    for (name, inv) in &obj.warehouse.liquids {
-        let target_kg = if export_farp_liquids_tons {
-            fowl_liquid_tons_to_dcs_kg(inv.stored)
-        } else {
-            inv.stored
-        };
+    for (name, inv) in obj.warehouse.liquids.iter_mut_cow() {
         let current = warehouse
             .get_liquid_amount(*name)
             .with_context(|| format_compact!("getting liquid amount for {name:?}"))?;
-        if current < target_kg {
-            let delta = target_kg - current;
-            warehouse
-                .add_liquid(*name, delta)
-                .with_context(|| format_compact!("adding liquid {name:?}"))?;
-            if liq_deltas < 8 {
-                wh_diag(format_compact!(
-                    "sync-to {} liq:{name:?} DCS {current}->{target_kg} (+{delta})",
-                    obj.name
-                ));
+        let current_virtual = if export_farp_liquids_tons {
+            dcs_liquid_kg_to_fowl_tons(current)
+        } else {
+            current
+        };
+        if current_virtual < inv.stored {
+            let want = inv.stored - current_virtual;
+            let add = match credits.as_mut() {
+                None => want,
+                Some((_, liq_credit)) => {
+                    let key = (oid, *name);
+                    let allowed = liq_credit.get(&key).copied().unwrap_or(0);
+                    let add = min(want, allowed);
+                    if add < want {
+                        wh_diag(format_compact!(
+                            "sync-to {} liq:{name:?} clamp virtual {}->{} (uncredited +{})",
+                            obj.name,
+                            inv.stored,
+                            current_virtual + add,
+                            want - add
+                        ));
+                        inv.stored = current_virtual + add;
+                    }
+                    if add > 0 {
+                        let left = liq_credit.entry(key).or_default();
+                        *left = left.saturating_sub(add);
+                    }
+                    add
+                }
+            };
+            if add > 0 {
+                let add_kg = if export_farp_liquids_tons {
+                    fowl_liquid_tons_to_dcs_kg(add)
+                } else {
+                    add
+                };
+                let target_kg = if export_farp_liquids_tons {
+                    fowl_liquid_tons_to_dcs_kg(inv.stored)
+                } else {
+                    inv.stored
+                };
+                warehouse
+                    .add_liquid(*name, add_kg)
+                    .with_context(|| format_compact!("adding liquid {name:?}"))?;
+                if liq_deltas < 8 {
+                    wh_diag(format_compact!(
+                        "sync-to {} liq:{name:?} DCS {current}->{target_kg} (+{add_kg})",
+                        obj.name
+                    ));
+                }
+                liq_deltas += 1;
             }
-            liq_deltas += 1;
-        } else if current > target_kg {
-            let delta = current - target_kg;
-            warehouse
-                .remove_liquid(*name, delta)
-                .with_context(|| format_compact!("removing liquid {name:?}"))?;
-            if liq_deltas < 8 {
-                wh_diag(format_compact!(
-                    "sync-to {} liq:{name:?} DCS {current}->{target_kg} (-{delta})",
-                    obj.name
-                ));
+        } else if current_virtual > inv.stored {
+            let target_kg = if export_farp_liquids_tons {
+                fowl_liquid_tons_to_dcs_kg(inv.stored)
+            } else {
+                inv.stored
+            };
+            let delta = current.saturating_sub(target_kg);
+            if delta > 0 {
+                warehouse
+                    .remove_liquid(*name, delta)
+                    .with_context(|| format_compact!("removing liquid {name:?}"))?;
+                if liq_deltas < 8 {
+                    wh_diag(format_compact!(
+                        "sync-to {} liq:{name:?} DCS {current}->{target_kg} (-{delta})",
+                        obj.name
+                    ));
+                }
+                liq_deltas += 1;
             }
-            liq_deltas += 1;
         }
     }
     if eq_deltas > 0 || liq_deltas > 0 {
@@ -1813,6 +1885,53 @@ fn clamp_non_olo_airframe_rows_to_export(
 /// Warehouse rows are unchanged — this is only for the Supply % average.
 fn equipment_counts_toward_supply_pct(inv: &Inventory) -> bool {
     !(inv.stored == 0 && inv.capacity <= 1)
+}
+
+fn equipment_is_airframe(
+    name: &str,
+    resource_meta: Option<&FxHashMap<String, WarehouseResourceMeta>>,
+) -> bool {
+    resource_meta
+        .and_then(|m| m.get(name))
+        .map(|m| m.is_aircraft)
+        .unwrap_or(false)
+}
+
+/// Average Supply % for airframe or non-airframe rows (same filters as `update_supply_status`).
+/// `None` when the bucket has no countable rows.
+fn equipment_bucket_supply_pct(
+    obj: &Objective,
+    dcs_tracked: Option<&FxHashSet<String>>,
+    resource_meta: Option<&FxHashMap<String, WarehouseResourceMeta>>,
+    airframes: bool,
+) -> Option<u8> {
+    let mut n = 0u32;
+    let mut sum = 0u32;
+    for (name, inv) in &obj.warehouse.equipment {
+        if inv.capacity == 0 {
+            continue;
+        }
+        if let Some(tracked) = dcs_tracked {
+            if !tracked.contains(name.as_str()) {
+                continue;
+            }
+        }
+        if !equipment_counts_toward_supply_pct(inv) {
+            continue;
+        }
+        if equipment_is_airframe(name.as_str(), resource_meta) != airframes {
+            continue;
+        }
+        if let Some(pct) = inv.percent() {
+            sum += pct as u32;
+            n += 1;
+        }
+    }
+    if n == 0 {
+        None
+    } else {
+        Some((sum / n) as u8)
+    }
 }
 
 /// SETTINGS-Ai supplement airframes (`production == 0`): align virtual capacity to DCS stock.
@@ -3152,7 +3271,21 @@ impl Db {
             &self.ephemeral.to_bg,
             export,
             resource_meta,
-        )
+        )?;
+        if let TransferItem::Equipment(name) = &tr.item {
+            *self
+                .ephemeral
+                .sync_to_equipment_credit
+                .entry((tr.target, name.clone()))
+                .or_default() += tr.amount;
+        } else if let TransferItem::Liquid(name) = &tr.item {
+            *self
+                .ephemeral
+                .sync_to_liquid_credit
+                .entry((tr.target, *name))
+                .or_default() += tr.amount;
+        }
+        Ok(())
     }
 
     fn ensure_dyn_spawn_template_links(&mut self, lua: MizLua) -> Result<()> {
@@ -3363,12 +3496,14 @@ impl Db {
                 }
                 let mut del_eq: SmallVec<[String; 8]> = smallvec![];
                 let mut del_l: SmallVec<[LiquidType; 4]> = smallvec![];
+                let mut ferried_eq: SmallVec<[String; 4]> = smallvec![];
+                let mut ferried_l: SmallVec<[LiquidType; 2]> = smallvec![];
                 if use_export_stock {
                     if objective_is_ground_dep_farp(obj) {
                         let Some(profile) = dep_farp_export_profile(export, obj) else {
                             continue;
                         };
-                        for (name, _) in &obj.warehouse.equipment {
+                        for (name, inv) in &obj.warehouse.equipment {
                             let mut keep = profile_export_equipment_has(
                                 profile,
                                 name.as_str(),
@@ -3385,18 +3520,37 @@ impl Db {
                                 );
                             }
                             if !keep {
-                                del_eq.push(name.clone());
+                                // Ferried / delivered stock outside export (e.g. C-130 to OAB).
+                                if inv.stored > 0 {
+                                    ferried_eq.push(name.clone());
+                                } else {
+                                    del_eq.push(name.clone());
+                                }
+                            }
+                        }
+                        for name in &ferried_eq {
+                            if let Some(inv) = obj.warehouse.equipment.get_mut_cow(name) {
+                                inv.capacity = inv.capacity.max(inv.stored);
                             }
                         }
                         for name in del_eq {
                             obj.warehouse.equipment.remove_cow(&name);
                         }
-                        for (liq, _) in &obj.warehouse.liquids {
+                        for (liq, inv) in &obj.warehouse.liquids {
                             let keep = profile.liquids.keys().any(|k| {
                                 liquid_type_from_export_key(k).ok() == Some(*liq)
                             });
                             if !keep {
-                                del_l.push(*liq);
+                                if inv.stored > 0 {
+                                    ferried_l.push(*liq);
+                                } else {
+                                    del_l.push(*liq);
+                                }
+                            }
+                        }
+                        for liq in &ferried_l {
+                            if let Some(inv) = obj.warehouse.liquids.get_mut_cow(liq) {
+                                inv.capacity = inv.capacity.max(inv.stored);
                             }
                         }
                         for liq in del_l {
@@ -3439,7 +3593,7 @@ impl Db {
                         ) else {
                             continue;
                         };
-                        for (name, _) in &obj.warehouse.equipment {
+                        for (name, inv) in &obj.warehouse.equipment {
                             let mut keep = profile_export_equipment_has(
                                 profile,
                                 name.as_str(),
@@ -3456,18 +3610,37 @@ impl Db {
                                 );
                             }
                             if !keep {
-                                del_eq.push(name.clone());
+                                // Ferried / delivered stock outside export (e.g. C-130 to OAB).
+                                if inv.stored > 0 {
+                                    ferried_eq.push(name.clone());
+                                } else {
+                                    del_eq.push(name.clone());
+                                }
+                            }
+                        }
+                        for name in &ferried_eq {
+                            if let Some(inv) = obj.warehouse.equipment.get_mut_cow(name) {
+                                inv.capacity = inv.capacity.max(inv.stored);
                             }
                         }
                         for name in del_eq {
                             obj.warehouse.equipment.remove_cow(&name);
                         }
-                        for (liq, _) in &obj.warehouse.liquids {
+                        for (liq, inv) in &obj.warehouse.liquids {
                             let keep = profile.liquids.keys().any(|k| {
                                 liquid_type_from_export_key(k).ok() == Some(*liq)
                             });
                             if !keep {
-                                del_l.push(*liq);
+                                if inv.stored > 0 {
+                                    ferried_l.push(*liq);
+                                } else {
+                                    del_l.push(*liq);
+                                }
+                            }
+                        }
+                        for liq in &ferried_l {
+                            if let Some(inv) = obj.warehouse.liquids.get_mut_cow(liq) {
+                                inv.capacity = inv.capacity.max(inv.stored);
                             }
                         }
                         for liq in del_l {
@@ -3505,7 +3678,7 @@ impl Db {
                     }
                 } else if let Some(prod) = self.ephemeral.production_by_side.get(&obj.owner) {
                     let on_water = objective_airbase_on_water(lua, obj)?;
-                    for (name, _) in &obj.warehouse.equipment {
+                    for (name, inv) in &obj.warehouse.equipment {
                         let mut keep = prod.equipment.contains_key(name);
                         if keep {
                             let meta = resource_meta.get(name).copied();
@@ -3513,15 +3686,33 @@ impl Db {
                                 equipment_allowed_for_objective(export, obj, obj.owner, name.as_str(), meta);
                         }
                         if !keep {
-                            del_eq.push(name.clone());
+                            if inv.stored > 0 {
+                                ferried_eq.push(name.clone());
+                            } else {
+                                del_eq.push(name.clone());
+                            }
+                        }
+                    }
+                    for name in &ferried_eq {
+                        if let Some(inv) = obj.warehouse.equipment.get_mut_cow(name) {
+                            inv.capacity = inv.capacity.max(inv.stored);
                         }
                     }
                     for name in del_eq {
                         obj.warehouse.equipment.remove_cow(&name);
                     }
-                    for (liq, _) in &obj.warehouse.liquids {
+                    for (liq, inv) in &obj.warehouse.liquids {
                         if !prod.liquids.contains_key(liq) {
-                            del_l.push(*liq);
+                            if inv.stored > 0 {
+                                ferried_l.push(*liq);
+                            } else {
+                                del_l.push(*liq);
+                            }
+                        }
+                    }
+                    for liq in &ferried_l {
+                        if let Some(inv) = obj.warehouse.liquids.get_mut_cow(liq) {
+                            inv.capacity = inv.capacity.max(inv.stored);
                         }
                     }
                     for liq in del_l {
@@ -3722,8 +3913,48 @@ impl Db {
             self.sync_logistics_hub_production_displays();
             let freq = Duration::minutes(tick as i64);
             let start_ts = Utc::now();
+            if matches!(
+                self.ephemeral.logistics_stage,
+                LogiStage::ExecuteTransfers { ref transfers } if !transfers.is_empty()
+            ) {
+                let st = Utc::now();
+                let mut pending = match mem::replace(
+                    &mut self.ephemeral.logistics_stage,
+                    LogiStage::ExecuteTransfers {
+                        transfers: Vec::new(),
+                    },
+                ) {
+                    LogiStage::ExecuteTransfers { transfers } => transfers,
+                    other => {
+                        self.ephemeral.logistics_stage = other;
+                        Vec::new()
+                    }
+                };
+                let before = pending.len();
+                while let Some(tr) = pending.pop() {
+                    if let Err(e) = self.execute_transfer(&tr) {
+                        error!("executing transfer {:?} {e:?}", tr)
+                    }
+                    if Utc::now() - st > Duration::milliseconds(6) {
+                        break;
+                    }
+                }
+                wh_diag(format_compact!(
+                    "executed {} transfers ({} remaining this stage)",
+                    before.saturating_sub(pending.len()),
+                    pending.len()
+                ));
+                self.ephemeral.logistics_stage = LogiStage::ExecuteTransfers {
+                    transfers: pending,
+                };
+                record_perf(&mut perf.logistics_transfer, st);
+                record_perf(&mut perf.logistics, start_ts);
+                return Ok(());
+            }
             match &mut self.ephemeral.logistics_stage {
                 LogiStage::Init => {
+                    self.ephemeral.sync_to_equipment_credit.clear();
+                    self.ephemeral.sync_to_liquid_credit.clear();
                     let objectives = self.warehouse_sync_objective_ids().into();
                     self.ephemeral.logistics_stage = if self
                         .ephemeral
@@ -3742,6 +3973,8 @@ impl Db {
                         self.persisted.logistics_ticks_since_delivery,
                         ticks_per_delivery
                     ));
+                    self.ephemeral.sync_to_equipment_credit.clear();
+                    self.ephemeral.sync_to_liquid_credit.clear();
                     self.ephemeral.logistics_stage =
                         LogiStage::SyncFromWarehouses { objectives: objectives.into() };
                 }
@@ -3763,7 +3996,7 @@ impl Db {
                         {
                             self.persisted.logistics_ticks_since_delivery = 0;
                             wh_diag("phase: deliver_production (+ hub distribute)");
-                            let v = match self.deliver_production() {
+                            let v = match self.deliver_production(lua) {
                                 Ok(v) => v,
                                 Err(e) => {
                                     error!("failed to deliver production {:?}", e);
@@ -3784,7 +4017,7 @@ impl Db {
                                 );
                                 vec![]
                             } else {
-                                match self.deliver_supplies_from_logistics_hubs() {
+                                match self.deliver_supplies_from_logistics_hubs(lua) {
                                     Ok(v) => v,
                                     Err(e) => {
                                         error!("failed to deliver supplies from hubs {:?}", e);
@@ -3821,37 +4054,13 @@ impl Db {
                     }
                     record_perf(&mut perf.logistics_transfer, st);
                 }
-                LogiStage::ExecuteTransfers { transfers } => {
-                    let st = Utc::now();
-                    let before = transfers.len();
-                    let export = Arc::clone(&self.ephemeral.fowl_miz_export);
-                    let resource_meta = self
-                        .ephemeral
-                        .warehouse_resource_meta
-                        .clone()
-                        .unwrap_or_else(|| Arc::new(FxHashMap::default()));
-                    while let Some(tr) = transfers.pop() {
-                        if let Err(e) = tr.execute(
-                            &mut self.persisted,
-                            &self.ephemeral.to_bg,
-                            export.as_ref(),
-                            resource_meta.as_ref(),
-                        ) {
-                            error!("executing transfer {:?} {e:?}", tr)
-                        }
-                        if Utc::now() - st > Duration::milliseconds(6) {
-                            break;
-                        }
-                    }
-                    wh_diag(format_compact!(
-                        "executed {} transfers ({} remaining this stage)",
-                        before.saturating_sub(transfers.len()),
-                        transfers.len()
-                    ));
-                    record_perf(&mut perf.logistics_transfer, st);
+                LogiStage::ExecuteTransfers { .. } => {
+                    // Non-empty handled before this match (transfer credits need &mut Db).
                 }
                 LogiStage::SyncToWarehouses { objectives } => match objectives.pop() {
                     None => {
+                        self.ephemeral.sync_to_equipment_credit.clear();
+                        self.ephemeral.sync_to_liquid_credit.clear();
                         self.update_supply_status()
                             .context("supply status after logistics sync-to")?;
                         self.ephemeral.logistics_stage = LogiStage::Complete { last_tick: ts };
@@ -4113,7 +4322,7 @@ impl Db {
         Ok(())
     }
 
-    pub fn deliver_production(&mut self) -> Result<Vec<Transfer>> {
+    pub fn deliver_production(&mut self, lua: MizLua) -> Result<Vec<Transfer>> {
         if self.ephemeral.cfg.warehouse.is_none() {
             return Ok(vec![]);
         }
@@ -4174,7 +4383,7 @@ impl Db {
         };
         deliver_produced_supplies().context("delivering produced supplies")?;
         self.ephemeral.dirty();
-        self.deliver_supplies_from_logistics_hubs()
+        self.deliver_supplies_from_logistics_hubs(lua)
             .context("delivering supplies from logistics hubs")
     }
 
@@ -4197,7 +4406,7 @@ impl Db {
         Ok(())
     }
 
-    pub fn deliver_supplies_from_logistics_hubs(&mut self) -> Result<Vec<Transfer>> {
+    pub fn deliver_supplies_from_logistics_hubs(&mut self, lua: MizLua) -> Result<Vec<Transfer>> {
         if !self.ephemeral.cfg.virtual_resupply {
             wh_diag("hub distribute skipped (virtual_resupply=false)");
             return Ok(vec![]);
@@ -4205,6 +4414,38 @@ impl Db {
         self.update_supply_status()
             .context("updating supply status")?;
         let cfg = &self.ephemeral.cfg;
+        let wh = cfg.warehouse.as_ref();
+        let resource_meta = self.ephemeral.warehouse_resource_meta.clone();
+        let resource_meta = resource_meta.as_deref();
+        let thresholds_for = |obj: &Objective| -> (u8, u8) {
+            let Some(w) = wh else {
+                return (100, 100);
+            };
+            if obj.is_occupied_logistics_hub() {
+                return (
+                    w.tick_occupiedhub_minimum_global_supply_percentage_clamped(),
+                    w.tick_occupiedhub_minimum_airframe_global_supply_percentage_clamped(),
+                );
+            }
+            let on_water = objective_airbase_on_water(lua, obj).unwrap_or(false);
+            (
+                w.tick_minimum_global_supply_percentage_for(&obj.kind, on_water),
+                w.tick_minimum_airframe_global_supply_percentage_for(&obj.kind, on_water),
+            )
+        };
+        let bucket_pct = |oid: &ObjectiveId, obj: &Objective, airframes: bool| -> Option<u8> {
+            equipment_bucket_supply_pct(
+                obj,
+                self.ephemeral.warehouse_dcs_equipment_names.get(oid),
+                resource_meta,
+                airframes,
+            )
+        };
+        let needs_bucket = |oid: &ObjectiveId, obj: &Objective, airframes: bool| -> bool {
+            let (min_non_ac, min_ac) = thresholds_for(obj);
+            let min = if airframes { min_ac } else { min_non_ac };
+            bucket_pct(oid, obj, airframes).is_some_and(|pct| pct < min)
+        };
         let mut transfers: Vec<Transfer> = vec![];
         for lid in &self.persisted.logistics_hubs {
             let logi = objective!(self, lid)?;
@@ -4224,8 +4465,17 @@ impl Db {
                     .filter(|(_, obj)| !virtual_resupply_threatened_blocks(cfg, obj))
                     .filter(|(oid, _)| !self.ephemeral.mobile_farp_underway.contains(oid))
             };
-            let mut needed_equipment: SmallVec<[Needed; 64]> = hub_destinations()
-                .filter(|(_, obj)| obj.supply < 100)
+            let mut needed_non_ac: SmallVec<[Needed; 64]> = hub_destinations()
+                .filter(|(oid, obj)| needs_bucket(oid, obj, false))
+                .map(|(oid, obj)| Needed {
+                    oid,
+                    obj,
+                    demanded: 0,
+                    allocated: 0,
+                })
+                .collect();
+            let mut needed_ac: SmallVec<[Needed; 64]> = hub_destinations()
+                .filter(|(oid, obj)| needs_bucket(oid, obj, true))
                 .map(|(oid, obj)| Needed {
                     oid,
                     obj,
@@ -4242,23 +4492,34 @@ impl Db {
                     allocated: 0,
                 })
                 .collect();
-            if needed_equipment.is_empty() && needed_liquid.is_empty() {
+            if needed_non_ac.is_empty() && needed_ac.is_empty() && needed_liquid.is_empty() {
                 wh_diag(format_compact!(
-                    "hub {} supply/fuel: all destinations at 100% (no outbound demand)",
+                    "hub {} supply/fuel: all destinations at/above non-AC and A/C gates and fuel 100% (no outbound demand)",
                     logi.name
                 ));
             } else {
                 let mut eq_names = CompactString::new("");
-                for (i, n) in needed_equipment.iter().enumerate() {
-                    if i > 0 {
-                        eq_names.push_str(", ");
+                let mut push_eq = |airframes: bool, list: &[Needed]| {
+                    let label = if airframes { "ac" } else { "nonAC" };
+                    for n in list {
+                        if !eq_names.is_empty() {
+                            eq_names.push_str(", ");
+                        }
+                        if eq_names.len() > 200 {
+                            eq_names.push_str("...");
+                            return;
+                        }
+                        let pct = bucket_pct(n.oid, n.obj, airframes).unwrap_or(0);
+                        eq_names.push_str(&format_compact!(
+                            "{} {}={}%",
+                            n.obj.name,
+                            label,
+                            pct
+                        ));
                     }
-                    if i >= 8 {
-                        eq_names.push_str("...");
-                        break;
-                    }
-                    eq_names.push_str(&format_compact!("{} supply={}%", n.obj.name, n.obj.supply));
-                }
+                };
+                push_eq(false, &needed_non_ac);
+                push_eq(true, &needed_ac);
                 let mut liq_names = CompactString::new("");
                 for (i, n) in needed_liquid.iter().enumerate() {
                     if i > 0 {
@@ -4271,9 +4532,10 @@ impl Db {
                     liq_names.push_str(&format_compact!("{} fuel={}%", n.obj.name, n.obj.fuel));
                 }
                 wh_diag(format_compact!(
-                    "hub {} demand: eq_dests={} [{}] liq_dests={} [{}]",
+                    "hub {} demand: nonAC_dests={} ac_dests={} [{}] liq_dests={} [{}]",
                     logi.name,
-                    needed_equipment.len(),
+                    needed_non_ac.len(),
+                    needed_ac.len(),
                     eq_names,
                     needed_liquid.len(),
                     liq_names
@@ -4339,13 +4601,83 @@ impl Db {
                         }
                     }
                 };
+                ($typ:expr, $from:ident, $get:ident, $needed:ident, $reserved_fn:ident, $want_ac:expr) => {
+                    for (name, inv) in &logi.warehouse.$from {
+                        if inv.stored == 0 {
+                            continue;
+                        }
+                        if equipment_is_airframe(name.as_str(), resource_meta) != $want_ac {
+                            continue;
+                        }
+                        $needed.sort_by(|n0, n1| {
+                            let i0 = n0.obj.$get(name);
+                            let i1 = n1.obj.$get(name);
+                            i0.stored.cmp(&i1.stored)
+                        });
+                        let mut total_demanded = 0;
+                        for n in &mut $needed {
+                            let inv = n.obj.$get(name);
+                            let reserved = self.$reserved_fn(*n.oid, name);
+                            let demanded =
+                                Db::dynamic_cargo_demand_room(inv.stored, inv.capacity, reserved);
+                            total_demanded += demanded;
+                            n.demanded = demanded;
+                            n.allocated = 0;
+                        }
+                        let mut have = inv.stored;
+                        let mut total_filled = 0;
+                        while have > 0 && total_filled < total_demanded {
+                            for n in &mut $needed {
+                                if have == 0 {
+                                    break;
+                                }
+                                let allocation = max(1, have >> 3);
+                                let amount = min(allocation, n.demanded - n.allocated);
+                                n.allocated += amount;
+                                total_filled += amount;
+                                have -= amount;
+                            }
+                        }
+                        for n in &$needed {
+                            if n.allocated > 0 {
+                                let amount = scale_by_delivery_efficiency(
+                                    n.allocated,
+                                    virtual_resupply_delivery_efficiency_cached(
+                                        &mut self.ephemeral.hub_delivery_efficiency,
+                                        &self.ephemeral.cfg,
+                                        logi,
+                                        n.obj,
+                                    ),
+                                );
+                                if amount == 0 {
+                                    continue;
+                                }
+                                transfers.push(Transfer {
+                                    source: *lid,
+                                    target: *n.oid,
+                                    amount,
+                                    item: $typ(name.clone()),
+                                })
+                            }
+                        }
+                    }
+                };
             }
             schedule_transfers!(
                 TransferItem::Equipment,
                 equipment,
                 get_equipment,
-                needed_equipment,
-                dynamic_cargo_equipment_reserved
+                needed_non_ac,
+                dynamic_cargo_equipment_reserved,
+                false
+            );
+            schedule_transfers!(
+                TransferItem::Equipment,
+                equipment,
+                get_equipment,
+                needed_ac,
+                dynamic_cargo_equipment_reserved,
+                true
             );
             schedule_transfers!(
                 TransferItem::Liquid,
@@ -4370,7 +4702,7 @@ impl Db {
             .copied()
             .collect::<Vec<_>>()
         {
-            let (occ_owner, occ_pos, need_supply, need_fuel) = {
+            let (occ_owner, occ_pos, need_non_ac, need_ac, need_fuel) = {
                 let occ = objective!(self, occ_id)?;
                 if !occ.is_occupied_logistics_hub() {
                     continue;
@@ -4381,11 +4713,12 @@ impl Db {
                 (
                     occ.owner,
                     occ.zone.pos(),
-                    occ.supply < 100,
+                    needs_bucket(&occ_id, occ, false),
+                    needs_bucket(&occ_id, occ, true),
                     occ.fuel < 100,
                 )
             };
-            if !need_supply && !need_fuel {
+            if !need_non_ac && !need_ac && !need_fuel {
                 continue;
             }
             let Some(supplier_id) = nearest_normal_logistics_hub(
@@ -4403,7 +4736,17 @@ impl Db {
                 continue;
             }
             let occ = objective!(self, occ_id)?;
-            let mut needed_equipment: SmallVec<[Needed; 1]> = if need_supply {
+            let mut needed_non_ac: SmallVec<[Needed; 1]> = if need_non_ac {
+                smallvec![Needed {
+                    oid: &occ_id,
+                    obj: occ,
+                    demanded: 0,
+                    allocated: 0,
+                }]
+            } else {
+                smallvec![]
+            };
+            let mut needed_ac: SmallVec<[Needed; 1]> = if need_ac {
                 smallvec![Needed {
                     oid: &occ_id,
                     obj: occ,
@@ -4474,13 +4817,75 @@ impl Db {
                         }
                     }
                 };
+                ($typ:expr, $from:ident, $get:ident, $needed:ident, $reserved_fn:ident, $want_ac:expr) => {
+                    for (name, inv) in &logi.warehouse.$from {
+                        if inv.stored == 0 {
+                            continue;
+                        }
+                        if equipment_is_airframe(name.as_str(), resource_meta) != $want_ac {
+                            continue;
+                        }
+                        $needed.sort_by(|n0, n1| {
+                            let i0 = n0.obj.$get(name);
+                            let i1 = n1.obj.$get(name);
+                            i0.stored.cmp(&i1.stored)
+                        });
+                        let mut total_demanded = 0;
+                        for n in &mut $needed {
+                            let inv = n.obj.$get(name);
+                            let reserved = self.$reserved_fn(*n.oid, name);
+                            let demanded =
+                                Db::dynamic_cargo_demand_room(inv.stored, inv.capacity, reserved);
+                            total_demanded += demanded;
+                            n.demanded = demanded;
+                            n.allocated = 0;
+                        }
+                        let mut have = inv.stored;
+                        let mut total_filled = 0;
+                        while have > 0 && total_filled < total_demanded {
+                            for n in &mut $needed {
+                                if have == 0 {
+                                    break;
+                                }
+                                let allocation = max(1, have >> 3);
+                                let amount = min(allocation, n.demanded - n.allocated);
+                                n.allocated += amount;
+                                total_filled += amount;
+                                have -= amount;
+                            }
+                        }
+                        for n in &$needed {
+                            if n.allocated > 0 {
+                                let amount = scale_by_delivery_efficiency(n.allocated, 100);
+                                if amount == 0 {
+                                    continue;
+                                }
+                                transfers.push(Transfer {
+                                    source: supplier_id,
+                                    target: occ_id,
+                                    amount,
+                                    item: $typ(name.clone()),
+                                })
+                            }
+                        }
+                    }
+                };
             }
             schedule_occupied_transfers!(
                 TransferItem::Equipment,
                 equipment,
                 get_equipment,
-                needed_equipment,
-                dynamic_cargo_equipment_reserved
+                needed_non_ac,
+                dynamic_cargo_equipment_reserved,
+                false
+            );
+            schedule_occupied_transfers!(
+                TransferItem::Equipment,
+                equipment,
+                get_equipment,
+                needed_ac,
+                dynamic_cargo_equipment_reserved,
+                true
             );
             schedule_occupied_transfers!(
                 TransferItem::Liquid,
@@ -4825,27 +5230,56 @@ impl Db {
             .ephemeral
             .airbase_by_oid
             .get(&oid)
-            .ok_or_else(|| anyhow!("no logistics for objective {}", obj.name))?;
+            .ok_or_else(|| anyhow!("no logistics for objective {}", obj.name))?
+            .clone();
         let warehouse = Airbase::get_instance(lua, &airbase)
             .context("getting airbase")?
             .get_warehouse()
             .context("getting warehouse")?;
         let owner = obj.owner;
-        let export = self.ephemeral.fowl_miz_export.as_ref();
-        prune_disallowed_dcs_weapon_stock(lua, &warehouse, export, owner, resource_meta.as_ref())?;
-        let liquids_tons = objective_liquids_stored_as_tons(export, obj);
-        sync_obj_to_warehouse(obj, &warehouse, liquids_tons)
-            .context("syncing warehouse to objective")?;
-        if objective_is_ground_dep_farp_export(export, obj) {
-            reconcile_dcs_warehouse_to_virtual(
-                lua,
+        let export = Arc::clone(&self.ephemeral.fowl_miz_export);
+        prune_disallowed_dcs_weapon_stock(
+            lua,
+            &warehouse,
+            export.as_ref(),
+            owner,
+            resource_meta.as_ref(),
+        )?;
+        let liquids_tons = objective_liquids_stored_as_tons(export.as_ref(), obj);
+        let ground_dep = objective_is_ground_dep_farp_export(export.as_ref(), obj);
+        let _ = obj;
+        {
+            let Db {
+                persisted,
+                ephemeral,
+                ..
+            } = self;
+            let obj = persisted
+                .objectives
+                .get_mut_cow(&oid)
+                .ok_or_else(|| anyhow!("no such objective {oid:?}"))?;
+            sync_obj_to_warehouse(
+                oid,
                 obj,
                 &warehouse,
-                Some(resource_meta.as_ref()),
+                liquids_tons,
+                Some((
+                    &mut ephemeral.sync_to_equipment_credit,
+                    &mut ephemeral.sync_to_liquid_credit,
+                )),
             )
+            .context("syncing warehouse to objective")?;
+            if ground_dep {
+                reconcile_dcs_warehouse_to_virtual(
+                    lua,
+                    obj,
+                    &warehouse,
+                    Some(resource_meta.as_ref()),
+                )
                 .context("pruning ground DEP FARP DCS warehouse after virtual push")?;
+            }
         }
-        Ok((obj, warehouse))
+        Ok((objective_mut!(self, oid)?, warehouse))
     }
 
     /// Drop DCS rows not in virtual, then set all virtual rows (opposite-owner debug / capture-style).
@@ -4965,11 +5399,42 @@ impl Db {
         for tr in transfers {
             self.execute_transfer(&tr)?
         }
-        let export = self.ephemeral.fowl_miz_export.as_ref();
-        let from_tons = objective_liquids_stored_as_tons(export, objective!(self, from)?);
-        let to_tons = objective_liquids_stored_as_tons(export, objective!(self, to)?);
-        sync_obj_to_warehouse(objective!(self, from)?, &from_wh, from_tons)?;
-        sync_obj_to_warehouse(objective!(self, to)?, &to_wh, to_tons)?;
+        let export = Arc::clone(&self.ephemeral.fowl_miz_export);
+        let from_tons = objective_liquids_stored_as_tons(export.as_ref(), objective!(self, from)?);
+        let to_tons = objective_liquids_stored_as_tons(export.as_ref(), objective!(self, to)?);
+        {
+            let Db {
+                persisted,
+                ephemeral,
+                ..
+            } = self;
+            sync_obj_to_warehouse(
+                from,
+                persisted
+                    .objectives
+                    .get_mut_cow(&from)
+                    .ok_or_else(|| anyhow!("no such objective {from:?}"))?,
+                &from_wh,
+                from_tons,
+                Some((
+                    &mut ephemeral.sync_to_equipment_credit,
+                    &mut ephemeral.sync_to_liquid_credit,
+                )),
+            )?;
+            sync_obj_to_warehouse(
+                to,
+                persisted
+                    .objectives
+                    .get_mut_cow(&to)
+                    .ok_or_else(|| anyhow!("no such objective {to:?}"))?,
+                &to_wh,
+                to_tons,
+                Some((
+                    &mut ephemeral.sync_to_equipment_credit,
+                    &mut ephemeral.sync_to_liquid_credit,
+                )),
+            )?;
+        }
         self.update_supply_status()
             .context("updating supply status")?;
         Ok(())
@@ -5010,7 +5475,8 @@ impl Db {
                 inv.reduce(percent);
             }
         }
-        sync_obj_to_warehouse(obj, &warehouse, liquids_tons).context("syncing from warehouse")?;
+        sync_obj_to_warehouse(oid, obj, &warehouse, liquids_tons, None)
+            .context("syncing from warehouse")?;
         self.update_supply_status()
             .context("updating supply status")?;
         self.ephemeral.dirty();

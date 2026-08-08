@@ -1427,7 +1427,7 @@ fn on_event(lua: MizLua, ev: Event) -> Result<()> {
                     ctx.db.on_combined_arms_leave(&ca_oid, ca_return_life)
                 {
                     if returned {
-                        let mut msg = CompactString::new("life returned\n");
+                        let mut msg = CompactString::new("LIFE RETURNED\n");
                         if let Ok(l) =
                             format_lives_total(&mut ctx.db, &ucid, LifeType::CombinedArms)
                         {
@@ -1441,7 +1441,7 @@ fn on_event(lua: MizLua, ev: Event) -> Result<()> {
                 }
                 match ctx.db.player_left_unit(lua, start_ts, &initiator) {
                     Ok((_, Some((ucid, slot, typ)), deslot)) => {
-                        let mut msg = CompactString::new("life returned\n");
+                        let mut msg = CompactString::new("LIFE RETURNED\n");
                         if let Ok(l) = format_lives_total(&mut ctx.db, &ucid, typ) {
                             msg.push_str(&l);
                         }
@@ -1685,7 +1685,7 @@ fn on_event(lua: MizLua, ev: Event) -> Result<()> {
                                 mark_airborne_voluntary_eject(ctx, ucid);
                             }
                             if let Err(e) =
-                                message_life(ctx, lua, &slot, Some(typ), "life taken\n")
+                                message_life(ctx, lua, &slot, Some(typ), "LIFE TAKEN (Not in cockpit? Press F1)\n")
                             {
                                 error!("could not display life taken message {:?}", e)
                             } else {
@@ -1915,7 +1915,7 @@ fn schedule_life_taken_ui(lua: MizLua, slot: SlotId, typ: Option<LifeType>) -> R
     let when = timer.get_time()? + LIFE_TAKEN_UI_DELAY_SECS;
     timer.schedule_function(when, mlua::Value::Nil, move |lua, _, _| {
         let ctx = unsafe { Context::get_mut() };
-        if let Err(e) = message_life(ctx, lua, &slot, typ, "life taken\n") {
+        if let Err(e) = message_life(ctx, lua, &slot, typ, "LIFE TAKEN (Not in cockpit? Press F1)\n") {
             error!("could not display life taken message {:?}", e);
         } else if let Err(e) = schedule_life_taken_sound(lua, slot) {
             error!("could not schedule life taken sound {:?}", e);
@@ -1941,7 +1941,7 @@ fn schedule_ca_life_taken_ui(lua: MizLua, ucid: Ucid, unit_id: UnitId) -> Result
     let when = timer.get_time()? + LIFE_TAKEN_UI_DELAY_SECS;
     timer.schedule_function(when, mlua::Value::Nil, move |lua, _, _| {
         let ctx = unsafe { Context::get_mut() };
-        let mut msg = CompactString::new("life taken\n");
+        let mut msg = CompactString::new("LIFE TAKEN (Not in cockpit? Press F1)\n");
         if let Ok(lives) = lives(
             &mut ctx.db,
             &ucid,
@@ -2015,7 +2015,7 @@ fn message_life(
     if let Ok(lives) = lives(&mut ctx.db, &ucid, typ, true, LivesFormat::Panel) {
         msg.push_str(&lives)
     }
-    let play_life_return = msg.starts_with("life returned");
+    let play_life_return = msg.starts_with("LIFE RETURNED");
     ctx.db.ephemeral.msgs().panel_to_unit(10, false, uid, msg);
     if play_life_return {
         ctx.db.play_sound_player(lua, "life_return", slot);
@@ -2242,7 +2242,7 @@ fn handle_player_leave_unit_no_initiator(
         match ctx.db.player_left_unit(lua, start_ts, &objid) {
             Ok((_, Some((ucid, slot, typ)), deslot)) => {
                 info!("life returned on deslot for {ucid} ({typ})");
-                let mut msg = CompactString::new("life returned\n");
+                let mut msg = CompactString::new("LIFE RETURNED\n");
                 if let Ok(l) = format_lives_total(&mut ctx.db, &ucid, typ) {
                     msg.push_str(&l);
                 }

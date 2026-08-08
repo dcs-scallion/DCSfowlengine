@@ -786,9 +786,10 @@ impl Db {
                         .get(i)
                         .or(hub_pick.slots.first())
                         .ok_or_else(|| anyhow!("no hub slot"))?;
-                    let route = ai_air::bootstrap_route(
+                    let route = ai_air::bootstrap_route_for_group(
                         lua,
                         self,
+                        gid,
                         &hub_pick,
                         slot,
                         ai_air::BootstrapMode::ColdSpawn,
@@ -971,8 +972,8 @@ impl Db {
         spawn_point: Vector2,
         args: WithPosAndGroup<()>,
     ) -> Result<Vec<MissionPoint<'lua>>> {
-        let mut route = self.drone_mission(side, ucid, spawn_point, args)?;
-        ai_air::insert_drone_climb_waypoints(lua, &mut route)?;
+        let mut route = self.drone_mission(side, ucid, spawn_point, args.clone())?;
+        ai_air::insert_drone_climb_waypoints(lua, self, args.group, &mut route)?;
         Ok(route)
     }
 
@@ -2111,6 +2112,9 @@ impl Db {
                 servicing_handoff: false,
                 last_airborne_task_push: None,
                 calcm_rack_empty_since: None,
+                drone_climb_pos: None,
+                drone_climb_hub: None,
+                drone_climb_orbit: None,
             },
             owner_lock_released: false,
         };
@@ -2344,6 +2348,9 @@ impl Db {
                             for id in marks.drain() {
                                 self.ephemeral.msgs().delete_mark(id);
                             }
+                            let mark_moved = (ai_air.active_mission.pos - args.pos).magnitude()
+                                > ai_air::DRONE_CLIMB_MARK_EPS_M;
+                            let is_drone = ai_air.mission_kind == ai_air::AiAirMissionKind::Drone;
                             ai_air.active_mission = ai_air::snapshot_from_loiter(
                                 args.pos,
                                 a.altitude,
@@ -2351,6 +2358,9 @@ impl Db {
                                 a.speed,
                                 matches!(pattern, OrbitPattern::RaceTrack),
                             );
+                            if is_drone && mark_moved {
+                                ai_air::clear_drone_climb_cache(ai_air);
+                            }
                         }
                         (a.altitude, a.altitude_typ.clone(), a.speed, marks, player)
                     }
@@ -2530,10 +2540,6 @@ impl Db {
         }
         let con = group.get_controller().context("getting controller")?;
         ai_air::apply_fowl_air_controller_options(&con)?;
-        con.set_task(Task::Mission {
-            airborne: Some(airborne),
-            route: mission.clone(),
-        })?;
         con.set_task(Task::Mission {
             airborne: Some(airborne),
             route: mission,

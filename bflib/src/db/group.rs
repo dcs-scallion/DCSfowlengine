@@ -2338,15 +2338,22 @@ impl Db {
         position.p.y = alt;
         position.p.z = final_pos.y;
 
-        // New static name so ED F8 ghost slots (old name) can be scrubbed separately.
-        let old_name = name.clone();
-        let new_name = format_compact!("fowl{}-{}", uid, Utc::now().timestamp_millis());
-        self.ephemeral
-            .shared_ed_bay_ghost_names
-            .insert(gid, old_name.clone());
+        // Keep / restore a player-readable unit name (ED F8 menu shows StaticObject name).
+        // Opaque `fowl{uid}-{ms}` was only for ghost scrub; bay is already clear here.
+        let spawn_name = self.fowl_crate_place_unit_name(gid, uid, name.as_str());
+        if spawn_name.as_str() != name.as_str() {
+            info!(
+                "crate {gid}: restore unit name {name} -> {spawn_name} for ED unload place"
+            );
+        }
         if let Some(unit) = self.persisted.units.get_mut_cow(&uid) {
-            self.persisted.units_by_name.remove_cow(&unit.name);
-            unit.name = String::from(new_name.as_str());
+            if unit.name.as_str() != spawn_name.as_str() {
+                self.persisted.units_by_name.remove_cow(&unit.name);
+                unit.name = String::from(spawn_name.as_str());
+                self.persisted
+                    .units_by_name
+                    .insert_cow(String::from(spawn_name.as_str()), uid);
+            }
             unit.dead = false;
             unit.hp_percent = 100;
             unit.pos = final_pos;
@@ -2356,9 +2363,6 @@ impl Db {
             unit.position = position;
             unit.spawn_position = position;
         }
-        self.persisted
-            .units_by_name
-            .insert_cow(String::from(new_name.as_str()), uid);
 
         if let Some(group) = self.persisted.groups.get_mut_cow(&gid) {
             if let DeployKind::Crate {
@@ -2387,31 +2391,40 @@ impl Db {
         self.ephemeral.shared_ed_eject_attempts.remove(&gid);
         self.ephemeral.shared_ed_fowl_aboard.remove(&gid);
         self.ephemeral.shared_ed_eject_pending_place.remove(&gid);
+        self.ephemeral.shared_ed_bay_ghost_names.remove(&gid);
         self.ephemeral
             .shared_ed_fowl_eject_grace_until
             .insert(gid, Utc::now() + chrono::Duration::seconds(30));
-        // Scrub ED F8 ghost under the pre-rename name (classic cargo menu).
-        let _ = self.try_clear_ed_bay_cargo_named(lua, gid, old_name.as_str());
-        let old_gone = self
-            .ephemeral
-            .slot_instance_unit(lua, &slot)
-            .ok()
-            .map(|ac| {
-                !crate::db::dynamic_cargo::unit_has_cargo_named(&ac, old_name.as_str())
-            })
-            .unwrap_or(false);
-        if old_gone {
-            self.ephemeral.shared_ed_bay_ghost_names.remove(&gid);
-        }
         // Keep shared_ed_place_ignore_dead until static_born (may be deferred).
         self.ephemeral.push_spawn(gid);
         self.mark_group(lua, &gid)?;
         self.ephemeral.dirty();
         info!(
-            "crate {gid}: placed on ED unload line for {carrier:?} as {new_name} at ({:.1},{:.1})",
+            "crate {gid}: placed on ED unload line for {carrier:?} as {spawn_name} at ({:.1},{:.1})",
             final_pos.x, final_pos.y
         );
         Ok(final_pos)
+    }
+
+    /// Readable StaticObject name for ED F8 / ground place (no opaque `fowl…` rename).
+    fn fowl_crate_place_unit_name(&self, gid: GroupId, uid: UnitId, current: &str) -> String {
+        if !current.starts_with("fowl") {
+            return String::from(current);
+        }
+        let spec_name = self
+            .persisted
+            .groups
+            .get(&gid)
+            .and_then(|g| match &g.origin {
+                DeployKind::Crate { spec, .. } => Some(spec.name.as_str()),
+                _ => None,
+            });
+        match spec_name {
+            Some(spec) if !spec.is_empty() => {
+                String::from(format_compact!("{spec}-{uid}").as_str())
+            }
+            _ => String::from(current),
+        }
     }
 
     /// Nearest same-side ED cargo transport player when Dead is likely F8/sling.
