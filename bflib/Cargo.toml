@@ -2,6 +2,7 @@
 name = "bflib"
 version.workspace = true
 edition = "2024"
+license = "AGPL-3.0-only"
 
 [lib]
 name = "bflib"
