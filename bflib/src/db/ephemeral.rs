@@ -238,6 +238,12 @@ pub struct Ephemeral {
     pub(super) shared_ed_fowl_aboard: FxHashMap<GroupId, Ucid>,
     /// Warehouse dynamic cargo name → register time (brief prune grace during F8 fill/load).
     pub(super) dynamic_cargo_registered_at: FxHashMap<String, DateTime<Utc>>,
+    /// Consecutive slow-tick world misses before prune treats cargo as gone.
+    pub(super) dynamic_cargo_miss_count: FxHashMap<String, u8>,
+    /// Names mid canCargo airdrop-rehook (ignore Dead / prune).
+    pub(super) dynamic_cargo_rehook_in_progress: FxHashSet<String>,
+    /// When `air_dropped` was first set (chute grace / rehook timing).
+    pub(super) dynamic_cargo_air_dropped_at: FxHashMap<String, DateTime<Utc>>,
     /// Deslot airframe: re-clamp DCS count after leave-unit (engine often returns late).
     /// `(due_utc, land_oid, typ_name, target_stored)`.
     pub(super) pending_deslot_airframe_fix: Vec<(DateTime<Utc>, ObjectiveId, String, u32)>,
@@ -342,6 +348,9 @@ impl Default for Ephemeral {
             shared_ed_bay_ghost_names: FxHashMap::default(),
             shared_ed_fowl_aboard: FxHashMap::default(),
             dynamic_cargo_registered_at: FxHashMap::default(),
+            dynamic_cargo_miss_count: FxHashMap::default(),
+            dynamic_cargo_rehook_in_progress: FxHashSet::default(),
+            dynamic_cargo_air_dropped_at: FxHashMap::default(),
             pending_deslot_airframe_fix: Vec::default(),
             sync_to_equipment_credit: FxHashMap::default(),
             sync_to_liquid_credit: FxHashMap::default(),

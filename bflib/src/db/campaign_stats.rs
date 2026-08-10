@@ -223,7 +223,7 @@ pub fn render_sidebar_html(view: &CampaignStatsView) -> String {
         false,
     ));
     out.push_str(&vs_row(
-        "Player deaths",
+        "Players' deaths",
         s.blue.player_deaths,
         s.red.player_deaths,
         false,

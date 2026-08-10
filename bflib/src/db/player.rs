@@ -38,7 +38,7 @@ use dcso3::{
     coalition::Side,
     coord::Coord,
     net::{SlotId, Ucid},
-    object::{DcsObject, DcsOid},
+    object::{DcsObject, DcsOid, Object},
     unit::{ClassUnit, Unit},
 };
 use fxhash::FxHashSet;
@@ -601,7 +601,101 @@ impl Db {
         self.adjust_points(ucid, cost, msg);
     }
 
-    pub fn land(&mut self, slot: SlotId, position: Vector2, unit: &Unit) -> bool {
+    /// ME zone, else nearest friendly airbase (helipads often sit outside the OFO circle).
+    fn resolve_friendly_land_objective(
+        &self,
+        lua: MizLua,
+        side: Side,
+        position: Vector2,
+    ) -> Option<ObjectiveId> {
+        if let Some((oid, _)) = self.persisted.objectives.into_iter().find(|(_, o)| {
+            o.owner == side && o.zone.contains(position)
+        }) {
+            return Some(*oid);
+        }
+        self.nearest_friendly_airbase_objective(lua, side, position)
+    }
+
+    fn nearest_friendly_airbase_objective(
+        &self,
+        lua: MizLua,
+        side: Side,
+        position: Vector2,
+    ) -> Option<ObjectiveId> {
+        let mut best: Option<(f64, ObjectiveId)> = None;
+        for (oid, obj) in &self.persisted.objectives {
+            if obj.owner != side {
+                continue;
+            }
+            let Some(ab_id) = self.ephemeral.airbase_by_oid.get(oid) else {
+                continue;
+            };
+            let Ok(ab) = Airbase::get_instance(lua, ab_id) else {
+                continue;
+            };
+            let Ok(pt) = ab.get_point() else {
+                continue;
+            };
+            let ab_pos = Vector2::new(pt.x, pt.z);
+            let dist_sq = (ab_pos - position).magnitude_squared();
+            let max_r = obj.zone.radius().max(3_000.0);
+            if dist_sq <= max_r * max_r {
+                if best.map(|(d, _)| dist_sq < d).unwrap_or(true) {
+                    best = Some((dist_sq, *oid));
+                }
+            }
+        }
+        best.map(|(_, oid)| oid)
+    }
+
+    /// Land `place` (e.g. `Ochamchira-3`) → objective id.
+    pub fn objective_id_for_land_place(
+        &self,
+        lua: MizLua,
+        place: &Object,
+    ) -> Option<ObjectiveId> {
+        if let Ok(pid) = place.object_id() {
+            for (oid, ab) in &self.ephemeral.airbase_by_oid {
+                if ab.erased() == pid {
+                    return Some(*oid);
+                }
+            }
+            for (oid, abs) in &self.ephemeral.airbases_by_oid {
+                if abs.iter().any(|a| a.erased() == pid) {
+                    return Some(*oid);
+                }
+            }
+            if let Ok(ab) = Airbase::get_instance_dyn(lua, &pid) {
+                if let Ok(obj) = ab.as_object() {
+                    if let Ok(name) = obj.get_name() {
+                        if let Some(oid) = self.objective_id_for_airbase_name(name.as_str()) {
+                            return Some(oid);
+                        }
+                    }
+                }
+            }
+        }
+        place
+            .get_name()
+            .ok()
+            .and_then(|n| self.objective_id_for_airbase_name(n.as_str()))
+    }
+
+    fn objective_id_for_airbase_name(&self, name: &str) -> Option<ObjectiveId> {
+        if let Some(oid) = self.persisted.objectives_by_name.get(name) {
+            return Some(*oid);
+        }
+        if let Some((base, rest)) = name.rsplit_once('-') {
+            if !rest.is_empty() && rest.chars().all(|c| c.is_ascii_digit()) {
+                if let Some(oid) = self.persisted.objectives_by_name.get(base) {
+                    return Some(*oid);
+                }
+            }
+        }
+        None
+    }
+
+    pub fn land(&mut self, lua: MizLua, slot: SlotId, position: Vector2, unit: &Unit) -> bool {
         let sifo = match self.ephemeral.slot_info.get(&slot) {
             Some(sifo) => sifo,
             None => return false,
@@ -613,63 +707,57 @@ impl Db {
                 (0, false, String::from(""))
             }
         };
-        let (ucid, player) = match self
-            .ephemeral
-            .players_by_slot
-            .get(&slot)
-            .and_then(|ucid| self.persisted.players.get_mut_cow(ucid).map(|p| (*ucid, p)))
-        {
+        let Some(ucid) = self.ephemeral.players_by_slot.get(&slot).copied() else {
+            return false;
+        };
+        let Some(side) = self.persisted.players.get(&ucid).map(|p| p.side) else {
+            return false;
+        };
+        let owned_objective = self.resolve_friendly_land_objective(lua, side, position);
+        self.ephemeral.stat(Stat::Land { id: ucid });
+        let Some(oid) = owned_objective else {
+            debug!(
+                "land() not armed slot={slot:?} side={side:?} pos=({:.0},{:.0}) — outside friendly objective / airbase",
+                position.x, position.y
+            );
+            return false;
+        };
+        let player = match self.persisted.players.get_mut_cow(&ucid) {
             Some(player) => player,
             None => return false,
         };
-        let owned_objective = self.persisted.objectives.into_iter().find_map(|(oid, o)| {
-            if o.owner == player.side && o.zone.contains(position) {
-                Some(*oid)
-            } else {
-                None
-            }
-        });
-        self.ephemeral.stat(Stat::Land { id: ucid });
-        if let Some(oid) = owned_objective {
-            player.airborne = None;
-            let mut frac = 1.;
-            if let Some((_, Some(inst))) = &mut player.current_slot {
-                inst.position.p.x = position.x;
-                inst.position.p.z = position.y;
-                inst.landed_at_objective = Some(oid);
-                frac = inst.cost_fraction;
-            }
-            if let Some(points) = self.ephemeral.cfg.points.as_ref() {
-                let is_provisional = points.provisional;
-                let provisional_points = player.provisional_points;
-                player.provisional_points = 0;
-                if cost > 0 {
-                    self.refund_points(
-                        &ucid,
-                        oid,
-                        cost,
-                        frac,
-                        cost_msg.as_str(),
-                        InvestBucket::Air,
-                    );
-                }
-                if is_provisional && provisional_points > 0 {
-                    self.adjust_points(
-                        &ucid,
-                        provisional_points as i32,
-                        "provisional points committed",
-                    );
-                }
-            }
-            self.ephemeral.dirty();
-            true
-        } else {
-            debug!(
-                "land() not armed slot={slot:?} side={:?} pos=({:.0},{:.0}) — outside friendly objective zone",
-                player.side, position.x, position.y
-            );
-            false
+        player.airborne = None;
+        let mut frac = 1.;
+        if let Some((_, Some(inst))) = &mut player.current_slot {
+            inst.position.p.x = position.x;
+            inst.position.p.z = position.y;
+            inst.landed_at_objective = Some(oid);
+            frac = inst.cost_fraction;
         }
+        if let Some(points) = self.ephemeral.cfg.points.as_ref() {
+            let is_provisional = points.provisional;
+            let provisional_points = player.provisional_points;
+            player.provisional_points = 0;
+            if cost > 0 {
+                self.refund_points(
+                    &ucid,
+                    oid,
+                    cost,
+                    frac,
+                    cost_msg.as_str(),
+                    InvestBucket::Air,
+                );
+            }
+            if is_provisional && provisional_points > 0 {
+                self.adjust_points(
+                    &ucid,
+                    provisional_points as i32,
+                    "provisional points committed",
+                );
+            }
+        }
+        self.ephemeral.dirty();
+        true
     }
 
     pub fn maybe_reset_lives(&mut self, ucid: &Ucid, now: DateTime<Utc>) -> Result<()> {
@@ -1466,6 +1554,115 @@ impl Db {
         Ok(())
     }
 
+    pub fn mark_landed_at_objective_from_place(&mut self, slot: &SlotId, oid: ObjectiveId) {
+        let Some(ucid) = self.ephemeral.player_in_slot(slot).cloned() else {
+            return;
+        };
+        let side_ok = self
+            .persisted
+            .players
+            .get(&ucid)
+            .zip(self.persisted.objectives.get(&oid))
+            .is_some_and(|(p, o)| o.owner == p.side);
+        if !side_ok {
+            return;
+        }
+        let Some(player) = self.persisted.players.get_mut_cow(&ucid) else {
+            return;
+        };
+        if let Some((_, Some(inst))) = player.current_slot.as_mut() {
+            inst.landed_at_objective = Some(oid);
+            inst.stopped_at_objective = true;
+        }
+    }
+
+    /// DCS returned the airframe to a warehouse but life was not returned — align Fowl stock.
+    fn align_fowl_airframe_to_dcs_after_deslot(
+        &mut self,
+        lua: MizLua,
+        side: Side,
+        slot: &SlotId,
+        typ: &Vehicle,
+        hint_pos: Option<Vector2>,
+    ) -> Result<()> {
+        let typ_name = typ.0.clone();
+        let home = self.ephemeral.slot_info.get(slot).map(|s| s.objective);
+        let mut candidates: SmallVec<[ObjectiveId; 4]> = smallvec![];
+        if let Some(oid) = home {
+            candidates.push(oid);
+        }
+        if let Some(pos) = hint_pos {
+            if let Some(oid) = self.nearest_friendly_airbase_objective(lua, side, pos) {
+                candidates.push(oid);
+            }
+            if let Some(oid) = self.resolve_friendly_land_objective(lua, side, pos) {
+                candidates.push(oid);
+            }
+        }
+        candidates.sort_unstable();
+        candidates.dedup();
+
+        let mut bumps: SmallVec<[(ObjectiveId, u32, u32, f64); 4]> = smallvec![];
+        for oid in &candidates {
+            let Some(ab_id) = self.ephemeral.airbase_by_oid.get(oid) else {
+                continue;
+            };
+            let Ok(ab) = Airbase::get_instance(lua, ab_id) else {
+                continue;
+            };
+            let Ok(wh) = ab.get_warehouse() else {
+                continue;
+            };
+            let Ok(dcs) = wh.get_item_count(typ_name.clone()) else {
+                continue;
+            };
+            let prev = self
+                .persisted
+                .objectives
+                .get(oid)
+                .and_then(|o| o.warehouse.equipment.get(&typ_name))
+                .map(|i| i.stored)
+                .unwrap_or(0);
+            if dcs <= prev {
+                continue;
+            }
+            let dist = hint_pos
+                .and_then(|pos| {
+                    ab.get_point().ok().map(|pt| {
+                        (Vector2::new(pt.x, pt.z) - pos).magnitude_squared()
+                    })
+                })
+                .unwrap_or(f64::MAX);
+            bumps.push((*oid, prev, dcs, dist));
+        }
+        if bumps.is_empty() {
+            return Ok(());
+        }
+        bumps.sort_by(|a, b| {
+            a.3
+                .partial_cmp(&b.3)
+                .unwrap_or(std::cmp::Ordering::Equal)
+                .then_with(|| (b.2 - b.1).cmp(&(a.2 - a.1)))
+        });
+        let (oid, prev, dcs, _) = bumps[0];
+        {
+            let obj = objective_mut!(self, oid)?;
+            let inv = obj
+                .warehouse
+                .equipment
+                .get_or_default_cow(typ_name.clone());
+            inv.stored = dcs;
+            if inv.capacity < dcs {
+                inv.capacity = dcs.max(1);
+            }
+        }
+        self.ephemeral.dirty();
+        info!(
+            "deslot airframe: aligned Fowl {typ_name} at {oid:?} {prev}->{dcs} (DCS warehouse, life not returned)"
+        );
+        Ok(())
+    }
+
     pub fn player_left_unit(
         &mut self,
         lua: MizLua,
@@ -1493,45 +1690,75 @@ impl Db {
                 let slot = *slot;
                 self.delete_fowl_crates_on_carrier_deslot(Some(lua), &ucid, Some(&slot));
                 deslot = Some((ucid.clone(), slot));
-                let player = maybe_mut!(self.persisted.players, ucid, "player")?;
-                if let Some((_, Some(inst))) = player.current_slot.as_mut() {
-                    let typ = inst.typ.clone();
-                    if let Some(oid) = inst.landed_at_objective {
-                        if self.ephemeral.cfg.limited_lives {
-                            if let Some(life_type) = self.ephemeral.cfg.life_types.get(&typ).copied()
-                            {
-                                if let Some((_, player_lives)) = player.lives.get_mut_cow(&life_type)
+                let (side, typ, flagged_oid) = {
+                    let player = maybe_mut!(self.persisted.players, ucid, "player")?;
+                    let Some((_, Some(inst))) = player.current_slot.as_mut() else {
+                        return Ok((dead, returned_life, deslot));
+                    };
+                    (player.side, inst.typ.clone(), inst.landed_at_objective)
+                };
+
+                let unit = Unit::get_instance(lua, objid).ok();
+                let on_ground = unit
+                    .as_ref()
+                    .map(|u| u.is_exist().unwrap_or(false) && !u.in_air().unwrap_or(true))
+                    .unwrap_or(false);
+                let pos = unit
+                    .as_ref()
+                    .and_then(|u| u.get_ground_position().ok())
+                    .map(|p| p.0);
+
+                let land_oid = if on_ground {
+                    pos.and_then(|p| self.resolve_friendly_land_objective(lua, side, p))
+                        .or(flagged_oid.filter(|_| on_ground))
+                } else {
+                    None
+                };
+
+                if let Some(oid) = land_oid {
+                    if let Some((_, Some(inst))) = self
+                        .persisted
+                        .players
+                        .get_mut_cow(&ucid)
+                        .and_then(|p| p.current_slot.as_mut())
+                    {
+                        inst.landed_at_objective = Some(oid);
+                    }
+                    if self.ephemeral.cfg.limited_lives {
+                        if let Some(life_type) = self.ephemeral.cfg.life_types.get(&typ).copied() {
+                            let player = maybe_mut!(self.persisted.players, ucid, "player")?;
+                            if let Some((_, player_lives)) = player.lives.get_mut_cow(&life_type) {
+                                *player_lives += 1;
+                                if *player_lives
+                                    >= self.ephemeral.cfg.default_lives[&life_type].0
                                 {
-                                    *player_lives += 1;
-                                    if *player_lives
-                                        >= self.ephemeral.cfg.default_lives[&life_type].0
-                                    {
-                                        player.lives.remove_cow(&life_type);
-                                    }
-                                    self.ephemeral.stat(Stat::Life {
-                                        id: ucid,
-                                        lives: player.lives.clone(),
-                                    });
-                                    returned_life = Some((ucid, slot, life_type));
-                                    info!(
-                                        "life returned on deslot for {ucid} ({life_type})"
-                                    );
-                                    self.ephemeral.dirty();
+                                    player.lives.remove_cow(&life_type);
                                 }
+                                self.ephemeral.stat(Stat::Life {
+                                    id: ucid,
+                                    lives: player.lives.clone(),
+                                });
+                                returned_life = Some((ucid, slot, life_type));
+                                info!(
+                                    "life returned on deslot for {ucid} ({life_type}) at {oid:?}"
+                                );
+                                self.ephemeral.dirty();
                             }
                         }
-                        // DCS often already returns the airframe to the landing (or slot-home)
-                        // warehouse on leave-unit. Blind add_item double-counts (e.g. 0→2 C-130).
-                        if let Err(e) = self.credit_airframe_on_deslot(
-                            lua,
-                            &objid,
-                            oid,
-                            &slot,
-                            &typ,
-                        ) {
-                            error!("unable to fix warehouse {:?}", e)
-                        }
                     }
+                    if let Err(e) =
+                        self.credit_airframe_on_deslot(lua, objid, oid, &slot, &typ)
+                    {
+                        error!("unable to fix warehouse {:?}", e)
+                    }
+                } else if let Err(e) = self.align_fowl_airframe_to_dcs_after_deslot(
+                    lua,
+                    side,
+                    &slot,
+                    &typ,
+                    pos,
+                ) {
+                    error!("unable to align warehouse after deslot {:?}", e)
                 }
             }
         }

@@ -1528,6 +1528,12 @@ fn on_event(lua: MizLua, ev: Event) -> Result<()> {
                     ctx.db.note_static_hit(static_id.clone(), who);
                 }
                 if target.get_life()? < 1 {
+                    if let Ok(name) = target.get_name() {
+                        if ctx.db.on_dynamic_cargo_static_destroyed(lua, name.as_str()) {
+                            flush_markup_if_pending(ctx, lua);
+                            return Ok(());
+                        }
+                    }
                     let killer = crate::shots::who_from_initiator(
                         &ctx.db,
                         e.initiator.as_ref(),
@@ -1576,6 +1582,12 @@ fn on_event(lua: MizLua, ev: Event) -> Result<()> {
                 }
             } else if let Some(st) = e.initiator.as_ref().and_then(|s| s.as_static().ok())
             {
+                if let Ok(name) = st.get_name() {
+                    if ctx.db.on_dynamic_cargo_static_destroyed(lua, name.as_str()) {
+                        flush_markup_if_pending(ctx, lua);
+                        return Ok(());
+                    }
+                }
                 let id = st.object_id()?;
                 let killer = ctx.db.take_static_hit(&id);
                 if let Err(e) = ctx.db.static_dead(lua, &id, start_ts, killer.as_ref()) {
@@ -1667,7 +1679,16 @@ fn on_event(lua: MizLua, ev: Event) -> Result<()> {
         Event::Takeoff(e) | Event::PostponedTakeoff(e) => {
             if let Ok(unit) = e.initiator.as_unit() {
                 let id = unit.object_id()?;
-                if !ctx.recently_born.contains_key(&id)
+                // Helo/airframe bounce: DCS fires Takeoff while still on the ground.
+                if !unit.in_air().unwrap_or(true) {
+                    debug!("ignoring bounce takeoff (unit still on ground) {id:?}");
+                    if !ctx.recently_born.contains_key(&id) {
+                        ctx.recently_landed
+                            .entry(id.clone())
+                            .or_insert_with(Utc::now);
+                    }
+                    let _ = ctx.airborne.remove(&id);
+                } else if !ctx.recently_born.contains_key(&id)
                     && ctx.airborne.insert(id.clone())
                     && ctx.recently_landed.remove(&id).is_none()
                 {
@@ -1714,6 +1735,13 @@ fn on_event(lua: MizLua, ev: Event) -> Result<()> {
                 if !ctx.recently_born.contains_key(&id) {
                     let _ = ctx.airborne.remove(&id);
                     ctx.recently_landed.insert(id, Utc::now());
+                }
+                if let Some(place) = e.place.as_ref() {
+                    if let Ok(slot) = unit.slot() {
+                        if let Some(oid) = ctx.db.objective_id_for_land_place(lua, place) {
+                            ctx.db.mark_landed_at_objective_from_place(&slot, oid);
+                        }
+                    }
                 }
             }
         }
@@ -2024,49 +2052,51 @@ fn message_life(
 }
 
 fn return_lives(lua: MizLua, ctx: &mut Context, ts: DateTime<Utc>) {
-    macro_rules! or_false {
-        ($e:expr) => {
-            match $e {
-                Ok(r) => r,
-                Err(_) => return false,
-            }
-        };
-    }
     let db = &mut ctx.db;
     ctx.recently_landed.retain(|id, landed_ts| {
-        if ts - *landed_ts >= Duration::seconds(10) {
-            let unit = or_false!(Unit::get_instance(lua, id));
-            let pos = or_false!(unit.get_ground_position());
-            let slot = or_false!(unit.slot());
-            if db.land(slot, pos.0, &unit) {
-                if db.ephemeral.cfg.limited_lives && db.ephemeral.cfg.lives_birth {
-                    let obj_label = db
-                        .ephemeral
-                        .player_in_slot(&slot)
-                        .and_then(|ucid| db.persisted.players.get(ucid))
-                        .and_then(|p| {
-                            p.current_slot
-                                .as_ref()
-                                .and_then(|(_, inst)| inst.as_ref())
-                                .and_then(|i| i.landed_at_objective)
-                        })
-                        .and_then(|oid| db.persisted.objectives.get(&oid))
-                        .map(|o| db.objective_f10_map_label(o))
-                        .unwrap_or_else(|| "friendly objective".to_string());
-                    let msg = format_compact!(
-                        "Landed at {obj_label}\nDeslot to return your life"
-                    );
-                    if let Some(uid) = slot.as_unit_id() {
-                        db.ephemeral.msgs().panel_to_unit(15, false, uid, msg);
-                    }
-                }
-                return false;
-            }
-            debug!(
-                "land() not armed slot={slot:?} pos=({:.0},{:.0}) — outside friendly objective zone?",
-                pos.0.x, pos.0.y
-            );
+        if ts - *landed_ts < Duration::seconds(10) {
+            return true;
         }
+        let Ok(unit) = Unit::get_instance(lua, id) else {
+            return true;
+        };
+        let Ok(pos) = unit.get_ground_position() else {
+            return true;
+        };
+        let Ok(slot) = unit.slot() else {
+            return true;
+        };
+        if unit.in_air().unwrap_or(true) {
+            return true;
+        }
+        if db.land(lua, slot, pos.0, &unit) {
+            if db.ephemeral.cfg.limited_lives && db.ephemeral.cfg.lives_birth {
+                let obj_label = db
+                    .ephemeral
+                    .player_in_slot(&slot)
+                    .and_then(|ucid| db.persisted.players.get(ucid))
+                    .and_then(|p| {
+                        p.current_slot
+                            .as_ref()
+                            .and_then(|(_, inst)| inst.as_ref())
+                            .and_then(|i| i.landed_at_objective)
+                    })
+                    .and_then(|oid| db.persisted.objectives.get(&oid))
+                    .map(|o| db.objective_f10_map_label(o))
+                    .unwrap_or_else(|| "friendly objective".to_string());
+                let msg = format_compact!(
+                    "Landed at {obj_label}\nDeslot to return your life"
+                );
+                if let Some(uid) = slot.as_unit_id() {
+                    db.ephemeral.msgs().panel_to_unit(15, false, uid, msg);
+                }
+            }
+            return false;
+        }
+        debug!(
+            "land() not armed slot={slot:?} pos=({:.0},{:.0}) — outside friendly objective / airbase?",
+            pos.0.x, pos.0.y
+        );
         true
     });
 }

@@ -2920,7 +2920,7 @@ impl Db {
         if !objective_is_ground_dep_farp_export(export, obj) {
             return Ok(());
         }
-        self.sync_objective_to_warehouse(lua, *oid)
+        self.sync_objective_to_warehouse(lua, *oid, false)
             .context("applying ground DEP FARP virtual stock to DCS warehouse")?;
         Ok(())
     }
@@ -3764,12 +3764,25 @@ impl Db {
                 continue;
             }
             if apply_persisted && !debug_coalition_switch {
-                self.sync_objective_to_warehouse(lua, oid).with_context(|| {
+                // Full push (no transfer credits): load must restore persisted stock to DCS.
+                let (owner, is_hub) = {
+                    let obj = objective!(self, oid)?;
+                    (obj.owner, matches!(obj.kind, ObjectiveKind::Logistics))
+                };
+                let (_, wh) = self.sync_objective_to_warehouse(lua, oid, false).with_context(|| {
                     format_compact!(
                         "loaded campaign: apply persisted warehouse to DCS for {:?}",
                         oid
                     )
                 })?;
+                record_objective_dcs_equipment_names(&mut self.ephemeral, oid, &wh)
+                    .context("recording DCS warehouse equipment after load SyncTo")?;
+                if is_hub {
+                    if let Some(prod) = self.ephemeral.production_by_side.get(&owner).map(Arc::clone)
+                    {
+                        mark_production_equipment_dcs_tracked(&mut self.ephemeral, oid, prod.as_ref());
+                    }
+                }
                 // ME `initialAmount=1` opposite DT rows resurrect after load; virtual has no
                 // matching entry so SyncTo alone leaves DCS at 1. Reapply the same prune as
                 // preserve_fill so UI shows 0/1 and capture path can still refill on ownership change.
@@ -3813,7 +3826,7 @@ impl Db {
             self.sync_warehouse_to_objective(lua, oid)
                 .with_context(|| format_compact!("seed virtual stock from DCS warehouse for {:?}", oid))?;
             if !preserve_fill {
-                self.sync_objective_to_warehouse(lua, oid).with_context(|| {
+                self.sync_objective_to_warehouse(lua, oid, false).with_context(|| {
                     format_compact!("Fowl export: prune/sync DCS warehouse for {:?}", oid)
                 })?;
             } else {
@@ -4067,7 +4080,7 @@ impl Db {
                     }
                     Some(oid) => {
                         let start_ts = Utc::now();
-                        if let Err(e) = self.sync_objective_to_warehouse(lua, oid) {
+                        if let Err(e) = self.sync_objective_to_warehouse(lua, oid, true) {
                             if !warehouse_sync_skip(&e) {
                                 error!("failed to sync objective {oid} to warehouse {:?}", e)
                             }
@@ -4201,7 +4214,7 @@ impl Db {
                 Err(e) => warn!("capture {name}: ME weapon rebuild {e:?}"),
             }
         }
-        let capture_track = match self.sync_objective_to_warehouse(lua, oid) {
+        let capture_track = match self.sync_objective_to_warehouse(lua, oid, false) {
             Ok((obj, wh)) => {
                 let liquids_tons = objective_liquids_stored_as_tons(export.as_ref(), obj);
                 if let Err(e) = apply_virtual_warehouse_to_dcs(
@@ -5210,10 +5223,12 @@ impl Db {
         Ok((obj, warehouse))
     }
 
+    /// `use_transfer_credits`: logistics tick only. Load / capture / DEP restore push full virtual.
     pub fn sync_objective_to_warehouse<'lua>(
         &mut self,
         lua: MizLua<'lua>,
         oid: ObjectiveId,
+        use_transfer_credits: bool,
     ) -> Result<(&mut Objective, warehouse::Warehouse<'lua>)> {
         let resource_meta = self
             .warehouse_resource_meta_cache(lua)
@@ -5258,17 +5273,16 @@ impl Db {
                 .objectives
                 .get_mut_cow(&oid)
                 .ok_or_else(|| anyhow!("no such objective {oid:?}"))?;
-            sync_obj_to_warehouse(
-                oid,
-                obj,
-                &warehouse,
-                liquids_tons,
+            let credits = if use_transfer_credits {
                 Some((
                     &mut ephemeral.sync_to_equipment_credit,
                     &mut ephemeral.sync_to_liquid_credit,
-                )),
-            )
-            .context("syncing warehouse to objective")?;
+                ))
+            } else {
+                None
+            };
+            sync_obj_to_warehouse(oid, obj, &warehouse, liquids_tons, credits)
+                .context("syncing warehouse to objective")?;
             if ground_dep {
                 reconcile_dcs_warehouse_to_virtual(
                     lua,

@@ -252,31 +252,56 @@ fn list_nearby_crates(lua: MizLua, gid: GroupId) -> Result<()> {
         .db
         .list_nearby_crates(lua, &st)
         .context("listing nearby crates")?;
-    if nearby.len() > 0 {
-        let mut msg = CompactString::new("");
-        for nc in nearby {
-            if nc.loaded {
-                msg.push_str(&format_compact!(
-                    "{} crate, loaded aboard\n",
-                    nc.crate_def.name
-                ));
-            } else {
-                msg.push_str(&format_compact!(
-                    "{} crate, bearing {}, {} meters away\n",
-                    nc.crate_def.name,
-                    nc.heading as u32,
-                    nc.distance as u32
-                ));
-            }
-        }
-        ctx.db.ephemeral.msgs().panel_to_group(10, false, gid, msg)
-    } else {
+    let nearby_dyn = ctx
+        .db
+        .list_nearby_dynamic_cargo(lua, &st)
+        .context("listing nearby dynamic cargo")?;
+    if nearby.is_empty() && nearby_dyn.is_empty() {
         drop(nearby);
+        drop(nearby_dyn);
         ctx.db
             .ephemeral
             .msgs()
-            .panel_to_group(10, false, gid, "No nearby crates")
+            .panel_to_group(10, false, gid, "No nearby crates");
+        return Ok(());
     }
+    let mut msg = CompactString::new("");
+    for nc in &nearby {
+        if nc.loaded {
+            msg.push_str(&format_compact!(
+                "{} crate, loaded aboard\n",
+                nc.crate_def.name
+            ));
+        } else {
+            msg.push_str(&format_compact!(
+                "{} crate, bearing {}, {} meters away\n",
+                nc.crate_def.name,
+                nc.heading as u32,
+                nc.distance as u32
+            ));
+        }
+    }
+    for dc in &nearby_dyn {
+        let damaged = if dc.damaged { " DAMAGED" } else { "" };
+        if dc.loaded {
+            msg.push_str(&format_compact!(
+                "dynamic {}{}, loaded aboard\n",
+                dc.type_name,
+                damaged
+            ));
+        } else {
+            msg.push_str(&format_compact!(
+                "dynamic {}{}, bearing {}, {} meters away\n",
+                dc.type_name,
+                damaged,
+                dc.heading as u32,
+                dc.distance as u32
+            ));
+        }
+    }
+    drop(nearby);
+    drop(nearby_dyn);
+    ctx.db.ephemeral.msgs().panel_to_group(10, false, gid, msg);
     Ok(())
 }
 
