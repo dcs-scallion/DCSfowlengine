@@ -38,11 +38,11 @@ cfg =
     ["isPublic"] = true,
     ["missionList"] = 
     {
-        [1] = "C:\\users\\dcs\\Saved Games\\caucasus_80s\\Missions\\Operation Fowl Intent - 80s.miz",
+        [1] = "C:\\users\\dcs\\Saved Games\\caucasus_80s\\Missions\\Caucasus1985-SARH.miz",
     }, -- end of ["missionList"]
     ["password"] = "",
     ["listLoop"] = false,
-    ["name"] = "▀█▓▒░ The Coop - Operation Fowl Intent, PVP 24/7 ░▒▓█▀",
+    ["name"] = "ATTRITION - Caucasus 1985 SARH",
     ["require_pure_scripts"] = true,
     ["listShuffle"] = false,
     ["require_pure_clients"] = true,

@@ -8,7 +8,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 - **Discord**: https://discord.gg/wAsBEfse
 - **Presentation**: https://docs.google.com/presentation/d/1EAOe0iK-1s6i0UV5ObxSD86gGBj1Ixz6FOotQn5XPdc/edit#slide=id.g2b6a346170f_1_35
-- **Test Server**: The Coop - Operation Fowl Intent
+- **Public servers**: Attrition (Fowl Engine 2.0; e.g. Caucasus 1985 SARH). The Coop / Operation Fowl Intent branding was Fowl 1.0 era and is retired.
 
 ## Mission baseline and Fowl 2.0 evolution
 

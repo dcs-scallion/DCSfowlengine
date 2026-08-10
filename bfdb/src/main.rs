@@ -15,7 +15,7 @@ use warp::{
 mod db;
 mod db_id;
 
-/// load stats and serve the coop web interface
+/// load stats and serve the campaign web interface
 #[derive(Parser, Debug)]
 #[command(version, about, long_about = None)]
 struct Args {

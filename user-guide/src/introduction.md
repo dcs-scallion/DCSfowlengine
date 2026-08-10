@@ -20,7 +20,7 @@ Fowl Engine (also known as BFNEXT) is a dynamic campaign system that transforms 
 
 - Join the [Discord community](https://discord.gg/wAsBEfse)
 - Check the [presentation](https://docs.google.com/presentation/d/1EAOe0iK-1s6i0UV5ObxSD86gGBj1Ixz6FOotQn5XPdc/edit#slide=id.g2b6a346170f_1_35)
-- Play on the test server: **The Coop - Operation Fowl Intent**
+- Play on public Fowl Engine 2.0 servers hosted by **Attrition** (e.g. Caucasus 1985 SARH)
 
 ## About This Guide
 
