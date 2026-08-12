@@ -15,7 +15,7 @@ for more details.
 */
 
 use super::{cargo, player_name, slot_for_group, ArgTuple};
-use crate::{jtac::JtId, Context};
+use crate::{db::Db, jtac::JtId, Context};
 use anyhow::{Context as ErrContext, Result};
 use bfprotocols::cfg::{Cfg, LimitEnforceTyp};
 use compact_str::format_compact;
@@ -137,6 +137,7 @@ fn return_troops(lua: MizLua, gid: GroupId) -> Result<()> {
 
 pub(super) fn add_troops_menu_for_group(
     cfg: &Cfg,
+    db: &Db,
     mc: &MissionCommands,
     side: &Side,
     group: GroupId,
@@ -173,10 +174,19 @@ pub(super) fn add_troops_menu_for_group(
         )?;
         let root = mc.add_submenu_for_group(group, "Squads".into(), Some(root))?;
         for sq in squads {
+            let (n, _) = db
+                .number_troops_deployed(*side, sq.name.as_str())
+                .with_context(|| format_compact!("getting number of {} troops deployed", sq.name))?;
             let item = if sq.cost > 0 {
-                format_compact!("Load {} squad ({} pts)", sq.name, sq.cost)
+                format_compact!(
+                    "Load {} squad ({}pts,Dep:{}/{})",
+                    sq.name,
+                    sq.cost,
+                    n,
+                    sq.limit
+                )
             } else {
-                format_compact!("Load {} squad", sq.name)
+                format_compact!("Load {} squad (Dep:{}/{})", sq.name, n, sq.limit)
             };
             mc.add_command_for_group(
                 group,

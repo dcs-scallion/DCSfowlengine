@@ -371,6 +371,7 @@ fn top10_section(
     preview: usize,
     kills_use_enemy_color: bool,
 ) -> String {
+    let ranks = top10_dense_ranks(rows);
     let mut body = String::new();
     for (i, r) in rows.iter().enumerate() {
         let name_cls = match r.side {
@@ -394,21 +395,44 @@ fn top10_section(
             " top10-row-more"
         };
         body.push_str(&format!(
-            r#"<div class="pilot-row{extra}"><span class="rank-col" aria-hidden="true"></span><span class="pilot-name {name_cls}">{name}</span><span class="pilot-ping {count_cls}">{count}</span></div>"#,
+            r#"<div class="pilot-row{extra}"><span class="rank-col top10-rank">{rank}</span><span class="pilot-name {name_cls}">{name}</span><span class="pilot-ping {count_cls}">{count}</span></div>"#,
             extra = extra,
+            rank = ranks[i],
             name_cls = name_cls,
             count_cls = count_cls,
             name = html_escape(&r.name),
             count = r.count,
         ));
     }
+    // Toggle only when closed preview hides rows (more data than campaign_top10_*_closed).
+    let toggle = if rows.len() > preview {
+        r##"<button type="button" class="top10-toggle" aria-expanded="false" title="Show full Top 10"><svg class="top10-chevron" viewBox="0 0 12 12" aria-hidden="true"><polygon class="top10-chevron-down" points="1,3 11,3 6,10" fill="#e8c547"/></svg></button>"##
+    } else {
+        r#"<span class="rank-col" aria-hidden="true"></span>"#
+    };
     format!(
-        r#"<div class="pilot-block pilot-block-neutral top10-collapsible" data-top10-preview="{preview}"><div class="pilot-hdr-row pilot-hdr-top10"><button type="button" class="top10-toggle" aria-expanded="false" title="Show full Top 10">&#9660;</button><span class="pilot-hdr-title">{title}</span><span class="pilot-hdr-ping">{badge}</span></div><div class="pilot-list">{rows}</div></div>"#,
+        r#"<div class="pilot-block pilot-block-neutral top10-collapsible" data-top10-preview="{preview}"><div class="pilot-hdr-row pilot-hdr-top10">{toggle}<span class="pilot-hdr-title">{title}</span><span class="pilot-hdr-ping">{badge}</span></div><div class="pilot-list">{rows}</div></div>"#,
         preview = preview,
+        toggle = toggle,
         title = title,
         badge = badge,
         rows = body,
     )
+}
+
+/// Dense ranks: equal stats share one place; next distinct value is next number (1,2,2,3).
+fn top10_dense_ranks(rows: &[Top10Row]) -> Vec<u32> {
+    let mut ranks = Vec::with_capacity(rows.len());
+    let mut rank = 0u32;
+    let mut prev: Option<u32> = None;
+    for r in rows {
+        if prev != Some(r.count) {
+            rank += 1;
+            prev = Some(r.count);
+        }
+        ranks.push(rank);
+    }
+    ranks
 }
 
 fn html_escape(s: &str) -> String {

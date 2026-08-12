@@ -918,9 +918,11 @@ fn format_restart_hms(rem_secs: u64) -> String {
 }
 
 fn stats_row_html(bar: &DiscordMapStatusBar, top: bool) -> String {
-    let restart_initial = restart_display_rem_secs(bar)
-        .map(format_restart_hms)
-        .unwrap_or_else(|| "—".into());
+    let (restart_initial, restart_cls) = match restart_display_rem_secs(bar) {
+        Some(0) => ("RESTARTING".into(), "stat-v stat-red"),
+        Some(secs) => (format_restart_hms(secs), "stat-v stat-accent"),
+        None => ("—".into(), "stat-v stat-accent"),
+    };
     let mission_h = bar.mission_tod_secs / 3600;
     let mission_m = (bar.mission_tod_secs % 3600) / 60;
     let mission_datetime_initial = format!(
@@ -948,7 +950,7 @@ fn stats_row_html(bar: &DiscordMapStatusBar, top: bool) -> String {
             r#"<div class="stats stats-top">
   <div class="stat"><div class="stat-h">Date and time in mission</div><div class="stat-v stat-plain" id="mission-datetime">{mission_datetime_initial}</div></div>
   <div class="stat"><div class="stat-h">Duration</div><div class="stat-v stat-accent" id="mission-duration">Day {mission_day_initial}</div></div>
-  <div class="stat"><div class="stat-h">Time to restart</div><div class="stat-v stat-accent" id="restart-time">{restart_initial}</div></div>
+  <div class="stat"><div class="stat-h">Time to restart</div><div class="{restart_cls}" id="restart-time">{restart_initial}</div></div>
   <div class="stat"><div class="stat-h">Ground objectives</div><div class="stat-v">{ground}</div></div>
   <div class="stat"><div class="stat-h">Carrier objectives</div><div class="stat-v">{carrier}</div></div>
   <div class="stat"><div class="stat-h">Factories</div><div class="stat-v">{factories}</div></div>
@@ -959,6 +961,7 @@ fn stats_row_html(bar: &DiscordMapStatusBar, top: bool) -> String {
             mission_datetime_initial = mission_datetime_initial,
             mission_day_initial = mission_day_initial,
             restart_initial = restart_initial,
+            restart_cls = restart_cls,
             ground = status_vs_html(bar.ground_blue, bar.ground_red),
             carrier = status_vs_html(bar.carrier_blue, bar.carrier_red),
             factories = status_vs_html(bar.factories_blue, bar.factories_red),
@@ -1291,13 +1294,14 @@ body{{margin:0;background:#000;color:#686a6e;font-family:"Roboto Condensed",Robo
 .pilot-hdr-red{{background:rgba(196,56,56,.9)}}
 .pilot-hdr-neutral{{background:rgba(46,49,56,.9)}}
 .pilot-hdr-top10{{background:#15161a;color:#686a6e}}
-.pilot-hdr-row .rank-col,.pilot-row .rank-col{{flex:0 0 {rank_col}px;width:{rank_col}px;min-width:{rank_col}px}}
+.pilot-hdr-row .rank-col,.pilot-row .rank-col{{flex:0 0 {rank_col}px;width:{rank_col}px;min-width:{rank_col}px;box-sizing:border-box}}
 .pilot-hdr-title{{flex:1 1 auto;min-width:0;text-align:left;padding:5px 4px;font-weight:400;overflow:hidden;text-overflow:ellipsis}}
 .pilot-hdr-title-bold{{font-weight:700}}
 .pilot-hdr-ping{{flex:0 0 36px;width:36px;text-align:right;padding:5px 4px;font-weight:400}}
 .pilot-row{{display:flex;flex-direction:row;flex-wrap:nowrap;align-items:center;width:100%;box-sizing:border-box;line-height:1.3}}
 .pilot-row .pilot-name{{flex:1 1 auto;min-width:0;padding:3px 4px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}}
 .pilot-row .pilot-ping{{flex:0 0 36px;width:36px;padding:3px 4px;text-align:right}}
+.pilot-row .top10-rank{{display:block;text-align:right;padding:3px 2px 3px 0;color:#686a6e;line-height:1.3;font-variant-numeric:tabular-nums}}
 .ping-green{{color:#3d9e5a}}
 .ping-yellow{{color:#e8c547}}
 .ping-orange{{color:#e07a2a}}
@@ -1306,8 +1310,11 @@ body{{margin:0;background:#000;color:#686a6e;font-family:"Roboto Condensed",Robo
 .top10-blue{{color:#2E5AAC}}
 .top10-red{{color:#C43838}}
 .top10-neutral{{color:#686a6e}}
-.top10-toggle{{flex:0 0 {rank_col}px;width:{rank_col}px;min-width:{rank_col}px;margin:0;padding:0;border:0;background:transparent;color:#e8c547;font:inherit;font-size:inherit;line-height:1;cursor:pointer;text-align:center}}
+.top10-toggle{{flex:0 0 {rank_col}px;width:{rank_col}px;min-width:{rank_col}px;margin:0;padding:0;border:0;background:transparent;color:#e8c547;font:inherit;font-size:inherit;line-height:1;cursor:pointer;text-align:center;display:inline-flex;align-items:center;justify-content:center}}
 .top10-toggle:hover{{filter:brightness(1.15)}}
+.top10-toggle .top10-chevron{{display:block;width:0.9em;height:0.9em;flex-shrink:0;overflow:visible}}
+.top10-chevron-down{{fill:rgb(232,197,71);stroke:none}}
+.top10-chevron-up{{fill:rgb(21,22,26)!important;stroke:rgb(232,197,71)!important;stroke-width:2px;stroke-linejoin:miter;vector-effect:non-scaling-stroke;paint-order:stroke fill}}
 .top10-collapsible:not(.top10-expanded) .top10-row-more{{display:none}}
 .map-frame{{border:1px solid #2e3138;box-sizing:border-box;display:block;line-height:0;width:100%}}
 #wrap{{position:relative;display:block;line-height:0;width:100%}}
@@ -1468,10 +1475,16 @@ body{{margin:0;background:#000;color:#686a6e;font-family:"Roboto Condensed",Robo
     if(restartEl&&anchor.restart_utc_ms){{
       var skew=anchor.restart_display_skew_secs||0;
       var rem=Math.max(0,Math.floor((anchor.restart_utc_ms-now)/1000)+skew);
-      var rh=Math.floor(rem/3600);
-      var rm=Math.floor((rem%3600)/60);
-      var rs=rem%60;
-      restartEl.textContent=rh+':'+pad2(rm)+':'+pad2(rs);
+      if(rem<=0){{
+        restartEl.textContent='RESTARTING';
+        restartEl.className='stat-v stat-red';
+      }}else{{
+        var rh=Math.floor(rem/3600);
+        var rm=Math.floor((rem%3600)/60);
+        var rs=rem%60;
+        restartEl.textContent=rh+':'+pad2(rm)+':'+pad2(rs);
+        restartEl.className='stat-v stat-accent';
+      }}
     }}
   }}
   tick();
@@ -1491,13 +1504,15 @@ body{{margin:0;background:#000;color:#686a6e;font-family:"Roboto Condensed",Robo
   setInterval(poll,45000);
 }})();
 (function(){{
+  var chevronDown='<svg class="top10-chevron" viewBox="0 0 12 12" aria-hidden="true"><polygon points="1,3 11,3 6,10" fill="rgb(232,197,71)" stroke="none"/></svg>';
+  var chevronUp='<svg class="top10-chevron" viewBox="0 0 12 12" aria-hidden="true"><polygon points="1,9 11,9 6,2" fill="rgb(21,22,26)" stroke="rgb(232,197,71)" stroke-width="2" stroke-linejoin="miter" paint-order="stroke fill" vector-effect="non-scaling-stroke"/></svg>';
   document.querySelectorAll('.top10-toggle').forEach(function(btn){{
     btn.addEventListener('click',function(){{
       var block=btn.closest('.top10-collapsible');
       if(!block){{return;}}
       var open=block.classList.toggle('top10-expanded');
       btn.setAttribute('aria-expanded',open?'true':'false');
-      btn.innerHTML=open?'&#9650;':'&#9660;';
+      btn.innerHTML=open?chevronUp:chevronDown;
       btn.title=open?'Show top preview':'Show full Top 10';
     }});
   }});

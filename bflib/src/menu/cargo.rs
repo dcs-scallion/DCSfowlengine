@@ -17,7 +17,10 @@ for more details.
 use super::{ArgTuple, player_name, slot_for_group};
 use crate::{
     Context,
-    db::cargo::{Cargo, Oldest, SlotStats, Unpakistan},
+    db::{
+        cargo::{Cargo, Oldest, SlotStats, Unpakistan},
+        Db,
+    },
 };
 use anyhow::{Context as ErrContext, Result, anyhow};
 use bfprotocols::cfg::{Cfg, LimitEnforceTyp};
@@ -377,6 +380,7 @@ fn spawn_crate(lua: MizLua, arg: ArgTuple<GroupId, String>) -> Result<()> {
 
 pub(super) fn add_cargo_menu_for_group(
     cfg: &Cfg,
+    db: &Db,
     mc: &MissionCommands,
     side: &Side,
     group: GroupId,
@@ -483,8 +487,26 @@ pub(super) fn add_cargo_menu_for_group(
                 match created_menus.entry(p.clone()) {
                     Entry::Occupied(e) => Ok(e.get().clone()),
                     Entry::Vacant(e) => {
-                        let item = if p == name && dep.cost > 0 {
-                            String::from(format_compact!("{p}({} pts)", dep.cost))
+                        let item = if p == name {
+                            let (n, _) = db
+                                .number_deployed(*side, name.as_str())
+                                .with_context(|| {
+                                    format_compact!("getting number of {} deployed", name)
+                                })?;
+                            if dep.cost > 0 {
+                                String::from(format_compact!(
+                                    "{p} ({}pts,Dep:{}/{})",
+                                    dep.cost,
+                                    n,
+                                    dep.limit
+                                ))
+                            } else {
+                                String::from(format_compact!(
+                                    "{p} (Dep:{}/{})",
+                                    n,
+                                    dep.limit
+                                ))
+                            }
                         } else {
                             p.clone()
                         };

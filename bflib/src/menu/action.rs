@@ -549,7 +549,7 @@ fn add_action_menu(lua: MizLua, arg: ArgTriple<Ucid, GroupId, SlotId>) -> Result
             n = 0;
         }
         let title = if action.cost > 0 {
-            String::from(format_compact!("{name}({} pts)", action.cost))
+            String::from(format_compact!("{name} ({}pts)", action.cost))
         } else {
             name.clone()
         };

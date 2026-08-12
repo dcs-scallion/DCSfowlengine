@@ -272,10 +272,17 @@ pub(super) fn init_for_slot(ctx: &mut Context, lua: MizLua, slot: &SlotId) -> Re
             ewr::add_ewr_menu_for_group(&mc, si.miz_gid)?;
             let cap = CarryCap::from_typ(&cfg, si.typ.as_str());
             if cap.crates && ctx.db.ephemeral.cfg.rules.cargo.check(&ucid) {
-                cargo::add_cargo_menu_for_group(&cfg, &mc, &si.side, si.miz_gid, si.typ.as_str())?
+                cargo::add_cargo_menu_for_group(
+                    &cfg,
+                    &ctx.db,
+                    &mc,
+                    &si.side,
+                    si.miz_gid,
+                    si.typ.as_str(),
+                )?
             }
             if cap.troops && ctx.db.ephemeral.cfg.rules.troops.check(&ucid) {
-                troop::add_troops_menu_for_group(&cfg, &mc, &si.side, si.miz_gid)?
+                troop::add_troops_menu_for_group(&cfg, &ctx.db, &mc, &si.side, si.miz_gid)?
             }
             if ctx.db.ephemeral.cfg.rules.jtac.check(&ucid) {
                 jtac::init_jtac_menu_for_slot(ctx, lua, slot)?
