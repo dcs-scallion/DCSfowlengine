@@ -2104,6 +2104,7 @@ impl Default for Cfg {
             unit_cull_distance: 37040, // 20 nm
             ground_vehicle_cull_distance: 10000,
             cull_after: 1800,
+            groups_spawn_queue_stretch: 5,
             slow_timed_events_freq: 10,
             threatened_distance: default_threatened_distance(),
             threatened_cooldown: 300,

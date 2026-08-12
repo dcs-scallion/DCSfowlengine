@@ -637,6 +637,7 @@ impl Ephemeral {
         idx: &MizIndex,
         spctx: &SpawnCtx,
         shots: &ShotDb,
+        unthrottled: bool,
     ) -> Result<()> {
         let mut delayed: SmallVec<[GroupId; 16]> = smallvec![];
         while let Some((at, gids)) = self.delayspawnq.first_key_value() {
@@ -669,8 +670,19 @@ impl Ephemeral {
         }
         let dlen = self.despawnq.len();
         let slen = self.spawnq.len();
+        let stretch = self.cfg.groups_spawn_queue_stretch_effective() as usize;
+        let batch = |len: usize| -> usize {
+            if len == 0 {
+                return 0;
+            }
+            if unthrottled {
+                return len;
+            }
+            // Legacy rate is len/16 (>> 4). stretch multiplies that denominator.
+            max(1, len / (16usize.saturating_mul(stretch).max(1)))
+        };
         if dlen > 0 {
-            for _ in 0..max(1, dlen >> 4) {
+            for _ in 0..batch(dlen) {
                 if let Some((gid, despawn)) = self.despawnq.pop_front() {
                     if despawn_defer_combat(spctx.lua(), shots, persisted, now, gid, &despawn) {
                         self.delaydespawnq
@@ -695,7 +707,7 @@ impl Ephemeral {
                 }
             }
         } else if slen > 0 {
-            for _ in 0..max(1, slen >> 4) {
+            for _ in 0..batch(slen) {
                 if let Some(gid) = self.spawnq.pop_front() {
                     let group = maybe!(persisted.groups, gid, "group")?;
                     self.spawn_group(perf, persisted, idx, spctx, group, vec![])?;

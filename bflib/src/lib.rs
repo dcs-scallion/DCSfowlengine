@@ -2663,6 +2663,7 @@ fn run_timed_events(
         &ctx.idx,
         &spctx,
         &ctx.shots_out,
+        false,
     ) {
         error!("error processing spawn queue {:?}", e)
     }

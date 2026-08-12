@@ -1097,6 +1097,10 @@ fn default_cull_after() -> u32 {
     1800
 }
 
+fn default_groups_spawn_queue_stretch() -> u32 {
+    5
+}
+
 fn default_deployable_unpack_min_base_distance_m() -> u32 {
     0
 }
@@ -1864,6 +1868,11 @@ pub struct Cfg {
     /// If a base has been inactive for this long then cull it's units (Seconds)
     #[serde(default = "default_cull_after")]
     pub cull_after: u32,
+    /// Spread objective group spawn/despawn queue over time (spawn and despawn).
+    /// 1 = legacy rate (~1/16 of queue per second). 2..=10 = that many times slower peak.
+    /// Default 5. Values outside 1..=10 are treated as 5.
+    #[serde(default = "default_groups_spawn_queue_stretch")]
+    pub groups_spawn_queue_stretch: u32,
     /// how often to do more expensive checks such as unit culling and
     /// updating unit positions (Seconds)
     pub slow_timed_events_freq: u32,
@@ -2085,6 +2094,14 @@ impl Cfg {
         self.dcsserver_bot_scheduled_restart
             .as_ref()
             .and_then(|s| s.next_restart_utc(now))
+    }
+
+    /// Effective spawn/despawn queue stretch; out-of-range CFG values fall back to default (5).
+    pub fn groups_spawn_queue_stretch_effective(&self) -> u32 {
+        match self.groups_spawn_queue_stretch {
+            1..=10 => self.groups_spawn_queue_stretch,
+            _ => default_groups_spawn_queue_stretch(),
+        }
     }
 
     pub fn save(&self, miz_state_path: &Path) -> Result<()> {

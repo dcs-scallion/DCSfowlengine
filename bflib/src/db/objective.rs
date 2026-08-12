@@ -207,6 +207,22 @@ impl ObjGroupClass {
         matches!(self, Self::Production)
     }
 
+    /// Higher = spawn sooner within an objective activate wave (Lr first).
+    pub fn spawn_queue_priority(self) -> u8 {
+        match self {
+            Self::Lr => 4,
+            Self::Mr => 3,
+            Self::Sr => 2,
+            Self::Aaa => 1,
+            Self::Logi
+            | Self::Armor
+            | Self::Services
+            | Self::Production
+            | Self::ObjectiveStatic
+            | Self::Other => 0,
+        }
+    }
+
     /// ME-placed static tied to an objective; never spawn/despawn.
     pub fn is_me_objective_static(&self) -> bool {
         matches!(self, Self::Production | Self::ObjectiveStatic)
@@ -1942,6 +1958,7 @@ impl Db {
             }
             if !obj.spawned && spawn {
                 obj.spawned = true;
+                let mut wave: SmallVec<[(u8, GroupId); 32]> = smallvec![];
                 for gid in obj.groups.get(&obj.owner).unwrap_or(&Set::new()) {
                     let group = group!(self, gid)?;
                     let farp = obj.kind.is_farp();
@@ -1956,8 +1973,13 @@ impl Db {
                                 unit.position = unit.spawn_position;
                             }
                         }
-                        self.ephemeral.push_spawn(*gid);
+                        wave.push((group.class.spawn_queue_priority(), *gid));
                     }
+                }
+                // High priority (Lr) first within this activate wave.
+                wave.sort_by(|a, b| b.0.cmp(&a.0).then_with(|| a.1.cmp(&b.1)));
+                for (_, gid) in wave {
+                    self.ephemeral.push_spawn(gid);
                 }
             } else if obj.spawned
                 && !spawn
@@ -1965,28 +1987,33 @@ impl Db {
                 && now - obj.last_activate >= Duration::seconds(cfg.cull_after as i64)
             {
                 obj.spawned = false;
+                let mut wave: SmallVec<[(u8, GroupId, Despawn); 32]> = smallvec![];
                 for gid in obj.groups.get(&obj.owner).unwrap_or(&Set::new()) {
                     let group = group!(self, gid)?;
                     let farp = obj.kind.is_farp();
                     let services = group.class.is_services();
                     let me_static = group.class.is_me_objective_static();
                     if !farp && !services && !me_static && group_health!(self, gid)?.0 > 0 {
+                        let pri = group.class.spawn_queue_priority();
                         match group.kind {
                             Some(_) => {
                                 if let Some(oid) = self.ephemeral.object_id_by_gid.get(gid) {
-                                    self.ephemeral
-                                        .push_despawn(*gid, Despawn::Group(oid.clone()))
+                                    wave.push((pri, *gid, Despawn::Group(oid.clone())));
                                 }
                             }
                             None => {
                                 for uid in &group.units {
                                     let unit = unit!(self, uid)?;
-                                    self.ephemeral
-                                        .push_despawn(*gid, Despawn::Static(unit.name.clone()))
+                                    wave.push((pri, *gid, Despawn::Static(unit.name.clone())));
                                 }
                             }
                         }
                     }
+                }
+                // Low priority first on cull (Aaa/other before Lr).
+                wave.sort_by(|a, b| a.0.cmp(&b.0).then_with(|| a.1.cmp(&b.1)));
+                for (_, gid, ds) in wave {
+                    self.ephemeral.push_despawn(gid, ds);
                 }
             } else if spawn != obj.enabled {
                 obj.enabled = spawn;

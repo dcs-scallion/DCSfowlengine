@@ -958,6 +958,7 @@ impl Db {
                 idx,
                 spctx,
                 &ShotDb::default(),
+                true,
             )?
         }
         self.setup_warehouses_after_load(spctx.lua())
@@ -1127,6 +1128,7 @@ impl Db {
                 idx,
                 &spctx,
                 shots,
+                true,
             )?;
         }
         if self.ephemeral.spawnq_len() > 0 {

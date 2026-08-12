@@ -291,6 +291,7 @@
   "unit_cull_distance": 55000,
   "ground_vehicle_cull_distance": 10000,
   "cull_after": 600,
+  "groups_spawn_queue_stretch": 10,
   "slow_timed_events_freq": 10,
   "ewr_mode": "Original",
   "ewr_delay": 60,
