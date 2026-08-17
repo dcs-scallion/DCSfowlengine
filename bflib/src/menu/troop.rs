@@ -179,14 +179,14 @@ pub(super) fn add_troops_menu_for_group(
                 .with_context(|| format_compact!("getting number of {} troops deployed", sq.name))?;
             let item = if sq.cost > 0 {
                 format_compact!(
-                    "Load {} squad ({}pts,Dep:{}/{})",
+                    "Load {} ({}pts,Dep:{}/{})",
                     sq.name,
                     sq.cost,
                     n,
                     sq.limit
                 )
             } else {
-                format_compact!("Load {} squad (Dep:{}/{})", sq.name, n, sq.limit)
+                format_compact!("Load {} (Dep:{}/{})", sq.name, n, sq.limit)
             };
             mc.add_command_for_group(
                 group,

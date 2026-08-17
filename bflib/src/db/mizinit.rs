@@ -617,15 +617,14 @@ impl Db {
             for point in slot.route()?.points()? {
                 let point = point?;
                 match point.typ {
-                    PointType::TakeOffGround | PointType::TakeOffGroundHot => {
-                        ground_start = true
-                    }
+                    PointType::TakeOffGround
+                    | PointType::TakeOffGroundHot
+                    | PointType::TakeOffParking
+                    | PointType::TakeOff => ground_start = true,
                     PointType::Land
                     | PointType::LandingReFuAr
-                    | PointType::TakeOff
                     | PointType::Custom(_)
                     | PointType::Nil
-                    | PointType::TakeOffParking
                     | PointType::TurningPoint => (),
                 }
             }

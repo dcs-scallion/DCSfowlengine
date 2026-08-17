@@ -244,9 +244,11 @@ pub struct Ephemeral {
     pub(super) dynamic_cargo_rehook_in_progress: FxHashSet<String>,
     /// When `air_dropped` was first set (chute grace / rehook timing).
     pub(super) dynamic_cargo_air_dropped_at: FxHashMap<String, DateTime<Utc>>,
-    /// Deslot airframe: re-clamp DCS count after leave-unit (engine often returns late).
-    /// `(due_utc, land_oid, typ_name, target_stored)`.
+    /// Slot/deslot airframe: re-clamp DCS count after engine warehouse apply.
+    /// `(due_utc, oid, typ_name, target_stored)`.
     pub(super) pending_deslot_airframe_fix: Vec<(DateTime<Utc>, ObjectiveId, String, u32)>,
+    /// Airframe loss: delayed destroy of dumped ED cargo `(due, ucid, wreck_x, wreck_y)`.
+    pub(super) pending_airframe_loss_dynamic_cargo: Vec<(DateTime<Utc>, Ucid, f64, f64)>,
     /// Hub/crate transfer credits for sync-to (target oid + item → amount).
     /// Sync-to may raise DCS stock only up to this credit (prevents phantom free stock).
     pub(super) sync_to_equipment_credit: FxHashMap<(ObjectiveId, String), u32>,
@@ -352,6 +354,7 @@ impl Default for Ephemeral {
             dynamic_cargo_rehook_in_progress: FxHashSet::default(),
             dynamic_cargo_air_dropped_at: FxHashMap::default(),
             pending_deslot_airframe_fix: Vec::default(),
+            pending_airframe_loss_dynamic_cargo: Vec::default(),
             sync_to_equipment_credit: FxHashMap::default(),
             sync_to_liquid_credit: FxHashMap::default(),
             ca_controller_by_oid: FxHashMap::default(),
@@ -1399,10 +1402,11 @@ impl Ephemeral {
                         unit.set_alt(su.position.p.y)?;
                         unit.set_heading(su.heading)?;
                         unit.set_name(su.name.clone())?;
-                        if matches!(group.origin, DeployKind::Crate { .. }) {
-                            // ED F8 / sling require Cargos + canCargo.
+                        if let DeployKind::Crate { spec, .. } = &group.origin {
+                            // ED F8 / sling require Cargos + canCargo + mass (Hoggit / CTLD).
                             let _ = unit.raw_set("canCargo", true);
                             let _ = unit.raw_set("category", "Cargos");
+                            let _ = unit.raw_set("mass", spec.weight.max(100) as f64);
                         }
                         if let Err(e) = super::ai_air::apply_persisted_crate_ship_link(
                             spctx.lua(),

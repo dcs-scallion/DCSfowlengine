@@ -51,6 +51,7 @@
     "retina": true,
     "padding": 0,
     "http_port": 17842,
+    "public_map_url": "",
     "front_line_in_map": true,
     "dowload_acmi": true,
     "dowload_acmi_url": "",

@@ -1301,9 +1301,31 @@ impl Db {
                     .context("getting airbase")?
                     .get_warehouse()
                     .context("getting warehouse")?;
+                let typ_name = sifo.typ.0.clone();
+                let prev = obj
+                    .warehouse
+                    .equipment
+                    .get(&typ_name)
+                    .map(|i| i.stored)
+                    .unwrap_or(0);
+                let target = prev.saturating_sub(1);
+                wh.set_item(typ_name.clone(), target).with_context(|| {
+                    format_compact!("setting {typ_name} in warehouse")
+                })?;
+                maybe_mut!(obj.warehouse.equipment, typ_name, "equip")?.stored = target;
+                info!(
+                    "slot airframe: set {typ_name} at {:?} to {target} (prev={prev})",
+                    obj.id
+                );
+                // DCS also consumes the airframe on spawn, often after this call.
+                let due = Utc::now() + Duration::seconds(2);
+                self.ephemeral.pending_deslot_airframe_fix.push((
+                    due,
+                    obj.id,
+                    typ_name,
+                    target,
+                ));
                 if sifo.ground_start {
-                    wh.remove_item(sifo.typ.0.clone(), 1)
-                        .with_context(|| format_compact!("removing {} from warehouse", sifo.typ.0))?;
                     for wep in unit.get_ammo()? {
                         let wep = wep?;
                         let count = wep.count()?;
@@ -1312,13 +1334,10 @@ impl Db {
                         debug!("removing {count} {typ} from the warehouse which contains {whcnt}");
                         wh.remove_item(typ.clone(), count)?;
                         if let Some(inv) = obj.warehouse.equipment.get_mut_cow(&typ) {
-                            inv.stored = whcnt - count;
+                            inv.stored = whcnt.saturating_sub(count);
                         }
                     }
                 }
-                maybe_mut!(obj.warehouse.equipment, sifo.typ.0, "equip")?.stored = wh
-                    .get_item_count(sifo.typ.0.clone())
-                    .with_context(|| format_compact!("getting warehouse count for {}", sifo.typ.0))?;
                 Ok(())
             };
             if let Err(e) = adjust_warehouse() {
@@ -1549,7 +1568,7 @@ impl Db {
         }
         self.ephemeral.dirty();
         info!(
-            "deslot airframe: deferred clamp {typ_name} at {oid:?} {dcs}->{target}"
+            "airframe warehouse clamp {typ_name} at {oid:?} {dcs}->{target}"
         );
         Ok(())
     }

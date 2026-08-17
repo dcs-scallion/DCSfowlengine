@@ -39,10 +39,11 @@ use dcso3::{
     env::miz::MizIndex,
     land::Land,
     net::{SlotId, Ucid},
+    object::{DcsObject, DcsOid},
     radians_to_degrees,
     static_object::StaticObject,
     trigger::Trigger,
-    unit::Unit,
+    unit::{ClassUnit, Unit},
 };
 use enumflags2::BitFlags;
 use fxhash::FxHashMap;
@@ -525,12 +526,60 @@ impl Db {
         self.delete_group(&gid)
     }
 
+    /// True if the player unit still exists with life (copilot takeover after PilotDead).
+    pub(super) fn object_airframe_flyable(lua: MizLua, id: &DcsOid<ClassUnit>) -> bool {
+        match Unit::get_instance(lua, id) {
+            Ok(u) => u.is_exist().unwrap_or(false) && u.get_life().map(|l| l >= 1).unwrap_or(false),
+            Err(_) => false,
+        }
+    }
+
+    pub(super) fn player_current_airframe_flyable(&self, lua: MizLua, ucid: &Ucid) -> bool {
+        let Some(player) = self.persisted.players.get(ucid) else {
+            return false;
+        };
+        let Some((slot, _)) = player.current_slot.as_ref() else {
+            return false;
+        };
+        let Ok(unit) = self.ephemeral.slot_instance_unit(lua, slot) else {
+            return false;
+        };
+        unit.is_exist().unwrap_or(false) && unit.get_life().map(|l| l >= 1).unwrap_or(false)
+    }
+
+    /// Crash / UnitLost / Dead: destroy bay crates. Skip PilotDead while the airframe still flies.
+    pub fn destroy_fowl_crates_if_airframe_lost(
+        &mut self,
+        lua: MizLua,
+        id: &DcsOid<ClassUnit>,
+    ) {
+        if Self::object_airframe_flyable(lua, id) {
+            return;
+        }
+        let Some(ucid) = self.player_in_unit(false, id) else {
+            return;
+        };
+        let slot = self.ephemeral.get_slot_by_object_id(id).cloned();
+        self.delete_fowl_crates_for_carrier(Some(lua), &ucid, slot.as_ref(), true);
+        self.destroy_dynamic_cargo_if_airframe_lost(lua, id);
+    }
+
     /// Delete Fowl crates still in this player's ED bay when they leave the airframe.
     pub fn delete_fowl_crates_on_carrier_deslot(
         &mut self,
         lua: Option<MizLua>,
         ucid: &Ucid,
         slot: Option<&SlotId>,
+    ) {
+        self.delete_fowl_crates_for_carrier(lua, ucid, slot, false);
+    }
+
+    fn delete_fowl_crates_for_carrier(
+        &mut self,
+        lua: Option<MizLua>,
+        ucid: &Ucid,
+        slot: Option<&SlotId>,
+        include_geometry: bool,
     ) {
         let mut gids: SmallVec<[GroupId; 8]> = smallvec![];
         for gid in &self.persisted.crates {
@@ -561,13 +610,23 @@ impl Db {
             for gid in self.fowl_crate_gids_on_ed_bay(lua, slot) {
                 gids.push(gid);
             }
+            if include_geometry {
+                for gid in self.fowl_crate_gids_geometry_on_ed_bay(lua, slot) {
+                    gids.push(gid);
+                }
+            }
         }
         gids.sort_unstable();
         gids.dedup();
+        let why = if include_geometry {
+            "airframe lost"
+        } else {
+            "deslot"
+        };
         for gid in gids {
-            info!("deslot {ucid}: deleting Fowl crate {gid} left in cargo bay");
+            info!("{why} {ucid}: deleting Fowl crate {gid} left in cargo bay");
             if let Err(e) = self.delete_group(&gid) {
-                warn!("deslot {ucid}: delete Fowl crate {gid} failed: {e:?}");
+                warn!("{why} {ucid}: delete Fowl crate {gid} failed: {e:?}");
             }
         }
     }
@@ -981,6 +1040,11 @@ impl Db {
             if self.try_clear_ed_bay_cargo_named(lua, gid, name.as_str()) {
                 continue;
             }
+            if self.fowl_crate_is_slung_by_player(lua, &ucid, name.as_str())
+                || self.player_airframe_in_air(lua, &ucid)
+            {
+                continue;
+            }
             self.ephemeral.shared_ed_eject_pending_place.remove(&gid);
             if let Err(e) = self.place_fowl_crate_on_ed_unload_line(lua, gid, uid, &ucid, &[]) {
                 warn!("crate {gid}: deferred ED unload place failed: {e:?}");
@@ -1159,6 +1223,13 @@ impl Db {
         let mut current: FxHashMap<GroupId, Ucid> = FxHashMap::default();
         for (slot, ucid) in &carriers {
             let ac = self.ephemeral.slot_instance_unit(lua, slot).ok();
+            let typ = self
+                .persisted
+                .players
+                .get(ucid)
+                .and_then(|p| p.current_slot.as_ref())
+                .and_then(|(_, inst)| inst.as_ref())
+                .map(|i| i.typ.0.clone());
             for gid in self.fowl_crate_gids_geometry_on_ed_bay(lua, slot) {
                 let Some(group) = self.persisted.groups.get(&gid) else {
                     continue;
@@ -1168,6 +1239,7 @@ impl Db {
                 };
                 let mut on_board = false;
                 let mut dead_on_carrier = false;
+                let mut slung = false;
                 for uid in &group.units {
                     let Some(unit) = self.persisted.units.get(uid) else {
                         continue;
@@ -1181,12 +1253,23 @@ impl Db {
                     {
                         on_board = true;
                     }
+                    if let (Some(ac), Some(typ)) = (ac.as_ref(), typ.as_ref()) {
+                        if crate::db::dynamic_cargo::fowl_crate_is_on_sling(
+                            lua,
+                            ac,
+                            typ.as_str(),
+                            unit.name.as_str(),
+                        ) {
+                            slung = true;
+                        }
+                    }
                     if unit.dead && ed_carrier.as_ref() == Some(ucid) {
                         dead_on_carrier = true;
                     }
                 }
                 // OBB alone is not "aboard" — F8 rear dumps sit inside the C-130 box.
-                if on_board || dead_on_carrier {
+                // Sling stays aboard until the hook actually releases on the ground.
+                if on_board || dead_on_carrier || slung {
                     current.insert(gid, ucid.clone());
                 }
             }
@@ -1228,6 +1311,20 @@ impl Db {
                 continue;
             };
             if unit.dead {
+                continue;
+            }
+            if self.fowl_crate_is_slung_by_player(lua, &ucid, unit.name.as_str()) {
+                current.insert(gid, ucid);
+                continue;
+            }
+            if self.player_airframe_in_air(lua, &ucid) {
+                continue;
+            }
+            if !self.player_current_airframe_flyable(lua, &ucid) {
+                info!("crate {gid}: carrier airframe lost; deleting instead of F8 unload place");
+                if let Err(e) = self.delete_group(&gid) {
+                    warn!("crate {gid}: delete after airframe loss failed: {e:?}");
+                }
                 continue;
             }
             let in_grace = self

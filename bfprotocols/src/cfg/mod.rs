@@ -1192,10 +1192,14 @@ pub struct DiscordMapCfg {
     pub retina: bool,
     #[serde(default)]
     pub padding: u32,
-    /// Read-only interactive map HTTP port (`0.0.0.0`, GET `/map` and `/map.png` only).
-    /// Discord link uses `serverSettings.lua` `bind_address` with this port.
+    /// Read-only interactive map HTTP listen port (`0.0.0.0`, GET `/map` and `/map.png` only).
+    /// Used as the Discord link only when `public_map_url` is empty.
     #[serde(default = "default_discord_map_http_port")]
     pub http_port: u16,
+    /// Public HTTPS URL for Discord / player links (e.g. `https://fowl-ta.duckdns.org/map`).
+    /// Empty: fall back to `http://{bind_address}:{http_port}/map`. One URL per DCS server.
+    #[serde(default)]
+    pub public_map_url: String,
     /// Draw campaign front line on interactive `/map` HTML (SVG only, not Discord PNG).
     /// Requires `front_line: true` in CFG root; validated at mission start.
     #[serde(default)]
@@ -1270,6 +1274,7 @@ impl Default for DiscordMapCfg {
             retina: true,
             padding: 0,
             http_port: default_discord_map_http_port(),
+            public_map_url: Default::default(),
             front_line_in_map: false,
             dowload_acmi: false,
             dowload_acmi_url: Default::default(),
@@ -1297,6 +1302,31 @@ impl Default for DiscordMapCfg {
             rounds_per_day: default_rounds_per_day(),
         }
     }
+}
+
+/// Discord / player HTTPS URL. Empty string means use `http://{bind_address}:{http_port}/map`.
+pub fn normalize_discord_map_public_url(raw: &str) -> Result<Option<std::string::String>> {
+    let t = raw.trim();
+    if t.is_empty() {
+        return Ok(None);
+    }
+    let lower = t.to_ascii_lowercase();
+    if !lower.starts_with("https://") {
+        bail!("discord_map.public_map_url must start with https://");
+    }
+    let hostport = t[8..].split('/').next().unwrap_or("");
+    if hostport.is_empty() || (hostport.starts_with('[') && !hostport.contains(']')) {
+        bail!("discord_map.public_map_url needs a hostname");
+    }
+    if hostport == "localhost" || hostport.starts_with("127.") || hostport == "[::1]" {
+        bail!("discord_map.public_map_url must be a public hostname, not {hostport}");
+    }
+    let mut url = t.trim_end_matches('/').to_string();
+    let last = url.rsplit('/').next().unwrap_or("");
+    if !last.eq_ignore_ascii_case("map") {
+        url.push_str("/map");
+    }
+    Ok(Some(url))
 }
 
 impl DiscordMapCfg {
@@ -1348,6 +1378,7 @@ impl DiscordMapCfg {
         if self.http_port == 0 {
             bail!("discord_map.http_port must be > 0 when discord_map.enabled");
         }
+        normalize_discord_map_public_url(&self.public_map_url)?;
         if self.campaign_stats && self.rounds_per_day == 0 {
             bail!("discord_map.rounds_per_day must be >= 1 when discord_map.campaign_stats is true");
         }
@@ -2164,5 +2195,41 @@ impl Cfg {
             }
         }
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod discord_map_public_url_tests {
+    use super::normalize_discord_map_public_url;
+
+    #[test]
+    fn empty_means_fallback() {
+        assert_eq!(normalize_discord_map_public_url("").unwrap(), None);
+        assert_eq!(normalize_discord_map_public_url("  ").unwrap(), None);
+    }
+
+    #[test]
+    fn https_host_appends_map() {
+        assert_eq!(
+            normalize_discord_map_public_url("https://fowl-ta.duckdns.org")
+                .unwrap()
+                .as_deref(),
+            Some("https://fowl-ta.duckdns.org/map")
+        );
+    }
+
+    #[test]
+    fn https_map_path_kept() {
+        assert_eq!(
+            normalize_discord_map_public_url("https://fowl-sarh.duckdns.org/map/")
+                .unwrap()
+                .as_deref(),
+            Some("https://fowl-sarh.duckdns.org/map")
+        );
+    }
+
+    #[test]
+    fn http_rejected() {
+        assert!(normalize_discord_map_public_url("http://fowl-ta.duckdns.org/map").is_err());
     }
 }

@@ -1896,13 +1896,13 @@ impl Db {
         const BAY_READY_MIN: f64 = 0.5;
         const MAX_UNLOAD_ATTEMPTS: u8 = 3;
 
-        let (slot, name) = {
+        let (slot, name, typ) = {
             let player = self
                 .persisted
                 .players
                 .get(carrier)
                 .ok_or_else(|| anyhow!("reject Fowl crate: missing carrier player"))?;
-            let Some((slot, Some(_))) = player.current_slot.as_ref() else {
+            let Some((slot, Some(inst))) = player.current_slot.as_ref() else {
                 bail!("reject Fowl crate: carrier has no slot instance");
             };
             let unit_name = self
@@ -1911,13 +1911,17 @@ impl Db {
                 .get(&uid)
                 .map(|u| u.name.clone())
                 .ok_or_else(|| anyhow!("reject Fowl crate: missing unit {uid:?}"))?;
-            (slot.clone(), unit_name)
+            (slot.clone(), unit_name, inst.typ.0.clone())
         };
 
         let ac = self
             .ephemeral
             .slot_instance_unit(lua, &slot)
             .context("reject Fowl crate: carrier unit")?;
+        if crate::db::dynamic_cargo::fowl_crate_is_on_sling(lua, &ac, typ.as_str(), name.as_str()) {
+            info!("crate {gid}: over-limit skip eject, still on sling ({name})");
+            return Ok(());
+        }
 
         let _ = ac.open_ramp(true);
         let bay_ready = ac.check_open_ramp().unwrap_or(false)
@@ -2278,13 +2282,14 @@ impl Db {
                 }
             };
         // Never keep aircraft-bay altitude on land; re-sample ground under final pos.
+        const GROUND_PLACE_AGL_M: f64 = 0.35;
         let (final_pos, alt, ship_hub, ship_offsets) = if ship_offsets.is_some() {
             (final_pos, alt, ship_hub, ship_offsets)
         } else {
             let ground = Land::singleton(lua)?
                 .get_height(LuaVec2(final_pos))
                 .unwrap_or(alt);
-            (final_pos, ground, None, None)
+            (final_pos, ground + GROUND_PLACE_AGL_M, None, None)
         };
 
         // Prefer clearing ED bay before destroy+respawn (same name must leave getCargosOnBoard).
@@ -2505,6 +2510,16 @@ impl Db {
         if !was_dead {
             return Ok(());
         }
+        if let Some(carrier) = &carrier {
+            if !self.player_current_airframe_flyable(lua, carrier) {
+                info!("crate {gid}: carrier airframe lost; deleting instead of revive ({name})");
+                self.delete_group(&gid)?;
+                if st.is_exist().unwrap_or(false) {
+                    let _ = st.clone().destroy();
+                }
+                return Ok(());
+            }
+        }
         let point = st.get_point()?;
         if let Some(unit) = self.persisted.units.get_mut_cow(&uid) {
             unit.dead = false;
@@ -2521,7 +2536,13 @@ impl Db {
         self.ephemeral.dirty();
         info!("revived Fowl crate {gid} after ED cargo unload ({name})");
         if let Some(carrier) = carrier {
-            if let Err(e) = self.place_fowl_crate_on_ed_unload_line(lua, gid, uid, &carrier, &[]) {
+            if self.player_airframe_in_air(lua, &carrier)
+                || self.fowl_crate_is_slung_by_player(lua, &carrier, name.as_str())
+            {
+                info!("crate {gid}: revive in place (sling / airborne), skip unload line");
+            } else if let Err(e) =
+                self.place_fowl_crate_on_ed_unload_line(lua, gid, uid, &carrier, &[])
+            {
                 warn!("crate {gid}: ED unload place after revive failed: {e:?}");
             }
         }

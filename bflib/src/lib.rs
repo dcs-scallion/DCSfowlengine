@@ -1284,6 +1284,7 @@ fn unit_killed(
     id: DcsOid<ClassUnit>,
     now: DateTime<Utc>,
 ) -> Result<()> {
+    ctx.db.destroy_fowl_crates_if_airframe_lost(lua, &id);
     // Player slots usually have no persisted uid; unit_dead then skips war-loss.
     let player_ucid = ctx.db.player_in_unit(false, &id);
     if let Some(ref ucid) = player_ucid {
@@ -1759,6 +1760,12 @@ fn on_event(lua: MizLua, ev: Event) -> Result<()> {
                         }
                     }
                 }
+            }
+        }
+        Event::Crash(e) => {
+            if let Some(unit) = e.initiator.as_ref().and_then(|u| u.as_unit().ok()) {
+                let id = unit.object_id()?;
+                ctx.db.destroy_fowl_crates_if_airframe_lost(lua, &id);
             }
         }
         Event::MissionEnd => unsafe {
@@ -2640,6 +2647,7 @@ fn run_timed_events(
     sanitize_connected_airborne_locks(ctx, lua, ts);
     process_pending_airborne_deslot_penalties(ctx, ts);
     ctx.db.process_pending_deslot_airframe_fixes(lua, ts);
+    ctx.db.process_pending_airframe_loss_dynamic_cargo(lua, ts);
 
     match run_slow_timed_events(lua, ctx, perf, path, ts) {
         Ok(AdminResult::Continue) => (),

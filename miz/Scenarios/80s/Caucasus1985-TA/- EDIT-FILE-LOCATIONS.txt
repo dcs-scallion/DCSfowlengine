@@ -1,0 +1,35 @@
+##################################################################################################
+# settings for build mission                                                                     #
+##################################################################################################
+# DCS user Saved Games path                                                                      #
+$DCS_user_path = "C:\Users\Robo\Saved Games\DCS"
+# Name of the compiled mission output                                                            #
+$mission_name  = "Caucasus1985-TA"
+$target_cfg_name = "${mission_name}_CFG"
+# DCS/bflib use the "sortie" string from l10n/DEFAULT/dictionary (not the .miz filename alone).  #
+# FowlTools overwrites dictionary[mission.sortie] to match --output .miz stem on each build.     #
+##################################################################################################
+
+
+###################################################################
+# settings for compilation Fowl DLL & FowlTools                   #
+###################################################################
+# Workspace root Fowl Engine repository                           #
+$work_path_engine = "C:\GitHub\DCSfowlengine"
+# bftools folder under repository                                 #
+$bftools          = "\bftools"
+# Mission folder under repository                                 #
+$path_engine_mission = "\miz\Scenarios\80s\Caucasus1985-TA"
+###################################################################
+
+
+###################################################################
+# Scratch / test outputs (gitignored)                             #
+###################################################################
+# bftools --output _test* / _t* (.miz and matching *_fowl_export   #
+# if any): -pracovní_soubory-možno_smazat/ only.                    #
+# Release *_fowl_export.json (mission stem, e.g. Rust_Fowl_...):    #
+# scenario root — required for build copy and bflib at runtime.     #
+# Repo .gitignore: **/-pracovní_soubory-možno_smazat/, **/_test*,   #
+# **/_t*                                                            #
+###################################################################

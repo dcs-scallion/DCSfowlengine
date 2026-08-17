@@ -164,7 +164,14 @@ pub fn mission_name_from_sortie_path(sortie_state_path: &Path) -> String {
         .to_string()
 }
 
-pub fn discord_map_interactive_url(bind_address: &str, http_port: u16) -> Result<String> {
+pub fn discord_map_interactive_url(
+    bind_address: &str,
+    http_port: u16,
+    public_map_url: &str,
+) -> Result<String> {
+    if let Some(url) = bfprotocols::cfg::normalize_discord_map_public_url(public_map_url)? {
+        return Ok(url);
+    }
     let host = super::server_settings::public_bind_host(bind_address)?;
     let base = if host.contains(':') && !host.starts_with('[') {
         format!("http://[{host}]:{http_port}")
@@ -178,9 +185,10 @@ pub fn build_discord_map_caption(
     mission_name: &str,
     bind_address: &str,
     http_port: u16,
+    public_map_url: &str,
 ) -> Result<(String, String, String)> {
     let ts = Utc::now().format("%Y-%m-%d %H:%M:%S").to_string();
-    let map_url = discord_map_interactive_url(bind_address, http_port)?;
+    let map_url = discord_map_interactive_url(bind_address, http_port, public_map_url)?;
     let caption = format!(
         "Campaign objective map : {mission_name}\nObjectives status as of {ts} UTC\nInteractive HTML campaign map: {map_url}"
     );
@@ -961,7 +969,12 @@ fn discord_map_post_job(
 ) -> Result<DiscordMapPostJob> {
     let server = super::server_settings::load_server_settings(lua);
     let (caption, status_utc, _) =
-        build_discord_map_caption(&runtime.mission_name, &server.bind_address, cfg.http_port)?;
+        build_discord_map_caption(
+            &runtime.mission_name,
+            &server.bind_address,
+            cfg.http_port,
+            &cfg.public_map_url,
+        )?;
     let status_bar = collect_map_status_bar(lua, db, live, &runtime.mission_name, &status_utc)?;
     Ok(DiscordMapPostJob {
         webhook_url: cfg.webhook_url.clone().unwrap().to_string(),
@@ -1121,7 +1134,8 @@ pub fn init_discord_map(
         return Ok(());
     }
     let server = super::server_settings::load_server_settings(lua);
-    let map_url = discord_map_interactive_url(&server.bind_address, cfg.http_port)?;
+    let map_url =
+        discord_map_interactive_url(&server.bind_address, cfg.http_port, &cfg.public_map_url)?;
     info!("discord map: interactive URL {map_url}");
     let (nw, se) = read_corner_zones(lua, miz)?;
     let viewport = viewport_from_corners(nw, se, cfg.width).with_context(|| {

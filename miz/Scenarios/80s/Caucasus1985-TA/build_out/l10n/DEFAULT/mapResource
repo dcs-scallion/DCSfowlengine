@@ -1,0 +1,13 @@
+mapResource = 
+{
+	["ResKey_ImageBriefing_236"] = "server-image-attrition.jpg",
+	["ResKey_ImageBriefing_245"] = "Caucasus1985SARH-1R.jpg",
+	["ResKey_ImageBriefing_247"] = "Caucasus1985SARH-3.jpg",
+	["ResKey_ImageBriefing_242"] = "Caucasus1985SARH-2.jpg",
+	["ResKey_ImageBriefing_246"] = "Caucasus1985SARH-2.jpg",
+	["ResKey_ImageBriefing_248"] = "Caucasus1985SARH-4.jpg",
+	["ResKey_initScript_6"] = "mizinit.lua",
+	["ResKey_ImageBriefing_241"] = "Caucasus1985SARH-1B.jpg",
+	["ResKey_ImageBriefing_243"] = "Caucasus1985SARH-3.jpg",
+	["ResKey_ImageBriefing_244"] = "Caucasus1985SARH-4.jpg",
+} -- end of mapResource

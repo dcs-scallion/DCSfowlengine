@@ -31,10 +31,10 @@ use dcso3::{
     env::miz::Miz,
     land::Land,
     net::Ucid,
-    object::ObjectCategory,
+    object::{DcsObject, DcsOid, ObjectCategory},
     radians_to_degrees,
     static_object::StaticObject,
-    unit::Unit,
+    unit::{ClassUnit, Unit},
     warehouse::{LiquidType, Warehouse},
     world::{SearchVolume, World},
     LuaEnv, LuaVec2, LuaVec3, MizLua, String, Vector2, Vector3,
@@ -43,6 +43,7 @@ use fxhash::{FxHashMap, FxHashSet};
 use log::{info, warn};
 use mlua::{FromLua, Value};
 use serde_derive::{Deserialize, Serialize};
+use std::sync::{Arc, Mutex};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DynamicCargoCrate {
@@ -88,6 +89,12 @@ const GROUND_AGL_M: f64 = 8.0;
 const AIRDROP_CHUTE_GRACE: chrono::Duration = chrono::Duration::seconds(180);
 /// Slow-tick misses of `get_by_name` before treating crate as gone (parachute name glitch).
 const PRUNE_MISS_LIMIT: u8 = 4;
+/// One `searchObjects` after airdrop: DCS chute copies + impact pos.
+const AIRDROP_ORPHAN_RADIUS_M: f64 = 150.0;
+/// Crash dump / bay cargo near the wreck (same as Fowl `crate_static_ed_carrier`).
+const AIRFRAME_LOSS_CARGO_RADIUS_M: f64 = 80.0;
+/// DCS may dump bay cargo a few seconds after Crash / UnitLost.
+const AIRFRAME_LOSS_CARGO_PURGE_DELAY: chrono::Duration = chrono::Duration::seconds(3);
 
 fn cargo_agl_m(lua: MizLua, x: f64, y: f64, alt: f64) -> Option<f64> {
     let land = Land::singleton(lua).ok()?;
@@ -95,16 +102,49 @@ fn cargo_agl_m(lua: MizLua, x: f64, y: f64, alt: f64) -> Option<f64> {
     Some(alt - ground)
 }
 
-/// CDS / ISO after chute often lack reliable sling params; CTLD-style stand-in.
-fn slingable_type_after_airdrop(type_name: &str) -> &str {
-    if type_name.starts_with("cds_")
-        || type_name == "iso_container"
-        || type_name == "iso_container_small"
-    {
-        "container_cargo"
-    } else {
-        type_name
-    }
+#[derive(Clone)]
+struct NearbyCargoHit {
+    name: String,
+    x: f64,
+    y: f64,
+    alt: f64,
+}
+
+fn collect_nearby_cargo(lua: MizLua, x: f64, y: f64, radius: f64) -> Vec<NearbyCargoHit> {
+    let hits = Arc::new(Mutex::new(Vec::new()));
+    let Ok(world) = World::singleton(lua) else {
+        return Vec::new();
+    };
+    let alt = Land::singleton(lua)
+        .ok()
+        .and_then(|l| l.get_height(LuaVec2(Vector2::new(x, y))).ok())
+        .unwrap_or(0.);
+    let vol = SearchVolume::Sphere {
+        point: LuaVec3(Vector3::new(x, alt + 2., y)),
+        radius,
+    };
+    let acc = hits.clone();
+    let _ = world.search_objects(
+        ObjectCategory::Cargo,
+        vol,
+        mlua::Value::Nil,
+        move |_, obj, _| {
+            let Ok(n) = obj.get_name() else {
+                return Ok(true);
+            };
+            let Ok(pt) = obj.get_point() else {
+                return Ok(true);
+            };
+            acc.lock().unwrap().push(NearbyCargoHit {
+                name: n,
+                x: pt.0.x,
+                y: pt.0.z,
+                alt: pt.0.y,
+            });
+            Ok(true)
+        },
+    );
+    hits.lock().unwrap().clone()
 }
 
 impl DynamicCargoCrate {
@@ -651,60 +691,222 @@ impl Db {
         }
     }
 
-    /// Chute copies often keep a different name; purge unregistered same-type cargo nearby.
+    fn cargo_live_xz(lua: MizLua, name: &str, fallback_x: f64, fallback_y: f64) -> (f64, f64) {
+        if let Ok(Static::Static(st)) = StaticObject::get_by_name(lua, name) {
+            if let Ok(p) = st.get_point() {
+                return (p.0.x, p.0.z);
+            }
+        }
+        (fallback_x, fallback_y)
+    }
+
+    fn unit_cargo_board_names(ac: &Unit) -> Vec<String> {
+        let Ok(Some(cargos)) = ac.get_cargos_on_board() else {
+            return Vec::new();
+        };
+        let mut names = Vec::new();
+        let _ = cargos.for_each(|c| {
+            let Ok(c) = c else {
+                return Ok(());
+            };
+            if let Ok(name) = c.get_name() {
+                names.push(name);
+            }
+            Ok(())
+        });
+        names
+    }
+
+    fn destroy_dynamic_cargo_lost_with_airframe(&mut self, lua: MizLua, name: &str) {
+        info!("airframe lost: deleting dynamic cargo {name} (checkout kept, no restore)");
+        self.destroy_dynamic_cargo_world_static(lua, name);
+        self.remove_dynamic_cargo_registry_entry(name);
+        self.ephemeral.dirty();
+    }
+
+    fn purge_dynamic_cargo_at_wreck(
+        &mut self,
+        lua: MizLua,
+        ucid: &Ucid,
+        wreck_x: f64,
+        wreck_y: f64,
+        unit: Option<&Unit>,
+    ) {
+        let radius_sq = AIRFRAME_LOSS_CARGO_RADIUS_M * AIRFRAME_LOSS_CARGO_RADIUS_M;
+        let mut names: FxHashSet<String> = FxHashSet::default();
+        if let Some(ac) = unit {
+            for name in Self::unit_cargo_board_names(ac) {
+                names.insert(name);
+            }
+        }
+        let registered: Vec<(String, Option<Ucid>, bool, f64, f64)> = self
+            .persisted
+            .dynamic_cargo_crates
+            .into_iter()
+            .map(|(n, c)| {
+                (
+                    n.clone(),
+                    c.last_carrier.clone(),
+                    c.airdrop_rehooked,
+                    c.x,
+                    c.y,
+                )
+            })
+            .collect();
+        for (name, last_carrier, rehooked, x, y) in registered {
+            if last_carrier.as_ref() != Some(ucid) || rehooked {
+                continue;
+            }
+            let (lx, ly) = Self::cargo_live_xz(lua, name.as_str(), x, y);
+            let dx = lx - wreck_x;
+            let dy = ly - wreck_y;
+            if dx * dx + dy * dy <= radius_sq {
+                names.insert(name);
+            }
+        }
+        for name in names {
+            if self.persisted.dynamic_cargo_crates.get(&name).is_some() {
+                self.destroy_dynamic_cargo_lost_with_airframe(lua, name.as_str());
+            } else {
+                self.destroy_dynamic_cargo_world_static(lua, name.as_str());
+            }
+        }
+        let keep: FxHashSet<String> = self
+            .persisted
+            .dynamic_cargo_crates
+            .into_iter()
+            .map(|(n, _)| n.clone())
+            .collect();
+        for hit in collect_nearby_cargo(lua, wreck_x, wreck_y, AIRFRAME_LOSS_CARGO_RADIUS_M) {
+            if keep.contains(&hit.name) {
+                continue;
+            }
+            self.destroy_dynamic_cargo_world_static(lua, hit.name.as_str());
+        }
+    }
+
+    /// Crash / UnitLost / Dead: destroy bay ED cargo. Skip PilotDead while the airframe still flies.
+    pub fn destroy_dynamic_cargo_if_airframe_lost(
+        &mut self,
+        lua: MizLua,
+        id: &DcsOid<ClassUnit>,
+    ) {
+        if !self.dynamic_cargo_enabled() {
+            return;
+        }
+        if Self::object_airframe_flyable(lua, id) {
+            return;
+        }
+        let Some(ucid) = self.player_in_unit(false, id) else {
+            return;
+        };
+        let unit = Unit::get_instance(lua, id).ok();
+        let wreck = unit
+            .as_ref()
+            .and_then(|u| u.get_point().ok())
+            .map(|p| (p.0.x, p.0.z))
+            .or_else(|| {
+                self.player_instance_world_pos(&ucid)
+                    .map(|(x, y, _)| (x, y))
+            });
+        let Some((wreck_x, wreck_y)) = wreck else {
+            return;
+        };
+        self.purge_dynamic_cargo_at_wreck(lua, &ucid, wreck_x, wreck_y, unit.as_ref());
+        if !self
+            .ephemeral
+            .pending_airframe_loss_dynamic_cargo
+            .iter()
+            .any(|(_, u, ..)| u == &ucid)
+        {
+            self.ephemeral.pending_airframe_loss_dynamic_cargo.push((
+                Utc::now() + AIRFRAME_LOSS_CARGO_PURGE_DELAY,
+                ucid,
+                wreck_x,
+                wreck_y,
+            ));
+        }
+    }
+
+    pub fn process_pending_airframe_loss_dynamic_cargo(
+        &mut self,
+        lua: MizLua,
+        now: DateTime<Utc>,
+    ) {
+        if self.ephemeral.pending_airframe_loss_dynamic_cargo.is_empty() {
+            return;
+        }
+        let pending = std::mem::take(&mut self.ephemeral.pending_airframe_loss_dynamic_cargo);
+        let mut keep = Vec::new();
+        for (due, ucid, wreck_x, wreck_y) in pending {
+            if now < due {
+                keep.push((due, ucid, wreck_x, wreck_y));
+                continue;
+            }
+            self.purge_dynamic_cargo_at_wreck(lua, &ucid, wreck_x, wreck_y, None);
+        }
+        self.ephemeral.pending_airframe_loss_dynamic_cargo = keep;
+    }
+
+    fn dynamic_cargo_is_airframe_loss_dump(
+        &self,
+        lua: MizLua,
+        entry: &DynamicCargoCrate,
+    ) -> bool {
+        if entry.airdrop_rehooked {
+            return false;
+        }
+        let Some(ucid) = entry.last_carrier.as_ref() else {
+            return false;
+        };
+        if self.player_current_airframe_flyable(lua, ucid) {
+            return false;
+        }
+        let radius_sq = AIRFRAME_LOSS_CARGO_RADIUS_M * AIRFRAME_LOSS_CARGO_RADIUS_M;
+        let (x, y) = Self::cargo_live_xz(lua, entry.name.as_str(), entry.x, entry.y);
+        if let Some((wx, wy, _)) = self.player_instance_world_pos(ucid) {
+            let dx = x - wx;
+            let dy = y - wy;
+            if dx * dx + dy * dy <= radius_sq {
+                return true;
+            }
+        }
+        for (_, u, wx, wy) in &self.ephemeral.pending_airframe_loss_dynamic_cargo {
+            if u != ucid {
+                continue;
+            }
+            let dx = x - wx;
+            let dy = y - wy;
+            if dx * dx + dy * dy <= radius_sq {
+                return true;
+            }
+        }
+        false
+    }
+
+    /// DCS chute copies (often a new name); purge unregistered cargo near the impact.
     fn destroy_airdrop_cargo_orphans(
         &self,
         lua: MizLua,
         keep_name: &str,
-        old_type: &str,
         x: f64,
         y: f64,
     ) {
-        self.destroy_dynamic_cargo_world_static(lua, keep_name);
-        let Ok(world) = World::singleton(lua) else {
-            return;
-        };
-        let alt = Land::singleton(lua)
-            .ok()
-            .and_then(|l| l.get_height(LuaVec2(Vector2::new(x, y))).ok())
-            .unwrap_or(0.);
-        let vol = SearchVolume::Sphere {
-            point: LuaVec3(Vector3::new(x, alt + 2., y)),
-            radius: 25.,
-        };
-        let registered: std::sync::Arc<FxHashSet<String>> = std::sync::Arc::new(
-            self.persisted
-                .dynamic_cargo_crates
-                .into_iter()
-                .map(|(n, _)| n.clone())
-                .collect(),
-        );
-        let keep = String::from(keep_name);
-        let old = String::from(old_type);
-        let _ = world.search_objects(
-            ObjectCategory::Cargo,
-            vol,
-            mlua::Value::Nil,
-            move |lua, obj, _| {
-                let Ok(n) = obj.get_name() else {
-                    return Ok(true);
-                };
-                let typ_match = obj
-                    .get_type_name()
-                    .ok()
-                    .is_some_and(|t| t.as_str() == old.as_str());
-                let purge = n.as_str() == keep.as_str()
-                    || (!registered.contains(n.as_str()) && typ_match);
-                if purge {
-                    if let Ok(Static::Static(st)) = StaticObject::get_by_name(lua, n.as_str()) {
-                        let _ = st.destroy();
-                    } else {
-                        let _ = obj.destroy();
-                    }
-                }
-                Ok(true)
-            },
-        );
+        let registered: FxHashSet<String> = self
+            .persisted
+            .dynamic_cargo_crates
+            .into_iter()
+            .map(|(n, _)| n.clone())
+            .collect();
+        for hit in collect_nearby_cargo(lua, x, y, AIRDROP_ORPHAN_RADIUS_M) {
+            if hit.name.as_str() == keep_name {
+                continue;
+            }
+            if registered.contains(&hit.name) {
+                continue;
+            }
+            self.destroy_dynamic_cargo_world_static(lua, hit.name.as_str());
+        }
     }
 
     /// Debit source for newly appeared cargo warehouse qty (Birth often registers empty).
@@ -1310,12 +1512,16 @@ impl Db {
         }
     }
 
-    /// After parachute: respawn with `canCargo` (CDS/ISO → `container_cargo`) for sling / To stock.
+    /// After parachute: respawn same type with `canCargo` at impact; then destroy DCS originals.
     fn rehook_airdropped_dynamic_cargo(&mut self, lua: MizLua, name: &str) -> Result<()> {
         let Some(mut entry) = self.persisted.dynamic_cargo_crates.get(name).cloned() else {
             return Ok(());
         };
         if entry.airdrop_rehooked || !entry.air_dropped {
+            return Ok(());
+        }
+        if self.dynamic_cargo_is_airframe_loss_dump(lua, &entry) {
+            self.destroy_dynamic_cargo_lost_with_airframe(lua, name);
             return Ok(());
         }
         if self.dynamic_cargo_name_on_any_board(lua, name) {
@@ -1325,12 +1531,7 @@ impl Db {
             .dynamic_cargo_rehook_in_progress
             .insert(name.into());
         let old_type = entry.type_name.clone();
-        if let Ok(Static::Static(st)) = StaticObject::get_by_name(lua, name) {
-            if let Ok(point) = st.get_point() {
-                entry.x = point.0.x;
-                entry.y = point.0.z;
-                entry.alt = point.0.y;
-            }
+        let named_pt = if let Ok(Static::Static(st)) = StaticObject::get_by_name(lua, name) {
             if let Ok((equipment, liquids)) = snapshot_cargo_warehouse(lua, &st) {
                 if equipment.len() > 0 || liquids.len() > 0 {
                     entry.equipment = equipment;
@@ -1342,9 +1543,25 @@ impl Db {
                     entry.last_weight_kg = w;
                 }
             }
+            st.get_point().ok().map(|p| (p.0.x, p.0.z, p.0.y))
+        } else {
+            None
+        };
+        if let Some((x, y, alt)) = named_pt {
+            entry.x = x;
+            entry.y = y;
+            entry.alt = alt;
+        } else {
+            let nearby = collect_nearby_cargo(lua, entry.x, entry.y, AIRDROP_ORPHAN_RADIUS_M);
+            if let Some(hit) = nearby.iter().find(|h| {
+                h.name.as_str() != name
+                    && cargo_agl_m(lua, h.x, h.y, h.alt).is_some_and(|a| a <= GROUND_AGL_M)
+            }) {
+                entry.x = hit.x;
+                entry.y = hit.y;
+                entry.alt = hit.alt;
+            }
         }
-        self.destroy_airdrop_cargo_orphans(lua, name, old_type.as_str(), entry.x, entry.y);
-        entry.type_name = String::from(slingable_type_after_airdrop(old_type.as_str()));
         if let Ok(land) = Land::singleton(lua) {
             if let Ok(ground) = land.get_height(LuaVec2(Vector2::new(entry.x, entry.y))) {
                 entry.alt = ground + 1.0;
@@ -1353,6 +1570,7 @@ impl Db {
         let spawn_ok = self.respawn_dynamic_cargo_crate(lua, &entry);
         self.ephemeral.dynamic_cargo_rehook_in_progress.remove(name);
         spawn_ok.with_context(|| format_compact!("respawn after airdrop {name}"))?;
+        self.destroy_airdrop_cargo_orphans(lua, name, entry.x, entry.y);
         if let Some(e) = self.persisted.dynamic_cargo_crates.get_mut_cow(name) {
             e.air_dropped = true;
             e.airdrop_rehooked = true;
@@ -1369,8 +1587,8 @@ impl Db {
             .insert(name.into(), Utc::now());
         self.ephemeral.dynamic_cargo_miss_count.remove(name);
         info!(
-            "dynamic cargo airdrop rehook (canCargo): {name} type {old_type} -> {}",
-            entry.type_name
+            "dynamic cargo airdrop rehook (canCargo): {name} type {old_type} pos=({:.0},{:.0})",
+            entry.x, entry.y
         );
         Ok(())
     }
@@ -1405,9 +1623,7 @@ impl Db {
                                 .map(|life| life > 0 && life < life0)
                         })
                         .unwrap_or(false);
-                    let loaded =
-                        dynamic_cargo_is_aboard_transport(self, lua, entry.side, &st_obj)
-                            .unwrap_or(false);
+                    let loaded = self.dynamic_cargo_name_on_any_board(lua, name.as_str());
                     (pos, damaged, loaded)
                 } else {
                     (entry.pos(), false, false)
@@ -1535,6 +1751,10 @@ impl Db {
         let mut rejected_same_objective = 0u32;
         let mut delivered_weight_kg = 0f64;
         for name in names {
+            if self.dynamic_cargo_name_on_any_board(lua, name.as_str()) {
+                skipped_loaded += 1;
+                continue;
+            }
             let Some(entry) = self.persisted.dynamic_cargo_crates.get(&name).cloned() else {
                 continue;
             };
@@ -1542,10 +1762,6 @@ impl Db {
                 self.persisted.dynamic_cargo_crates.remove_cow(&name);
                 continue;
             };
-            if dynamic_cargo_is_aboard_transport(self, lua, entry.side, &st)? {
-                skipped_loaded += 1;
-                continue;
-            }
             if entry.source == dest_oid {
                 rejected_same_objective += 1;
                 continue;
@@ -1810,6 +2026,99 @@ pub(crate) fn dynamic_cargo_is_aboard_unit(
         }
     }
     Ok(false)
+}
+
+/// Hook vs bay: cargo hanging below the airframe inside DCS rope length.
+const SLING_BELOW_M: f64 = 2.5;
+
+fn cargo_point_for_sling(lua: MizLua, ac: &Unit, crate_name: &str) -> Option<Vector3> {
+    if let Ok(Static::Static(st)) = StaticObject::get_by_name(lua, crate_name) {
+        if st.is_exist().unwrap_or(false) {
+            if let Ok(p) = st.get_point() {
+                return Some(p.0);
+            }
+        }
+    }
+    let Ok(Some(cargos)) = ac.get_cargos_on_board() else {
+        return None;
+    };
+    let mut pt = None;
+    let _ = cargos.for_each(|c| {
+        let Ok(c) = c else {
+            return Ok(());
+        };
+        if c.get_name()
+            .map(|n| n.as_str() == crate_name)
+            .unwrap_or(false)
+        {
+            pt = c.get_point().ok().map(|p| p.0);
+        }
+        Ok(())
+    });
+    pt
+}
+
+/// True when this Fowl crate is on the cargo hook, not in the F8 bay.
+pub(crate) fn fowl_crate_is_on_sling(
+    lua: MizLua,
+    ac: &Unit,
+    type_name: &str,
+    crate_name: &str,
+) -> bool {
+    let Some(dim) = dynamic_cargo_aircraft_dim(type_name) else {
+        return false;
+    };
+    if dim.ropelength <= 0. {
+        return false;
+    }
+    let Ok(upt) = ac.get_point() else {
+        return false;
+    };
+    let Some(cpt) = cargo_point_for_sling(lua, ac, crate_name) else {
+        return false;
+    };
+    let below = upt.0.y - cpt.y;
+    if below < SLING_BELOW_M {
+        return false;
+    }
+    let d3 = ((upt.0.x - cpt.x).powi(2)
+        + (upt.0.y - cpt.y).powi(2)
+        + (upt.0.z - cpt.z).powi(2))
+    .sqrt();
+    d3 <= dim.ropelength + 1.0
+}
+
+impl Db {
+    pub(crate) fn player_airframe_in_air(&self, lua: MizLua, ucid: &Ucid) -> bool {
+        let Some(player) = self.persisted.players.get(ucid) else {
+            return false;
+        };
+        let Some((slot, inst)) = player.current_slot.as_ref() else {
+            return false;
+        };
+        if let Ok(u) = self.ephemeral.slot_instance_unit(lua, slot) {
+            return u.in_air().unwrap_or(false);
+        }
+        inst.as_ref().map(|i| i.in_air).unwrap_or(false)
+    }
+
+    pub(crate) fn fowl_crate_is_slung_by_player(
+        &self,
+        lua: MizLua,
+        ucid: &Ucid,
+        crate_name: &str,
+    ) -> bool {
+        let Some(player) = self.persisted.players.get(ucid) else {
+            return false;
+        };
+        let Some((slot, Some(inst))) = player.current_slot.as_ref() else {
+            return false;
+        };
+        let Ok(ac) = self.ephemeral.slot_instance_unit(lua, slot) else {
+            return false;
+        };
+        fowl_crate_is_on_sling(lua, &ac, inst.typ.as_str(), crate_name)
+    }
 }
 
 /// True if `Unit.getCargosOnBoard` still lists this crate name (F8 / ghost slots).
