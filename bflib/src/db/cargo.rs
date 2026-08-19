@@ -1045,6 +1045,10 @@ impl Db {
             {
                 continue;
             }
+            if self.ephemeral.shared_ed_sling_landed.contains(&gid) {
+                self.ephemeral.shared_ed_eject_pending_place.remove(&gid);
+                continue;
+            }
             self.ephemeral.shared_ed_eject_pending_place.remove(&gid);
             if let Err(e) = self.place_fowl_crate_on_ed_unload_line(lua, gid, uid, &ucid, &[]) {
                 warn!("crate {gid}: deferred ED unload place failed: {e:?}");
@@ -1241,6 +1245,37 @@ impl Db {
                 let mut on_board = false;
                 let mut dead_on_carrier = false;
                 let mut slung = false;
+                if self.ephemeral.shared_ed_sling_landed.contains(&gid) {
+                    for uid in &group.units {
+                        let Some(unit) = self.persisted.units.get(uid) else {
+                            continue;
+                        };
+                        if ac
+                            .as_ref()
+                            .map(|u| {
+                                crate::db::dynamic_cargo::unit_has_cargo_named(u, unit.name.as_str())
+                            })
+                            .unwrap_or(false)
+                        {
+                            on_board = true;
+                        }
+                        if let (Some(ac), Some(typ)) = (ac.as_ref(), typ.as_ref()) {
+                            if crate::db::dynamic_cargo::fowl_crate_is_on_sling(
+                                lua,
+                                ac,
+                                typ.as_str(),
+                                unit.name.as_str(),
+                            ) {
+                                slung = true;
+                            }
+                        }
+                    }
+                    if on_board || slung {
+                        self.ephemeral.shared_ed_sling_landed.remove(&gid);
+                    } else {
+                        continue;
+                    }
+                }
                 for uid in &group.units {
                     let Some(unit) = self.persisted.units.get(uid) else {
                         continue;
@@ -1279,14 +1314,13 @@ impl Db {
             }
         }
 
-        // Detect sling drop: was slung last tick, no longer slung now.
-        self.ephemeral.shared_ed_sling_dropped.clear();
+        // Sling drop: was slung last tick, no longer slung — leave crate at landing spot.
         for (gid, ucid) in &self.ephemeral.shared_ed_prev_slung.clone() {
             if !cur_slung.contains_key(gid) {
                 info!("crate {gid}: sling drop detected, skipping unload-line relocation");
-                self.ephemeral.shared_ed_sling_dropped.insert(*gid);
-                // Keep in current so relocate loop skips it entirely.
-                current.entry(*gid).or_insert_with(|| ucid.clone());
+                self.ephemeral.shared_ed_sling_landed.insert(*gid);
+                current.remove(gid);
+                let _ = ucid;
             }
         }
         self.ephemeral.shared_ed_prev_slung = cur_slung;
@@ -1311,8 +1345,7 @@ impl Db {
             if self.ephemeral.shared_ed_eject_pending_place.contains_key(&gid) {
                 continue;
             }
-            // Sling drop this tick — crate landed where it was dropped; don't relocate.
-            if self.ephemeral.shared_ed_sling_dropped.contains(&gid) {
+            if self.ephemeral.shared_ed_sling_landed.contains(&gid) {
                 continue;
             }
             let Some(uid) = self
