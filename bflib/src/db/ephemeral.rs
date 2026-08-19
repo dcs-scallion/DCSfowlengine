@@ -236,6 +236,10 @@ pub struct Ephemeral {
     pub(super) shared_ed_bay_ghost_names: FxHashMap<GroupId, String>,
     /// Fowl crates last seen geometrically in a shared-ED bay (gid → carrier). F8 unload detect.
     pub(super) shared_ed_fowl_aboard: FxHashMap<GroupId, Ucid>,
+    /// Crates that just landed from a sling hook this tick — skip unload-line relocation.
+    pub(super) shared_ed_sling_dropped: FxHashSet<GroupId>,
+    /// Previous tick slung crates (gid → carrier) for drop-transition detection.
+    pub(super) shared_ed_prev_slung: FxHashMap<GroupId, Ucid>,
     /// Warehouse dynamic cargo name → register time (brief prune grace during F8 fill/load).
     pub(super) dynamic_cargo_registered_at: FxHashMap<String, DateTime<Utc>>,
     /// Consecutive slow-tick world misses before prune treats cargo as gone.
@@ -349,6 +353,8 @@ impl Default for Ephemeral {
             shared_ed_eject_pending_place: FxHashMap::default(),
             shared_ed_bay_ghost_names: FxHashMap::default(),
             shared_ed_fowl_aboard: FxHashMap::default(),
+            shared_ed_sling_dropped: FxHashSet::default(),
+            shared_ed_prev_slung: FxHashMap::default(),
             dynamic_cargo_registered_at: FxHashMap::default(),
             dynamic_cargo_miss_count: FxHashMap::default(),
             dynamic_cargo_rehook_in_progress: FxHashSet::default(),

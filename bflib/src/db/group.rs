@@ -2536,7 +2536,9 @@ impl Db {
         self.ephemeral.dirty();
         info!("revived Fowl crate {gid} after ED cargo unload ({name})");
         if let Some(carrier) = carrier {
-            if self.player_airframe_in_air(lua, &carrier)
+            if self.ephemeral.shared_ed_sling_dropped.contains(&gid) {
+                info!("crate {gid}: revive in place (sling drop), skip unload line");
+            } else if self.player_airframe_in_air(lua, &carrier)
                 || self.fowl_crate_is_slung_by_player(lua, &carrier, name.as_str())
             {
                 info!("crate {gid}: revive in place (sling / airborne), skip unload line");

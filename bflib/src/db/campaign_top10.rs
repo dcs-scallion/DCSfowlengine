@@ -84,7 +84,7 @@ impl Db {
         let Some(target) = classify_target_kind(self, dead) else {
             return;
         };
-        let participants = player_kill_participants(self, dead);
+        let participants = player_kill_blow(self, dead);
         if participants.is_empty() {
             return;
         }
@@ -265,6 +265,41 @@ fn shooter_is_air(db: &Db, who: &Who) -> bool {
         return false;
     };
     tags.contains(UnitTag::Aircraft) || tags.contains(UnitTag::Helicopter)
+}
+
+/// Returns only the killing blow shooter for Top10 (matches DCS S_EVENT_KILL semantics).
+fn player_kill_blow(db: &Db, dead: &Dead) -> SmallVec<[(Ucid, bool); 1]> {
+    let accept = |shot: &bfprotocols::shots::Shot| -> Option<(Ucid, bool)> {
+        let Who::Player { ucid, side, .. } = &shot.shooter else {
+            return None;
+        };
+        if side == dead.victim.side() {
+            return None;
+        }
+        if let Who::Player { ucid: victim, .. } = &dead.victim {
+            if victim == ucid {
+                return None;
+            }
+        }
+        Some((*ucid, shooter_is_air(db, &shot.shooter)))
+    };
+    // Last player hit in shots[] is the killing blow.
+    for shot in dead.shots.iter().rev() {
+        if shot.hit {
+            if let Some(entry) = accept(shot) {
+                return smallvec![entry];
+            }
+        }
+    }
+    // Fallback: last player shot within 3 minutes (no hit recorded).
+    for shot in dead.shots.iter().rev() {
+        if dead.time - shot.time <= Duration::minutes(3) {
+            if let Some(entry) = accept(shot) {
+                return smallvec![entry];
+            }
+        }
+    }
+    smallvec![]
 }
 
 fn player_kill_participants(db: &Db, dead: &Dead) -> SmallVec<[(Ucid, bool); 8]> {

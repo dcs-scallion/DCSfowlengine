@@ -1221,6 +1221,7 @@ impl Db {
             .collect();
 
         let mut current: FxHashMap<GroupId, Ucid> = FxHashMap::default();
+        let mut cur_slung: FxHashMap<GroupId, Ucid> = FxHashMap::default();
         for (slot, ucid) in &carriers {
             let ac = self.ephemeral.slot_instance_unit(lua, slot).ok();
             let typ = self
@@ -1272,8 +1273,23 @@ impl Db {
                 if on_board || dead_on_carrier || slung {
                     current.insert(gid, ucid.clone());
                 }
+                if slung {
+                    cur_slung.insert(gid, ucid.clone());
+                }
             }
         }
+
+        // Detect sling drop: was slung last tick, no longer slung now.
+        self.ephemeral.shared_ed_sling_dropped.clear();
+        for (gid, ucid) in &self.ephemeral.shared_ed_prev_slung.clone() {
+            if !cur_slung.contains_key(gid) {
+                info!("crate {gid}: sling drop detected, skipping unload-line relocation");
+                self.ephemeral.shared_ed_sling_dropped.insert(*gid);
+                // Keep in current so relocate loop skips it entirely.
+                current.entry(*gid).or_insert_with(|| ucid.clone());
+            }
+        }
+        self.ephemeral.shared_ed_prev_slung = cur_slung;
 
         // F8 can keep crates alive in-bay without Dead — drop stale F10 marks.
         for gid in current.keys() {
@@ -1293,6 +1309,10 @@ impl Db {
         let mut reserved: SmallVec<[Vector2; 8]> = smallvec![];
         for (gid, ucid) in unloaded {
             if self.ephemeral.shared_ed_eject_pending_place.contains_key(&gid) {
+                continue;
+            }
+            // Sling drop this tick — crate landed where it was dropped; don't relocate.
+            if self.ephemeral.shared_ed_sling_dropped.contains(&gid) {
                 continue;
             }
             let Some(uid) = self

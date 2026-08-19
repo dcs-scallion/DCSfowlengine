@@ -150,6 +150,31 @@ Points: 1250
 Side Switches: 1
 ```
 
+## Objective Points
+
+Each objective maintains its own points pool, separate from player balances. The pool is a shared coalition resource — anyone can contribute to it and the whole team benefits when crates are unpacked.
+
+**Contributing to the pool**
+
+Use the transfer command with the `objective:` prefix:
+
+```
+-transfer 200 objective:Sochi
+```
+
+This moves 200 of your personal points into Sochi's reserve.
+
+**How costs are split at unpack time**
+
+Every crate records the objective it was loaded from (the *origin objective*). When you unpack, the engine verifies that your personal balance plus the origin objective's pool cover the deployable cost. Your own points are always spent first; the objective pool covers whatever remains.
+
+**Rules to keep in mind**
+
+- **No range limit.** Crates can be flown anywhere on the map — the origin objective still contributes its points at unpack.
+- **Proximity restrictions.** Some servers block unpacking within a set distance of friendly objectives. This is a placement rule only and has no effect on cost calculation.
+- **Logistics repairs.** On servers that charge for repairs, objective points are drawn against repair costs the same way.
+- **Capture transfers the pool.** If the origin objective is captured, its accumulated points go to the new owner. The enemy coalition can then draw on them. If the pool is simply empty, you cover the full cost yourself.
+
 ## Point Transfers
 
 Some servers allow point transfers between players.
