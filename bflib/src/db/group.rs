@@ -1750,6 +1750,20 @@ impl Db {
                 return Ok(());
             }
         }
+        // MP native sling: DCS often fires Dead on unhook (no killer). Soft-respawn in place.
+        if killer.is_none()
+            && self.ephemeral.cfg.dynamic_cargo_delivery.enabled
+            && self.persisted.units.get(&uid).is_some_and(|u| {
+                let gid = u.group;
+                self.persisted.crates.contains(&gid)
+                    && (self.ephemeral.shared_ed_sling_landed.contains(&gid)
+                        || self.ephemeral.shared_ed_prev_slung.contains_key(&gid))
+            })
+        {
+            let gid = unit!(self, uid)?.group;
+            info!("crate {gid}: sling unhook/impact Dead — soft-respawn in place");
+            return self.soft_respawn_fowl_crate_after_sling_impact(lua, gid, uid);
+        }
         if self.persisted.units.get(&uid).is_some_and(|u| u.dead) {
             return Ok(());
         }
@@ -1855,6 +1869,12 @@ impl Db {
                             }
                             info!("crate {gid} despawned near transport; keeping for ED cargo load");
                         }
+                    } else if killer.is_none()
+                        && (self.ephemeral.shared_ed_sling_landed.contains(&gid)
+                            || self.ephemeral.shared_ed_prev_slung.contains_key(&gid))
+                    {
+                        info!("crate {gid}: sling impact (late Dead) — soft-respawn in place");
+                        self.soft_respawn_fowl_crate_after_sling_impact(lua, gid, uid)?;
                     } else {
                         self.delete_group(&gid)?
                     }
@@ -2431,6 +2451,65 @@ impl Db {
             }
             _ => String::from(current),
         }
+    }
+
+    /// Replace a Fowl crate DCS killed on sling unhook (MP physics) at its last ground pos.
+    fn soft_respawn_fowl_crate_after_sling_impact(
+        &mut self,
+        lua: MizLua,
+        gid: GroupId,
+        uid: UnitId,
+    ) -> Result<()> {
+        const GROUND_PLACE_AGL_M: f64 = 0.35;
+        let (name, pos, heading) = {
+            let unit = unit!(self, uid)?;
+            (unit.name.clone(), unit.pos, unit.heading)
+        };
+        let alt = Land::singleton(lua)?
+            .get_height(LuaVec2(pos))
+            .unwrap_or(0.)
+            + GROUND_PLACE_AGL_M;
+        let mut position = Position3::default();
+        position.p.x = pos.x;
+        position.p.y = alt;
+        position.p.z = pos.y;
+
+        self.ephemeral.shared_ed_place_ignore_dead.insert(gid);
+        if let Ok(Static::Static(st)) = StaticObject::get_by_name(lua, name.as_str()) {
+            if st.is_exist().unwrap_or(false) {
+                let _ = st.destroy();
+            }
+        }
+        self.ephemeral.uid_by_static.retain(|_, u| *u != uid);
+        if let Some(unit) = self.persisted.units.get_mut_cow(&uid) {
+            unit.dead = false;
+            unit.hp_percent = 100;
+            unit.pos = pos;
+            unit.spawn_pos = pos;
+            unit.heading = heading;
+            unit.spawn_heading = heading;
+            unit.position = position;
+            unit.spawn_position = position;
+        }
+        if let Some(group) = self.persisted.groups.get_mut_cow(&gid) {
+            if let DeployKind::Crate { ed_carrier, .. } = &mut group.origin {
+                *ed_carrier = None;
+            }
+        }
+        self.ephemeral.shared_ed_sling_landed.insert(gid);
+        self.ephemeral.shared_ed_fowl_aboard.remove(&gid);
+        self.ephemeral.shared_ed_prev_slung.remove(&gid);
+        if let Some(id) = self.ephemeral.group_marks.remove(&gid) {
+            self.ephemeral.msgs.delete_mark(id);
+        }
+        self.ephemeral.push_spawn(gid);
+        self.mark_group(lua, &gid)?;
+        self.ephemeral.dirty();
+        info!(
+            "crate {gid}: soft-respawn after sling impact as {name} at ({:.1},{:.1})",
+            pos.x, pos.y
+        );
+        Ok(())
     }
 
     /// Nearest same-side ED cargo transport player when Dead is likely F8/sling.
