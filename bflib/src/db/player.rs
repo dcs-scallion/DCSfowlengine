@@ -1341,7 +1341,21 @@ impl Db {
                 Ok(())
             };
             if let Err(e) = adjust_warehouse() {
-                error!("couldn't adjust warehouse {:?}", e)
+                error!("failed to adjust warehouse {:?}", e)
+            }
+        }
+        // After obj borrow ends — clear ferry linkDynTempl registry if stock empty.
+        {
+            let typ_name = sifo.typ.0.clone();
+            let stored = self
+                .persisted
+                .objectives
+                .get(&oid)
+                .and_then(|o| o.warehouse.equipment.get(&typ_name))
+                .map(|i| i.stored)
+                .unwrap_or(0);
+            if stored == 0 {
+                self.clear_runtime_dyn_templ_airframe(oid, typ_name.as_str());
             }
         }
         let hub_claims = if !in_air {
@@ -1458,15 +1472,20 @@ impl Db {
                 home_wh
                     .set_item(typ_name.clone(), home_prev)
                     .context("clamp airframe at slot home")?;
-                let home_obj = objective_mut!(self, home).context("home objective")?;
-                let inv = home_obj
-                    .warehouse
-                    .equipment
-                    .get_or_default_cow(typ_name.clone());
-                inv.stored = home_prev;
+                {
+                    let home_obj = objective_mut!(self, home).context("home objective")?;
+                    let inv = home_obj
+                        .warehouse
+                        .equipment
+                        .get_or_default_cow(typ_name.clone());
+                    inv.stored = home_prev;
+                }
                 info!(
                     "deslot airframe: clamped home {home:?} {typ_name} {home_dcs}->{home_prev} (ferry to {land_oid:?})"
                 );
+                if home_prev == 0 {
+                    self.clear_runtime_dyn_templ_airframe(home, typ_name.as_str());
+                }
             }
         }
 
@@ -1479,6 +1498,16 @@ impl Db {
         info!(
             "deslot airframe: set {typ_name} at {land_oid:?} to {target} (dcs_before={land_dcs} prev={land_prev} dcs_after={land_after})"
         );
+
+        if land_prev == 0 {
+            if let Err(e) =
+                self.register_runtime_dyn_templ_airframe(lua, land_oid, typ_name.as_str())
+            {
+                warn!(
+                    "deslot airframe: runtime linkDynTempl {land_oid:?} {typ_name}: {e:?}"
+                );
+            }
+        }
 
         let mut sync: SmallVec<[String; 4]> = smallvec![typ_name.clone()];
         if !is_airbase && let Ok(unit) = Unit::get_instance(lua, objid) {
@@ -1557,14 +1586,19 @@ impl Db {
         }
         wh.set_item(String::from(typ_name), target)
             .context("set_item clamp")?;
-        let obj = objective_mut!(self, oid).context("objective")?;
-        let inv = obj
-            .warehouse
-            .equipment
-            .get_or_default_cow(String::from(typ_name));
-        inv.stored = target;
-        if inv.capacity < target {
-            inv.capacity = target.max(1);
+        {
+            let obj = objective_mut!(self, oid).context("objective")?;
+            let inv = obj
+                .warehouse
+                .equipment
+                .get_or_default_cow(String::from(typ_name));
+            inv.stored = target;
+            if inv.capacity < target {
+                inv.capacity = target.max(1);
+            }
+        }
+        if target == 0 {
+            self.clear_runtime_dyn_templ_airframe(oid, typ_name);
         }
         self.ephemeral.dirty();
         info!(

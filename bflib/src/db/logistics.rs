@@ -218,6 +218,68 @@ fn apply_me_warehouse_link_dyn_templ(
     Ok(updated)
 }
 
+/// Ensure one airframe ME row has owner `linkDynTempl` (create row if missing).
+/// Unlike capture, does not rewrite every aircraft row or add the full DT set.
+fn ensure_me_warehouse_airframe_link_dyn_templ(
+    lua: MizLua,
+    ab_id: i64,
+    owner: Side,
+    unit_type: &str,
+    links: &FxHashMap<(Side, String), i64>,
+) -> Result<bool> {
+    let Some(&gid) = links.get(&(owner, String::from(unit_type))) else {
+        warn!(
+            "runtime linkDynTempl: no zzDT for {owner:?} {unit_type} (airbase id {ab_id})"
+        );
+        return Ok(false);
+    };
+    let Some(warehouses) = env_warehouses_table(lua)? else {
+        warn!("runtime linkDynTempl: env.warehouses missing");
+        return Ok(false);
+    };
+    let Some(wh) = me_warehouse_table_for_airbase_id(&warehouses, ab_id)? else {
+        warn!("runtime linkDynTempl: no ME warehouse for airbase id {ab_id}");
+        return Ok(false);
+    };
+    let aircrafts: LuaTable = match wh.raw_get("aircrafts") {
+        Ok(t) => t,
+        Err(_) => {
+            let t = lua.inner().create_table()?;
+            wh.raw_set("aircrafts", t.clone())?;
+            t
+        }
+    };
+    let resource_map = warehouse::Warehouse::get_resource_map(lua).ok();
+    let cat = aircraft_me_category(resource_map.as_ref(), unit_type);
+    let cat_tbl: LuaTable = match aircrafts.raw_get(cat) {
+        Ok(t) => t,
+        Err(_) => {
+            let t = lua.inner().create_table()?;
+            aircrafts.raw_set(cat, t.clone())?;
+            t
+        }
+    };
+    if let Ok(row) = cat_tbl.raw_get::<_, LuaTable>(unit_type) {
+        row.raw_set("linkDynTempl", gid)?;
+        return Ok(true);
+    }
+    let row = lua.inner().create_table()?;
+    row.raw_set("initialAmount", 0u32)?;
+    row.raw_set("linkDynTempl", gid)?;
+    if let Some(rm) = resource_map.as_ref() {
+        if let Some(quad) = resource_map_ws_quad(rm, unit_type) {
+            let ws = lua.inner().create_table()?;
+            ws.raw_set(1, quad[0])?;
+            ws.raw_set(2, quad[1])?;
+            ws.raw_set(3, quad[2])?;
+            ws.raw_set(4, quad[3])?;
+            row.raw_set("wsType", ws)?;
+        }
+    }
+    cat_tbl.raw_set(unit_type, row)?;
+    Ok(true)
+}
+
 /// Opposite/capture: Invisible FARP / ROAD FOB ME weapon tables are incomplete vs airports.
 /// Rebuild `weapons` from virtual stock (drop opponent leftovers) before `Warehouse.setItem`.
 fn rebuild_me_warehouse_weapons_from_virtual(
@@ -3333,6 +3395,168 @@ impl Db {
         Ok(())
     }
 
+    /// Persist + ME `linkDynTempl` when a non-hub first receives an airframe type (ferry).
+    pub(super) fn register_runtime_dyn_templ_airframe(
+        &mut self,
+        lua: MizLua,
+        oid: ObjectiveId,
+        typ: &str,
+    ) -> Result<()> {
+        if self.persisted.logistics_hubs.contains(&oid) {
+            return Ok(());
+        }
+        let owner = objective!(self, oid)?.owner;
+        if matches!(owner, Side::Neutral) {
+            return Ok(());
+        }
+        let typ_s = String::from(typ);
+        self.persisted
+            .runtime_dyn_templ_regs
+            .get_or_default_cow(oid)
+            .insert_cow(typ_s.clone());
+        self.ephemeral.dirty();
+        self.ensure_dyn_spawn_template_links(lua)?;
+        let links = self.ephemeral.dyn_spawn_template_links.clone();
+        if links.is_empty() {
+            warn!("runtime linkDynTempl: no zzDT-* groups in mission");
+            return Ok(());
+        }
+        let airbase_oid = self
+            .ephemeral
+            .airbase_by_oid
+            .get(&oid)
+            .ok_or_else(|| anyhow!("no airbase for runtime linkDynTempl {oid:?}"))?
+            .clone();
+        let airbase = Airbase::get_instance(lua, &airbase_oid)
+            .context("airbase for runtime linkDynTempl")?;
+        let ab_id = airbase
+            .get_id()
+            .context("airbase id for runtime linkDynTempl")?
+            .inner();
+        if ensure_me_warehouse_airframe_link_dyn_templ(lua, ab_id, owner, typ, &links)? {
+            info!(
+                "runtime linkDynTempl oid={oid:?} owner={owner:?} airbase_id={ab_id} type={typ}"
+            );
+        }
+        Ok(())
+    }
+
+    /// Drop registry entry only (ME rows / other airframe links untouched).
+    pub(super) fn clear_runtime_dyn_templ_airframe(&mut self, oid: ObjectiveId, typ: &str) {
+        let Some(set) = self.persisted.runtime_dyn_templ_regs.get_mut_cow(&oid) else {
+            return;
+        };
+        let typ_s = String::from(typ);
+        if !set.contains(&typ_s) {
+            return;
+        }
+        set.remove_cow(&typ_s);
+        if set.len() == 0 {
+            self.persisted.runtime_dyn_templ_regs.remove_cow(&oid);
+        }
+        self.ephemeral.dirty();
+    }
+
+    fn apply_runtime_dyn_templ_regs_after_load(&mut self, lua: MizLua) -> Result<()> {
+        let regs: Vec<(ObjectiveId, Vec<String>)> = self
+            .persisted
+            .runtime_dyn_templ_regs
+            .into_iter()
+            .map(|(oid, types)| (*oid, types.into_iter().cloned().collect()))
+            .collect();
+        if regs.is_empty() {
+            return Ok(());
+        }
+        self.ensure_dyn_spawn_template_links(lua)?;
+        let links = self.ephemeral.dyn_spawn_template_links.clone();
+        if links.is_empty() {
+            warn!("runtime linkDynTempl restore: no zzDT-* groups in mission");
+            return Ok(());
+        }
+        let mut restored = 0usize;
+        let mut cleared = 0usize;
+        for (oid, types) in regs {
+            let (owner, stored_ok) = match self.persisted.objectives.get(&oid) {
+                Some(obj) => {
+                    let owner = obj.owner;
+                    let still: Vec<String> = types
+                        .iter()
+                        .filter(|t| {
+                            obj.warehouse
+                                .equipment
+                                .get(*t)
+                                .map(|i| i.stored > 0)
+                                .unwrap_or(false)
+                        })
+                        .cloned()
+                        .collect();
+                    (owner, still)
+                }
+                None => {
+                    self.persisted.runtime_dyn_templ_regs.remove_cow(&oid);
+                    cleared += types.len();
+                    continue;
+                }
+            };
+            if stored_ok.len() != types.len() {
+                cleared += types.len() - stored_ok.len();
+            }
+            if stored_ok.is_empty() {
+                self.persisted.runtime_dyn_templ_regs.remove_cow(&oid);
+                continue;
+            }
+            self.persisted.runtime_dyn_templ_regs.remove_cow(&oid);
+            {
+                let set = self
+                    .persisted
+                    .runtime_dyn_templ_regs
+                    .get_or_default_cow(oid);
+                for t in &stored_ok {
+                    set.insert_cow(t.clone());
+                }
+            }
+            if matches!(owner, Side::Neutral) {
+                continue;
+            }
+            let Some(airbase_oid) = self.ephemeral.airbase_by_oid.get(&oid).cloned() else {
+                warn!("runtime linkDynTempl restore: no airbase for {oid:?}");
+                continue;
+            };
+            let airbase = match Airbase::get_instance(lua, &airbase_oid) {
+                Ok(ab) => ab,
+                Err(e) => {
+                    warn!("runtime linkDynTempl restore airbase {oid:?}: {e:?}");
+                    continue;
+                }
+            };
+            let ab_id = match airbase.get_id() {
+                Ok(id) => id.inner(),
+                Err(e) => {
+                    warn!("runtime linkDynTempl restore airbase id {oid:?}: {e:?}");
+                    continue;
+                }
+            };
+            for typ in &stored_ok {
+                match ensure_me_warehouse_airframe_link_dyn_templ(
+                    lua, ab_id, owner, typ.as_str(), &links,
+                ) {
+                    Ok(true) => restored += 1,
+                    Ok(false) => {}
+                    Err(e) => warn!(
+                        "runtime linkDynTempl restore {oid:?} {typ}: {e:?}"
+                    ),
+                }
+            }
+        }
+        if restored > 0 || cleared > 0 {
+            self.ephemeral.dirty();
+            info!(
+                "runtime linkDynTempl restore: applied {restored}, cleared empty {cleared}"
+            );
+        }
+        Ok(())
+    }
+
     pub(super) fn setup_warehouses_after_load(&mut self, lua: MizLua) -> Result<()> {
         self.init_resource_map(lua)
             .context("initializing resource map")?;
@@ -3884,6 +4108,8 @@ impl Db {
             self.setup_supply_lines()
                 .context("supply lines after ground DEP FARP zone sync on load")?;
         }
+        self.apply_runtime_dyn_templ_regs_after_load(lua)
+            .context("restoring runtime linkDynTempl registrations")?;
         self.update_supply_status()
             .context("updating supply status")?;
         self.setup_supply_lines()

@@ -71,6 +71,10 @@ pub struct Persisted {
     pub dynamic_cargo_crates: MapM<String, DynamicCargoCrate>,
     #[serde(default)]
     pub dynamic_cargo_next_index: MapS<Side, u64>,
+    /// Non-hub airframes that gained `linkDynTempl` at runtime (ferry / transfer).
+    /// ME resets from `.miz` on restart — re-apply from this list in warehouse setup.
+    #[serde(default)]
+    pub runtime_dyn_templ_regs: MapM<ObjectiveId, SetS<String>>,
 }
 
 impl Persisted {
