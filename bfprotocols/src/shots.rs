@@ -71,6 +71,18 @@ pub struct Dead {
     pub shots: Vec<Shot>,
 }
 
+impl Dead {
+    /// True if any opposing-side shot recorded a hit (player or AI, including objective SAM).
+    /// Used to suppress the "shot within 3 minutes without hit" kill-credit fallback when
+    /// something else already landed a hit (e.g. SA-2) while a player missile flew past.
+    pub fn has_enemy_hit(&self) -> bool {
+        let victim_side = self.victim.side();
+        self.shots
+            .iter()
+            .any(|s| s.hit && s.shooter.side() != victim_side)
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Shot {
     pub weapon_name: Option<String>,

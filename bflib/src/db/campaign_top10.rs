@@ -291,11 +291,13 @@ fn player_kill_blow(db: &Db, dead: &Dead) -> SmallVec<[(Ucid, bool); 1]> {
             }
         }
     }
-    // Fallback: last player shot within 3 minutes (no hit recorded).
-    for shot in dead.shots.iter().rev() {
-        if dead.time - shot.time <= Duration::minutes(3) {
-            if let Some(entry) = accept(shot) {
-                return smallvec![entry];
+    // Force-to-crash only: no opposing hit (SAM/AAA/player) in the shot list.
+    if !dead.has_enemy_hit() {
+        for shot in dead.shots.iter().rev() {
+            if dead.time - shot.time <= Duration::minutes(3) {
+                if let Some(entry) = accept(shot) {
+                    return smallvec![entry];
+                }
             }
         }
     }
@@ -327,7 +329,7 @@ fn player_kill_participants(db: &Db, dead: &Dead) -> SmallVec<[(Ucid, bool); 8]>
             }
         }
     }
-    if out.is_empty() {
+    if out.is_empty() && !dead.has_enemy_hit() {
         for shot in &dead.shots {
             if dead.time - shot.time <= Duration::minutes(3) {
                 if let Some((ucid, air)) = accept(shot) {

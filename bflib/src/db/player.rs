@@ -2092,7 +2092,8 @@ impl Db {
                 hit_by.push(k)
             }
         }
-        if hit_by.is_empty() {
+        // Force-to-crash / no-hit credit only when nobody (incl. AI SAM) landed a hit.
+        if hit_by.is_empty() && !dead.has_enemy_hit() {
             for shot in valid_shots() {
                 let k = match shot.shooter {
                     Who::Player { ucid, .. } => (ucid, cfg.provisional),
