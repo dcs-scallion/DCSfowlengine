@@ -484,10 +484,8 @@ impl Ephemeral {
         obj: &Objective,
         moved: &[ObjectiveId],
     ) {
-        super::logistics::invalidate_virtual_resupply_efficiency_for(
-            &mut self.hub_delivery_efficiency,
-            obj.id,
-        );
+        // Distance-based efficiency: invalidate only when geometry/topology moves.
+        // Full clear happens in setup_supply_lines.
         for oid in moved {
             super::logistics::invalidate_virtual_resupply_efficiency_for(
                 &mut self.hub_delivery_efficiency,
@@ -560,6 +558,10 @@ impl Ephemeral {
     }
 
     pub fn remove_objective_markup(&mut self, oid: &ObjectiveId) {
+        super::logistics::invalidate_virtual_resupply_efficiency_for(
+            &mut self.hub_delivery_efficiency,
+            *oid,
+        );
         if let Some(mk) = self.objective_markup.remove(oid) {
             mk.remove(&mut self.msgs)
         }

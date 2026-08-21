@@ -1729,21 +1729,29 @@ impl Db {
                 self.compute_spawnable_logi_repaired(obj)?,
             )
         };
+        let mut changed = false;
         {
             let obj = objective_mut!(self, oid)?;
             let health_changed = obj.health != health;
             let logi_changed = obj.logi != logi;
+            changed |= health_changed || logi_changed;
             obj.health = health;
             obj.logi = logi;
             if matches!(kind, ObjectiveKind::Production) {
+                changed |= obj.production != production
+                    || obj.production_hp_sum != hp_sum
+                    || obj.production_repair_need != repair_need;
                 obj.production = production;
                 obj.production_hp_sum = hp_sum;
                 obj.production_repair_need = repair_need;
             } else {
+                changed |= obj.static_repair_need != static_need
+                    || obj.spawnable_logi_repaired != spawnable_ok;
                 obj.static_repair_need = static_need;
                 obj.spawnable_logi_repaired = spawnable_ok;
                 if obj.static_repair > obj.static_repair_need {
                     obj.static_repair = obj.static_repair_need;
+                    changed = true;
                 }
             }
             if health_changed || logi_changed {
@@ -1759,9 +1767,12 @@ impl Db {
         if let ObjectiveKind::Farp { .. } = &kind {
             if logi == 0 {
                 self.delete_objective(oid)?;
+                return Ok(());
             }
         }
-        self.ephemeral.dirty();
+        if changed {
+            self.ephemeral.dirty();
+        }
         if health != 100 || logi != 100 {
             debug!("objective {oid} health: {}, logi: {}", health, logi);
         }
@@ -2745,13 +2756,25 @@ impl Db {
                 .context("resync supply lines after ground DEP FARP zone sync")?;
         }
         let now = Utc::now();
+        let mut mobile_farp_oids: SmallVec<[ObjectiveId; 8]> = smallvec![];
         let oids: Vec<ObjectiveId> = self
             .persisted
             .objectives
             .into_iter()
-            .map(|(id, _)| *id)
+            .map(|(id, obj)| {
+                if matches!(
+                    &obj.kind,
+                    ObjectiveKind::Farp {
+                        mobile: true,
+                        ..
+                    }
+                ) {
+                    mobile_farp_oids.push(*id);
+                }
+                *id
+            })
             .collect();
-        for oid in &oids {
+        for oid in &mobile_farp_oids {
             if let Err(e) = self.sync_mobile_farp_hull_hp_from_dcs(lua, *oid) {
                 warn!("mobile FARP hull HP sync {oid:?}: {e:?}");
             }
