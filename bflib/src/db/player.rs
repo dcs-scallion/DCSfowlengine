@@ -1499,12 +1499,15 @@ impl Db {
             "deslot airframe: set {typ_name} at {land_oid:?} to {target} (dcs_before={land_dcs} prev={land_prev} dcs_after={land_after})"
         );
 
-        if land_prev == 0 {
-            if let Err(e) =
-                self.register_runtime_dyn_templ_airframe(lua, land_oid, typ_name.as_str())
-            {
+        if land_prev == 0 && target > 0 {
+            if let Err(e) = self.register_runtime_dyn_templ_airframe(
+                lua,
+                land_oid,
+                typ_name.as_str(),
+                target,
+            ) {
                 warn!(
-                    "deslot airframe: runtime linkDynTempl {land_oid:?} {typ_name}: {e:?}"
+                    "deslot airframe: runtime linkDynTempl {land_oid:?} {typ_name} stored={target}: {e:?}"
                 );
             }
         }

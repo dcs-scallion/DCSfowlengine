@@ -218,15 +218,18 @@ fn apply_me_warehouse_link_dyn_templ(
     Ok(updated)
 }
 
-/// Ensure one airframe ME row has owner `linkDynTempl` (create row if missing).
-/// Unlike capture, does not rewrite every aircraft row or add the full DT set.
+/// ME `linkDynTempl` only after stock exists (`stored > 0`); ME `initialAmount` matches stock.
 fn ensure_me_warehouse_airframe_link_dyn_templ(
     lua: MizLua,
     ab_id: i64,
     owner: Side,
     unit_type: &str,
+    stored: u32,
     links: &FxHashMap<(Side, String), i64>,
 ) -> Result<bool> {
+    if stored == 0 {
+        return Ok(false);
+    }
     let Some(&gid) = links.get(&(owner, String::from(unit_type))) else {
         warn!(
             "runtime linkDynTempl: no zzDT for {owner:?} {unit_type} (airbase id {ab_id})"
@@ -261,10 +264,11 @@ fn ensure_me_warehouse_airframe_link_dyn_templ(
     };
     if let Ok(row) = cat_tbl.raw_get::<_, LuaTable>(unit_type) {
         row.raw_set("linkDynTempl", gid)?;
+        row.raw_set("initialAmount", stored)?;
         return Ok(true);
     }
     let row = lua.inner().create_table()?;
-    row.raw_set("initialAmount", 0u32)?;
+    row.raw_set("initialAmount", stored)?;
     row.raw_set("linkDynTempl", gid)?;
     if let Some(rm) = resource_map.as_ref() {
         if let Some(quad) = resource_map_ws_quad(rm, unit_type) {
@@ -3396,12 +3400,17 @@ impl Db {
     }
 
     /// Persist + ME `linkDynTempl` when a non-hub first receives an airframe type (ferry).
+    /// Call after DCS/virtual stock is credited (`stored > 0`).
     pub(super) fn register_runtime_dyn_templ_airframe(
         &mut self,
         lua: MizLua,
         oid: ObjectiveId,
         typ: &str,
+        stored: u32,
     ) -> Result<()> {
+        if stored == 0 {
+            return Ok(());
+        }
         if self.persisted.logistics_hubs.contains(&oid) {
             return Ok(());
         }
@@ -3433,9 +3442,14 @@ impl Db {
             .get_id()
             .context("airbase id for runtime linkDynTempl")?
             .inner();
-        if ensure_me_warehouse_airframe_link_dyn_templ(lua, ab_id, owner, typ, &links)? {
+        if ensure_me_warehouse_airframe_link_dyn_templ(lua, ab_id, owner, typ, stored, &links)? {
+            airbase
+                .get_warehouse()
+                .context("warehouse after runtime linkDynTempl")?
+                .set_item(String::from(typ), stored)
+                .with_context(|| format_compact!("re-sync {typ} after runtime linkDynTempl"))?;
             info!(
-                "runtime linkDynTempl oid={oid:?} owner={owner:?} airbase_id={ab_id} type={typ}"
+                "runtime linkDynTempl oid={oid:?} owner={owner:?} airbase_id={ab_id} type={typ} stored={stored}"
             );
         }
         Ok(())
@@ -3537,10 +3551,24 @@ impl Db {
                 }
             };
             for typ in &stored_ok {
+                let stored = self
+                    .persisted
+                    .objectives
+                    .get(&oid)
+                    .and_then(|o| o.warehouse.equipment.get(typ))
+                    .map(|i| i.stored)
+                    .unwrap_or(0);
                 match ensure_me_warehouse_airframe_link_dyn_templ(
-                    lua, ab_id, owner, typ.as_str(), &links,
+                    lua, ab_id, owner, typ.as_str(), stored, &links,
                 ) {
-                    Ok(true) => restored += 1,
+                    Ok(true) => {
+                        if let Ok(ab) = Airbase::get_instance(lua, &airbase_oid) {
+                            if let Ok(wh) = ab.get_warehouse() {
+                                let _ = wh.set_item(typ.clone(), stored);
+                            }
+                        }
+                        restored += 1;
+                    }
                     Ok(false) => {}
                     Err(e) => warn!(
                         "runtime linkDynTempl restore {oid:?} {typ}: {e:?}"
