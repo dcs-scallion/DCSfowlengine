@@ -1697,7 +1697,6 @@ impl Db {
             logistics: bool,
             iter: F,
         ) -> bool {
-            let excl_dist_sq = (db.ephemeral.cfg.logistics_exclusion as f64).powi(2);
             db.persisted.objectives.into_iter().any(|(oid, obj)| {
                 let mut check = false;
                 for cr in iter() {
@@ -1705,6 +1704,11 @@ impl Db {
                 }
                 check |= logistics || obj.owner == side;
                 check && (logistics || obj.threatened) && {
+                    let excl_dist_sq = (db
+                        .ephemeral
+                        .cfg
+                        .logistics_exclusion_for(&obj.kind) as f64)
+                        .powi(2);
                     let dist = na::distance_squared(&obj.zone.pos().into(), &centroid.into());
                     dist <= excl_dist_sq || obj.zone.scale(1.1).contains(centroid.into())
                 }

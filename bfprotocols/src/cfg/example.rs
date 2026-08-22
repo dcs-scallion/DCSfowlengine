@@ -2103,6 +2103,8 @@ impl Default for Cfg {
             deployable_unpack_min_base_distance_m: 0,
             unit_cull_distance: 37040, // 20 nm
             ground_vehicle_cull_distance: 10000,
+            production_logistics_exclusion: 10000,
+            production_ground_vehicle_cull_distance: 10000,
             cull_after: 1800,
             groups_spawn_queue_stretch: 5,
             slow_timed_events_freq: 10,

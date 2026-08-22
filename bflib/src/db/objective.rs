@@ -1857,13 +1857,14 @@ impl Db {
             .collect::<SmallVec<[_; 64]>>();
         let cfg = Arc::clone(&self.ephemeral.cfg);
         let cull_distance = (cfg.unit_cull_distance as f64).powi(2);
-        let ground_cull_distance = (cfg.ground_vehicle_cull_distance as f64).powi(2);
         let mut is_close_to_enemies: FxHashSet<UnitId> = FxHashSet::default();
         let mut check_close_units = |units: &Map<UnitId, SpawnedUnit>,
                                      close_units: &FxHashSet<UnitId>,
                                      obj: &Objective,
                                      spawn: &mut bool,
                                      threat: &mut bool| {
+            let ground_cull_distance =
+                (cfg.ground_vehicle_cull_distance_for(&obj.kind) as f64).powi(2);
             for uid in close_units {
                 let unit = units
                     .get(uid)

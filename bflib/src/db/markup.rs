@@ -1151,12 +1151,13 @@ impl ObjectiveMarkup {
         t.name = format_compact!(" {} ", label).into();
         t.pos = obj.zone.pos();
         let pos3 = Vector3::new(t.pos.x, 0., t.pos.y);
+        let logistics_excl = cfg.logistics_exclusion_for(&obj.kind) as f64;
 
         macro_rules! threat_circle {
             ($radius:expr) => {
                 msgq.circle_to_all(all_spec, t.threatened_ring, CircleSpec {
                     center: LuaVec3(pos3),
-                    radius: (cfg.logistics_exclusion as f64).max($radius * 1.1),
+                    radius: logistics_excl.max($radius * 1.1),
                     color: Color::yellow(if obj.threatened { 0.75 } else { 0. }),
                     fill_color: Color::black(0.),
                     line_type: LineType::Solid,
@@ -1188,7 +1189,7 @@ impl ObjectiveMarkup {
                     line_type: LineType::Dashed,
                     read_only: true,
                 }, None);
-                if !points.contains_circle(pos, cfg.logistics_exclusion as f64) {
+                if !points.contains_circle(pos, logistics_excl) {
                     threat_circle!(0.);
                 } else {
                     let points = points.scale(1.1);

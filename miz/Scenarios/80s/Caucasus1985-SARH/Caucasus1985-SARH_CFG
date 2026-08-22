@@ -291,6 +291,8 @@
   "deployable_unpack_min_base_distance_m": 5000,
   "unit_cull_distance": 55000,
   "ground_vehicle_cull_distance": 10000,
+  "production_logistics_exclusion": 5000,
+  "production_ground_vehicle_cull_distance": 5000,
   "cull_after": 600,
   "groups_spawn_queue_stretch": 10,
   "slow_timed_events_freq": 10,

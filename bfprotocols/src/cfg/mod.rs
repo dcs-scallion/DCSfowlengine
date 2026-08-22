@@ -1105,6 +1105,14 @@ fn default_deployable_unpack_min_base_distance_m() -> u32 {
     0
 }
 
+fn default_production_logistics_exclusion() -> u32 {
+    10000
+}
+
+fn default_production_ground_vehicle_cull_distance() -> u32 {
+    10000
+}
+
 fn default_lock_sides() -> bool {
     true
 }
@@ -1896,6 +1904,12 @@ pub struct Cfg {
     /// an objective will cull it's units if there are no enemy ground units
     /// within this distance (Meters)
     pub ground_vehicle_cull_distance: u32,
+    /// OPR (Production) threatened map ring and deploy exclusion radius (Meters).
+    #[serde(default = "default_production_logistics_exclusion")]
+    pub production_logistics_exclusion: u32,
+    /// OPR (Production) enemy ground threat and ground spawn-activation radius (Meters).
+    #[serde(default = "default_production_ground_vehicle_cull_distance")]
+    pub production_ground_vehicle_cull_distance: u32,
     /// If a base has been inactive for this long then cull it's units (Seconds)
     #[serde(default = "default_cull_after")]
     pub cull_after: u32,
@@ -2147,6 +2161,22 @@ impl Cfg {
         serde_json::to_writer_pretty(fd, self).context("serializing cfg")?;
         fs::rename(&path, Self::path(miz_state_path)).context("moving new file into place")?;
         Ok(())
+    }
+
+    pub fn logistics_exclusion_for(&self, kind: &ObjectiveKind) -> u32 {
+        if matches!(kind, ObjectiveKind::Production) {
+            self.production_logistics_exclusion
+        } else {
+            self.logistics_exclusion
+        }
+    }
+
+    pub fn ground_vehicle_cull_distance_for(&self, kind: &ObjectiveKind) -> u32 {
+        if matches!(kind, ObjectiveKind::Production) {
+            self.production_ground_vehicle_cull_distance
+        } else {
+            self.ground_vehicle_cull_distance
+        }
     }
 
     pub fn check_vehicle_has_threat_distance(&self, vehicle: &Vehicle) -> Result<()> {
