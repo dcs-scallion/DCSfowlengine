@@ -2453,6 +2453,58 @@ impl Db {
         }
     }
 
+    /// Persist Fowl crate coords from the live DCS static (no destroy/respawn).
+    pub(super) fn sync_fowl_crate_persisted_pos_from_live_static(
+        &mut self,
+        lua: MizLua,
+        gid: GroupId,
+        uid: UnitId,
+    ) -> Result<bool> {
+        const GROUND_PLACE_AGL_M: f64 = 0.35;
+        let (name, _fallback, heading) = {
+            let unit = unit!(self, uid)?;
+            (unit.name.clone(), unit.pos, unit.heading)
+        };
+        let Ok(Static::Static(st)) = StaticObject::get_by_name(lua, name.as_str()) else {
+            return Ok(false);
+        };
+        if !st.is_exist().unwrap_or(false) {
+            return Ok(false);
+        }
+        let point = st.get_point()?;
+        let pos = Vector2::new(point.0.x, point.0.z);
+        let alt = if point.0.y > 1. {
+            point.0.y
+        } else {
+            Land::singleton(lua)?
+                .get_height(LuaVec2(pos))
+                .unwrap_or(0.)
+                + GROUND_PLACE_AGL_M
+        };
+        let mut position = Position3::default();
+        position.p.x = pos.x;
+        position.p.y = alt;
+        position.p.z = pos.y;
+        if let Some(unit) = self.persisted.units.get_mut_cow(&uid) {
+            unit.dead = false;
+            unit.hp_percent = 100;
+            unit.pos = pos;
+            unit.spawn_pos = pos;
+            unit.heading = heading;
+            unit.spawn_heading = heading;
+            unit.position = position;
+            unit.spawn_position = position;
+        }
+        if let Some(group) = self.persisted.groups.get_mut_cow(&gid) {
+            if let DeployKind::Crate { ed_carrier, .. } = &mut group.origin {
+                *ed_carrier = None;
+            }
+        }
+        self.mark_group(lua, &gid)?;
+        self.ephemeral.dirty();
+        Ok(true)
+    }
+
     /// Replace a Fowl crate DCS killed on sling unhook (MP physics) at its last ground pos.
     fn soft_respawn_fowl_crate_after_sling_impact(
         &mut self,
@@ -2461,10 +2513,11 @@ impl Db {
         uid: UnitId,
     ) -> Result<()> {
         const GROUND_PLACE_AGL_M: f64 = 0.35;
-        let (name, pos, heading) = {
+        let (name, fallback, heading) = {
             let unit = unit!(self, uid)?;
             (unit.name.clone(), unit.pos, unit.heading)
         };
+        let pos = Self::crate_world_pos(lua, name.as_str(), fallback);
         let alt = Land::singleton(lua)?
             .get_height(LuaVec2(pos))
             .unwrap_or(0.)

@@ -433,7 +433,7 @@ impl Db {
     }
 
     /// Live DCS world pos for a crate static (ship-linked crates move with the carrier).
-    fn crate_world_pos(lua: MizLua, name: &str, fallback: Vector2) -> Vector2 {
+    pub(super) fn crate_world_pos(lua: MizLua, name: &str, fallback: Vector2) -> Vector2 {
         match StaticObject::get_by_name(lua, name) {
             Ok(Static::Static(st)) if st.is_exist().unwrap_or(false) => st
                 .as_object()
@@ -1314,10 +1314,26 @@ impl Db {
             }
         }
 
-        // Sling drop: was slung last tick, no longer slung — leave crate at landing spot.
+        // Hook release: was slung last tick, no longer slung — keep DCS landing pos (skip nose line).
         for (gid, ucid) in &self.ephemeral.shared_ed_prev_slung.clone() {
             if !cur_slung.contains_key(gid) {
-                info!("crate {gid}: sling drop detected, skipping unload-line relocation");
+                let Some(uid) = self
+                    .persisted
+                    .groups
+                    .get(gid)
+                    .and_then(|g| g.units.into_iter().next().copied())
+                else {
+                    continue;
+                };
+                match self.sync_fowl_crate_persisted_pos_from_live_static(lua, *gid, uid) {
+                    Ok(true) => info!(
+                        "crate {gid}: hook-release detected, synced live static pos (skip unload line)"
+                    ),
+                    Ok(false) => info!(
+                        "crate {gid}: hook-release detected, no live static (skip unload line)"
+                    ),
+                    Err(e) => warn!("crate {gid}: hook-release pos sync failed: {e:?}"),
+                }
                 self.ephemeral.shared_ed_sling_landed.insert(*gid);
                 current.remove(gid);
                 let _ = ucid;
@@ -1558,6 +1574,7 @@ impl Db {
         fn buildable(
             nearby: &SmallVec<[Cifo; 8]>,
             didx: &DeployableIndex,
+            player_pos: Vector2,
         ) -> std::result::Result<
             FxHashMap<String, FxHashMap<String, Vec<Cifo>>>,
             SmallVec<[CompactString; 2]>,
@@ -1580,9 +1597,12 @@ impl Db {
                 for req in &spec.crates {
                     match have.get_mut(&req.name) {
                         Some(ids) if ids.len() >= req.required as usize => {
-                            while ids.len() > req.required as usize {
-                                ids.pop();
-                            }
+                            ids.sort_by(|a, b| {
+                                na::distance(&player_pos.into(), &a.pos.into())
+                                    .partial_cmp(&na::distance(&player_pos.into(), &b.pos.into()))
+                                    .unwrap_or(std::cmp::Ordering::Equal)
+                            });
+                            ids.truncate(req.required as usize);
                         }
                         Some(_) | None => {
                             reasons
@@ -1598,6 +1618,26 @@ impl Db {
             } else {
                 Ok(candidates)
             }
+        }
+        fn crates_cluster_within_spread(
+            have: &FxHashMap<String, Vec<Cifo>>,
+            max_spread_m: f64,
+        ) -> bool {
+            let max_dist_sq = max_spread_m.powi(2);
+            let mut positions: SmallVec<[Vector2; 8]> = smallvec![];
+            for crs in have.values() {
+                for cr in crs {
+                    positions.push(cr.pos);
+                }
+            }
+            for (i, a) in positions.iter().enumerate() {
+                for b in positions.iter().skip(i + 1) {
+                    if na::distance_squared(&(*a).into(), &(*b).into()) > max_dist_sq {
+                        return false;
+                    }
+                }
+            }
+            true
         }
         fn base_repairable(
             db: &Db,
@@ -1808,7 +1848,6 @@ impl Db {
             })
         }
         fn compute_positions(
-            db: &mut Db,
             have: &FxHashMap<String, Vec<Cifo>>,
             centroid: Vector2,
             group_heading: f64,
@@ -1816,17 +1855,9 @@ impl Db {
             let mut num_by_typ: FxHashMap<String, usize> = FxHashMap::default();
             let mut pos_by_typ: FxHashMap<String, Vector2> = FxHashMap::default();
             for cr in have.iter().flat_map(|(_, cr)| cr.iter()) {
-                let group = &group!(db, cr.group)?;
-                if let DeployKind::Crate { spec, .. } = &group.origin {
-                    if let Some(typ) = spec.pos_unit.as_ref() {
-                        let uid = group
-                            .units
-                            .into_iter()
-                            .next()
-                            .ok_or_else(|| anyhow!("{:?} has no units", cr.group))?;
-                        *pos_by_typ.entry(typ.clone()).or_default() += unit!(db, uid)?.pos;
-                        *num_by_typ.entry(typ.clone()).or_default() += 1;
-                    }
+                if let Some(typ) = cr.crate_def.pos_unit.as_ref() {
+                    *pos_by_typ.entry(typ.clone()).or_default() += cr.pos;
+                    *num_by_typ.entry(typ.clone()).or_default() += 1;
                 }
             }
             for (typ, pos) in pos_by_typ.iter_mut() {
@@ -2158,11 +2189,18 @@ impl Db {
                 reasons.push("not close enough to a friendly objective".into());
             }
         }
-        match buildable(&nearby, &didx) {
+        match buildable(&nearby, &didx, st.point) {
             Err(mut build_reasons) => reasons.append(&mut build_reasons),
             Ok(mut candidates) => {
                 let (dep, have) = candidates.drain().next().unwrap();
                 let spec = maybe!(didx.deployables_by_name, dep, "deployable")?.clone();
+                let cluster_spread = self.ephemeral.cfg.crate_spread as f64;
+                if !crates_cluster_within_spread(&have, cluster_spread) {
+                    reasons.push(format_compact!(
+                        "can't spawn {dep}: required crates must be within {} m of each other",
+                        cluster_spread as u32
+                    ));
+                } else {
                 let centroid = centroid2d(have.values().flat_map(|c| c.iter()).map(|c| c.pos));
                 let too_close =
                     too_close(self, st.side, centroid, spec.kind.is_objective(), || {
@@ -2237,7 +2275,7 @@ impl Db {
                             DeployableKind::Group { template } => {
                                 let pos = self.ephemeral.slot_instance_pos(lua, slot)?;
                                 let spawnloc =
-                                    compute_positions(self, &have, centroid, azumith3d(pos.x.0))?;
+                                    compute_positions(&have, centroid, azumith3d(pos.x.0))?;
                                 let origin = DeployKind::Deployed {
                                     player: st.ucid.clone(),
                                     moved_by: None,
@@ -2293,6 +2331,7 @@ impl Db {
                             }
                         },
                     }
+                }
                 }
             }
         }
