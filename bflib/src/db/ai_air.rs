@@ -3431,11 +3431,28 @@ fn cas_ship_attributes() -> Vec<Attribute> {
     ]
 }
 
+fn cas_structure_attributes() -> Vec<Attribute> {
+    vec![
+        Attribute::Buildings,
+        Attribute::Fortifications,
+        Attribute::Airfields,
+        Attribute::Heliports,
+        Attribute::GrassAirfields,
+    ]
+}
+
+fn cas_heli_no_target_types() -> Vec<Attribute> {
+    cas_ship_attributes()
+        .into_iter()
+        .chain(cas_structure_attributes())
+        .collect()
+}
+
 /// ME-style CAS enroute combo (test mission `test CAS`).
-/// Attack helicopters: ships excluded from engage lists / `noTargetTypes`.
+/// Attack helicopters: ships and structures excluded from engage lists / `noTargetTypes`.
 pub(super) fn cas_combo_task<'lua>(kind: AiPlaneKind, zone: Vector2) -> Task<'lua> {
     let heli = matches!(kind, AiPlaneKind::Helicopter);
-    let ships = cas_ship_attributes();
+    let heli_no_targets = heli.then(cas_heli_no_target_types);
     let aa_engage = Task::EngageTargets {
         target_types: vec![
             Attribute::AirDefence,
@@ -3445,7 +3462,7 @@ pub(super) fn cas_combo_task<'lua>(kind: AiPlaneKind, zone: Vector2) -> Task<'lu
         ],
         max_dist: Some(cas_engage_max_dist(kind)),
         max_dist_enabled: Some(true),
-        no_target_types: heli.then(|| ships.clone()),
+        no_target_types: heli_no_targets.clone(),
         priority: Some(0),
         preset_key: None,
     };
@@ -3468,7 +3485,7 @@ pub(super) fn cas_combo_task<'lua>(kind: AiPlaneKind, zone: Vector2) -> Task<'lu
         target_types: cas_preset_types,
         max_dist: None,
         max_dist_enabled: None,
-        no_target_types: heli.then(|| ships.clone()),
+        no_target_types: heli_no_targets.clone(),
         priority: Some(2),
         preset_key: Some(String::from("CAS")),
     };
@@ -3478,6 +3495,10 @@ pub(super) fn cas_combo_task<'lua>(kind: AiPlaneKind, zone: Vector2) -> Task<'lu
             Attribute::HeavyArmedShips,
             Attribute::ArmedShips,
             Attribute::UnarmedShips,
+            Attribute::Buildings,
+            Attribute::Airfields,
+            Attribute::Heliports,
+            Attribute::GrassAirfields,
         ]);
     }
     let main_engage = Task::EngageTargets {
