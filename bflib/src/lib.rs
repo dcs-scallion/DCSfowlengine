@@ -309,6 +309,8 @@ enum LoadState {
     Init,
     MissionLoaded { time: DateTime<Utc> },
     Running,
+    /// `delayed_init_miz` failed; do not step to Running (that would allow persist save of empty Db).
+    Failed,
 }
 
 impl Default for LoadState {
@@ -328,12 +330,13 @@ impl LoadState {
                 let remains = (Duration::seconds(62) - (Utc::now() - time)).num_seconds();
                 Some(format_compact!("The server is initializing ETA {remains}s").into())
             }
+            Self::Failed => Some(String::from("The mission failed to start")),
         }
     }
 
     fn init_ok(&self) -> bool {
         match self {
-            Self::Init => false,
+            Self::Init | Self::Failed => false,
             Self::MissionLoaded { time } => Utc::now() - *time > Duration::seconds(1),
             Self::Running => true,
         }
@@ -341,7 +344,7 @@ impl LoadState {
 
     fn step(&mut self) {
         match self {
-            Self::Running | Self::Init => (),
+            Self::Running | Self::Init | Self::Failed => (),
             Self::MissionLoaded { time } => {
                 if Utc::now() - *time >= Duration::minutes(1) {
                     *self = Self::Running;
@@ -367,6 +370,8 @@ struct Context {
     restart_warnings: Option<AutoShutdown>,
     last_perf_log: DateTime<Utc>,
     load_state: LoadState,
+    /// True only after `delayed_init_miz` succeeds. Shutdown must not SaveState while this is false.
+    db_ready: bool,
     idx: env::miz::MizIndex,
     db: Db,
     external_admin_commands: Arc<SegQueue<(AdminCommand, oneshot::Sender<Value>)>>,
@@ -438,6 +443,10 @@ impl Context {
     }
 
     fn persist_campaign_state(&mut self) {
+        if !self.db_ready {
+            warn!("skipping persist: campaign db was never initialized");
+            return;
+        }
         self.db
             .campaign_flush_online_before_save(Utc::now());
         if let Some(snap) = self.db.maybe_snapshot() {
@@ -2595,8 +2604,10 @@ fn run_slow_timed_events(
         record_perf(&mut perf.update_jtac_contacts, ts);
         let now = Utc::now();
         ctx.db.campaign_flush_online_before_save(now);
-        if let Some(snap) = ctx.db.maybe_snapshot() {
-            ctx.do_bg_task(bg::Task::SaveState(path.clone(), snap));
+        if ctx.db_ready {
+            if let Some(snap) = ctx.db.maybe_snapshot() {
+                ctx.do_bg_task(bg::Task::SaveState(path.clone(), snap));
+            }
         }
         record_perf(&mut perf.snapshot, now);
         award_periodic_points(ctx, lua, start_ts);
@@ -2750,8 +2761,8 @@ fn initiate_dcs_shutdown(ctx: &mut Context, lua: MizLua) -> Result<()> {
 
 fn external_request_shutdown(lua: MizLua) -> Result<()> {
     let ctx = unsafe { Context::get_mut() };
-    if !ctx.load_state.init_ok() {
-        bail!("mission not ready for shutdown");
+    if !ctx.db_ready {
+        warn!("requestShutdown: campaign not initialized, persist will not be written");
     }
     admin::request_shutdown(ctx, lua)?;
     initiate_dcs_shutdown(ctx, lua)
@@ -2952,6 +2963,7 @@ fn delayed_init_miz(lua: MizLua) -> Result<()> {
     if let Err(e) = ctx.db.flush_markup_messages(lua) {
         warn!("csar mark rebuild flush failed {e:?}");
     }
+    ctx.db_ready = true;
     ctx.persist_campaign_state();
     start_timed_events(ctx, lua, path).context("starting the timed events loop")?;
     Ok(())
@@ -3026,12 +3038,12 @@ fn init_miz(lua: MizLua) -> Result<()> {
         if ctx.load_state.init_ok() {
             if let Err(e) = delayed_init_miz(lua) {
                 error!("THE MISSION CANNOT START: {e:#}");
+                ctx.load_state = LoadState::Failed;
                 let timer = Timer::singleton(lua)?;
                 timer.schedule_function(
                     now + 1.,
                     mlua::Value::Nil,
                     move |lua, _, now| {
-                        let ctx = unsafe { Context::get_mut() };
                         let screen_detail = e
                             .chain()
                             .map(|err| err.to_string())
@@ -3046,7 +3058,6 @@ fn init_miz(lua: MizLua) -> Result<()> {
                             3600,
                             true,
                         );
-                        ctx.load_state.step();
                         Ok(Some(now + 10.))
                     },
                 )?;

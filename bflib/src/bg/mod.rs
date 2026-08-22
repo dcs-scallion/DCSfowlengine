@@ -543,6 +543,12 @@ async fn background_loop(write_dir: PathBuf, mut rx: UnboundedReceiver<Task>) {
                 }
             }
             Task::SaveState(path, db) => {
+                if db.objectives.len() == 0 {
+                    error!(
+                        "refusing to save persist with zero objectives (would wipe campaign): {path:?}"
+                    );
+                    continue;
+                }
                 let encoded = match encode(&db) {
                     Ok(encoded) => encoded.freeze(),
                     Err(e) => {

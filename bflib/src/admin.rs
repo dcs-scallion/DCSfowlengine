@@ -759,26 +759,32 @@ pub(super) fn admin_shutdown(
     lua: MizLua,
     reset: Option<Option<Side>>,
 ) -> Result<AdminResult> {
-    if let Err(e) = crate::acmi_sanitize::maybe_spawn(&ctx.db.ephemeral.cfg.acmi_sanitize) {
-        error!("acmi_sanitize: {e:?}");
-    }
-    let new_campaign = reset.is_some();
-    match crate::db::discord_map::resolve_mission_miz_path(lua, &ctx.miz_state_path) {
-        Ok(miz_path) => {
-            let cfg = &ctx.db.ephemeral.cfg;
-            let args = crate::setmissionstartdatetime::SpawnArgs {
-                cfg: &cfg.setmissionstartdatetime,
-                campaign_stats_enabled: cfg.discord_map.campaign_stats,
-                campaign_rounds: ctx.db.persisted.campaign_stats.campaign_rounds,
-                rounds_per_day: cfg.discord_map.rounds_per_day,
-                miz_path: &miz_path,
-                new_campaign,
-            };
-            if let Err(e) = crate::setmissionstartdatetime::maybe_spawn(args) {
-                error!("setmissionstartdatetime: {e:?}");
-            }
+    if ctx.db_ready {
+        if let Err(e) = crate::acmi_sanitize::maybe_spawn(&ctx.db.ephemeral.cfg.acmi_sanitize) {
+            error!("acmi_sanitize: {e:?}");
         }
-        Err(e) => error!("setmissionstartdatetime: resolve miz path failed: {e:?}"),
+        let new_campaign = reset.is_some();
+        match crate::db::discord_map::resolve_mission_miz_path(lua, &ctx.miz_state_path) {
+            Ok(miz_path) => {
+                let cfg = &ctx.db.ephemeral.cfg;
+                let args = crate::setmissionstartdatetime::SpawnArgs {
+                    cfg: &cfg.setmissionstartdatetime,
+                    campaign_stats_enabled: cfg.discord_map.campaign_stats,
+                    campaign_rounds: ctx.db.persisted.campaign_stats.campaign_rounds,
+                    rounds_per_day: cfg.discord_map.rounds_per_day,
+                    miz_path: &miz_path,
+                    new_campaign,
+                };
+                if let Err(e) = crate::setmissionstartdatetime::maybe_spawn(args) {
+                    error!("setmissionstartdatetime: {e:?}");
+                }
+            }
+            Err(e) => error!("setmissionstartdatetime: resolve miz path failed: {e:?}"),
+        }
+    } else {
+        warn!(
+            "shutdown: campaign not initialized; skipping persist, ACMI, and mission datetime spawn"
+        );
     }
     let wait = Arc::new((Mutex::new(false), Condvar::new()));
     let se = {
@@ -791,15 +797,23 @@ pub(super) fn admin_shutdown(
         }
     };
     if let Some(winner) = reset {
-        ctx.do_bg_task(Task::ResetState(ctx.miz_state_path.clone()));
-        ctx.do_bg_task(Task::Stat(se));
-        ctx.do_bg_task(Task::Stat(Stat::RoundEnd { winner }));
-    } else {
+        if ctx.db_ready {
+            ctx.do_bg_task(Task::ResetState(ctx.miz_state_path.clone()));
+            ctx.do_bg_task(Task::Stat(se));
+            ctx.do_bg_task(Task::Stat(Stat::RoundEnd { winner }));
+        } else {
+            warn!("refusing ResetState: campaign not initialized");
+            ctx.do_bg_task(Task::Stat(se));
+        }
+    } else if ctx.db_ready {
         return_lives(lua, ctx, DateTime::<Utc>::MAX_UTC);
         ctx.do_bg_task(Task::SaveState(
             ctx.miz_state_path.clone(),
             ctx.db.persisted.clone(),
         ));
+        ctx.do_bg_task(Task::Stat(se));
+    } else {
+        warn!("skipping SaveState: campaign db was never initialized");
         ctx.do_bg_task(Task::Stat(se));
     }
     ctx.do_bg_task(Task::Shutdown(Arc::clone(&wait)));
