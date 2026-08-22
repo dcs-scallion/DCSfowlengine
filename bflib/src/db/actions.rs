@@ -444,10 +444,13 @@ impl Db {
                         DeployKind::Objective { origin } => {
                             let obj = objective!(self, origin)?;
                             match obj.kind {
-                                ObjectiveKind::Farp { mobile: true, .. } => a.cfg.deployable,
+                                ObjectiveKind::Farp { mobile: true, .. } => a.cfg.deployable_naval(),
                                 _ => bail!("can't move this unit type"),
                             }
                         }
+                        DeployKind::Troop {
+                            ship_hub: Some(_), ..
+                        } => a.cfg.deployable_naval(),
                         DeployKind::Troop { .. } => a.cfg.troop,
                         _ => bail!("can't move this unit type"),
                     };

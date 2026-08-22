@@ -798,7 +798,8 @@
         "kind": {
           "Move": {
             "troop": 2500,
-            "deployable": 10000
+            "deployable": 10000,
+            "deployable_naval": 40000
           }
         },
         "cost": 10,
@@ -1278,7 +1279,8 @@
         "kind": {
           "Move": {
             "troop": 2500,
-            "deployable": 10000
+            "deployable": 10000,
+            "deployable_naval": 40000
           }
         },
         "cost": 10,

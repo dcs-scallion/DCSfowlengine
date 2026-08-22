@@ -1589,6 +1589,7 @@ fn default_red_actions() -> IndexMap<String, Action, FxBuildHasher> {
                 kind: ActionKind::Move(MoveCfg {
                     troop: 1000,
                     deployable: 1000,
+                    deployable_naval: Some(4000),
                 }),
             },
         ),
@@ -1928,6 +1929,7 @@ fn default_blue_actions() -> IndexMap<String, Action, FxBuildHasher> {
                 kind: ActionKind::Move(MoveCfg {
                     troop: 1000,
                     deployable: 1000,
+                    deployable_naval: Some(4000),
                 }),
             },
         ),

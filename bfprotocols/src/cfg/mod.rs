@@ -949,8 +949,17 @@ pub struct NukeCfg {
 pub struct MoveCfg {
     /// max distance for troop moves in meters per unit cost
     pub troop: u32,
-    /// max distance for deployable moves in meters per unit cost
+    /// max distance for ground deployable moves in meters per unit cost
     pub deployable: u32,
+    /// naval deployable / mobile FARP step; defaults to `deployable` when omitted
+    #[serde(default)]
+    pub deployable_naval: Option<u32>,
+}
+
+impl MoveCfg {
+    pub fn deployable_naval(&self) -> u32 {
+        self.deployable_naval.unwrap_or(self.deployable)
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
