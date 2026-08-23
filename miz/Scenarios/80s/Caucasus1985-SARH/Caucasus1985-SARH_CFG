@@ -92,7 +92,7 @@
     ]
   },
   "server_maintenance": {
-    "tracks_multiplayer_retain_days": 7,
+    "tracks_multiplayer_retain_days": 15,
     "logs_multiplayer_retain_days": 30
   },
   "acmi_sanitize": {

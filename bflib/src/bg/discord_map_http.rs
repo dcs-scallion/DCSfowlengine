@@ -6,16 +6,20 @@ use hyper::server::conn::http1;
 use hyper::service::service_fn;
 use hyper::{Request, Response, StatusCode};
 use hyper_util::rt::TokioIo;
-use log::{error, info, warn};
+use log::{info, warn};
 use std::convert::Infallible;
 use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::time::Duration;
 use tokio::fs;
 use tokio::net::TcpListener;
 
+/// Claimed once: bind retry and/or accept loop owns the port for this process.
 static MAP_HTTP_STARTED: AtomicBool = AtomicBool::new(false);
+
+const BIND_RETRY_SECS: u64 = 5;
 
 #[derive(Clone)]
 struct MapHttpState {
@@ -34,27 +38,35 @@ pub async fn ensure_map_http_server(
     base_png_path: PathBuf,
     virtual_resupply_decay_path: PathBuf,
 ) {
-    if MAP_HTTP_STARTED.load(Ordering::Acquire) {
+    if MAP_HTTP_STARTED.swap(true, Ordering::AcqRel) {
         return;
     }
-    let addr = SocketAddr::from(([0, 0, 0, 0], port));
-    let listener = match TcpListener::bind(addr).await {
-        Ok(l) => l,
-        Err(e) => {
-            error!("discord map HTTP: bind 0.0.0.0:{port} failed: {e:#}");
-            return;
-        }
-    };
-    MAP_HTTP_STARTED.store(true, Ordering::Release);
-    info!("discord map HTTP: read-only server on http://0.0.0.0:{port}/map");
-    let state = Arc::new(MapHttpState {
-        html_path,
-        map_version_path,
-        composited_png_path,
-        base_png_path,
-        virtual_resupply_decay_path,
-    });
+    // Retry off the bg task queue so Discord posts / logs keep flowing while the port is busy.
     tokio::spawn(async move {
+        let addr = SocketAddr::from(([0, 0, 0, 0], port));
+        let mut attempts: u32 = 0;
+        let listener = loop {
+            match TcpListener::bind(addr).await {
+                Ok(l) => break l,
+                Err(e) => {
+                    attempts = attempts.saturating_add(1);
+                    if attempts == 1 || attempts % 12 == 0 {
+                        warn!(
+                            "discord map HTTP: bind 0.0.0.0:{port} failed (retry every {BIND_RETRY_SECS}s): {e:#}"
+                        );
+                    }
+                    tokio::time::sleep(Duration::from_secs(BIND_RETRY_SECS)).await;
+                }
+            }
+        };
+        info!("discord map HTTP: read-only server on http://0.0.0.0:{port}/map");
+        let state = Arc::new(MapHttpState {
+            html_path,
+            map_version_path,
+            composited_png_path,
+            base_png_path,
+            virtual_resupply_decay_path,
+        });
         loop {
             let Ok((stream, _)) = listener.accept().await else {
                 continue;
