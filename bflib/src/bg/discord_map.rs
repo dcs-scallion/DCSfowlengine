@@ -1115,7 +1115,7 @@ fn map_header_left_html(bar: &DiscordMapStatusBar) -> String {
     let brand_w = map_label_display_w();
     let brand_h = map_label_display_h();
     format!(
-        r#"<span class="map-hdr-brand" aria-hidden="true"><span class="map-hdr-brand-icons" style="width:{brand_w}px;height:{brand_h}px"><img class="map-hdr-brand-off" src="data:image/png;base64,{icon_off}" width="{brand_w}" height="{brand_h}" alt=""><img class="map-hdr-brand-on" src="data:image/png;base64,{icon_on}" width="{brand_w}" height="{brand_h}" alt=""></span></span><span class="map-hdr-text"><span class="map-hdr-part">DCS server IP {bind}:{port} (ver.{version})</span><span class="map-hdr-part map-hdr-name">{name}</span><span class="map-hdr-part">{mission}</span></span>"#,
+        r#"<a class="map-hdr-brand" href="https://attrition.cz/" target="_blank" rel="noopener noreferrer" title="Attrition"><span class="map-hdr-brand-icons" style="width:{brand_w}px;height:{brand_h}px"><img class="map-hdr-brand-off" src="data:image/png;base64,{icon_off}" width="{brand_w}" height="{brand_h}" alt=""><img class="map-hdr-brand-on" src="data:image/png;base64,{icon_on}" width="{brand_w}" height="{brand_h}" alt="Attrition"></span></a><span class="map-hdr-text"><span class="map-hdr-part">DCS server IP {bind}:{port} (ver.{version})</span><span class="map-hdr-part map-hdr-name">{name}</span><span class="map-hdr-part">{mission}</span></span>"#,
         icon_off = MAP_LABEL_GR_B64.as_str(),
         icon_on = MAP_LABEL_B64.as_str(),
         brand_w = brand_w,
@@ -1222,7 +1222,7 @@ body{{margin:0;background:#000;color:#686a6e;font-family:"Roboto Condensed",Robo
 .map-panel{{display:flex;flex-direction:column;gap:{layout_gap}px;width:{panel_w}px;min-width:{panel_w}px;box-sizing:border-box}}
 .map-hdr{{display:flex;justify-content:space-between;align-items:center;gap:8px;width:100%;min-height:{brand_h}px;padding:0;line-height:1;color:#686a6e;font-size:clamp(15px,calc(100vw*24/{panel_w}),24px)}}
 .map-hdr-left{{display:flex;flex-direction:row;align-items:center;gap:0;text-align:left;flex:1 1 auto;min-width:0;overflow:hidden;align-self:stretch}}
-.map-hdr-brand{{flex:0 0 auto;display:inline-flex;align-items:center;align-self:center;max-width:{sidebar_w}px}}
+.map-hdr-brand{{flex:0 0 auto;display:inline-flex;align-items:center;align-self:center;max-width:{sidebar_w}px;text-decoration:none;color:inherit;cursor:pointer}}
 .map-hdr-brand-icons{{position:relative;display:inline-block;flex:0 0 auto;max-width:{sidebar_w}px}}
 .map-hdr-brand-off,.map-hdr-brand-on{{position:absolute;left:0;top:0;width:100%;height:100%;max-width:{sidebar_w}px;object-fit:contain;image-rendering:auto}}
 .map-hdr-brand-on{{display:none}}

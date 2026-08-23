@@ -280,12 +280,13 @@ impl Db {
         let type_name = st.get_type_name().unwrap_or_else(|_| String::from("cargo"));
         let (spawner, source) = self.resolve_dynamic_cargo_spawner_and_source(lua, side, pos, &name)?;
         let (equipment, liquids) = snapshot_cargo_warehouse(lua, st)?;
+        let snap_empty = equipment.len() == 0 && liquids.len() == 0;
         self.debit_source_for_dynamic_cargo_checkout(source, &equipment, &liquids)?;
         self.insert_dynamic_cargo_crate(
             lua,
             DynamicCargoCrate {
                 index: 0,
-                name,
+                name: name.clone(),
                 side,
                 spawner,
                 source,
@@ -302,10 +303,23 @@ impl Db {
                 airdrop_rehooked: false,
             },
         )?;
-        if let Err(e) = self.sync_objective_to_warehouse(lua, source, false) {
+        // Birth often registers empty; SyncTo now would restore DCS stock (OLO exploit).
+        // Fill-delta in refresh_dynamic_cargo_snapshots debits + SyncTo when content appears.
+        if snap_empty {
+            info!(
+                "dynamic cargo registered {name}: empty warehouse snapshot, defer SyncTo until fill"
+            );
+        } else if let Err(e) = self.sync_objective_to_warehouse(lua, source, false) {
             warn!("dynamic cargo checkout SyncTo {source:?}: {e:?}");
         }
         Ok(())
+    }
+
+    pub(super) fn objective_has_open_dynamic_cargo_checkout(&self, oid: ObjectiveId) -> bool {
+        self.persisted
+            .dynamic_cargo_crates
+            .into_iter()
+            .any(|(_, c)| c.source == oid && c.source_checked_out)
     }
 
     fn resolve_dynamic_cargo_spawner_and_source(
@@ -1135,6 +1149,7 @@ impl Db {
                     let synced = match self.sync_warehouse_to_objective(lua, pad) {
                         Ok(_) => {
                             sync_from_oids.insert(pad, ());
+                            self.clamp_dynamic_cargo_checkout(pad);
                             info!(
                                 "dynamic cargo absorb SyncFrom {pad:?} ({})",
                                 entry.name

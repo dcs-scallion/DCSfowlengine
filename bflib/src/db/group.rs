@@ -277,6 +277,19 @@ impl Db {
         ))
     }
 
+    pub fn group_has_naval_driveable(&self, id: &GroupId) -> Result<bool> {
+        let group = group!(self, id)?;
+        Ok(group
+            .units
+            .into_iter()
+            .filter_map(|uid| self.persisted.units.get(uid))
+            .any(|unit| {
+                !unit.dead
+                    && unit.tags.contains(UnitTag::Boat)
+                    && unit.tags.contains(UnitTag::Driveable)
+            }))
+    }
+
     #[allow(dead_code)]
     pub fn group_by_name(&self, name: &str) -> Result<&SpawnedGroup> {
         group_by_name!(self, name)

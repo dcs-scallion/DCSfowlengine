@@ -439,12 +439,18 @@ impl Db {
                     let pos = self.group_center(&a.group)?;
                     let dist = na::distance(&pos.into(), &a.pos.into());
                     let group = group!(self, a.group)?;
+                    let naval_driveable = self.group_has_naval_driveable(&a.group)?;
+                    let deployable_step = if naval_driveable {
+                        a.cfg.deployable_naval()
+                    } else {
+                        a.cfg.deployable
+                    };
                     let step = match &group.origin {
-                        DeployKind::Deployed { .. } => a.cfg.deployable,
+                        DeployKind::Deployed { .. } => deployable_step,
                         DeployKind::Objective { origin } => {
                             let obj = objective!(self, origin)?;
                             match obj.kind {
-                                ObjectiveKind::Farp { mobile: true, .. } => a.cfg.deployable_naval(),
+                                ObjectiveKind::Farp { mobile: true, .. } => deployable_step,
                                 _ => bail!("can't move this unit type"),
                             }
                         }

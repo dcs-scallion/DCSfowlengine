@@ -666,6 +666,8 @@ fn sync_obj_to_warehouse(
         &mut FxHashMap<(ObjectiveId, String), u32>,
         &mut FxHashMap<(ObjectiveId, LiquidType), u32>,
     )>,
+    // Open checkout: never push DCS stock back up (OLO unload/reload exploit).
+    forbid_dcs_restore: bool,
 ) -> Result<()> {
     let perf = unsafe { Perf::get_mut() };
     let perf = Arc::make_mut(&mut perf.inner);
@@ -677,6 +679,17 @@ fn sync_obj_to_warehouse(
             .get_item_count(item.clone())
             .with_context(|| format_compact!("getting item count for {item}"))?;
         if current < inv.stored {
+            if forbid_dcs_restore {
+                if eq_deltas < 12 {
+                    wh_diag(format_compact!(
+                        "sync-to {} eq:{item} skip restore DCS {current} virtual {} (open checkout)",
+                        obj.name,
+                        inv.stored
+                    ));
+                }
+                eq_deltas += 1;
+                continue;
+            }
             let want = inv.stored - current;
             let add = match credits.as_mut() {
                 None => want,
@@ -739,6 +752,17 @@ fn sync_obj_to_warehouse(
             current
         };
         if current_virtual < inv.stored {
+            if forbid_dcs_restore {
+                if liq_deltas < 8 {
+                    wh_diag(format_compact!(
+                        "sync-to {} liq:{name:?} skip restore DCS {current_virtual} virtual {} (open checkout)",
+                        obj.name,
+                        inv.stored
+                    ));
+                }
+                liq_deltas += 1;
+                continue;
+            }
             let want = inv.stored - current_virtual;
             let add = match credits.as_mut() {
                 None => want,
@@ -4334,6 +4358,18 @@ impl Db {
                     }
                     Some(oid) => {
                         let start_ts = Utc::now();
+                        // SyncFrom first so DCS absorb stock is in virtual before SyncTo can wipe it.
+                        if self.dynamic_cargo_enabled() {
+                            if let Err(e) = self.sync_warehouse_to_objective(lua, oid) {
+                                if !warehouse_sync_skip(&e) {
+                                    error!(
+                                        "dynamic cargo SyncFrom before SyncTo {oid:?}: {e:?}"
+                                    )
+                                }
+                            } else {
+                                self.clamp_dynamic_cargo_checkout(oid);
+                            }
+                        }
                         if let Err(e) = self.sync_objective_to_warehouse(lua, oid, true) {
                             if !warehouse_sync_skip(&e) {
                                 error!("failed to sync objective {oid} to warehouse {:?}", e)
@@ -5487,6 +5523,8 @@ impl Db {
         let resource_meta = self
             .warehouse_resource_meta_cache(lua)
             .context("warehouse resource meta for prune")?;
+        let forbid_dcs_restore = self.ephemeral.cfg.dynamic_cargo_delivery.enabled
+            && self.objective_has_open_dynamic_cargo_checkout(oid);
         let obj = objective_mut!(self, oid)?;
         if matches!(obj.kind, ObjectiveKind::Production) {
             debug!(
@@ -5535,8 +5573,15 @@ impl Db {
             } else {
                 None
             };
-            sync_obj_to_warehouse(oid, obj, &warehouse, liquids_tons, credits)
-                .context("syncing warehouse to objective")?;
+            sync_obj_to_warehouse(
+                oid,
+                obj,
+                &warehouse,
+                liquids_tons,
+                credits,
+                forbid_dcs_restore,
+            )
+            .context("syncing warehouse to objective")?;
             if ground_dep {
                 reconcile_dcs_warehouse_to_virtual(
                     lua,
@@ -5670,6 +5715,10 @@ impl Db {
         let export = Arc::clone(&self.ephemeral.fowl_miz_export);
         let from_tons = objective_liquids_stored_as_tons(export.as_ref(), objective!(self, from)?);
         let to_tons = objective_liquids_stored_as_tons(export.as_ref(), objective!(self, to)?);
+        let from_forbid = self.ephemeral.cfg.dynamic_cargo_delivery.enabled
+            && self.objective_has_open_dynamic_cargo_checkout(from);
+        let to_forbid = self.ephemeral.cfg.dynamic_cargo_delivery.enabled
+            && self.objective_has_open_dynamic_cargo_checkout(to);
         {
             let Db {
                 persisted,
@@ -5688,6 +5737,7 @@ impl Db {
                     &mut ephemeral.sync_to_equipment_credit,
                     &mut ephemeral.sync_to_liquid_credit,
                 )),
+                from_forbid,
             )?;
             sync_obj_to_warehouse(
                 to,
@@ -5701,6 +5751,7 @@ impl Db {
                     &mut ephemeral.sync_to_equipment_credit,
                     &mut ephemeral.sync_to_liquid_credit,
                 )),
+                to_forbid,
             )?;
         }
         self.update_supply_status()
@@ -5743,7 +5794,7 @@ impl Db {
                 inv.reduce(percent);
             }
         }
-        sync_obj_to_warehouse(oid, obj, &warehouse, liquids_tons, None)
+        sync_obj_to_warehouse(oid, obj, &warehouse, liquids_tons, None, false)
             .context("syncing from warehouse")?;
         self.update_supply_status()
             .context("updating supply status")?;

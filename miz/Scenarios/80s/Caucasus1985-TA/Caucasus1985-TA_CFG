@@ -259,7 +259,7 @@
     "tick_carrier_minimum_airframe_global_supply_percentage": 99,
     "tick_airbase_minimum_airframe_global_supply_percentage": 99,
     "tick_occupiedhub_minimum_airframe_global_supply_percentage": 99,
-    "ticks_per_delivery": 3,
+    "ticks_per_delivery": 2,
     "supply_transfer_size": 10,
     "supply_transfer_crate": {
       "Red": {

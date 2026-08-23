@@ -132,3 +132,5 @@ bftools/analyze_export.ps1
 bftools/analyze_export_detail.ps1
 # Local Cursor IDE rules and settings (not shared via git)
 .cursor/
+# Attrition static site — local/DCS host only, not part of the engine repo
+/website/
