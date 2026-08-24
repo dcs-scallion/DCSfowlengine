@@ -22,6 +22,25 @@ $env:LUA_LIB=Get-Location
 $env:LUA_LINK="dylib"
 $env:LUA_LIB_NAME="lua"
 
+# cargo/rustc inherit this shell. BelowNormal keeps the desktop usable during release LTO.
+function Set-FowlBuildProcessPriority {
+    param(
+        [ValidateSet('Idle', 'BelowNormal', 'Normal')]
+        [string]$Class = 'BelowNormal'
+    )
+    try {
+        $proc = Get-Process -Id $PID
+        if ($proc.PriorityClass.ToString() -ne $Class) {
+            $proc.PriorityClass = $Class
+        }
+        Write-Host "Build process priority: $($proc.PriorityClass) (cargo/rustc inherit this)." -ForegroundColor DarkGray
+    }
+    catch {
+        Write-Host "Could not set process priority: $($_.Exception.Message)" -ForegroundColor DarkYellow
+    }
+}
+Set-FowlBuildProcessPriority
+
 # Output the set variables for verification
 Write-Host "`n--- Checking Rust Environment Settings ---" -ForegroundColor Cyan
 Get-ChildItem Env:LUA*

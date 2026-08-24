@@ -112,13 +112,11 @@ try {
 
     Set-Location -Path "$work_path_engine" -ErrorAction Stop
 
-    $env:LUA_LIB = Get-Location
-    $env:LUA_LINK = "dylib"
-    $env:LUA_LIB_NAME = "lua"
-
-    Write-Host "`n--- Rust / Lua env (LUA_*) ---" -ForegroundColor Cyan
-    Get-ChildItem Env:LUA*
-    Write-Host "------------------------------------------`n" -ForegroundColor Cyan
+    $setupBuild = Join-Path (Get-Location) "setup-build.ps1"
+    if (-not (Test-Path -LiteralPath $setupBuild)) {
+        throw "Missing $setupBuild"
+    }
+    . $setupBuild
 
     Write-Host "`n--- bflib.dll build started: $(Get-Date) ---" -ForegroundColor Cyan
 

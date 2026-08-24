@@ -257,6 +257,9 @@ pub struct Ephemeral {
     /// Sync-to may raise DCS stock only up to this credit (prevents phantom free stock).
     pub(super) sync_to_equipment_credit: FxHashMap<(ObjectiveId, String), u32>,
     pub(super) sync_to_liquid_credit: FxHashMap<(ObjectiveId, LiquidType), u32>,
+    /// Outbound hub transfers this tick (source oid + item → amount).
+    pub(super) sync_to_equipment_debit: FxHashMap<(ObjectiveId, String), u32>,
+    pub(super) sync_to_liquid_debit: FxHashMap<(ObjectiveId, LiquidType), u32>,
     /// Combined Arms: object id → UCID of player currently controlling a Fowl deployable/troop.
     pub(crate) ca_controller_by_oid: FxHashMap<DcsOid<ClassUnit>, Ucid>,
     /// Reverse of `ca_controller_by_oid` (one controlled unit per player).
@@ -363,6 +366,8 @@ impl Default for Ephemeral {
             pending_airframe_loss_dynamic_cargo: Vec::default(),
             sync_to_equipment_credit: FxHashMap::default(),
             sync_to_liquid_credit: FxHashMap::default(),
+            sync_to_equipment_debit: FxHashMap::default(),
+            sync_to_liquid_debit: FxHashMap::default(),
             ca_controller_by_oid: FxHashMap::default(),
             ca_oid_by_controller: FxHashMap::default(),
             overlay_underlay_dirty: false,

@@ -2284,6 +2284,25 @@ fn snapshot_equipment_stored(obj: &Objective) -> FxHashMap<String, u32> {
         .collect()
 }
 
+fn snap_liq_stored(snap: &[(LiquidType, u32)], typ: LiquidType) -> u32 {
+    snap.iter()
+        .find(|(t, _)| *t == typ)
+        .map(|(_, stored)| *stored)
+        .unwrap_or(0)
+}
+
+/// After SyncFrom: keep OLO/virtual deliveries; keep DCS-only absorb (player unload).
+fn merge_stored_after_sync_from(
+    v: u32,
+    dcs: u32,
+    credit: u32,
+    debit: u32,
+) -> u32 {
+    let expected_dcs = v.saturating_sub(credit).saturating_add(debit);
+    let absorb = dcs.saturating_sub(expected_dcs);
+    v.saturating_add(absorb)
+}
+
 fn clamp_liquid_stored_no_increase(obj: &mut Objective, previous: &[(LiquidType, u32)]) {
     for &(typ, prev_stored) in previous {
         if let Some(inv) = obj.warehouse.liquids.get_mut_cow(&typ) {
@@ -3368,14 +3387,112 @@ impl Db {
                 .sync_to_equipment_credit
                 .entry((tr.target, name.clone()))
                 .or_default() += tr.amount;
+            *self
+                .ephemeral
+                .sync_to_equipment_debit
+                .entry((tr.source, name.clone()))
+                .or_default() += tr.amount;
         } else if let TransferItem::Liquid(name) = &tr.item {
             *self
                 .ephemeral
                 .sync_to_liquid_credit
                 .entry((tr.target, *name))
                 .or_default() += tr.amount;
+            *self
+                .ephemeral
+                .sync_to_liquid_debit
+                .entry((tr.source, *name))
+                .or_default() += tr.amount;
         }
         Ok(())
+    }
+
+    fn merge_virtual_keep_logistics_and_absorb(
+        &mut self,
+        oid: ObjectiveId,
+        snap_eq: &FxHashMap<String, u32>,
+        snap_liq: &[(LiquidType, u32)],
+    ) {
+        let Db {
+            persisted,
+            ephemeral,
+            ..
+        } = self;
+        let Some(obj) = persisted.objectives.get_mut_cow(&oid) else {
+            return;
+        };
+        let mut eq_logs = 0u32;
+        let mut liq_logs = 0u32;
+        let mut dirty = false;
+        for (item, inv) in obj.warehouse.equipment.iter_mut_cow() {
+            let v = snap_eq.get(item.as_str()).copied().unwrap_or(0);
+            let dcs = inv.stored;
+            let credit = ephemeral
+                .sync_to_equipment_credit
+                .get(&(oid, item.clone()))
+                .copied()
+                .unwrap_or(0);
+            let debit = ephemeral
+                .sync_to_equipment_debit
+                .get(&(oid, item.clone()))
+                .copied()
+                .unwrap_or(0);
+            let merged = merge_stored_after_sync_from(v, dcs, credit, debit);
+            if merged != dcs {
+                if eq_logs < 12 {
+                    if merged == v {
+                        wh_diag(format_compact!(
+                            "sync-from {} eq:{item} keep virtual {dcs}->{merged} (OLO delivery)",
+                            obj.name
+                        ));
+                    } else {
+                        wh_diag(format_compact!(
+                            "sync-from {} eq:{item} keep absorb+virtual {dcs}->{merged} (was {v})",
+                            obj.name
+                        ));
+                    }
+                    eq_logs += 1;
+                }
+                inv.stored = merged;
+                dirty = true;
+            }
+        }
+        for (typ, inv) in obj.warehouse.liquids.iter_mut_cow() {
+            let v = snap_liq_stored(snap_liq, *typ);
+            let dcs = inv.stored;
+            let credit = ephemeral
+                .sync_to_liquid_credit
+                .get(&(oid, *typ))
+                .copied()
+                .unwrap_or(0);
+            let debit = ephemeral
+                .sync_to_liquid_debit
+                .get(&(oid, *typ))
+                .copied()
+                .unwrap_or(0);
+            let merged = merge_stored_after_sync_from(v, dcs, credit, debit);
+            if merged != dcs {
+                if liq_logs < 8 {
+                    if merged == v {
+                        wh_diag(format_compact!(
+                            "sync-from {} liq:{typ:?} keep virtual {dcs}->{merged} (OLO delivery)",
+                            obj.name
+                        ));
+                    } else {
+                        wh_diag(format_compact!(
+                            "sync-from {} liq:{typ:?} keep absorb+virtual {dcs}->{merged} (was {v})",
+                            obj.name
+                        ));
+                    }
+                    liq_logs += 1;
+                }
+                inv.stored = merged;
+                dirty = true;
+            }
+        }
+        if dirty {
+            ephemeral.dirty();
+        }
     }
 
     fn ensure_dyn_spawn_template_links(&mut self, lua: MizLua) -> Result<()> {
@@ -4246,6 +4363,8 @@ impl Db {
                 LogiStage::Init => {
                     self.ephemeral.sync_to_equipment_credit.clear();
                     self.ephemeral.sync_to_liquid_credit.clear();
+                    self.ephemeral.sync_to_equipment_debit.clear();
+                    self.ephemeral.sync_to_liquid_debit.clear();
                     let objectives = self.warehouse_sync_objective_ids().into();
                     self.ephemeral.logistics_stage = if self
                         .ephemeral
@@ -4266,6 +4385,8 @@ impl Db {
                     ));
                     self.ephemeral.sync_to_equipment_credit.clear();
                     self.ephemeral.sync_to_liquid_credit.clear();
+                    self.ephemeral.sync_to_equipment_debit.clear();
+                    self.ephemeral.sync_to_liquid_debit.clear();
                     self.ephemeral.logistics_stage =
                         LogiStage::SyncFromWarehouses { objectives: objectives.into() };
                 }
@@ -4352,14 +4473,18 @@ impl Db {
                     None => {
                         self.ephemeral.sync_to_equipment_credit.clear();
                         self.ephemeral.sync_to_liquid_credit.clear();
+                        self.ephemeral.sync_to_equipment_debit.clear();
+                        self.ephemeral.sync_to_liquid_debit.clear();
                         self.update_supply_status()
                             .context("supply status after logistics sync-to")?;
                         self.ephemeral.logistics_stage = LogiStage::Complete { last_tick: ts };
                     }
                     Some(oid) => {
                         let start_ts = Utc::now();
-                        // SyncFrom first so DCS absorb stock is in virtual before SyncTo can wipe it.
+                        // SyncFrom then merge: DCS absorb vs virtual OLO delivery.
                         if self.dynamic_cargo_enabled() {
+                            let snap_eq = snapshot_equipment_stored(objective!(self, oid)?);
+                            let snap_liq = snapshot_liquid_stored(objective!(self, oid)?);
                             if let Err(e) = self.sync_warehouse_to_objective(lua, oid) {
                                 if !warehouse_sync_skip(&e) {
                                     error!(
@@ -4367,6 +4492,9 @@ impl Db {
                                     )
                                 }
                             } else {
+                                self.merge_virtual_keep_logistics_and_absorb(
+                                    oid, &snap_eq, &snap_liq,
+                                );
                                 self.clamp_dynamic_cargo_checkout(oid);
                             }
                         }
@@ -4638,7 +4766,7 @@ impl Db {
             let hub_ids: Vec<ObjectiveId> =
                 self.persisted.logistics_hubs.into_iter().copied().collect();
             for side in Side::ALL {
-                let production = match self.ephemeral.production_by_side.get(&side) {
+                let production = match self.ephemeral.production_by_side.get(&side).cloned() {
                     Some(e) => e,
                     None => continue,
                 };
@@ -4654,26 +4782,56 @@ impl Db {
                     }
                     let hub_prod = effective_hub_production(cfg, &self.persisted, logi_ref);
                     let hub_name = logi_ref.name.clone();
-                    let logi = objective_mut!(self, oid)?;
-                    let mut added_eq = 0u32;
-                    let mut added_liq = 0u32;
-                    for (name, inv) in logi.warehouse.equipment.iter_mut_cow() {
-                        if let Some(eq) = production.equipment.get(name) {
-                            let add = Self::scale_production_amount(eq.production, hub_prod);
-                            if add > 0 {
-                                *inv += add;
-                                added_eq = added_eq.saturating_add(add);
+                    let hid = *oid;
+                    let (added_eq, added_liq, eq_credits, liq_credits) = {
+                        let logi = objective_mut!(self, oid)?;
+                        let mut added_eq = 0u32;
+                        let mut added_liq = 0u32;
+                        let mut eq_credits: Vec<(String, u32)> = Vec::new();
+                        let mut liq_credits: Vec<(LiquidType, u32)> = Vec::new();
+                        for (name, inv) in logi.warehouse.equipment.iter_mut_cow() {
+                            if let Some(eq) = production.equipment.get(name) {
+                                let add = Self::scale_production_amount(eq.production, hub_prod);
+                                if add > 0 {
+                                    let before = inv.stored;
+                                    *inv += add;
+                                    let actual = inv.stored.saturating_sub(before);
+                                    if actual > 0 {
+                                        added_eq = added_eq.saturating_add(actual);
+                                        eq_credits.push((name.clone(), actual));
+                                    }
+                                }
                             }
                         }
+                        for (name, inv) in logi.warehouse.liquids.iter_mut_cow() {
+                            if let Some(pr) = production.liquids.get(name) {
+                                let add = Self::scale_production_amount(*pr, hub_prod);
+                                if add > 0 {
+                                    let before = inv.stored;
+                                    *inv += add;
+                                    let actual = inv.stored.saturating_sub(before);
+                                    if actual > 0 {
+                                        added_liq = added_liq.saturating_add(actual);
+                                        liq_credits.push((*name, actual));
+                                    }
+                                }
+                            }
+                        }
+                        (added_eq, added_liq, eq_credits, liq_credits)
+                    };
+                    for (name, qty) in eq_credits {
+                        *self
+                            .ephemeral
+                            .sync_to_equipment_credit
+                            .entry((hid, name))
+                            .or_default() += qty;
                     }
-                    for (name, inv) in logi.warehouse.liquids.iter_mut_cow() {
-                        if let Some(pr) = production.liquids.get(name) {
-                            let add = Self::scale_production_amount(*pr, hub_prod);
-                            if add > 0 {
-                                *inv += add;
-                                added_liq = added_liq.saturating_add(add);
-                            }
-                        }
+                    for (liq, qty) in liq_credits {
+                        *self
+                            .ephemeral
+                            .sync_to_liquid_credit
+                            .entry((hid, liq))
+                            .or_default() += qty;
                     }
                     if added_eq > 0 || added_liq > 0 {
                         wh_diag(format_compact!(
