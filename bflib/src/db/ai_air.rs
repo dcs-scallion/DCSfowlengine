@@ -3439,25 +3439,17 @@ fn cas_ship_attributes() -> Vec<Attribute> {
 fn cas_structure_attributes() -> Vec<Attribute> {
     vec![
         Attribute::Buildings,
-        Attribute::Fortifications,
         Attribute::Airfields,
         Attribute::Heliports,
         Attribute::GrassAirfields,
     ]
 }
 
-fn cas_heli_no_target_types() -> Vec<Attribute> {
-    cas_ship_attributes()
-        .into_iter()
-        .chain(cas_structure_attributes())
-        .collect()
-}
-
 /// ME-style CAS enroute combo (test mission `test CAS`).
-/// Attack helicopters: ships and structures excluded from engage lists / `noTargetTypes`.
+/// Heli: structure `noTargetTypes` only on `main_engage` (CAS preset + Fortifications killed ATGM).
 pub(super) fn cas_combo_task<'lua>(kind: AiPlaneKind, zone: Vector2) -> Task<'lua> {
     let heli = matches!(kind, AiPlaneKind::Helicopter);
-    let heli_no_targets = heli.then(cas_heli_no_target_types);
+    let heli_ship_exclude = heli.then(cas_ship_attributes);
     let aa_engage = Task::EngageTargets {
         target_types: vec![
             Attribute::AirDefence,
@@ -3467,7 +3459,7 @@ pub(super) fn cas_combo_task<'lua>(kind: AiPlaneKind, zone: Vector2) -> Task<'lu
         ],
         max_dist: Some(cas_engage_max_dist(kind)),
         max_dist_enabled: Some(true),
-        no_target_types: heli_no_targets.clone(),
+        no_target_types: heli_ship_exclude.clone(),
         priority: Some(0),
         preset_key: None,
     };
@@ -3490,22 +3482,17 @@ pub(super) fn cas_combo_task<'lua>(kind: AiPlaneKind, zone: Vector2) -> Task<'lu
         target_types: cas_preset_types,
         max_dist: None,
         max_dist_enabled: None,
-        no_target_types: heli_no_targets.clone(),
+        no_target_types: heli_ship_exclude,
         priority: Some(2),
         preset_key: Some(String::from("CAS")),
     };
-    let mut main_exclude = vec![Attribute::Fortifications, Attribute::LightArmedShips];
-    if heli {
-        main_exclude.extend([
-            Attribute::HeavyArmedShips,
-            Attribute::ArmedShips,
-            Attribute::UnarmedShips,
-            Attribute::Buildings,
-            Attribute::Airfields,
-            Attribute::Heliports,
-            Attribute::GrassAirfields,
-        ]);
-    }
+    let main_exclude = if heli {
+        let mut v = cas_ship_attributes();
+        v.extend(cas_structure_attributes());
+        v
+    } else {
+        vec![Attribute::Fortifications, Attribute::LightArmedShips]
+    };
     let main_engage = Task::EngageTargets {
         target_types: vec![
             Attribute::Helicopters,
