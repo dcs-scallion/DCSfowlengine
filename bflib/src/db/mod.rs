@@ -299,7 +299,8 @@ impl Db {
                 DeployKind::Crate { .. }
                 | DeployKind::Objective { .. }
                 | DeployKind::ObjectiveDeprecated
-                | DeployKind::Troop { .. } => None,
+                | DeployKind::Troop { .. }
+                | DeployKind::CsarPilot { .. } => None,
                 DeployKind::Action {
                     spec:
                         Action {
@@ -394,6 +395,7 @@ impl Db {
                     | DeployKind::Objective { .. }
                     | DeployKind::ObjectiveDeprecated
                     | DeployKind::Troop { .. }
+                    | DeployKind::CsarPilot { .. }
                     | DeployKind::Deployed { .. } => None,
                 }
             })

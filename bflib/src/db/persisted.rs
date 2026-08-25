@@ -41,6 +41,8 @@ pub struct Persisted {
     pub farps: SetS<ObjectiveId>,
     pub crates: SetM<GroupId>,
     pub troops: SetM<GroupId>,
+    #[serde(default)]
+    pub csar_pilots: SetM<GroupId>,
     pub jtacs: SetM<GroupId>,
     pub ewrs: SetS<GroupId>,
     #[serde(default)]

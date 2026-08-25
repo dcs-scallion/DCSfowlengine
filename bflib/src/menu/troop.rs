@@ -135,6 +135,96 @@ fn return_troops(lua: MizLua, gid: GroupId) -> Result<()> {
     Ok(())
 }
 
+fn csar_list(lua: MizLua, gid: GroupId) -> Result<()> {
+    let ctx = unsafe { Context::get_mut() };
+    let (_, slot) = slot_for_group(lua, ctx, &gid).context("getting slot for group")?;
+    match ctx.db.csar_list_nearby(lua, &slot) {
+        Ok(msg) => ctx
+            .db
+            .ephemeral
+            .msgs()
+            .panel_to_group(15, false, gid, msg),
+        Err(e) => ctx
+            .db
+            .ephemeral
+            .msgs()
+            .panel_to_group(10, false, gid, format_compact!("{e}")),
+    }
+    Ok(())
+}
+
+fn csar_smoke(lua: MizLua, gid: GroupId) -> Result<()> {
+    let ctx = unsafe { Context::get_mut() };
+    let (_, slot) = slot_for_group(lua, ctx, &gid).context("getting slot for group")?;
+    match ctx.db.csar_request_smoke(lua, &slot) {
+        Ok(msg) => ctx
+            .db
+            .ephemeral
+            .msgs()
+            .panel_to_group(15, false, gid, msg),
+        Err(e) => ctx
+            .db
+            .ephemeral
+            .msgs()
+            .panel_to_group(10, false, gid, format_compact!("{e}")),
+    }
+    Ok(())
+}
+
+fn csar_extract(lua: MizLua, gid: GroupId) -> Result<()> {
+    let ctx = unsafe { Context::get_mut() };
+    let (_, slot) = slot_for_group(lua, ctx, &gid).context("getting slot for group")?;
+    match ctx.db.csar_extract_friendly(lua, &slot) {
+        Ok(msg) => ctx
+            .db
+            .ephemeral
+            .msgs()
+            .panel_to_group(15, false, gid, msg),
+        Err(e) => ctx
+            .db
+            .ephemeral
+            .msgs()
+            .panel_to_group(10, false, gid, format_compact!("{e}")),
+    }
+    Ok(())
+}
+
+fn csar_extract_enemy(lua: MizLua, gid: GroupId) -> Result<()> {
+    let ctx = unsafe { Context::get_mut() };
+    let (_, slot) = slot_for_group(lua, ctx, &gid).context("getting slot for group")?;
+    match ctx.db.csar_extract_captured_enemy(lua, &slot) {
+        Ok(msg) => ctx
+            .db
+            .ephemeral
+            .msgs()
+            .panel_to_group(15, false, gid, msg),
+        Err(e) => ctx
+            .db
+            .ephemeral
+            .msgs()
+            .panel_to_group(10, false, gid, format_compact!("{e}")),
+    }
+    Ok(())
+}
+
+fn csar_deliver(lua: MizLua, gid: GroupId) -> Result<()> {
+    let ctx = unsafe { Context::get_mut() };
+    let (_, slot) = slot_for_group(lua, ctx, &gid).context("getting slot for group")?;
+    match ctx.db.csar_deliver(lua, &slot) {
+        Ok(msg) => ctx
+            .db
+            .ephemeral
+            .msgs()
+            .panel_to_group(15, false, gid, msg),
+        Err(e) => ctx
+            .db
+            .ephemeral
+            .msgs()
+            .panel_to_group(10, false, gid, format_compact!("{e}")),
+    }
+    Ok(())
+}
+
 pub(super) fn add_troops_menu_for_group(
     cfg: &Cfg,
     db: &Db,
@@ -172,6 +262,44 @@ pub(super) fn add_troops_menu_for_group(
             return_troops,
             group,
         )?;
+        if cfg.csar.enabled {
+            let csar = mc.add_submenu_for_group(group, "CSAR".into(), Some(root.clone()))?;
+            mc.add_command_for_group(
+                group,
+                "List nearby".into(),
+                Some(csar.clone()),
+                csar_list,
+                group,
+            )?;
+            mc.add_command_for_group(
+                group,
+                "Smoke nearest".into(),
+                Some(csar.clone()),
+                csar_smoke,
+                group,
+            )?;
+            mc.add_command_for_group(
+                group,
+                "Extract".into(),
+                Some(csar.clone()),
+                csar_extract,
+                group,
+            )?;
+            mc.add_command_for_group(
+                group,
+                "Extract captured enemy".into(),
+                Some(csar.clone()),
+                csar_extract_enemy,
+                group,
+            )?;
+            mc.add_command_for_group(
+                group,
+                "Deliver rescued pilots".into(),
+                Some(csar),
+                csar_deliver,
+                group,
+            )?;
+        }
         let root = mc.add_submenu_for_group(group, "Squads".into(), Some(root))?;
         for sq in squads {
             let (n, _) = db

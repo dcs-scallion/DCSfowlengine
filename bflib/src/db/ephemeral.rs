@@ -173,6 +173,14 @@ pub struct Ephemeral {
     pub(super) csar_pilot_unit: FxHashMap<DcsOid<ClassUnit>, Ucid>,
     /// Pilot units to destroy on next CSAR tick (life reset without MizLua).
     pub(super) pending_csar_pilot_destroy: Vec<DcsOid<ClassUnit>>,
+    /// Friendly extract in progress: downed group -> rescuing slot.
+    pub(super) csar_extracting: FxHashMap<GroupId, SlotId>,
+    /// Capture walk: capturing troop group -> downed pilot group.
+    pub(super) csar_capture_walk: FxHashMap<GroupId, GroupId>,
+    /// Capture squads that already received a walk task.
+    pub(super) csar_capture_ordered: FxHashSet<GroupId>,
+    /// Last CSAR smoke request per player.
+    pub(super) csar_smoke_at: FxHashMap<Ucid, DateTime<Utc>>,
     pub(super) units_able_to_move: IndexSet<UnitId, FxBuildHasher>,
     pub(super) groups_with_move_missions: FxHashMap<GroupId, Vector2>,
     pub(super) units_potentially_close_to_enemies: FxHashSet<UnitId>,
@@ -315,6 +323,10 @@ impl Default for Ephemeral {
             force_to_spectators: BTreeMap::default(),
             csar_pilot_unit: FxHashMap::default(),
             pending_csar_pilot_destroy: Vec::default(),
+            csar_extracting: FxHashMap::default(),
+            csar_capture_walk: FxHashMap::default(),
+            csar_capture_ordered: FxHashSet::default(),
+            csar_smoke_at: FxHashMap::default(),
             units_able_to_move: IndexSet::default(),
             groups_with_move_missions: FxHashMap::default(),
             units_potentially_close_to_enemies: FxHashSet::default(),
@@ -1076,6 +1088,7 @@ impl Ephemeral {
                 }
             }
             self.cargo.remove(slot);
+            self.csar_extracting.retain(|_, s| s != slot);
             if let Some(id) = self.object_id_by_slot.remove(slot) {
                 self.slot_by_object_id.remove(&id);
                 if let Some(uid) = self.uid_by_object_id.remove(&id) {

@@ -24,7 +24,7 @@ use crate::{
 };
 use anyhow::{Result, anyhow, bail};
 use bfprotocols::{
-    cfg::{CargoConfig, Crate, Deployable, DeployableKind, LimitEnforceTyp, Troop, Vehicle},
+    cfg::{CargoConfig, Crate, Deployable, DeployableKind, LifeType, LimitEnforceTyp, Troop, Vehicle},
     db::{
         group::GroupId,
         objective::{ObjectiveId, ObjectiveKind},
@@ -142,10 +142,22 @@ pub struct InternalTroop {
     pub troop: Troop,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct InternalPilot {
+    pub ucid: Ucid,
+    pub name: String,
+    pub life_type: LifeType,
+    pub side: Side,
+    pub enemy: bool,
+    pub weight_kg: u32,
+}
+
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct Cargo {
     pub troops: SmallVec<[InternalTroop; 2]>,
     pub crates: SmallVec<[(ObjectiveId, Crate); 1]>,
+    #[serde(default)]
+    pub pilots: SmallVec<[InternalPilot; 2]>,
 }
 
 impl Cargo {
@@ -157,8 +169,21 @@ impl Cargo {
         self.crates.len()
     }
 
+    pub fn num_pilots(&self) -> usize {
+        self.pilots.len()
+    }
+
+    /// 1 troop squad = 2 half-slots; 1 downed pilot = 1 half-slot.
+    pub fn troop_half_slots(&self) -> usize {
+        self.num_troops() * 2 + self.num_pilots()
+    }
+
+    pub fn total_half_slots(&self) -> usize {
+        self.num_crates() * 2 + self.troop_half_slots()
+    }
+
     pub fn num_total(&self) -> usize {
-        self.num_crates() + self.num_troops()
+        self.num_crates() + self.num_troops() + (self.num_pilots() + 1) / 2
     }
 
     pub fn weight(&self) -> i64 {
@@ -166,9 +191,13 @@ impl Cargo {
             .crates
             .iter()
             .fold(0, |acc, (_, cr)| acc + cr.weight as i64);
-        self.troops
+        let tr = self
+            .troops
             .iter()
-            .fold(cr, |acc, it| acc + it.troop.weight as i64)
+            .fold(cr, |acc, it| acc + it.troop.weight as i64);
+        self.pilots
+            .iter()
+            .fold(tr, |acc, p| acc + p.weight_kg as i64)
     }
 }
 
@@ -473,7 +502,8 @@ impl Db {
                 | DeployKind::Troop { .. }
                 | DeployKind::Objective { .. }
                 | DeployKind::ObjectiveDeprecated
-                | DeployKind::Action { .. } => {
+                | DeployKind::Action { .. }
+                | DeployKind::CsarPilot { .. } => {
                     bail!("group {:?} is listed in crates but isn't a crate", gid)
                 }
             };
@@ -1702,6 +1732,7 @@ impl Db {
                             | DeployKind::Objective { .. }
                             | DeployKind::ObjectiveDeprecated
                             | DeployKind::Troop { .. }
+                            | DeployKind::CsarPilot { .. }
                             | DeployKind::Action { .. } => (),
                         }
                     }
@@ -2587,9 +2618,9 @@ impl Db {
             .unwrap_or(0);
         let cargo = self.ephemeral.cargo.entry(slot.clone()).or_default();
         let crates = cargo.num_crates().saturating_add(ed_crates);
-        let troops = cargo.num_troops();
         if cargo_capacity.crate_slots as usize <= crates
-            || cargo_capacity.total_slots as usize <= crates.saturating_add(troops)
+            || cargo_capacity.total_slots as usize * 2
+                < cargo.total_half_slots() + ed_crates * 2 + 2
         {
             bail!("you already have a full load onboard")
         }
@@ -2654,11 +2685,15 @@ impl Db {
                 }
             }
         }
-        let (crates, troops) = self.fowl_crate_and_troop_slot_usage_with_bay(lua, slot, &ucid);
-        if cargo_capacity.troop_slots as usize <= troops
-            || cargo_capacity.total_slots as usize <= crates.saturating_add(troops)
+        let (crates, _) = self.fowl_crate_and_troop_slot_usage_with_bay(lua, slot, &ucid);
         {
-            bail!("you already have a full load onboard")
+            let cargo = self.ephemeral.cargo.entry(slot.clone()).or_default();
+            if cargo.troop_half_slots() + 2 > cargo_capacity.troop_slots as usize * 2
+                || cargo.troop_half_slots() + crates * 2 + 2
+                    > cargo_capacity.total_slots as usize * 2
+            {
+                bail!("you already have a full load onboard")
+            }
         }
         let cost_fraction = self.charge_for_item(
             &ucid,
@@ -2808,6 +2843,7 @@ impl Db {
                     troop: it.troop.name.clone(),
                     by: it.player,
                 });
+                self.try_start_csar_capture(lua, gid, side, point);
                 Ok((it.troop, gid, oid))
             }
             Err(e) => {
@@ -2912,10 +2948,13 @@ impl Db {
             .player_in_slot(slot)
             .cloned()
             .ok_or_else(|| anyhow!("can't find player in slot {slot:?}"))?;
-        let (crates, troops) = self.fowl_crate_and_troop_slot_usage_with_bay(lua, slot, &ucid);
-        if cargo_capacity.troop_slots as usize <= troops
-            || cargo_capacity.total_slots as usize <= crates.saturating_add(troops)
-        {
+        let (crates, _) = self.fowl_crate_and_troop_slot_usage_with_bay(lua, slot, &ucid);
+        if {
+            let cargo = self.ephemeral.cargo.entry(slot.clone()).or_default();
+            cargo.troop_half_slots() + 2 > cargo_capacity.troop_slots as usize * 2
+                || cargo.troop_half_slots() + crates * 2 + 2
+                    > cargo_capacity.total_slots as usize * 2
+        } {
             bail!("you already have a full load onboard")
         }
         let cargo = self.ephemeral.cargo.entry(slot.clone()).or_default();

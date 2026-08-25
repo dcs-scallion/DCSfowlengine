@@ -403,7 +403,8 @@ impl Db {
                             DeployKind::Action { player, .. } => player.clone(),
                             DeployKind::Crate { .. }
                             | DeployKind::Objective { .. }
-                            | DeployKind::ObjectiveDeprecated => None,
+                            | DeployKind::ObjectiveDeprecated
+                            | DeployKind::CsarPilot { .. } => None,
                         })
                 }
             }
@@ -443,6 +444,7 @@ impl Db {
         unit: &Unit,
         position: Vector2,
     ) -> Result<TakeoffRes> {
+        self.cancel_csar_extract_for_slot(&slot);
         let sifo = self
             .ephemeral
             .slot_info

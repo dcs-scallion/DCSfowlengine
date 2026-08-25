@@ -274,6 +274,9 @@ fn delete_command(ctx: &mut Context, id: PlayerId, s: &str) {
                         reply!("group {id} wasn't deployed by you")
                     }
                     DeployKind::Action { .. } => reply!("can't delete an action group"),
+                    DeployKind::CsarPilot { .. } => {
+                        reply!("can't delete a downed pilot this way")
+                    }
                     DeployKind::Objective { .. } | DeployKind::ObjectiveDeprecated => {
                         reply!("can't delete an objective group")
                     }

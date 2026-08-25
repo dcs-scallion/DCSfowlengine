@@ -449,7 +449,8 @@ fn add_action_menu(lua: MizLua, arg: ArgTriple<Ucid, GroupId, SlotId>) -> Result
                     .persisted
                     .deployed
                     .into_iter()
-                    .chain(ctx.db.persisted.troops.into_iter()),
+                    .chain(ctx.db.persisted.troops.into_iter())
+                    .chain(ctx.db.persisted.csar_pilots.into_iter()),
             )
         };
         let mut n = 0;
@@ -480,6 +481,14 @@ fn add_action_menu(lua: MizLua, arg: ArgTriple<Ucid, GroupId, SlotId>) -> Result
                 DeployKind::Troop { spec, .. } => {
                     if !action {
                         Some(format_compact!("{} Troop", spec.name).into())
+                    } else {
+                        None
+                    }
+                }
+                DeployKind::CsarPilot { captured: true, .. } => None,
+                DeployKind::CsarPilot { .. } => {
+                    if !action {
+                        Some(String::from("downed pilot"))
                     } else {
                         None
                     }

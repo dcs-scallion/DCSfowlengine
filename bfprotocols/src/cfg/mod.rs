@@ -489,6 +489,9 @@ pub struct Troop {
     pub cost: u32,
     /// Can laser designate and scout
     pub jtac: Option<DeployableJtac>,
+    /// May walk to and detain an enemy downed pilot for CSAR extraction.
+    #[serde(default)]
+    pub can_capture_csar: bool,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize)]
@@ -857,6 +860,12 @@ pub struct PointsCfg {
     /// not cover all weapons, and the default is zero.
     #[serde(default)]
     pub weapon_cost: FxHashMap<String, u32>,
+    /// Points to the rescuer for delivering a same-coalition downed pilot.
+    #[serde(default)]
+    pub csar_delivery_coalition_pilot: u32,
+    /// Points to the rescuer for delivering a captured enemy downed pilot.
+    #[serde(default)]
+    pub csar_delivery_enemy_pilot: u32,
     /// How many points do connected players automatically gain per
     /// time interval. This is a pair of the number of points with the
     /// interval in seconds. The number of points CAN be negative, the
@@ -1689,9 +1698,9 @@ fn parse_scheduled_restart_hh_mm(s: &str) -> Result<(u32, u32)> {
     Ok((h % 24, m))
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CsarCfg {
-    /// Keep ejected pilots in the world and hide them from JTAC (future CSAR missions).
+    /// Keep ejected pilots in the world and hide them from JTAC.
     #[serde(default)]
     pub enabled: bool,
     /// Late-activated ME group name for downed pilot (MOOSE CSAR template), red side.
@@ -1700,6 +1709,92 @@ pub struct CsarCfg {
     /// Late-activated ME group name for downed pilot (MOOSE CSAR template), blue side.
     #[serde(default)]
     pub pilot_template_blue: Option<String>,
+    /// Max distance (m) from helo to issue Extract / load a captured enemy.
+    #[serde(default = "default_csar_pickup_distance_m")]
+    pub pickup_distance_m: u32,
+    /// Extract / enemy load requires the helo on the ground.
+    #[serde(default = "default_csar_pickup_requires_landed")]
+    pub pickup_requires_landed: bool,
+    /// Internal cargo mass (kg) per onboard downed pilot.
+    #[serde(default = "default_csar_downed_pilot_weight_kg")]
+    pub downed_pilot_weight_kg: u32,
+    /// Restore a friendly life on delivery when the class is not already full.
+    #[serde(default = "default_csar_restore_life_on_rescue")]
+    pub restore_life_on_rescue: bool,
+    /// Do not restore a life that would exceed `default_lives` for that class.
+    #[serde(default = "default_csar_restore_life_cap_at_default")]
+    pub restore_life_cap_at_default: bool,
+    /// Minutes until an unrescued downed pilot is removed (0 = disabled).
+    #[serde(default)]
+    pub capture_timer: u32,
+    /// Seconds before the same player can request smoke again.
+    #[serde(default = "default_csar_smoke_cooldown")]
+    pub smoke_cooldown: u32,
+    /// Max distance (m) from an unloaded capture squad to an enemy downed pilot.
+    #[serde(default = "default_csar_capture_start_distance_m")]
+    pub capture_start_distance_m: u32,
+    /// Distance (m) at which a walking pilot/squad is treated as arrived.
+    #[serde(default = "default_csar_board_distance_m")]
+    pub board_distance_m: u32,
+    /// Max range (m) for CSAR List nearby / Smoke nearest (friendly only).
+    #[serde(default = "default_csar_list_smoke_range_m")]
+    pub list_smoke_range_m: u32,
+}
+
+impl Default for CsarCfg {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            pilot_template_red: None,
+            pilot_template_blue: None,
+            pickup_distance_m: default_csar_pickup_distance_m(),
+            pickup_requires_landed: default_csar_pickup_requires_landed(),
+            downed_pilot_weight_kg: default_csar_downed_pilot_weight_kg(),
+            restore_life_on_rescue: default_csar_restore_life_on_rescue(),
+            restore_life_cap_at_default: default_csar_restore_life_cap_at_default(),
+            capture_timer: 0,
+            smoke_cooldown: default_csar_smoke_cooldown(),
+            capture_start_distance_m: default_csar_capture_start_distance_m(),
+            board_distance_m: default_csar_board_distance_m(),
+            list_smoke_range_m: default_csar_list_smoke_range_m(),
+        }
+    }
+}
+
+fn default_csar_pickup_distance_m() -> u32 {
+    60
+}
+
+fn default_csar_pickup_requires_landed() -> bool {
+    true
+}
+
+fn default_csar_downed_pilot_weight_kg() -> u32 {
+    100
+}
+
+fn default_csar_restore_life_on_rescue() -> bool {
+    true
+}
+
+fn default_csar_restore_life_cap_at_default() -> bool {
+    true
+}
+
+fn default_csar_smoke_cooldown() -> u32 {
+    300
+}
+
+fn default_csar_capture_start_distance_m() -> u32 {
+    250
+}
+
+fn default_csar_board_distance_m() -> u32 {
+    20
+}
+
+fn default_csar_list_smoke_range_m() -> u32 {
+    10_000
 }
 
 /// ED dynamic cargo crates: Fowl registry, To stock → objective warehouse, points.

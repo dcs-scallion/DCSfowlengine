@@ -30,7 +30,7 @@ use crate::{
 };
 use anyhow::{anyhow, bail, Context, Result};
 use bfprotocols::{
-    cfg::{Action, ActionKind, Crate, Deployable, Troop, UnitTag, UnitTags, Vehicle},
+    cfg::{Action, ActionKind, Crate, Deployable, LifeType, Troop, UnitTag, UnitTags, Vehicle},
     db::objective::{ObjectiveId, ObjectiveKind},
     stats::{self, EnId},
 };
@@ -122,6 +122,14 @@ pub enum DeployKind {
         /// Ship-relative offsets for carrier-deck troops.
         #[serde(default)]
         ship_offsets: Option<ShipCrateOffsets>,
+    },
+    CsarPilot {
+        ucid: Ucid,
+        life_type: LifeType,
+        #[serde(default)]
+        captured: bool,
+        #[serde(default)]
+        captured_by: Option<GroupId>,
     },
     Crate {
         origin: ObjectiveId,
@@ -542,6 +550,7 @@ impl Db {
                     msg,
                 ))
             }
+            DeployKind::CsarPilot { .. } => None,
         };
         if let Some(id) = id {
             self.ephemeral.group_marks.insert(*gid, id);
@@ -585,6 +594,9 @@ impl Db {
                 if spec.jtac.is_some() {
                     self.persisted.jtacs.remove_cow(gid);
                 }
+            }
+            DeployKind::CsarPilot { .. } => {
+                self.persisted.csar_pilots.remove_cow(gid);
             }
         }
         if let Some(id) = self.ephemeral.group_marks.remove(gid) {
@@ -1104,6 +1116,9 @@ impl Db {
                 if spec.jtac.is_some() {
                     self.persisted.jtacs.insert_cow(gid);
                 }
+            }
+            DeployKind::CsarPilot { .. } => {
+                self.persisted.csar_pilots.insert_cow(gid);
             }
         }
         self.persisted.groups.insert_cow(gid, spawned);
@@ -1669,6 +1684,7 @@ impl Db {
                 if self.persisted.deployed.contains(&gid)
                     || self.persisted.troops.contains(&gid)
                     || self.persisted.crates.contains(&gid)
+                    || self.persisted.csar_pilots.contains(&gid)
                 {
                     if health == 0 {
                         match &group!(self, gid)?.origin {
@@ -1694,8 +1710,18 @@ impl Db {
                             | DeployKind::Deployed { .. }
                             | DeployKind::Action { .. }
                             | DeployKind::Crate { .. }
+                            | DeployKind::CsarPilot { .. }
                             | DeployKind::Objective { .. }
                             | DeployKind::ObjectiveDeprecated => (),
+                        }
+                        if self.persisted.csar_pilots.contains(&gid) {
+                            self.on_csar_group_destroyed(&gid);
+                        }
+                        if matches!(
+                            group!(self, gid).map(|g| &g.origin),
+                            Ok(DeployKind::Troop { .. })
+                        ) {
+                            self.on_csar_capture_squad_destroyed(&gid);
                         }
                         self.delete_group(&gid)?
                     }

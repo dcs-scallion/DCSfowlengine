@@ -159,18 +159,25 @@ pub(crate) fn list_cargo_for_slot(ctx: &mut Context, lua: MizLua, slot: &SlotId)
     let mut msg = CompactString::new("Current Cargo\n--------------------------------------------\n");
     let ucid = ctx.db.ephemeral.player_in_slot(slot);
     let ed_bay_crates = ctx.db.fowl_crates_on_ed_bay(lua, slot);
-    let (crate_n, troop_n) = match ucid {
+    let (crate_n, troop_n, pilot_n) = match ucid {
         Some(_) => (
             cargo.num_crates().saturating_add(ed_bay_crates.len()),
             cargo.num_troops(),
+            cargo.num_pilots(),
         ),
-        None => (cargo.num_crates(), cargo.num_troops()),
+        None => (cargo.num_crates(), cargo.num_troops(), cargo.num_pilots()),
     };
     msg.push_str(&format_compact!(
         "troops: {} of {}\n",
         troop_n,
         capacity.troop_slots
     ));
+    if pilot_n > 0 {
+        msg.push_str(&format_compact!(
+            "downed pilots: {} (2 = 1 troop squad)\n",
+            pilot_n
+        ));
+    }
     msg.push_str(&format_compact!(
         "crates: {} of {}\n",
         crate_n,
@@ -178,7 +185,7 @@ pub(crate) fn list_cargo_for_slot(ctx: &mut Context, lua: MizLua, slot: &SlotId)
     ));
     msg.push_str(&format_compact!(
         "total : {} of {}\n",
-        crate_n.saturating_add(troop_n),
+        crate_n.saturating_add(troop_n).saturating_add((pilot_n + 1) / 2),
         capacity.total_slots
     ));
     let mut detail = CompactString::new("");
@@ -202,6 +209,15 @@ pub(crate) fn list_cargo_for_slot(ctx: &mut Context, lua: MizLua, slot: &SlotId)
             it.troop.weight
         ));
         fowl_hybrid_kg = fowl_hybrid_kg.saturating_add(it.troop.weight);
+    }
+    for p in &cargo.pilots {
+        let kind = if p.enemy { "captured" } else { "rescued" };
+        detail.push_str(&format_compact!(
+            "{} {kind} pilot weighing: {} kg\n",
+            p.name,
+            p.weight_kg
+        ));
+        fowl_hybrid_kg = fowl_hybrid_kg.saturating_add(p.weight_kg);
     }
     if !detail.is_empty() {
         msg.push_str("--------------------------------------------\n");

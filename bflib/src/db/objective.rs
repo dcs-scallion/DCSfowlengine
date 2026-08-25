@@ -2553,7 +2553,8 @@ impl Db {
                         | DeployKind::Objective { .. }
                         | DeployKind::ObjectiveDeprecated
                         | DeployKind::Action { .. }
-                        | DeployKind::Troop { .. } => (),
+                        | DeployKind::Troop { .. }
+                        | DeployKind::CsarPilot { .. } => (),
                     }
                 }
             }

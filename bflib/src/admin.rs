@@ -894,6 +894,7 @@ fn delete(ctx: &mut Context, id: &GroupId) -> Result<()> {
         DeployKind::Crate { .. }
         | DeployKind::Deployed { .. }
         | DeployKind::Troop { .. }
+        | DeployKind::CsarPilot { .. }
         | DeployKind::Action { .. } => ctx.db.delete_group(id),
     }
 }

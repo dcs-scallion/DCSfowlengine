@@ -21,6 +21,7 @@ use crate::{
 };
 use anyhow::{Context, Result, bail};
 use bfprotocols::cfg::{LifeType, Vehicle};
+use bfprotocols::db::group::GroupId;
 use bfprotocols::stats::EnId;
 use chrono::prelude::*;
 use dcso3::{
@@ -44,6 +45,8 @@ use log::{info, warn};
 use mlua::{FromLua, Value};
 use serde_derive::{Deserialize, Serialize};
 use smallvec::SmallVec;
+
+mod pickup;
 
 pub const LIFE_TYPE_DISPLAY_ORDER: [LifeType; 6] = [
     LifeType::Standard,
@@ -104,6 +107,12 @@ pub struct CsarDowned {
     pub pilot_type_name: String,
     #[serde(default = "default_csar_pilot_category")]
     pub pilot_category: GroupCategory,
+    #[serde(default)]
+    pub group_id: Option<GroupId>,
+    #[serde(default)]
+    pub captured: bool,
+    #[serde(default)]
+    pub captured_by: Option<GroupId>,
 }
 
 fn default_csar_pilot_category() -> GroupCategory {
@@ -162,7 +171,7 @@ fn csar_pilot_circle_popup(player_name: &str, life_type_label: &str) -> String {
     csar_pilot_mark_label(player_name, life_type_label)
 }
 
-fn delete_csar_marks(msgs: &mut MsgQ, csar: &mut CsarDowned) {
+pub(super) fn delete_csar_marks(msgs: &mut MsgQ, csar: &mut CsarDowned) {
     if let Some(id) = csar.circle_mark_id.take() {
         msgs.delete_mark(id);
     }
@@ -172,7 +181,9 @@ fn delete_csar_marks(msgs: &mut MsgQ, csar: &mut CsarDowned) {
 }
 
 fn prepare_csar_pilot_unit(pilot: &Unit, landed: bool) {
-    let _ = pilot.set_name(String::from(""));
+    if !landed {
+        let _ = pilot.set_name(String::from(""));
+    }
     if let Ok(ctrl) = pilot.get_controller() {
         let immortal = !landed;
         if let Err(e) = ctrl.set_command(Command::SetImmortal(immortal)) {
@@ -196,7 +207,7 @@ fn csar_infantry_type_candidates(side: Side) -> &'static [&'static str] {
     }
 }
 
-fn csar_spawn_names(ucid: &Ucid, ejected_at: DateTime<Utc>) -> (String, String) {
+pub(super) fn csar_spawn_names(ucid: &Ucid, ejected_at: DateTime<Utc>) -> (String, String) {
     let tag = format!("{ucid}_{}", ejected_at.timestamp());
     (
         format!("FowlCsar_{tag}").into(),
@@ -914,6 +925,7 @@ impl Db {
             prepare_csar_pilot_unit(&unit, true);
         }
         self.sync_csar_marks_for_ucid(&ucid);
+        self.maybe_adopt_landed_csar_groups(lua, &ucid);
         self.ephemeral.dirty();
         Ok(true)
     }
@@ -994,6 +1006,15 @@ impl Db {
         let mut csar = csar.clone();
         delete_csar_marks(self.ephemeral.msgs(), &mut csar);
         self.ephemeral.csar_pilot_unit.remove(&csar.pilot_unit);
+        if let Some(gid) = csar.group_id {
+            self.ephemeral.csar_extracting.remove(&gid);
+            if self.persisted.groups.get(&gid).is_some() {
+                if let Err(e) = self.delete_group(&gid) {
+                    warn!("csar: delete group {gid} failed: {e:?}");
+                }
+                return;
+            }
+        }
         self.queue_csar_pilot_destroy(csar.pilot_unit.clone());
     }
 
@@ -1230,6 +1251,9 @@ impl Db {
             pilot_unit_stale: false,
             pilot_type_name,
             pilot_category,
+            group_id: None,
+            captured: false,
+            captured_by: None,
         };
         let tracked_id = match self.spawn_csar_pilot_unit(lua, &ucid, side, &csar)? {
             Some(spawned_id) => {
@@ -1372,10 +1396,13 @@ impl Db {
         }
         self.flush_pending_csar_destroys(lua);
         for ucid in self.csar_active_ucids() {
+            self.maybe_adopt_landed_csar_groups(lua, &ucid);
             if let Err(e) = self.update_csar_downed_positions(lua, now, &ucid) {
                 warn!("csar position update failed for {ucid:?}: {e:?}");
             }
         }
+        self.expire_csar_capture_timer(now);
+        self.tick_csar_walks(lua);
     }
 
     pub fn rebuild_csar_marks(&mut self) {

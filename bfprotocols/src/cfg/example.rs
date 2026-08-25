@@ -34,6 +34,7 @@ fn default_red_troops() -> Vec<Troop> {
             limit_enforce: LimitEnforceTyp::DeleteOldest,
             cost: 0,
             weight: 800,
+            can_capture_csar: true,
         },
         Troop {
             name: "Anti Tank".into(),
@@ -48,6 +49,7 @@ fn default_red_troops() -> Vec<Troop> {
             limit_enforce: LimitEnforceTyp::DeleteOldest,
             cost: 1,
             weight: 1000,
+            can_capture_csar: false,
         },
         Troop {
             name: "Mortar".into(),
@@ -62,6 +64,22 @@ fn default_red_troops() -> Vec<Troop> {
             limit_enforce: LimitEnforceTyp::DeleteOldest,
             cost: 5,
             weight: 1200,
+            can_capture_csar: false,
+        },
+        Troop {
+            name: "Recon".into(),
+            template: "RJTACTROOP".into(),
+            persist: PersistTyp::Forever,
+            can_capture: false,
+            jtac: Some(DeployableJtac {
+                range: 8000,
+                nolos: false,
+            }),
+            limit: 10,
+            limit_enforce: LimitEnforceTyp::DeleteOldest,
+            cost: 10,
+            weight: 400,
+            can_capture_csar: true,
         },
         Troop {
             name: "Igla".into(),
@@ -73,6 +91,7 @@ fn default_red_troops() -> Vec<Troop> {
             limit_enforce: LimitEnforceTyp::DeleteOldest,
             cost: 5,
             weight: 500,
+            can_capture_csar: false,
         },
     ]
 }
@@ -92,6 +111,7 @@ fn default_blue_troops() -> Vec<Troop> {
             limit_enforce: LimitEnforceTyp::DeleteOldest,
             cost: 0,
             weight: 800,
+            can_capture_csar: true,
         },
         Troop {
             name: "Anti Tank".into(),
@@ -106,6 +126,7 @@ fn default_blue_troops() -> Vec<Troop> {
             limit_enforce: LimitEnforceTyp::DeleteOldest,
             cost: 1,
             weight: 1000,
+            can_capture_csar: false,
         },
         Troop {
             name: "Mortar".into(),
@@ -120,6 +141,22 @@ fn default_blue_troops() -> Vec<Troop> {
             limit_enforce: LimitEnforceTyp::DeleteOldest,
             cost: 5,
             weight: 1200,
+            can_capture_csar: false,
+        },
+        Troop {
+            name: "Recon".into(),
+            template: "BJTACTROOP".into(),
+            persist: PersistTyp::Forever,
+            can_capture: false,
+            jtac: Some(DeployableJtac {
+                range: 8000,
+                nolos: false,
+            }),
+            limit: 10,
+            limit_enforce: LimitEnforceTyp::DeleteOldest,
+            cost: 10,
+            weight: 400,
+            can_capture_csar: true,
         },
         Troop {
             name: "Stinger".into(),
@@ -134,6 +171,7 @@ fn default_blue_troops() -> Vec<Troop> {
             limit_enforce: LimitEnforceTyp::DeleteOldest,
             cost: 5,
             weight: 500,
+            can_capture_csar: false,
         },
     ]
 }
@@ -2045,6 +2083,8 @@ impl Default for Cfg {
                 capture_fob: 10,
                 capture_airbase: 15,
                 capture_hub: 20,
+                csar_delivery_coalition_pilot: 50,
+                csar_delivery_enemy_pilot: 150,
                 tk_window: 5,
                 provisional: false,
                 airframe_cost: FxHashMap::default(),

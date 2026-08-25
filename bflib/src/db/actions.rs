@@ -458,6 +458,10 @@ impl Db {
                             ship_hub: Some(_), ..
                         } => a.cfg.deployable_naval(),
                         DeployKind::Troop { .. } => a.cfg.troop,
+                        DeployKind::CsarPilot { captured: true, .. } => {
+                            bail!("can't move a captured downed pilot")
+                        }
+                        DeployKind::CsarPilot { .. } => a.cfg.troop,
                         _ => bail!("can't move this unit type"),
                     };
                     let steps = dist / (step as f64);
@@ -1417,6 +1421,7 @@ impl Db {
                 | DeployKind::Objective { .. }
                 | DeployKind::ObjectiveDeprecated
                 | DeployKind::Troop { .. }
+                | DeployKind::CsarPilot { .. }
                 | DeployKind::Deployed { .. } => (),
             }
         }
@@ -2397,7 +2402,8 @@ impl Db {
             | DeployKind::Deployed { .. }
             | DeployKind::Objective { .. }
             | DeployKind::ObjectiveDeprecated
-            | DeployKind::Troop { .. } => bail!("not a race tracker"),
+            | DeployKind::Troop { .. }
+            | DeployKind::CsarPilot { .. } => bail!("not a race tracker"),
         };
         let responsible = player
             .as_ref()
