@@ -2024,6 +2024,72 @@ fn equipment_bucket_supply_pct(
     }
 }
 
+/// Why a hub destination failed the airframe Supply % gate (carrier debug).
+fn equipment_airframe_bucket_skip_reason(
+    obj: &Objective,
+    dcs_tracked: Option<&FxHashSet<String>>,
+    resource_meta: Option<&FxHashMap<String, WarehouseResourceMeta>>,
+    min_ac: u8,
+) -> CompactString {
+    let pct = equipment_bucket_supply_pct(obj, dcs_tracked, resource_meta, true);
+    let mut virtual_ac = 0u32;
+    let mut tracked_ac = 0u32;
+    let mut counted_ac = 0u32;
+    let mut samples = CompactString::new("");
+    for (name, inv) in &obj.warehouse.equipment {
+        if inv.capacity == 0 || !equipment_is_airframe(name.as_str(), resource_meta) {
+            continue;
+        }
+        virtual_ac += 1;
+        let in_tracked = match dcs_tracked {
+            Some(tracked) => tracked.contains(name.as_str()),
+            None => true,
+        };
+        if in_tracked {
+            tracked_ac += 1;
+        }
+        let counts = in_tracked && equipment_counts_toward_supply_pct(inv);
+        if counts {
+            counted_ac += 1;
+        }
+        if samples.len() >= 160 {
+            continue;
+        }
+        if !samples.is_empty() {
+            samples.push_str("; ");
+        }
+        let tag = if !in_tracked {
+            " !tracked"
+        } else if !counts {
+            " !counted"
+        } else {
+            ""
+        };
+        samples.push_str(&format_compact!(
+            "{name} {}/{}={}%{tag}",
+            inv.stored,
+            inv.capacity,
+            inv.percent().unwrap_or(0),
+        ));
+    }
+    let dcs_names = match dcs_tracked {
+        None => "unset".into(),
+        Some(t) if t.is_empty() => "empty".into(),
+        Some(t) => format_compact!("{} names", t.len()),
+    };
+    match pct {
+        Some(p) if p >= min_ac => format_compact!(
+            "pct={p} gate={min_ac} at/above dcs={dcs_names} tracked={tracked_ac}/{virtual_ac} counted={counted_ac} [{samples}]"
+        ),
+        Some(p) => format_compact!(
+            "pct={p} gate={min_ac} below_gate_not_scheduled dcs={dcs_names} tracked={tracked_ac}/{virtual_ac} counted={counted_ac} [{samples}]"
+        ),
+        None => format_compact!(
+            "no_pct gate={min_ac} dcs={dcs_names} tracked={tracked_ac}/{virtual_ac} counted={counted_ac} [{samples}]"
+        ),
+    }
+}
+
 /// SETTINGS-Ai supplement airframes (`production == 0`): align virtual capacity to DCS stock.
 /// Legacy exports doubled baseline via `merge_ai_template_stock_export`; skip when already matched.
 fn reconcile_objective_stock_aircraft_capacity_to_dcs(
@@ -4944,6 +5010,26 @@ impl Db {
                     allocated: 0,
                 })
                 .collect();
+            for (oid, obj) in hub_destinations() {
+                if needs_bucket(oid, obj, true) {
+                    continue;
+                }
+                if !objective_airbase_on_water(lua, obj).unwrap_or(false) {
+                    continue;
+                }
+                let (_, min_ac) = thresholds_for(obj);
+                wh_diag(format_compact!(
+                    "hub {} skip-ac {}: {}",
+                    logi.name,
+                    obj.name,
+                    equipment_airframe_bucket_skip_reason(
+                        obj,
+                        self.ephemeral.warehouse_dcs_equipment_names.get(oid),
+                        resource_meta,
+                        min_ac,
+                    ),
+                ));
+            }
             let mut needed_liquid: SmallVec<[Needed; 64]> = hub_destinations()
                 .filter(|(_, obj)| obj.fuel < 100)
                 .map(|(oid, obj)| Needed {
