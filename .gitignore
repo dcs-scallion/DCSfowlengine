@@ -107,6 +107,8 @@ no_llvm_build
 
 # DCS / mission: local archives & scratch (not versioned; use backup disk or release assets)
 miz/Scenarios/**/base.miz
+# Exception: base.miz inside folders whose name starts with sample (published with the sample campaign)
+!miz/Scenarios/**/sample*/base.miz
 miz/Scenarios/80s/Caucasus1985-SARH/Rust_Fowl_Engine_2.0_Caucasus1985-SARH.miz
 # Mission CFG JSON lives on the DCS host / backup — do not push updates (history may still have older copies)
 miz/**/*_CFG
