@@ -357,6 +357,9 @@ pub struct AiAirState {
     /// Orbit mark used when `drone_climb_pos` was planned (invalidate on waypoint move).
     #[serde(default)]
     pub drone_climb_orbit: Option<Vector2>,
+    /// Consecutive failed DCS rehydrate/spawn attempts; delete group when high.
+    #[serde(default)]
+    pub rehydrate_fail_streak: u8,
 }
 
 #[derive(Debug, Clone)]
@@ -2764,6 +2767,8 @@ const AIRFIELD_GROUND_RADIUS_M: f64 = 3_000.;
 const CYCLIC_PARK_HOLD_MIN: i64 = 10;
 /// One-shot RTB: wait on parking with engines off before despawn (seconds).
 const ONE_SHOT_SHUTDOWN_PARK_SEC: i64 = 90;
+/// Ghost rehydrate: remove AI after this many failed spawn attempts.
+const REHYDRATE_FAIL_MAX: u8 = 3;
 
 fn hub_slot_parking_label(slot: &HubSlot) -> Option<String> {
     match slot.kind {
@@ -6383,6 +6388,28 @@ pub(super) fn advance_ai_air(
             finalize_ai_air_attrition(db, gid)?;
             return Ok(());
         }
+        let streak = {
+            let group = group!(db, gid)?;
+            if let DeployKind::Action { ai_air, .. } = &group.origin {
+                ai_air.rehydrate_fail_streak
+            } else {
+                REHYDRATE_FAIL_MAX
+            }
+        };
+        if streak >= REHYDRATE_FAIL_MAX {
+            log::warn!(
+                "ai air {gid}: rehydrate failed {streak}x — removing from campaign (fuel safety)"
+            );
+            mark_ai_air_attrition(db, gid);
+            finalize_ai_air_attrition(db, gid)?;
+            return Ok(());
+        }
+        {
+            let group = group_mut!(db, gid)?;
+            if let DeployKind::Action { ai_air, .. } = &mut group.origin {
+                ai_air.rehydrate_fail_streak = streak.saturating_add(1);
+            }
+        }
         let Some(hub_oid) = hub else {
             return Ok(());
         };
@@ -6407,6 +6434,14 @@ pub(super) fn advance_ai_air(
             perf,
         )?;
         return Ok(());
+    }
+    {
+        let group = group_mut!(db, gid)?;
+        if let DeployKind::Action { ai_air, .. } = &mut group.origin {
+            if ai_air.rehydrate_fail_streak != 0 {
+                ai_air.rehydrate_fail_streak = 0;
+            }
+        }
     }
     if !duration_shutdown && action_air_duration_expired(db, gid, now) {
         begin_duration_shutdown(db, lua, spctx, idx, gid, side)?;
@@ -7264,20 +7299,59 @@ pub(super) fn advance_ai_air(
             }
         }
         AiAirPhase::TaxiToParking => {
-            if !flight_all_on_parking_slots(lua, &dcs_names, &hub_pick.slots) {
-                ensure_ground_parking_task(lua, db, spctx, &hub_pick, &hub_pick.slots, &dcs_names)?;
+            let (phase_since, rtb_hold) = {
+                let group = group!(db, gid)?;
+                let DeployKind::Action { ai_air, .. } = &group.origin else {
+                    return Ok(());
+                };
+                (ai_air.phase_since, ai_air.rtb_hold)
+            };
+            if flight_all_on_parking_slots(lua, &dcs_names, &hub_pick.slots) {
+                if duration_shutdown {
+                    log::info!("ai air {gid}: taxi complete -> shutdown servicing");
+                } else {
+                    log::info!("ai air {gid}: taxi complete -> servicing");
+                }
+                let group = group_mut!(db, gid)?;
+                if let DeployKind::Action { ai_air, .. } = &mut group.origin {
+                    ai_air.servicing_handoff = false;
+                    set_phase(ai_air, AiAirPhase::Servicing);
+                }
                 return Ok(());
             }
-            if duration_shutdown {
-                log::info!("ai air {gid}: taxi complete -> shutdown servicing");
-            } else {
-                log::info!("ai air {gid}: taxi complete -> servicing");
+            let on_field = flight_all_on_airfield_ground(lua, &dcs_names, &hub_pick, hub_pos);
+            if on_field && now - phase_since >= servicing_complete_wait() {
+                if mission_kind_cycles(mission_kind) && !rtb_hold && !duration_shutdown {
+                    log::info!(
+                        "ai air {gid}: taxi stuck on field (damage?) -> cycle respawn + bootstrap"
+                    );
+                    cycle_respawn_ai_air_at_hub(
+                        lua,
+                        db,
+                        spctx,
+                        idx,
+                        gid,
+                        side,
+                        &hub_pick,
+                        plane_kind,
+                        true,
+                        perf,
+                    )?;
+                    return Ok(());
+                }
+                if duration_shutdown {
+                    log::info!("ai air {gid}: taxi stuck on field -> shutdown servicing");
+                } else {
+                    log::info!("ai air {gid}: taxi stuck on field -> servicing (rtb hold)");
+                }
+                let group = group_mut!(db, gid)?;
+                if let DeployKind::Action { ai_air, .. } = &mut group.origin {
+                    ai_air.servicing_handoff = false;
+                    set_phase(ai_air, AiAirPhase::Servicing);
+                }
+                return Ok(());
             }
-            let group = group_mut!(db, gid)?;
-            if let DeployKind::Action { ai_air, .. } = &mut group.origin {
-                ai_air.servicing_handoff = false;
-                set_phase(ai_air, AiAirPhase::Servicing);
-            }
+            ensure_ground_parking_task(lua, db, spctx, &hub_pick, &hub_pick.slots, &dcs_names)?;
         }
         AiAirPhase::Legacy => (),
         AiAirPhase::ShutdownParked => {
