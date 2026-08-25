@@ -1,0 +1,237 @@
+{
+  "airbases": [
+    {
+      "airbase_name": "Anapa-Vityazevo",
+      "category": 0,
+      "id": 12,
+      "name": "Anapa",
+      "objective_kind": "Logistics Hub",
+      "trigger_zone_name": "OLORAnapa",
+      "warehouse_whid": "Airdrome12",
+      "x": -4447.8,
+      "z": 244022.0
+    },
+    {
+      "airbase_name": "Krasnodar-Center",
+      "category": 0,
+      "id": 13,
+      "name": "Krasnodar",
+      "objective_kind": "Airbase",
+      "trigger_zone_name": "OABRKrasnodar",
+      "warehouse_whid": "Airdrome13",
+      "x": 11652.9,
+      "z": 366766.3
+    },
+    {
+      "airbase_name": "Novorossiysk",
+      "category": 0,
+      "id": 14,
+      "name": "Novorossiysk",
+      "objective_kind": "Airbase",
+      "trigger_zone_name": "OABRNovorossiysk",
+      "warehouse_whid": "Airdrome14",
+      "x": -40299.0,
+      "z": 279853.5
+    },
+    {
+      "airbase_name": "Krymsk",
+      "category": 0,
+      "id": 15,
+      "name": "Krymsk",
+      "objective_kind": "Airbase",
+      "trigger_zone_name": "OABRKrymsk",
+      "warehouse_whid": "Airdrome15",
+      "x": -7349.0,
+      "z": 293712.0
+    },
+    {
+      "airbase_name": "Maykop-Khanskaya",
+      "category": 0,
+      "id": 16,
+      "name": "Maykop",
+      "objective_kind": "Airbase",
+      "trigger_zone_name": "OABRMaykop",
+      "warehouse_whid": "Airdrome16",
+      "x": -27625.9,
+      "z": 457047.7
+    },
+    {
+      "airbase_name": "Sochi-Adler",
+      "category": 0,
+      "id": 18,
+      "name": "Sochi",
+      "objective_kind": "Airbase",
+      "trigger_zone_name": "OABRSochi",
+      "warehouse_whid": "Airdrome18",
+      "x": -165163.3,
+      "z": 460901.5
+    },
+    {
+      "airbase_name": "Krasnodar-Pashkovsky",
+      "category": 0,
+      "id": 19,
+      "name": "Test2",
+      "objective_kind": "Airbase",
+      "trigger_zone_name": "OABBTest2",
+      "warehouse_whid": "Airdrome19",
+      "x": 8706.8,
+      "z": 388985.7
+    },
+    {
+      "airbase_name": "Sukhumi-Babushara",
+      "category": 0,
+      "id": 20,
+      "name": "Sukhumi",
+      "objective_kind": "Airbase",
+      "trigger_zone_name": "OABBSukhumi",
+      "warehouse_whid": "Airdrome20",
+      "x": -221381.7,
+      "z": 565908.8
+    },
+    {
+      "airbase_name": "Gudauta",
+      "category": 0,
+      "id": 21,
+      "name": "Gudauta",
+      "objective_kind": "Airbase",
+      "trigger_zone_name": "OABBGudauta",
+      "warehouse_whid": "Airdrome21",
+      "x": -195650.5,
+      "z": 515898.8
+    },
+    {
+      "airbase_name": "Batumi",
+      "category": 0,
+      "id": 22,
+      "name": "Batumi",
+      "objective_kind": "Logistics Hub",
+      "trigger_zone_name": "OLOBBatumi",
+      "warehouse_whid": "Airdrome22",
+      "x": -356437.2,
+      "z": 618210.9
+    },
+    {
+      "airbase_name": "Senaki-Kolkhi",
+      "category": 0,
+      "id": 23,
+      "name": "Senaki",
+      "objective_kind": "Airbase",
+      "trigger_zone_name": "OABBSenaki",
+      "warehouse_whid": "Airdrome23",
+      "x": -281903.1,
+      "z": 648379.1
+    },
+    {
+      "airbase_name": "Kobuleti",
+      "category": 0,
+      "id": 24,
+      "name": "Kobuleti",
+      "objective_kind": "Airbase",
+      "trigger_zone_name": "OABBKobuleti",
+      "warehouse_whid": "Airdrome24",
+      "x": -317604.9,
+      "z": 636704.1
+    },
+    {
+      "airbase_name": "Kutaisi",
+      "category": 0,
+      "id": 25,
+      "name": "Kutaisi",
+      "objective_kind": "Airbase",
+      "trigger_zone_name": "OABBKutaisi",
+      "warehouse_whid": "Airdrome25",
+      "x": -284582.8,
+      "z": 685029.6
+    },
+    {
+      "airbase_name": "Mineralnye Vody",
+      "category": 0,
+      "id": 26,
+      "name": "Mineralnye Vody",
+      "objective_kind": "Airbase",
+      "trigger_zone_name": "OABRMineralnye Vody",
+      "warehouse_whid": "Airdrome26",
+      "x": -52089.5,
+      "z": 707418.1
+    },
+    {
+      "airbase_name": "Nalchik",
+      "category": 0,
+      "id": 27,
+      "name": "Nalchik",
+      "objective_kind": "Airbase",
+      "trigger_zone_name": "OABRNalchik",
+      "warehouse_whid": "Airdrome27",
+      "x": -125487.6,
+      "z": 759560.1
+    },
+    {
+      "airbase_name": "Mozdok",
+      "category": 0,
+      "id": 28,
+      "name": "Mozdok",
+      "objective_kind": "Logistics Hub",
+      "trigger_zone_name": "OLORMozdok",
+      "warehouse_whid": "Airdrome28",
+      "x": -83329.8,
+      "z": 835634.7
+    },
+    {
+      "airbase_name": "Tbilisi-Lochini",
+      "category": 0,
+      "id": 29,
+      "name": "Tbilisi",
+      "objective_kind": "Logistics Hub",
+      "trigger_zone_name": "OLOBTbilisi",
+      "warehouse_whid": "Airdrome29",
+      "x": -314926.3,
+      "z": 895724.0
+    },
+    {
+      "airbase_name": "Vaziani",
+      "category": 0,
+      "id": 31,
+      "name": "Vaziani",
+      "objective_kind": "Airbase",
+      "trigger_zone_name": "OABBVaziani",
+      "warehouse_whid": "Airdrome31",
+      "x": -318191.7,
+      "z": 902331.8
+    },
+    {
+      "airbase_name": "Beslan",
+      "category": 0,
+      "id": 32,
+      "name": "Beslan",
+      "objective_kind": "Airbase",
+      "trigger_zone_name": "OABRBeslan",
+      "warehouse_whid": "Airdrome32",
+      "x": -148472.4,
+      "z": 842251.8
+    },
+    {
+      "airbase_name": "Gubskaya",
+      "category": 1,
+      "id": 20771,
+      "name": "Gubskaya",
+      "objective_kind": "Logistics Hub",
+      "trigger_zone_name": "OLORGubskaya",
+      "warehouse_whid": "20771",
+      "x": -52465.9,
+      "z": 522614.3
+    },
+    {
+      "airbase_name": "Zestafoni",
+      "category": 1,
+      "id": 20792,
+      "name": "Zestafoni",
+      "objective_kind": "Logistics Hub",
+      "trigger_zone_name": "OLOBZestafoni",
+      "warehouse_whid": "20792",
+      "x": -284530.2,
+      "z": 722627.5
+    }
+  ],
+  "schema_version": 1,
+  "source": "bflib admin airbaseexport (Airbase or Logistics objective: zone contains airbase point -> getId; else getByName; optional legacy OAB*/OLO* name prefixes)"
+}

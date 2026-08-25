@@ -1805,7 +1805,9 @@ pub struct Cfg {
     /// who can do what
     #[serde(default)]
     pub rules: Rules,
-    /// Because DCS. Reject names that don't match this regex
+    /// Optional player-name regex checked on connect. Fowl 2.0 default bans only
+    /// Unicode control / line-separator characters (crash / log / Lua FFI risk);
+    /// printable ASCII including `-` and letters with diacritics are allowed.
     #[serde(default)]
     pub name_filter: Option<NameFilter>,
     /// The maximum number of messages, including markup, we will push to dcs

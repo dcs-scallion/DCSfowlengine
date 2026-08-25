@@ -2018,7 +2018,7 @@ impl Default for Cfg {
                 },
             )]),
             repair_crate: default_repair_crate(),
-            name_filter: Some("^[a-zA-Z0-9<>|= ]+$".try_into().unwrap()),
+            name_filter: Some(r"^[^\p{Cc}\p{Zl}\p{Zp}]+$".try_into().unwrap()),
             shutdown: Some(10),
             chat_time_command: None,
             dcsserver_bot_scheduled_restart: None,
