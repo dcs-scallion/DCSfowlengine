@@ -508,6 +508,92 @@ fn wh_diag(msg: impl AsRef<str>) {
     info!("warehouse diag: {}", msg.as_ref());
 }
 
+/// One-shot `getInventory` read with hybrid per-name fallback.
+///
+/// DCS `getInventory` omits 0-qty and no-friendly-name SKUs (Hoggit / ED forum). Any name
+/// missing from the map must fall back to `getItemCount` / `getLiquidAmount` to preserve
+/// identical semantics with prior per-name reads.
+struct WarehouseSnapshot {
+    weapons: FxHashMap<String, u32>,
+    aircraft: FxHashMap<String, u32>,
+    liquids: [Option<u32>; 4],
+    /// Precomputed `weapons ∪ aircraft` keys (Supply gate + DCS-tracked names).
+    equipment_names: FxHashSet<String>,
+}
+
+impl WarehouseSnapshot {
+    fn item_count(&self, name: &str) -> Option<u32> {
+        self.weapons
+            .get(name)
+            .copied()
+            .or_else(|| self.aircraft.get(name).copied())
+    }
+
+    fn item_count_or_fetch(
+        &self,
+        warehouse: &warehouse::Warehouse<'_>,
+        name: &String,
+    ) -> Result<u32> {
+        if let Some(q) = self.item_count(name.as_str()) {
+            return Ok(q);
+        }
+        warehouse
+            .get_item_count(name.clone())
+            .with_context(|| format_compact!("fallback getItemCount {name}"))
+    }
+
+    fn liquid_amount_or_fetch(
+        &self,
+        warehouse: &warehouse::Warehouse<'_>,
+        typ: LiquidType,
+    ) -> Result<u32> {
+        if let Some(q) = self.liquids[typ as usize] {
+            return Ok(q);
+        }
+        warehouse
+            .get_liquid_amount(typ)
+            .with_context(|| format_compact!("fallback getLiquidAmount {typ:?}"))
+    }
+}
+
+fn read_warehouse_snapshot(
+    warehouse: &warehouse::Warehouse<'_>,
+) -> Result<WarehouseSnapshot> {
+    let inv = warehouse
+        .get_inventory(None)
+        .context("warehouse getInventory for snapshot")?;
+    let mut weapons: FxHashMap<String, u32> = FxHashMap::default();
+    inv.weapons()
+        .context("warehouse weapons for snapshot")?
+        .for_each(|name, qty| {
+            weapons.insert(name, qty);
+            Ok(())
+        })?;
+    let mut aircraft: FxHashMap<String, u32> = FxHashMap::default();
+    inv.aircraft()
+        .context("warehouse aircraft for snapshot")?
+        .for_each(|name, qty| {
+            aircraft.insert(name, qty);
+            Ok(())
+        })?;
+    let mut liquids: [Option<u32>; 4] = [None; 4];
+    inv.liquids()
+        .context("warehouse liquids for snapshot")?
+        .for_each(|typ, qty| {
+            liquids[typ as usize] = Some(qty);
+            Ok(())
+        })?;
+    let mut equipment_names: FxHashSet<String> = FxHashSet::default();
+    equipment_names.extend(weapons.keys().cloned());
+    equipment_names.extend(aircraft.keys().cloned());
+    Ok(WarehouseSnapshot {
+        weapons,
+        aircraft,
+        liquids,
+        equipment_names,
+    })
+}
+
 fn transfer_item_label(item: &TransferItem) -> CompactString {
     match item {
         TransferItem::Equipment(name) => format_compact!("eq:{name}"),
@@ -699,6 +785,7 @@ fn sync_obj_to_warehouse(
     )>,
     // Open checkout: never push DCS stock back up (OLO unload/reload exploit).
     forbid_dcs_restore: bool,
+    snapshot: &WarehouseSnapshot,
 ) -> Result<()> {
     let perf = unsafe { Perf::get_mut() };
     let perf = Arc::make_mut(&mut perf.inner);
@@ -706,8 +793,8 @@ fn sync_obj_to_warehouse(
     let mut liq_deltas = 0u32;
     for (item, inv) in obj.warehouse.equipment.iter_mut_cow() {
         perf.logistics_items.insert((item.clone(), obj.id));
-        let current = warehouse
-            .get_item_count(item.clone())
+        let current = snapshot
+            .item_count_or_fetch(warehouse, item)
             .with_context(|| format_compact!("getting item count for {item}"))?;
         if current < inv.stored {
             if forbid_dcs_restore {
@@ -774,8 +861,8 @@ fn sync_obj_to_warehouse(
         }
     }
     for (name, inv) in obj.warehouse.liquids.iter_mut_cow() {
-        let current = warehouse
-            .get_liquid_amount(*name)
+        let current = snapshot
+            .liquid_amount_or_fetch(warehouse, *name)
             .with_context(|| format_compact!("getting liquid amount for {name:?}"))?;
         let current_virtual = if export_farp_liquids_tons {
             dcs_liquid_kg_to_fowl_tons(current)
@@ -874,12 +961,13 @@ fn sync_warehouse_to_obj(
     obj: &mut Objective,
     warehouse: &warehouse::Warehouse,
     export_farp_liquids_tons: bool,
+    snapshot: &WarehouseSnapshot,
 ) -> Result<()> {
     let mut eq_deltas = 0u32;
     let mut liq_deltas = 0u32;
     for (name, inv) in obj.warehouse.equipment.iter_mut_cow() {
         let prev = inv.stored;
-        inv.stored = warehouse.get_item_count(name.clone())?;
+        inv.stored = snapshot.item_count_or_fetch(warehouse, name)?;
         if prev != inv.stored {
             if eq_deltas < 12 {
                 wh_diag(format_compact!(
@@ -893,7 +981,7 @@ fn sync_warehouse_to_obj(
     }
     for (name, inv) in obj.warehouse.liquids.iter_mut_cow() {
         let prev = inv.stored;
-        let kg = warehouse.get_liquid_amount(*name)?;
+        let kg = snapshot.liquid_amount_or_fetch(warehouse, *name)?;
         inv.stored = if export_farp_liquids_tons {
             dcs_liquid_kg_to_fowl_tons(kg)
         } else {
@@ -1196,106 +1284,100 @@ fn liquid_capacity_for_discovered_row(
 /// FARP pads: virtual rows keyed by pad template when runtime objective name differs from export.
 fn discover_dcs_warehouse_into_obj(
     obj: &mut Objective,
-    warehouse: &warehouse::Warehouse,
+    _warehouse: &warehouse::Warehouse,
     export: &FowlMizExport,
     resource_meta: &FxHashMap<String, WarehouseResourceMeta>,
     whcfg: Option<&bfprotocols::cfg::WarehouseConfig>,
     production: Option<&Production>,
     on_water: bool,
+    snapshot: &WarehouseSnapshot,
 ) -> Result<()> {
-    let inv = warehouse
-        .get_inventory(None)
-        .context("warehouse getInventory for virtual hydrate")?;
     let profile = objective_coalition_stock_for_objective(export, obj);
-    let mut ingest_equipment =
-        |items: warehouse::ItemInventory<'_>| -> Result<()> {
-            items.for_each(|name, stored| {
-                if stored == 0 {
-                    return Ok(());
-                }
-                let meta = resource_meta.get(&name).copied();
-                if !equipment_allowed_for_objective(
-                    export,
-                    obj,
-                    obj.owner,
-                    name.as_str(),
-                    meta,
-                ) {
-                    return Ok(());
-                }
-                if let Some(profile) = profile {
-                    if !discover_equipment_allowed_by_export_profile(
-                        obj,
-                        profile,
-                        name.as_str(),
-                        resource_meta,
-                    ) && !profile.equipment.is_empty()
-                    {
-                        return Ok(());
-                    }
-                }
-                let capacity = equipment_capacity_for_discovered_row(
-                    obj,
-                    name.as_str(),
-                    stored,
-                    export,
-                    resource_meta,
-                    whcfg,
-                    production,
-                    on_water,
-                );
-                let row = obj
-                    .warehouse
-                    .equipment
-                    .get_or_default_cow(String::from(name.as_str()));
-                row.stored = stored;
-                if capacity > 0 {
-                    row.capacity = capacity;
-                } else if row.capacity == 0 {
-                    row.capacity = stored.max(1);
-                }
-                Ok(())
-            })
-        };
-    ingest_equipment(inv.weapons().context("warehouse weapon inventory")?)?;
-    ingest_equipment(inv.aircraft().context("warehouse aircraft inventory")?)?;
-    inv.liquids()
-        .context("warehouse liquid inventory")?
-        .for_each(|typ, stored| {
-            if stored == 0 {
+    let mut ingest_equipment_row = |name: &String, stored: u32| -> Result<()> {
+        if stored == 0 {
+            return Ok(());
+        }
+        let meta = resource_meta.get(name.as_str()).copied();
+        if !equipment_allowed_for_objective(export, obj, obj.owner, name.as_str(), meta) {
+            return Ok(());
+        }
+        if let Some(profile) = profile {
+            if !discover_equipment_allowed_by_export_profile(
+                obj,
+                profile,
+                name.as_str(),
+                resource_meta,
+            ) && !profile.equipment.is_empty()
+            {
                 return Ok(());
             }
-            if let Some(profile) = profile {
-                let keep = profile.liquids.keys().any(|k| {
-                    liquid_type_from_export_key(k).ok() == Some(typ)
-                });
-                if !profile.liquids.is_empty() && !keep {
-                    return Ok(());
-                }
+        }
+        let capacity = equipment_capacity_for_discovered_row(
+            obj,
+            name.as_str(),
+            stored,
+            export,
+            resource_meta,
+            whcfg,
+            production,
+            on_water,
+        );
+        let row = obj
+            .warehouse
+            .equipment
+            .get_or_default_cow(String::from(name.as_str()));
+        row.stored = stored;
+        if capacity > 0 {
+            row.capacity = capacity;
+        } else if row.capacity == 0 {
+            row.capacity = stored.max(1);
+        }
+        Ok(())
+    };
+    for (name, stored) in &snapshot.weapons {
+        ingest_equipment_row(name, *stored)?;
+    }
+    for (name, stored) in &snapshot.aircraft {
+        ingest_equipment_row(name, *stored)?;
+    }
+    for typ in LiquidType::ALL {
+        let Some(stored) = snapshot.liquids[typ as usize] else {
+            continue;
+        };
+        if stored == 0 {
+            continue;
+        }
+        if let Some(profile) = profile {
+            let keep = profile
+                .liquids
+                .keys()
+                .any(|k| liquid_type_from_export_key(k).ok() == Some(typ));
+            if !profile.liquids.is_empty() && !keep {
+                continue;
             }
-            let stored_virtual = if objective_liquids_stored_as_tons(export, obj) {
-                dcs_liquid_kg_to_fowl_tons(stored)
-            } else {
-                stored
-            };
-            let capacity = liquid_capacity_for_discovered_row(
-                obj,
-                typ,
-                stored_virtual,
-                export,
-                whcfg,
-                production,
-                on_water,
-            );
-            let row = obj.warehouse.liquids.get_or_default_cow(typ);
-            row.stored = stored_virtual;
-            if capacity > 0 {
-                row.capacity = capacity;
-            } else if row.capacity == 0 {
-                row.capacity = stored_virtual.max(1);
-            }
-            Ok(())
-        })?;
+        }
+        let stored_virtual = if objective_liquids_stored_as_tons(export, obj) {
+            dcs_liquid_kg_to_fowl_tons(stored)
+        } else {
+            stored
+        };
+        let capacity = liquid_capacity_for_discovered_row(
+            obj,
+            typ,
+            stored_virtual,
+            export,
+            whcfg,
+            production,
+            on_water,
+        );
+        let row = obj.warehouse.liquids.get_or_default_cow(typ);
+        row.stored = stored_virtual;
+        if capacity > 0 {
+            row.capacity = capacity;
+        } else if row.capacity == 0 {
+            row.capacity = stored_virtual.max(1);
+        }
+    }
     Ok(())
 }
 
@@ -1309,6 +1391,7 @@ fn hydrate_production_keys_from_dcs(
     whcfg: Option<&bfprotocols::cfg::WarehouseConfig>,
     production: &Production,
     on_water: bool,
+    snapshot: &WarehouseSnapshot,
 ) -> Result<u32> {
     let mut new_eq = 0u32;
     for name in production.equipment.keys() {
@@ -1316,8 +1399,8 @@ fn hydrate_production_keys_from_dcs(
         if !equipment_allowed_for_objective(export, obj, obj.owner, name.as_str(), meta) {
             continue;
         }
-        let stored = warehouse
-            .get_item_count(name.clone())
+        let stored = snapshot
+            .item_count_or_fetch(warehouse, name)
             .with_context(|| format_compact!("get_item_count production hydrate {name}"))?;
         let capacity = equipment_capacity_for_discovered_row(
             obj,
@@ -1342,8 +1425,8 @@ fn hydrate_production_keys_from_dcs(
         }
     }
     for typ in production.liquids.keys() {
-        let stored_kg = warehouse
-            .get_liquid_amount(*typ)
+        let stored_kg = snapshot
+            .liquid_amount_or_fetch(warehouse, *typ)
             .with_context(|| format_compact!("get_liquid_amount production hydrate {typ:?}"))?;
         let stored = if objective_liquids_stored_as_tons(export, obj) {
             dcs_liquid_kg_to_fowl_tons(stored_kg)
@@ -1969,6 +2052,17 @@ fn record_objective_dcs_equipment_names(
     Ok(())
 }
 
+/// Snapshot-fed variant of `record_objective_dcs_equipment_names` (dedup `getInventory`).
+fn record_objective_dcs_equipment_names_from_snapshot(
+    ephemeral: &mut super::ephemeral::Ephemeral,
+    oid: ObjectiveId,
+    snapshot: &WarehouseSnapshot,
+) {
+    ephemeral
+        .warehouse_dcs_equipment_names
+        .insert(oid, snapshot.equipment_names.clone());
+}
+
 /// Non-OLO: drop airframe demand for types not in the objective export template (baseline 0 / missing).
 /// Keep ferried stock (`stored > 0`) like delivered weapons outside the local template.
 fn clamp_non_olo_airframe_rows_to_export(
@@ -2303,50 +2397,50 @@ fn allowed_weapon_quads(export: &FowlMizExport, side: Side) -> FxHashSet<[i32; 4
     side_allowlist(export, side).iter().copied().collect()
 }
 
-/// Prune via warehouse inventory + cached resource map (not full DCS catalog scan).
+/// Prune via warehouse snapshot + cached resource map (not full DCS catalog scan).
+///
+/// Returns `true` when at least one row was actually cleared (DCS state mutated) — the caller
+/// must then refresh any cached snapshot before further reads.
 fn prune_disallowed_dcs_weapon_stock<'lua>(
     lua: MizLua<'lua>,
     warehouse: &warehouse::Warehouse<'lua>,
     export: &FowlMizExport,
     side: Side,
     resource_meta: &FxHashMap<String, WarehouseResourceMeta>,
-) -> Result<()> {
+    snapshot: &WarehouseSnapshot,
+) -> Result<bool> {
     if !export_has_any_weapon_allowlist(export) {
-        return Ok(());
+        return Ok(false);
     }
     if side_allowlist(export, side).is_empty() {
-        return Ok(());
+        return Ok(false);
     }
     let allowed = allowed_weapon_quads(export, side);
-    let inv = warehouse
-        .get_inventory(None)
-        .context("warehouse getInventory for prune")?;
-    let weapons = inv.weapons().context("warehouse weapon inventory")?;
-    weapons
-        .for_each(|name, qty| {
-            if qty == 0 {
-                return Ok(());
-            }
-            let Some(meta) = resource_meta.get(&name) else {
-                return Ok(());
-            };
-            let Some(quad) = meta.quad else {
-                return Ok(());
-            };
-            let quad_n = remap_legacy_kmgu_ws(quad);
-            if !row_subject_to_weapon_allowlist(export, &quad)
-                && !row_subject_to_weapon_allowlist(export, &quad_n)
-            {
-                return Ok(());
-            }
-            if allowed.contains(&quad) || allowed.contains(&quad_n) {
-                return Ok(());
-            }
-            clear_dcs_warehouse_equipment_quad(lua, warehouse, quad, name.as_str())?;
-            Ok(())
-        })
-        .context("pruning disallowed weapon stock from DCS")?;
-    Ok(())
+    let mut mutated = false;
+    for (name, qty) in &snapshot.weapons {
+        if *qty == 0 {
+            continue;
+        }
+        let Some(meta) = resource_meta.get(name.as_str()) else {
+            continue;
+        };
+        let Some(quad) = meta.quad else {
+            continue;
+        };
+        let quad_n = remap_legacy_kmgu_ws(quad);
+        if !row_subject_to_weapon_allowlist(export, &quad)
+            && !row_subject_to_weapon_allowlist(export, &quad_n)
+        {
+            continue;
+        }
+        if allowed.contains(&quad) || allowed.contains(&quad_n) {
+            continue;
+        }
+        clear_dcs_warehouse_equipment_quad(lua, warehouse, quad, name.as_str())
+            .context("pruning disallowed weapon stock from DCS")?;
+        mutated = true;
+    }
+    Ok(mutated)
 }
 
 pub(super) fn hub_to_objective_distance_km(hub: &Objective, dest: &Objective) -> f64 {
@@ -5734,6 +5828,7 @@ impl Db {
         canonicalize_virtual_equipment_keys(obj, resource_meta.as_ref());
         if objective_is_ground_dep_farp_export(export.as_ref(), obj) {
             let keep_virtual = skip_dep_hydrate || dep_farp_has_persisted_virtual_stock(obj);
+            // `reconcile_dcs_warehouse_to_virtual` may write to DCS; snapshot is taken AFTER.
             reconcile_dcs_warehouse_to_virtual(
                 lua,
                 obj,
@@ -5741,17 +5836,22 @@ impl Db {
                 Some(resource_meta.as_ref()),
             )
                 .context("pruning ground DEP FARP DCS warehouse to virtual stock")?;
+            let snapshot = read_warehouse_snapshot(&warehouse)
+                .context("warehouse snapshot for ground DEP FARP SyncFrom")?;
             if !keep_virtual {
                 self.ephemeral.dep_farp_authoritative_until.remove(&oid);
-                sync_warehouse_to_obj(obj, &warehouse, true)
+                sync_warehouse_to_obj(obj, &warehouse, true, &snapshot)
                     .context("syncing ground DEP FARP warehouse from DCS (tracked rows only)")?;
             }
             if block_sync_from_refill {
                 clamp_threatened_sync_from_refill(obj, &prev_equipment, &prev_liquids);
             }
             canonicalize_virtual_equipment_keys(obj, resource_meta.as_ref());
-            record_objective_dcs_equipment_names(&mut self.ephemeral, oid, &warehouse)
-                .context("recording DCS warehouse equipment for supply")?;
+            record_objective_dcs_equipment_names_from_snapshot(
+                &mut self.ephemeral,
+                oid,
+                &snapshot,
+            );
             if self.ephemeral.cfg.dynamic_cargo_delivery.enabled
                 && Db::clamp_dynamic_cargo_checkout_obj(
                     obj,
@@ -5766,7 +5866,10 @@ impl Db {
         }
         let is_logistics_hub = matches!(obj.kind, ObjectiveKind::Logistics);
         let liquids_tons = objective_liquids_stored_as_tons(export.as_ref(), obj);
-        sync_warehouse_to_obj(obj, &warehouse, liquids_tons)
+        // SyncFrom is pure reads; one snapshot serves sync-from + discover + hydrate + record.
+        let snapshot = read_warehouse_snapshot(&warehouse)
+            .context("warehouse snapshot for SyncFrom")?;
+        sync_warehouse_to_obj(obj, &warehouse, liquids_tons, &snapshot)
             .context("syncing warehouse to objective")?;
         discover_dcs_warehouse_into_obj(
             obj,
@@ -5776,6 +5879,7 @@ impl Db {
             whcfg,
             production.as_deref(),
             on_water,
+            &snapshot,
         )
         .context("hydrating virtual warehouse from DCS inventory")?;
         // Production-key hydrate is OLO-only (FARP/helipad Inventory gaps). On OAB/OFO/FARP
@@ -5790,6 +5894,7 @@ impl Db {
                     whcfg,
                     prod,
                     on_water,
+                    &snapshot,
                 )
                 .context("hydrating production keys from DCS get_item_count")?;
             }
@@ -5810,8 +5915,11 @@ impl Db {
             );
         }
         canonicalize_virtual_equipment_keys(obj, resource_meta.as_ref());
-        record_objective_dcs_equipment_names(&mut self.ephemeral, oid, &warehouse)
-            .context("recording DCS warehouse equipment for supply")?;
+        record_objective_dcs_equipment_names_from_snapshot(
+            &mut self.ephemeral,
+            oid,
+            &snapshot,
+        );
         if is_logistics_hub {
             if let Some(prod) = production.as_deref() {
                 mark_production_equipment_dcs_tracked(&mut self.ephemeral, oid, prod);
@@ -5862,13 +5970,21 @@ impl Db {
             .context("getting warehouse")?;
         let owner = obj.owner;
         let export = Arc::clone(&self.ephemeral.fowl_miz_export);
-        prune_disallowed_dcs_weapon_stock(
+        // One snapshot serves prune + sync_obj_to_warehouse; refresh only if prune mutated DCS.
+        let mut snapshot = read_warehouse_snapshot(&warehouse)
+            .context("warehouse snapshot for SyncTo prune")?;
+        let prune_mutated = prune_disallowed_dcs_weapon_stock(
             lua,
             &warehouse,
             export.as_ref(),
             owner,
             resource_meta.as_ref(),
+            &snapshot,
         )?;
+        if prune_mutated {
+            snapshot = read_warehouse_snapshot(&warehouse)
+                .context("warehouse snapshot for SyncTo after prune")?;
+        }
         let liquids_tons = objective_liquids_stored_as_tons(export.as_ref(), obj);
         let ground_dep = objective_is_ground_dep_farp_export(export.as_ref(), obj);
         let _ = obj;
@@ -5897,6 +6013,7 @@ impl Db {
                 liquids_tons,
                 credits,
                 forbid_dcs_restore,
+                &snapshot,
             )
             .context("syncing warehouse to objective")?;
             if ground_dep {
@@ -5954,7 +6071,16 @@ impl Db {
                 obj.name
             );
         }
-        prune_disallowed_dcs_weapon_stock(lua, &warehouse, export, owner, resource_meta.as_ref())?;
+        let prune_snapshot = read_warehouse_snapshot(&warehouse)
+            .context("warehouse snapshot for replace_dcs prune")?;
+        prune_disallowed_dcs_weapon_stock(
+            lua,
+            &warehouse,
+            export,
+            owner,
+            resource_meta.as_ref(),
+            &prune_snapshot,
+        )?;
         let liquids_tons = objective_liquids_stored_as_tons(export, obj);
         apply_virtual_warehouse_to_dcs(
             lua,
@@ -6036,6 +6162,10 @@ impl Db {
             && self.objective_has_open_dynamic_cargo_checkout(from);
         let to_forbid = self.ephemeral.cfg.dynamic_cargo_delivery.enabled
             && self.objective_has_open_dynamic_cargo_checkout(to);
+        let from_snapshot = read_warehouse_snapshot(&from_wh)
+            .context("warehouse snapshot for transfer_supplies from")?;
+        let to_snapshot = read_warehouse_snapshot(&to_wh)
+            .context("warehouse snapshot for transfer_supplies to")?;
         {
             let Db {
                 persisted,
@@ -6055,6 +6185,7 @@ impl Db {
                     &mut ephemeral.sync_to_liquid_credit,
                 )),
                 from_forbid,
+                &from_snapshot,
             )?;
             sync_obj_to_warehouse(
                 to,
@@ -6069,6 +6200,7 @@ impl Db {
                     &mut ephemeral.sync_to_liquid_credit,
                 )),
                 to_forbid,
+                &to_snapshot,
             )?;
         }
         self.update_supply_status()
@@ -6111,7 +6243,9 @@ impl Db {
                 inv.reduce(percent);
             }
         }
-        sync_obj_to_warehouse(oid, obj, &warehouse, liquids_tons, None, false)
+        let snapshot = read_warehouse_snapshot(&warehouse)
+            .context("warehouse snapshot for admin_reduce_inventory SyncTo")?;
+        sync_obj_to_warehouse(oid, obj, &warehouse, liquids_tons, None, false, &snapshot)
             .context("syncing from warehouse")?;
         self.update_supply_status()
             .context("updating supply status")?;
