@@ -69,6 +69,37 @@ fn objective_airbase_on_water(lua: MizLua, obj: &Objective) -> Result<bool> {
     ))
 }
 
+/// DCS Airbase desc.category: 0 land, 1 FARP/helipad, 2 ship.
+fn objective_dcs_airbase_is_ship(lua: MizLua, db: &Db, oid: ObjectiveId) -> bool {
+    let Some(ab_oids) = db.ephemeral.airbases_by_oid.get(&oid) else {
+        return false;
+    };
+    for ab_oid in ab_oids {
+        let Ok(ab) = Airbase::get_instance(lua, ab_oid) else {
+            continue;
+        };
+        let Ok(desc) = ab.get_desc() else {
+            continue;
+        };
+        if desc.raw_get::<_, i64>("category").unwrap_or(-1) == 2 {
+            return true;
+        }
+    }
+    false
+}
+
+fn objective_is_carrier_logistics_dest(lua: MizLua, db: &Db, obj: &Objective) -> bool {
+    match &obj.kind {
+        ObjectiveKind::Farp { mobile: true, .. } => true,
+        ObjectiveKind::Airbase => {
+            objective_airbase_on_water(lua, obj).unwrap_or(false)
+                || objective_dcs_airbase_is_ship(lua, db, obj.id)
+        }
+        _ => false,
+    }
+}
+
+
 fn scale_capacity_by_percent_floor(capacity: u32, pct: u8) -> u32 {
     capacity.saturating_mul(pct as u32) / 100
 }
@@ -5014,12 +5045,14 @@ impl Db {
                 if needs_bucket(oid, obj, true) {
                     continue;
                 }
-                if !objective_airbase_on_water(lua, obj).unwrap_or(false) {
+                if !objective_is_carrier_logistics_dest(lua, self, obj) {
                     continue;
                 }
                 let (_, min_ac) = thresholds_for(obj);
+                let on_water = objective_airbase_on_water(lua, obj).unwrap_or(false);
+                let ship = objective_dcs_airbase_is_ship(lua, self, *oid);
                 wh_diag(format_compact!(
-                    "hub {} skip-ac {}: {}",
+                    "hub {} skip-ac {}: on_water={on_water} ship={ship} {}",
                     logi.name,
                     obj.name,
                     equipment_airframe_bucket_skip_reason(
@@ -5239,6 +5272,46 @@ impl Db {
                     "hub {} scheduled {} outbound transfers",
                     logi.name,
                     hub_planned
+                ));
+            }
+        }
+        // Carrier supply-line audit (once per distribute tick).
+        {
+            for (oid, obj) in &self.persisted.objectives {
+                if !objective_is_carrier_logistics_dest(lua, self, obj) {
+                    continue;
+                }
+                let on_water = objective_airbase_on_water(lua, obj).unwrap_or(false);
+                let ship = objective_dcs_airbase_is_ship(lua, self, *oid);
+                let (supplier_name, in_dest) = match obj.warehouse.supplier {
+                    Some(sid) => {
+                        let name = self
+                            .persisted
+                            .objectives
+                            .get(&sid)
+                            .map(|h| h.name.as_str())
+                            .unwrap_or("?");
+                        let in_dest = self
+                            .persisted
+                            .objectives
+                            .get(&sid)
+                            .map(|h| h.warehouse.destination.contains(oid))
+                            .unwrap_or(false);
+                        (name, in_dest)
+                    }
+                    None => ("none", false),
+                };
+                let (_, min_ac) = thresholds_for(obj);
+                wh_diag(format_compact!(
+                    "carrier-link {}: on_water={on_water} ship={ship} detached={} supplier={supplier_name} in_dest={in_dest} {}",
+                    obj.name,
+                    obj.logistics_detached,
+                    equipment_airframe_bucket_skip_reason(
+                        obj,
+                        self.ephemeral.warehouse_dcs_equipment_names.get(oid),
+                        resource_meta,
+                        min_ac,
+                    ),
                 ));
             }
         }
