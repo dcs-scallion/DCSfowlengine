@@ -10337,6 +10337,41 @@ fn ensure_land_objective_opposite_dyn_templ_rows(
     Ok(ensured)
 }
 
+/// Registration stub for ferry / re-owner: DCS registers a warehouse `linkDynTempl` at load only when
+/// `initialAmount > 0`. Any aircraft row already carrying a link but with `initialAmount == 0` is
+/// bumped to 1 so a ferried or captured airframe can spawn a Dynamic Slot at that base. bflib
+/// `prune_registration_aircraft_outside_export_profile` zeros stubs outside owner export after load;
+/// ferried airframes with persisted `stored > 0` survive. Caller must exclude naval and DEP FARP.
+fn ensure_registration_stubs_for_linked_aircraft_rows(
+    _lua: &Lua,
+    wh: &Table<'_>,
+) -> Result<usize> {
+    let aircrafts: Table = match wh.raw_get("aircrafts") {
+        Ok(t) => t,
+        Err(_) => return Ok(0),
+    };
+    let mut ensured = 0usize;
+    for cat in ["helicopters", "planes"] {
+        let Ok(cat_tbl) = aircrafts.raw_get::<_, Table>(cat) else {
+            continue;
+        };
+        for pair in cat_tbl.pairs::<String, Table>() {
+            let (_unit_type, row) = pair?;
+            let link = row.raw_get::<_, i64>("linkDynTempl").unwrap_or(0);
+            if link == 0 {
+                continue;
+            }
+            let amt = row.raw_get::<_, u32>("initialAmount").unwrap_or(0);
+            if amt != 0 {
+                continue;
+            }
+            row.raw_set("initialAmount", 1u32)?;
+            ensured += 1;
+        }
+    }
+    Ok(ensured)
+}
+
 /// Geometry extracted from a trigger zone (owns no Lua state).
 enum ObjectiveZoneGeom {
     Circle { center: Vector2, radius: f64 },
@@ -12517,6 +12552,20 @@ fn patch_warehouse_dynamic_spawn_links(
                             }
                         }
                     }
+                }
+            }
+
+            // Ferry / re-owner registration stubs (land only, non-naval, non-DEP FARP).
+            // Any row with linkDynTempl != 0 must have initialAmount > 0 to be registered by DCS.
+            // bflib prune clears stubs outside owner export at load; persisted ferried stock survives.
+            if !mult_cfg.naval_warehouse_ids.contains(&wid)
+                && !mult_cfg.dep_farp_warehouse_ids.contains(&wid)
+            {
+                let n = ensure_registration_stubs_for_linked_aircraft_rows(lua, &wh)?;
+                if n > 0 {
+                    info!(
+                        "warehouse {wid}: ensured {n} registration stub(s) initialAmount=1 for linked aircraft rows"
+                    );
                 }
             }
 

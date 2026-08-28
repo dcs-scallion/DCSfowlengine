@@ -1355,20 +1355,6 @@ impl Db {
                 error!("failed to adjust warehouse {:?}", e)
             }
         }
-        // After obj borrow ends — clear ferry linkDynTempl registry if stock empty.
-        {
-            let typ_name = sifo.typ.0.clone();
-            let stored = self
-                .persisted
-                .objectives
-                .get(&oid)
-                .and_then(|o| o.warehouse.equipment.get(&typ_name))
-                .map(|i| i.stored)
-                .unwrap_or(0);
-            if stored == 0 {
-                self.clear_runtime_dyn_templ_airframe(oid, typ_name.as_str());
-            }
-        }
         let hub_claims = if !in_air {
             let obj = objective!(self, oid)?;
             ai_air::resolve_player_parking_claims(lua, self, obj, parking_subplace, point)?
@@ -1494,9 +1480,6 @@ impl Db {
                 info!(
                     "deslot airframe: clamped home {home:?} {typ_name} {home_dcs}->{home_prev} (ferry to {land_oid:?})"
                 );
-                if home_prev == 0 {
-                    self.clear_runtime_dyn_templ_airframe(home, typ_name.as_str());
-                }
             }
         }
 
@@ -1509,19 +1492,6 @@ impl Db {
         info!(
             "deslot airframe: set {typ_name} at {land_oid:?} to {target} (dcs_before={land_dcs} prev={land_prev} dcs_after={land_after})"
         );
-
-        if land_prev == 0 && target > 0 {
-            if let Err(e) = self.register_runtime_dyn_templ_airframe(
-                lua,
-                land_oid,
-                typ_name.as_str(),
-                target,
-            ) {
-                warn!(
-                    "deslot airframe: runtime linkDynTempl {land_oid:?} {typ_name} stored={target}: {e:?}"
-                );
-            }
-        }
 
         let mut sync: SmallVec<[String; 4]> = smallvec![typ_name.clone()];
         if !is_airbase && let Ok(unit) = Unit::get_instance(lua, objid) {
@@ -1610,9 +1580,6 @@ impl Db {
             if inv.capacity < target {
                 inv.capacity = target.max(1);
             }
-        }
-        if target == 0 {
-            self.clear_runtime_dyn_templ_airframe(oid, typ_name);
         }
         self.ephemeral.dirty();
         info!(
