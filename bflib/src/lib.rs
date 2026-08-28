@@ -1671,9 +1671,17 @@ fn on_event(lua: MizLua, ev: Event) -> Result<()> {
                             z: p,
                         })
                     });
+                let landed_unit = e
+                    .initiator
+                    .as_unit()
+                    .ok()
+                    .and_then(|u| u.object_id().ok());
                 match landing_pos {
                     Ok(pos) => {
-                        match ctx.db.on_csar_landing_after_ejection(lua, start_ts, pos) {
+                        match ctx
+                            .db
+                            .on_csar_landing_after_ejection(lua, start_ts, pos, landed_unit)
+                        {
                             Ok(true) => {
                                 flush_markup_if_pending(ctx, lua);
                                 ctx.persist_campaign_state();

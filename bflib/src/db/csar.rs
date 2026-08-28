@@ -21,7 +21,7 @@ use crate::{
 };
 use anyhow::{Context, Result, bail};
 use bfprotocols::cfg::{LifeType, Vehicle};
-use bfprotocols::db::group::GroupId;
+use bfprotocols::db::group::{GroupId, UnitId};
 use bfprotocols::stats::EnId;
 use chrono::prelude::*;
 use dcso3::{
@@ -870,10 +870,13 @@ impl Db {
         lua: MizLua,
         now: DateTime<Utc>,
         landing_pos: Position3,
+        landed_unit: Option<DcsOid<ClassUnit>>,
     ) -> Result<bool> {
         let Some((ucid, idx)) = self.find_csar_for_landing(&landing_pos) else {
             return Ok(false);
         };
+        // The DCS pilot that just landed is replaced by our own model; it must go.
+        let leftover = landed_unit.filter(|id| !is_fowl_csar_unit(lua, id));
         let side = match self.persisted.players.get(&ucid) {
             Some(p) => p.side,
             None => return Ok(false),
@@ -921,6 +924,10 @@ impl Db {
         self.ephemeral
             .csar_pilot_unit
             .insert(new_id.clone(), ucid);
+        if let Some(leftover) = leftover.filter(|id| *id != new_id) {
+            self.ephemeral.csar_pilot_unit.remove(&leftover);
+            Self::destroy_csar_pilot_unit(lua, &leftover);
+        }
         if let Ok(unit) = Unit::get_instance(lua, &new_id) {
             prepare_csar_pilot_unit(&unit, true);
         }
@@ -1006,16 +1013,31 @@ impl Db {
         let mut csar = csar.clone();
         delete_csar_marks(self.ephemeral.msgs(), &mut csar);
         self.ephemeral.csar_pilot_unit.remove(&csar.pilot_unit);
+        // Adopted CSAR groups have no object_id_by_gid, so delete_group never despawns
+        // them; the pilot units must be destroyed explicitly.
+        let mut doomed: SmallVec<[DcsOid<ClassUnit>; 2]> = SmallVec::new();
+        doomed.push(csar.pilot_unit.clone());
         if let Some(gid) = csar.group_id {
             self.ephemeral.csar_extracting.remove(&gid);
-            if self.persisted.groups.get(&gid).is_some() {
+            let uids: SmallVec<[UnitId; 2]> = match self.persisted.groups.get(&gid) {
+                Some(group) => group.units.into_iter().copied().collect(),
+                None => SmallVec::new(),
+            };
+            let exists = self.persisted.groups.get(&gid).is_some();
+            for uid in &uids {
+                if let Some(oid) = self.ephemeral.object_id_by_uid.get(uid) {
+                    doomed.push(oid.clone());
+                }
+            }
+            if exists {
                 if let Err(e) = self.delete_group(&gid) {
                     warn!("csar: delete group {gid} failed: {e:?}");
                 }
-                return;
             }
         }
-        self.queue_csar_pilot_destroy(csar.pilot_unit.clone());
+        for oid in doomed {
+            self.queue_csar_pilot_destroy(oid);
+        }
     }
 
     pub fn flush_pending_csar_destroys(&mut self, lua: MizLua) {
@@ -1390,10 +1412,21 @@ impl Db {
         Ok(())
     }
 
+    /// Downed pilots die with the life type they came from, even if the owner
+    /// never slots in again after the reset timer expires.
+    fn expire_csar_lives_reset(&mut self, now: DateTime<Utc>) {
+        for ucid in self.csar_active_ucids() {
+            if let Err(e) = self.maybe_reset_lives(&ucid, now) {
+                warn!("csar: lives reset check failed for {ucid:?}: {e:?}");
+            }
+        }
+    }
+
     pub fn update_all_csar_pilots(&mut self, lua: MizLua, now: DateTime<Utc>) {
         if !self.csar_enabled() {
             return;
         }
+        self.expire_csar_lives_reset(now);
         self.flush_pending_csar_destroys(lua);
         for ucid in self.csar_active_ucids() {
             self.maybe_adopt_landed_csar_groups(lua, &ucid);

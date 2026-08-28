@@ -949,6 +949,15 @@ impl Db {
                 }
             }
         }
+        let objective_points = objective.points;
+        // Canonical reset path: also clears downed pilots of the reset life type.
+        if let Err(e) = self.maybe_reset_lives(ucid, time) {
+            warn!("lives reset check failed for {ucid:?}: {e:?}");
+        }
+        let sifo = match self.ephemeral.slot_info.get(&slot) {
+            None => return SlotAuth::Denied,
+            Some(sifo) => sifo,
+        };
         let player = match self.persisted.players.get_mut_cow(ucid) {
             Some(player) => player,
             None => return SlotAuth::NotRegistered(sifo.side),
@@ -972,7 +981,7 @@ impl Db {
         }
         if let Some(points) = self.ephemeral.cfg.points.as_ref() {
             let cost = *points.airframe_cost.get(&sifo.typ).unwrap_or(&0) as i32;
-            let balance = player.points + objective.points;
+            let balance = player.points + objective_points;
             if cost > 0 && balance < cost {
                 return SlotAuth::NoPoints {
                     cost: cost as u32,
