@@ -624,7 +624,9 @@ fn try_occupy_slot(
     let miz = MizLua::from_env(lua);
     let now = Utc::now();
     sanitize_airborne_slot_lock(ctx, miz, &ifo.ucid, now);
-    if ctx.db.ephemeral.cfg.airborne_deslot_block {
+    if ctx.db.ephemeral.cfg.airborne_deslot_block
+        && !airborne_deslot_penalty_exempt(ctx, &ifo.ucid, &slot)
+    {
         if let Some(secs) = ctx.db.airborne_observer_penalty_remaining(&ifo.ucid, now) {
             process_slot_rejection(
                 ctx,
@@ -636,7 +638,7 @@ fn try_occupy_slot(
         }
     }
     if slot_exits_aircraft(&slot) {
-        if let Some(rej) = in_flight_exit_slot_block(ctx, miz, &ifo.ucid) {
+        if let Some(rej) = in_flight_exit_slot_block(ctx, miz, &ifo.ucid, &slot) {
             process_slot_rejection(ctx, id, ifo.ucid, rej);
             return Ok(false);
         }
@@ -682,11 +684,21 @@ fn slot_exits_aircraft(slot: &SlotId) -> bool {
     !matches!(slot, SlotId::Unit(_) | SlotId::MultiCrew(_, _))
 }
 
+/// Game master (Instructor) is admin-only; deslot penalty must not block it.
+fn airborne_deslot_penalty_exempt(ctx: &Context, ucid: &Ucid, slot: &SlotId) -> bool {
+    matches!(slot, SlotId::Instructor(_, _))
+        && ctx.db.ephemeral.cfg.admins.contains_key(ucid)
+}
+
 fn in_flight_exit_slot_block(
     ctx: &mut Context,
     lua: MizLua,
     ucid: &Ucid,
+    target_slot: &SlotId,
 ) -> Option<SlotAuth> {
+    if airborne_deslot_penalty_exempt(ctx, ucid, target_slot) {
+        return None;
+    }
     if !ctx.db.ephemeral.cfg.airborne_deslot_block {
         return None;
     }
