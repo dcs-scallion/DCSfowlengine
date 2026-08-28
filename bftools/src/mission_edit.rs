@@ -6221,6 +6221,28 @@ fn apply_settings_dynamic_spawn_ttdn_naval_flags(
     Ok(())
 }
 
+/// After `dynamicSpawn` is final: stamp ME `allowHotStart` from CFG on every row that has dynamic spawn enabled.
+fn apply_cfg_dynamic_spawn_allow_hot_start_flags(
+    warehouses_root: &Table<'static>,
+    allow_hot_start: bool,
+) -> Result<usize> {
+    let mut updated = 0usize;
+    for tbl_name in ["airports", "warehouses"] {
+        let Ok(tbl) = warehouses_root.raw_get::<_, Table>(tbl_name) else {
+            continue;
+        };
+        for pair in tbl.pairs::<Value, Table>() {
+            let (_, wh) = pair?;
+            if !warehouse_dynamic_spawn_enabled(&wh) {
+                continue;
+            }
+            wh.raw_set("allowHotStart", allow_hot_start)?;
+            updated += 1;
+        }
+    }
+    Ok(updated)
+}
+
 fn validate_settings_dynamic_spawn_ground_keys(settings: &HashMap<String, bool>) -> Result<()> {
     for key in settings.keys() {
         if key.as_str() == SETTINGS_DYNAMIC_SPAWN_DEP_FARP_KEY {
@@ -14429,6 +14451,10 @@ pub fn run(cfg: &MizCmd) -> Result<()> {
             if let Some(ref m) = w.warehouse_multipliers {
                 info!("campaign warehouse multipliers from JSON: {:?}", m);
             }
+            info!(
+                "campaign CFG dynamicSpawn_AllowHotStart={}",
+                w.dynamic_spawn_allow_hot_start
+            );
             Some(w)
         }
     };
@@ -15053,6 +15079,20 @@ pub fn run(cfg: &MizCmd) -> Result<()> {
             &dynamic_emit.ship_hull_by_wid,
         )
         .context("applying SETTINGS-dynamic-spawn-TTDN naval dynamicSpawn flags")?;
+        let allow_hot_start = campaign_overlay
+            .as_ref()
+            .map(|o| o.dynamic_spawn_allow_hot_start)
+            .unwrap_or(false);
+        let n_hot = apply_cfg_dynamic_spawn_allow_hot_start_flags(
+            &base.warehouses,
+            allow_hot_start,
+        )
+        .context("applying CFG dynamicSpawn_AllowHotStart on dynamicSpawn warehouses")?;
+        if n_hot > 0 {
+            info!(
+                "CFG dynamicSpawn_AllowHotStart={allow_hot_start}: stamped allowHotStart on {n_hot} warehouse row(s) with dynamicSpawn enabled"
+            );
+        }
         let ai_template_stock = load_ai_template_stock_settings(&base)
             .context("loading SETTINGS-Ai template stock zones")?;
         if !ai_template_stock.is_empty() {

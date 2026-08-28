@@ -65,6 +65,8 @@ pub struct WarehouseMultipliersFromCfg {
 pub struct CampaignWarehouseOverlay {
     pub defaults: WarehouseDefaultsFromCfg,
     pub warehouse_multipliers: Option<WarehouseMultipliersFromCfg>,
+    /// Root CFG `dynamicSpawn_AllowHotStart` (default false): bftools stamps `allowHotStart` on every warehouse row with `dynamicSpawn` enabled.
+    pub dynamic_spawn_allow_hot_start: bool,
     pub campaign_decade: Option<String>,
     /// DCS unit types counted as OPR factories (`production_factory_units` in campaign CFG).
     pub production_factory_units: HashSet<String>,
@@ -150,6 +152,11 @@ pub fn load_overlay(path: &Path) -> Result<CampaignWarehouseOverlay> {
     }
 
     let warehouse_multipliers = if any { Some(m) } else { None };
+    let dynamic_spawn_allow_hot_start = v
+        .get("dynamicSpawn_AllowHotStart")
+        .or_else(|| v.get("warehouse").and_then(|w| w.get("dynamicSpawn_AllowHotStart")))
+        .and_then(|n| n.as_bool())
+        .unwrap_or(false);
     let campaign_decade =
         v.get("campaign_decade").and_then(|n| n.as_str()).map(|s| s.to_string());
     let production_factory_units = v
@@ -163,6 +170,7 @@ pub fn load_overlay(path: &Path) -> Result<CampaignWarehouseOverlay> {
     Ok(CampaignWarehouseOverlay {
         defaults,
         warehouse_multipliers,
+        dynamic_spawn_allow_hot_start,
         campaign_decade,
         production_factory_units,
         objective_static_units,

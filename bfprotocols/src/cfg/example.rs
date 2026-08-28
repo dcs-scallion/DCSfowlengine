@@ -2132,6 +2132,7 @@ impl Default for Cfg {
             front_line: false,
             front_line_grid_size_meters: 2500.,
             campaign_decade: None,
+            dynamic_spawn_allow_hot_start: false,
             default_warehouse_aa_missiles: 0,
             default_warehouse_ag_missiles: 0,
             default_warehouse_ag_rockets: 0,

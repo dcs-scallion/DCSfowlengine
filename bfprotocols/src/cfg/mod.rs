@@ -1979,6 +1979,9 @@ pub struct Cfg {
     /// Decade label for bftools (`weapon{campaign_decade}.miz`); core gameplay ignores unless referenced elsewhere.
     #[serde(default)]
     pub campaign_decade: Option<String>,
+    /// bftools: ME `allowHotStart` on every warehouse row with `dynamicSpawn` enabled.
+    #[serde(default, rename = "dynamicSpawn_AllowHotStart")]
+    pub dynamic_spawn_allow_hot_start: bool,
     /// Stock targets per wsType subcategory for bftools-generated default warehouse rows (JSON keys match mission CFG).
     #[serde(default, rename = "default_warehouse_AAmissiles")]
     pub default_warehouse_aa_missiles: u32,
