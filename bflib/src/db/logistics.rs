@@ -4344,77 +4344,10 @@ impl Db {
             }
             (eq_cap_rows, liq_cap_rows, pct_filled, pct)
         };
-        // Ensure ME weapon rows for new-owner ordnance before Warehouse.setItem (AGM-114K etc.).
-        if let Ok(Some(ab_id)) = (|| -> Result<Option<i64>> {
-            let airbase_oid = match self.ephemeral.airbase_by_oid.get(&oid) {
-                Some(id) => id,
-                None => return Ok(None),
-            };
-            let ab = Airbase::get_instance(lua, airbase_oid)?;
-            Ok(Some(ab.get_id()?.inner()))
-        })() {
-            let obj = objective!(self, oid)?;
-            match rebuild_me_warehouse_weapons_from_virtual(
-                lua,
-                ab_id,
-                obj,
-                resource_meta.as_ref(),
-            ) {
-                Ok(n) if n > 0 => info!(
-                    "capture {name}: rebuilt {n} ME weapon row(s) for {new_owner:?} export stock"
-                ),
-                Ok(_) => {}
-                Err(e) => warn!("capture {name}: ME weapon rebuild {e:?}"),
-            }
-        }
-        let capture_track = match self.sync_objective_to_warehouse(lua, oid, false) {
-            Ok((obj, wh)) => {
-                let liquids_tons = objective_liquids_stored_as_tons(export.as_ref(), obj);
-                if let Err(e) = apply_virtual_warehouse_to_dcs(
-                    lua,
-                    obj,
-                    &wh,
-                    liquids_tons,
-                    true,
-                    Some(resource_meta.as_ref()),
-                ) {
-                    error!("apply DCS warehouse after capture {oid}: {e:?}");
-                }
-                if let Ok(dcs_names) = collect_dcs_warehouse_equipment_names(&wh) {
-                    rematch_virtual_equipment_to_dcs_names(
-                        obj,
-                        &dcs_names,
-                        resource_meta.as_ref(),
-                    );
-                    canonicalize_virtual_equipment_keys(obj, resource_meta.as_ref());
-                }
-                let mut track_names: Vec<String> = Vec::new();
-                for (name, inv) in &obj.warehouse.equipment {
-                    if inv.capacity > 0 {
-                        track_names.push(name.clone());
-                    }
-                }
-                match collect_dcs_warehouse_equipment_names(&wh) {
-                    Ok(dcs_names) => Some((track_names, dcs_names)),
-                    Err(e) => {
-                        error!("record DCS warehouse equipment after capture {oid}: {e:?}");
-                        Some((track_names, FxHashSet::default()))
-                    }
-                }
-            }
-            Err(e) if warehouse_sync_skip(&e) => None,
-            Err(e) => {
-                error!("sync warehouse after capture {oid}: {e:?}");
-                None
-            }
-        };
-        if let Some((track_names, mut dcs_names)) = capture_track {
-            for name in track_names {
-                dcs_names.insert(name);
-            }
-            self.ephemeral
-                .warehouse_dcs_equipment_names
-                .insert(oid, dcs_names);
+        // Capture-style DCS push (same as OAB/OFO): rebuild ME ordnance rows, then one
+        // establish pass via wsType setItem — not sync_obj add_item deltas (misses RDEFAULT keys).
+        if let Err(e) = self.push_capture_warehouse_to_dcs(lua, oid, &name, new_owner) {
+            error!("push DCS warehouse after capture {oid}: {e:?}");
         }
         self.update_supply_status()
             .context("supply status after capture warehouse reseed")?;
@@ -5571,6 +5504,82 @@ impl Db {
             }
         }
         Ok((objective_mut!(self, oid)?, warehouse))
+    }
+
+    /// OAB/OFO/OLO capture: rebuild ME `weapons`, prune opponent ordnance, establish full virtual profile in DCS.
+    fn push_capture_warehouse_to_dcs(
+        &mut self,
+        lua: MizLua,
+        oid: ObjectiveId,
+        name: &str,
+        new_owner: Side,
+    ) -> Result<()> {
+        let resource_meta = self
+            .warehouse_resource_meta_cache(lua)
+            .context("warehouse resource meta for capture DCS push")?;
+        let export = self.ephemeral.fowl_miz_export.as_ref();
+        let airbase = self
+            .ephemeral
+            .airbase_by_oid
+            .get(&oid)
+            .ok_or_else(|| anyhow!("no airbase for capture warehouse push {name}"))?;
+        let airbase_inst = Airbase::get_instance(lua, airbase).context("getting airbase")?;
+        let ab_id = airbase_inst
+            .get_id()
+            .context("airbase id for capture ME weapon rows")?
+            .inner();
+        let warehouse = airbase_inst
+            .get_warehouse()
+            .context("getting warehouse")?;
+        let obj = objective_mut!(self, oid)?;
+        match rebuild_me_warehouse_weapons_from_virtual(
+            lua,
+            ab_id,
+            obj,
+            resource_meta.as_ref(),
+        ) {
+            Ok(n) if n > 0 => info!(
+                "capture {name}: rebuilt {n} ME weapon row(s) for {new_owner:?} export stock"
+            ),
+            Ok(_) => {}
+            Err(e) => warn!("capture {name}: ME weapon rebuild {e:?}"),
+        }
+        let prune_snapshot = read_warehouse_snapshot(&warehouse)
+            .context("warehouse snapshot for capture DCS push")?;
+        prune_disallowed_dcs_weapon_stock(
+            lua,
+            &warehouse,
+            export,
+            new_owner,
+            resource_meta.as_ref(),
+            &prune_snapshot,
+        )?;
+        let obj = objective_mut!(self, oid)?;
+        let liquids_tons = objective_liquids_stored_as_tons(export, obj);
+        apply_virtual_warehouse_to_dcs(
+            lua,
+            obj,
+            &warehouse,
+            liquids_tons,
+            true,
+            Some(resource_meta.as_ref()),
+        )
+        .context("establish DCS warehouse after capture")?;
+        let dcs_names = collect_dcs_warehouse_equipment_names(&warehouse)
+            .context("collect DCS equipment names after capture")?;
+        rematch_virtual_equipment_to_dcs_names(obj, &dcs_names, resource_meta.as_ref());
+        canonicalize_virtual_equipment_keys(obj, resource_meta.as_ref());
+        let mut tracked = dcs_names;
+        for (eq_name, inv) in &obj.warehouse.equipment {
+            if inv.capacity > 0 {
+                tracked.insert(eq_name.clone());
+            }
+        }
+        self.ephemeral
+            .warehouse_dcs_equipment_names
+            .insert(oid, tracked);
+        self.ephemeral.dirty();
+        Ok(())
     }
 
     /// Drop DCS rows not in virtual, then set all virtual rows (opposite-owner debug / capture-style).

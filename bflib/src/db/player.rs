@@ -828,6 +828,21 @@ impl Db {
         Ok(false)
     }
 
+    /// MP: FO/observer TryChangeSlot runs before PlayerLeaveUnit and clears `current_slot.inst`.
+    fn stash_aircraft_deslot_snapshot(&mut self, ucid: &Ucid) {
+        let Some(player) = self.persisted.players.get_mut_cow(ucid) else {
+            return;
+        };
+        let Some((old_slot, Some(inst))) = player.current_slot.as_ref() else {
+            return;
+        };
+        if matches!(old_slot, SlotId::Unit(_) | SlotId::MultiCrew(_, _)) {
+            self.ephemeral
+                .pending_aircraft_deslot
+                .insert(*old_slot, inst.clone());
+        }
+    }
+
     pub fn try_occupy_slot(
         &mut self,
         lua: MizLua,
@@ -836,6 +851,17 @@ impl Db {
         slot: SlotId,
         ucid: &Ucid,
     ) -> SlotAuth {
+        let exits_aircraft = slot.is_spectator()
+            || matches!(
+                slot,
+                SlotId::Instructor(_, _)
+                    | SlotId::ArtilleryCommander(_, _)
+                    | SlotId::ForwardObserver(_, _)
+                    | SlotId::Observer(_, _)
+            );
+        if exits_aircraft {
+            self.stash_aircraft_deslot_snapshot(ucid);
+        }
         let player = match self.persisted.players.get_mut_cow(ucid) {
             Some(player) => player,
             None => {
@@ -1724,12 +1750,26 @@ impl Db {
                 let slot = *slot;
                 self.delete_fowl_crates_on_carrier_deslot(Some(lua), &ucid, Some(&slot));
                 deslot = Some((ucid.clone(), slot));
-                let (side, typ, flagged_oid) = {
+                let (side, typ, flagged_oid, stopped_at_objective) = {
                     let player = maybe_mut!(self.persisted.players, ucid, "player")?;
-                    let Some((_, Some(inst))) = player.current_slot.as_mut() else {
+                    let inst = if let Some((cur_slot, Some(inst))) = player.current_slot.as_ref() {
+                        if *cur_slot == slot {
+                            Some(inst.clone())
+                        } else {
+                            self.ephemeral.pending_aircraft_deslot.get(&slot).cloned()
+                        }
+                    } else {
+                        self.ephemeral.pending_aircraft_deslot.get(&slot).cloned()
+                    };
+                    let Some(inst) = inst else {
                         return Ok((dead, returned_life, deslot));
                     };
-                    (player.side, inst.typ.clone(), inst.landed_at_objective)
+                    (
+                        player.side,
+                        inst.typ.clone(),
+                        inst.landed_at_objective,
+                        inst.stopped_at_objective,
+                    )
                 };
 
                 let unit = Unit::get_instance(lua, objid).ok();
@@ -1744,19 +1784,20 @@ impl Db {
 
                 let land_oid = if on_ground {
                     pos.and_then(|p| self.resolve_friendly_land_objective(lua, side, p))
-                        .or(flagged_oid.filter(|_| on_ground))
+                        .or(flagged_oid)
+                } else if flagged_oid.is_some() && stopped_at_objective {
+                    flagged_oid
                 } else {
                     None
                 };
 
                 if let Some(oid) = land_oid {
-                    if let Some((_, Some(inst))) = self
-                        .persisted
-                        .players
-                        .get_mut_cow(&ucid)
-                        .and_then(|p| p.current_slot.as_mut())
-                    {
-                        inst.landed_at_objective = Some(oid);
+                    if let Some(player) = self.persisted.players.get_mut_cow(&ucid) {
+                        if let Some((cur_slot, Some(inst))) = player.current_slot.as_mut() {
+                            if *cur_slot == slot {
+                                inst.landed_at_objective = Some(oid);
+                            }
+                        }
                     }
                     if self.ephemeral.cfg.limited_lives {
                         if let Some(life_type) = self.ephemeral.cfg.life_types.get(&typ).copied() {

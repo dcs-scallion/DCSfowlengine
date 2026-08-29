@@ -257,6 +257,8 @@ pub struct Ephemeral {
     /// Slot/deslot airframe: re-clamp DCS count after engine warehouse apply.
     /// `(due_utc, oid, typ_name, target_stored)`.
     pub(super) pending_deslot_airframe_fix: Vec<(DateTime<Utc>, ObjectiveId, String, u32)>,
+    /// Aircraft inst snapshot when MP slot change (FO/observer) overwrites `current_slot` before LeaveUnit.
+    pub(super) pending_aircraft_deslot: FxHashMap<dcso3::net::SlotId, super::player::InstancedPlayer>,
     /// Airframe loss: delayed destroy of dumped ED cargo `(due, ucid, wreck_x, wreck_y)`.
     pub(super) pending_airframe_loss_dynamic_cargo: Vec<(DateTime<Utc>, Ucid, f64, f64)>,
     /// Hub/crate transfer credits for sync-to (target oid + item → amount).
@@ -372,6 +374,7 @@ impl Default for Ephemeral {
             dynamic_cargo_rehook_in_progress: FxHashSet::default(),
             dynamic_cargo_air_dropped_at: FxHashMap::default(),
             pending_deslot_airframe_fix: Vec::default(),
+            pending_aircraft_deslot: FxHashMap::default(),
             pending_airframe_loss_dynamic_cargo: Vec::default(),
             sync_to_equipment_credit: FxHashMap::default(),
             sync_to_liquid_credit: FxHashMap::default(),
@@ -1068,6 +1071,7 @@ impl Ephemeral {
         expected_ucid: Option<Ucid>,
     ) -> Option<(UnitId, Ucid)> {
         self.clear_player_hub_slot_claim(slot);
+        self.pending_aircraft_deslot.remove(slot);
         if let Some(ucid) = self.players_by_slot.swap_remove(slot) {
             if let Some(expected_ucid) = expected_ucid {
                 if expected_ucid != ucid {
