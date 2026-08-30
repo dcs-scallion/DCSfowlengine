@@ -15,21 +15,31 @@ use chrono::prelude::*;
 use compact_str::{format_compact, CompactString};
 use dcso3::{
     coalition::Side,
-    controller::{ActionTyp, AltType, MissionPoint, PointType, Task, VehicleFormation},
+    controller::{
+        ActionTyp, AiOption, AlarmState, AltType, GroundOption, MissionPoint, PointType, Task,
+        VehicleFormation,
+    },
     group::{GroupCategory},
     land::Land,
     net::{SlotId, Ucid},
     object::{DcsObject, DcsOid},
     trigger::{SmokeColor, Trigger},
     unit::{ClassUnit, Unit},
-    LuaVec2, LuaVec3, MizLua, String, Time, Vector2,
+    LuaVec2, LuaVec3, MizLua, String, Vector2,
 };
 use log::{info, warn};
 use smallvec::SmallVec;
 
+const CSAR_EXTRACT_WALK_REISSUE: chrono::Duration = chrono::Duration::seconds(5);
+
 impl Db {
-    pub fn on_csar_group_destroyed(&mut self, gid: &GroupId) {
+    pub(super) fn clear_csar_extract(&mut self, gid: &GroupId) {
         self.ephemeral.csar_extracting.remove(gid);
+        self.ephemeral.csar_extract_walk_at.remove(gid);
+    }
+
+    pub fn on_csar_group_destroyed(&mut self, gid: &GroupId) {
+        self.clear_csar_extract(gid);
         self.ephemeral.csar_capture_walk.retain(|_, p| p != gid);
         let Some(ucid) = self.csar_owner_of_group(gid) else {
             return;
@@ -234,6 +244,9 @@ impl Db {
         };
         self.csar_order_walk(lua, &gid, point)?;
         self.ephemeral.csar_extracting.insert(gid, *slot);
+        self.ephemeral
+            .csar_extract_walk_at
+            .insert(gid, (Utc::now(), point));
         Ok(format_compact!("{name} moving to your helicopter ({:.0}m)", dist2.sqrt()).into())
     }
 
@@ -345,7 +358,16 @@ impl Db {
     }
 
     pub fn cancel_csar_extract_for_slot(&mut self, slot: &SlotId) {
-        self.ephemeral.csar_extracting.retain(|_, s| s != slot);
+        let doomed: SmallVec<[GroupId; 4]> = self
+            .ephemeral
+            .csar_extracting
+            .iter()
+            .filter(|(_, s)| *s == slot)
+            .map(|(g, _)| *g)
+            .collect();
+        for gid in doomed {
+            self.clear_csar_extract(&gid);
+        }
     }
 
     pub(super) fn maybe_adopt_landed_csar_groups(&mut self, lua: MizLua, ucid: &Ucid) {
@@ -421,6 +443,7 @@ impl Db {
     }
 
     pub(super) fn tick_csar_walks(&mut self, lua: MizLua) {
+        let now = Utc::now();
         let board2 = (self.ephemeral.cfg.csar.board_distance_m as f64).powi(2);
         let pick2 = (self.ephemeral.cfg.csar.pickup_distance_m as f64).powi(2);
         let extracting: Vec<(GroupId, SlotId)> = self
@@ -431,26 +454,39 @@ impl Db {
             .collect();
         for (gid, slot) in extracting {
             let Some(helo) = self.csar_slot_point(lua, &slot) else {
-                self.ephemeral.csar_extracting.remove(&gid);
+                self.clear_csar_extract(&gid);
                 continue;
             };
             let inst_air = self.csar_slot_in_air(lua, &slot);
             let Ok(ppos) = self.group_center(&gid) else {
-                self.ephemeral.csar_extracting.remove(&gid);
+                self.clear_csar_extract(&gid);
                 continue;
             };
             let dist2 = na::distance_squared(&ppos.into(), &helo.into());
             if inst_air || dist2 > pick2 {
-                self.ephemeral.csar_extracting.remove(&gid);
+                self.clear_csar_extract(&gid);
                 continue;
             }
             if dist2 <= board2 {
-                self.ephemeral.csar_extracting.remove(&gid);
+                self.clear_csar_extract(&gid);
                 if let Some((ucid, idx)) = self.csar_owner_idx_of_group(&gid) {
                     if let Err(e) = self.csar_board_friendly(lua, &slot, ucid, idx) {
                         warn!("csar: auto-board failed: {e:?}");
                     }
                 }
+                continue;
+            }
+            let reissue = match self.ephemeral.csar_extract_walk_at.get(&gid) {
+                None => true,
+                Some((t, pos)) => {
+                    let moved = (pos.x - helo.x).powi(2) + (pos.y - helo.y).powi(2) > 100.;
+                    now - *t >= CSAR_EXTRACT_WALK_REISSUE || moved
+                }
+            };
+            if reissue && self.csar_order_walk(lua, &gid, helo).is_ok() {
+                self.ephemeral
+                    .csar_extract_walk_at
+                    .insert(gid, (now, helo));
             }
         }
         let walks: Vec<(GroupId, GroupId)> = self
@@ -596,51 +632,36 @@ impl Db {
             .ok_or_else(|| anyhow!("no object id for csar unit {uid}"))?;
         let unit = Unit::get_instance(lua, oid)?;
         let dcs = unit.get_group()?;
+        let _ = dcs.activate();
         let controller = dcs.get_controller()?;
-        let from = self.group_center(gid)?;
+        let _ = controller.reset_task();
+        let _ = controller.set_option(AiOption::Ground(GroundOption::AlarmState(
+            AlarmState::Green,
+        )));
         let land = Land::singleton(lua)?;
-        let alt0 = land.get_height(LuaVec2(from)).unwrap_or(0.);
         let alt1 = land.get_height(LuaVec2(target)).unwrap_or(0.);
         controller.set_task(Task::Mission {
             airborne: Some(false),
-            route: vec![
-                MissionPoint {
-                    action: Some(ActionTyp::Ground(VehicleFormation::OffRoad)),
-                    airdrome_id: None,
-                    helipad: None,
-                    typ: PointType::TurningPoint,
-                    link_unit: None,
-                    pos: LuaVec2(from),
-                    alt: alt0,
-                    alt_typ: Some(AltType::BARO),
-                    time_re_fu_ar: None,
-                    eta: Some(Time(0.)),
-                    eta_locked: Some(true),
-                    speed: 3.5,
-                    speed_locked: Some(true),
-                    name: None,
-                    parking: None,
-                    task: Box::new(Task::Hold),
-                },
-                MissionPoint {
-                    action: Some(ActionTyp::Ground(VehicleFormation::OffRoad)),
-                    airdrome_id: None,
-                    helipad: None,
-                    typ: PointType::TurningPoint,
-                    time_re_fu_ar: None,
-                    link_unit: None,
-                    pos: LuaVec2(target),
-                    alt: alt1,
-                    alt_typ: Some(AltType::BARO),
-                    speed: 3.5,
-                    speed_locked: Some(true),
-                    eta: None,
-                    eta_locked: None,
-                    name: Some(String::from("csar")),
-                    parking: None,
-                    task: Box::new(Task::Hold),
-                },
-            ],
+            route: vec![MissionPoint {
+                action: Some(ActionTyp::Ground(VehicleFormation::OffRoad)),
+                airdrome_id: None,
+                helipad: None,
+                typ: PointType::TurningPoint,
+                link_unit: None,
+                pos: LuaVec2(target),
+                alt: alt1,
+                alt_typ: Some(AltType::BARO),
+                time_re_fu_ar: None,
+                eta: None,
+                eta_locked: None,
+                speed: 10.,
+                speed_locked: Some(true),
+                name: Some(String::from("csar")),
+                parking: None,
+                task: Box::new(Task::ComboTask(vec![Task::WrappedOption(
+                    AiOption::Ground(GroundOption::AlarmState(AlarmState::Green)),
+                )])),
+            }],
         })?;
         Ok(())
     }
@@ -818,7 +839,7 @@ impl Db {
             }
         }
         if let Some(gid) = gid {
-            self.ephemeral.csar_extracting.remove(&gid);
+            self.clear_csar_extract(&gid);
             if let Some(g) = self.persisted.groups.get_mut_cow(&gid) {
                 if let DeployKind::CsarPilot {
                     captured,

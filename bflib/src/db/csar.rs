@@ -245,7 +245,7 @@ fn try_spawn_csar_pilot_infantry(
     group_tbl.raw_set("x", map_x)?;
     group_tbl.raw_set("y", map_y)?;
     group_tbl.raw_set("hidden", false)?;
-    group_tbl.raw_set("uncontrolled", true)?;
+    group_tbl.raw_set("uncontrolled", false)?;
     group_tbl.raw_set("start_time", 0i64)?;
     let route = lua_inner.create_table()?;
     route.raw_set("points", lua_inner.create_table()?)?;
@@ -268,6 +268,7 @@ fn try_spawn_csar_pilot_infantry(
     let spawned = Coalition::singleton(lua)?
         .add_group(country, GroupCategory::Ground, group_data)
         .with_context(|| format!("spawning csar infantry pilot type {type_name}"))?;
+    let _ = spawned.activate();
     let pilot = spawned
         .get_unit(1)
         .with_context(|| format!("csar pilot group has no unit type {type_name}"))?;
@@ -296,7 +297,7 @@ fn try_spawn_csar_pilot_from_template(
     template.group.set_name(group_name)?;
     template.group.set("lateActivation", false)?;
     template.group.set("hidden", false)?;
-    template.group.set("uncontrolled", true)?;
+    template.group.set("uncontrolled", false)?;
     template.group.set("x", pos.x)?;
     template.group.set("y", pos.z)?;
     let units = template.group.units()?;
@@ -316,6 +317,9 @@ fn try_spawn_csar_pilot_from_template(
     let spawned = spctx
         .spawn(template)
         .with_context(|| format!("spawning csar pilot from template {template_name}"))?;
+    if let Spawned::Group(ref group) = spawned {
+        let _ = group.activate();
+    }
     let pilot = match spawned {
         Spawned::Group(group) => group
             .get_unit(1)
@@ -1024,7 +1028,7 @@ impl Db {
         let mut doomed: SmallVec<[DcsOid<ClassUnit>; 2]> = SmallVec::new();
         doomed.push(csar.pilot_unit.clone());
         if let Some(gid) = csar.group_id {
-            self.ephemeral.csar_extracting.remove(&gid);
+            self.clear_csar_extract(&gid);
             let uids: SmallVec<[UnitId; 2]> = match self.persisted.groups.get(&gid) {
                 Some(group) => group.units.into_iter().copied().collect(),
                 None => SmallVec::new(),

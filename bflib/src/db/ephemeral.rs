@@ -175,6 +175,8 @@ pub struct Ephemeral {
     pub(super) pending_csar_pilot_destroy: Vec<DcsOid<ClassUnit>>,
     /// Friendly extract in progress: downed group -> rescuing slot.
     pub(super) csar_extracting: FxHashMap<GroupId, SlotId>,
+    /// Last walk order while extracting (time, helo pos).
+    pub(super) csar_extract_walk_at: FxHashMap<GroupId, (DateTime<Utc>, dcso3::Vector2)>,
     /// Capture walk: capturing troop group -> downed pilot group.
     pub(super) csar_capture_walk: FxHashMap<GroupId, GroupId>,
     /// Capture squads that already received a walk task.
@@ -324,6 +326,7 @@ impl Default for Ephemeral {
             csar_pilot_unit: FxHashMap::default(),
             pending_csar_pilot_destroy: Vec::default(),
             csar_extracting: FxHashMap::default(),
+            csar_extract_walk_at: FxHashMap::default(),
             csar_capture_walk: FxHashMap::default(),
             csar_capture_ordered: FxHashSet::default(),
             csar_smoke_at: FxHashMap::default(),
@@ -1090,6 +1093,8 @@ impl Ephemeral {
             }
             self.cargo.remove(slot);
             self.csar_extracting.retain(|_, s| s != slot);
+            self.csar_extract_walk_at
+                .retain(|gid, _| self.csar_extracting.contains_key(gid));
             if let Some(id) = self.object_id_by_slot.remove(slot) {
                 self.slot_by_object_id.remove(&id);
                 if let Some(uid) = self.uid_by_object_id.remove(&id) {
