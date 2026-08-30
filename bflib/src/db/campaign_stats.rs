@@ -32,6 +32,8 @@ pub struct CoalitionLossStats {
     pub planes_tanker: u32,
     #[serde(default)]
     pub planes_awacs: u32,
+    #[serde(default)]
+    pub planes_log: u32,
     pub drones: u32,
     pub helicopters_atk: u32,
     pub helicopters_log: u32,
@@ -242,6 +244,7 @@ pub fn render_sidebar_html(view: &CampaignStatsView) -> String {
     out.push_str(&vs_row("Planes bomber", bl.planes_bomber, rl.planes_bomber, false));
     out.push_str(&vs_row("Planes tanker", bl.planes_tanker, rl.planes_tanker, false));
     out.push_str(&vs_row("Planes awacs", bl.planes_awacs, rl.planes_awacs, false));
+    out.push_str(&vs_row("Planes log", bl.planes_log, rl.planes_log, false));
     out.push_str(&vs_row("Drones", bl.drones, rl.drones, false));
     out.push_str(divider());
     out.push_str(&vs_row("Helicopters atk", bl.helicopters_atk, rl.helicopters_atk, false));
@@ -345,6 +348,7 @@ impl Db {
             LossBucketField::PlanesBomber => &mut losses.planes_bomber,
             LossBucketField::PlanesTanker => &mut losses.planes_tanker,
             LossBucketField::PlanesAwacs => &mut losses.planes_awacs,
+            LossBucketField::PlanesLog => &mut losses.planes_log,
             LossBucketField::Drones => &mut losses.drones,
             LossBucketField::HelicoptersAtk => &mut losses.helicopters_atk,
             LossBucketField::HelicoptersLog => &mut losses.helicopters_log,
@@ -934,6 +938,7 @@ enum LossBucketField {
     PlanesBomber,
     PlanesTanker,
     PlanesAwacs,
+    PlanesLog,
     Drones,
     HelicoptersAtk,
     HelicoptersLog,
@@ -970,7 +975,7 @@ fn life_type_loss_bucket(lt: LifeType, helo: bool) -> LossBucketField {
         LifeType::Attack => LossBucketField::PlanesAttack,
         LifeType::Recon => LossBucketField::PlanesRecon,
         LifeType::Logistics if helo => LossBucketField::HelicoptersLog,
-        LifeType::Logistics => LossBucketField::PlanesAttack,
+        LifeType::Logistics => LossBucketField::PlanesLog,
         LifeType::CombinedArms => LossBucketField::PlanesAttack,
     }
 }
@@ -996,7 +1001,11 @@ fn action_kind_loss_bucket(kind: &ActionKind, helo: bool) -> LossBucketField {
             LossBucketField::Drones
         }
         ActionKind::LogisticsRepair(_) | ActionKind::LogisticsTransfer(_) => {
-            LossBucketField::HelicoptersLog
+            if helo {
+                LossBucketField::HelicoptersLog
+            } else {
+                LossBucketField::PlanesLog
+            }
         }
         ActionKind::Paratrooper(_) => LossBucketField::HelicoptersLog,
         _ => {
