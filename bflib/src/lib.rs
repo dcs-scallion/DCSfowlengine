@@ -386,6 +386,8 @@ struct Context {
     airborne_voluntary_eject: FxHashSet<Ucid>,
     /// Deslot penalty deferred so disconnect can cancel before apply.
     pending_airborne_deslot_penalty: FxHashMap<Ucid, DateTime<Utc>>,
+    /// Count Players' deaths when voluntary ejection deslot penalty is applied.
+    pending_airborne_death_on_penalty: FxHashSet<Ucid>,
     captureable: FxHashMap<ObjectiveId, usize>,
     shots_out: ShotDb,
     menu_init_queue: IndexSet<SlotId, FxBuildHasher>,
@@ -835,6 +837,11 @@ fn penalize_airborne_exit(
     let penalty_secs = ctx.db.ephemeral.cfg.airborne_deslot_penalty_secs;
     if ctx.db.apply_airborne_observer_penalty(&ucid, now) {
         notify_airborne_observer_penalty(ctx, ucid, penalty_secs, reason);
+        if ctx.pending_airborne_death_on_penalty.remove(&ucid) {
+            if let Some(side) = ctx.db.persisted.players.get(&ucid).map(|p| p.side) {
+                ctx.db.campaign_on_player_death(side);
+            }
+        }
     }
     ctx.db.ephemeral.cancel_force_to_spectators(&ucid);
 }
@@ -845,6 +852,7 @@ fn schedule_airborne_deslot_penalty(ctx: &mut Context, ucid: Ucid, when: DateTim
 
 fn cancel_airborne_deslot_penalty(ctx: &mut Context, ucid: &Ucid) {
     ctx.pending_airborne_deslot_penalty.remove(ucid);
+    ctx.pending_airborne_death_on_penalty.remove(ucid);
 }
 
 fn process_pending_airborne_deslot_penalties(ctx: &mut Context, now: DateTime<Utc>) {
@@ -1416,6 +1424,9 @@ fn on_event(lua: MizLua, ev: Event) -> Result<()> {
                 if let Some(ucid) = ctx.db.player_in_unit(false, &initiator) {
                     if airborne_deslot_block(ctx, lua, ucid, Some(&initiator)).is_some() {
                         // True airborne deslot — count airframe war loss (not life-not-returned).
+                        if ctx.airborne_voluntary_eject.contains(&ucid) {
+                            ctx.pending_airborne_death_on_penalty.insert(ucid);
+                        }
                         ctx.db
                             .campaign_record_player_airframe_loss(&ucid, &initiator);
                         schedule_airborne_deslot_penalty(ctx, ucid, start_ts);
@@ -1648,6 +1659,7 @@ fn on_event(lua: MizLua, ev: Event) -> Result<()> {
                             .is_some();
                     if was_in_flight {
                         if voluntary {
+                            ctx.pending_airborne_death_on_penalty.insert(ucid);
                             penalize_airborne_exit(
                                 ctx,
                                 ucid,
