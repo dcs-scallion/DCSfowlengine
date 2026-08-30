@@ -645,6 +645,9 @@ impl Db {
         csar: &CsarDowned,
         now: DateTime<Utc>,
     ) -> Result<CsarPilotMissingAction> {
+        if !csar.landed {
+            return Ok(CsarPilotMissingAction::AwaitRebind);
+        }
         if let Some(new_id) = lookup_csar_pilot_unit(lua, ucid, csar)? {
             if new_id != *pilot_unit {
                 if self.apply_csar_pilot_rebind(ucid, pilot_unit, new_id.clone()) {
@@ -976,6 +979,9 @@ impl Db {
                 },
                 None => break,
             };
+            if !csar.landed {
+                continue;
+            }
             if let Some(new_id) = lookup_csar_pilot_unit(lua, ucid, &csar)? {
                 if new_id != old_id && self.apply_csar_pilot_rebind(ucid, &old_id, new_id) {
                     rebound = true;
@@ -1205,7 +1211,7 @@ impl Db {
         let dcs_pilot_id = pilot.object_id()?;
         let aircraft_id = aircraft.object_id()?;
         let slot = aircraft.slot()?;
-        let side = self
+        let _side = self
             .persisted
             .players
             .get(&ucid)
@@ -1260,7 +1266,7 @@ impl Db {
             .and_then(|g| g.get_category())
             .unwrap_or(GroupCategory::Airplane);
         let eject_position = inst.position;
-        let mut csar = CsarDowned {
+        let csar = CsarDowned {
             pilot_unit: dcs_pilot_id.clone(),
             life_type,
             aircraft_type: typ,
@@ -1277,27 +1283,7 @@ impl Db {
             captured: false,
             captured_by: None,
         };
-        let tracked_id = match self.spawn_csar_pilot_unit(lua, &ucid, side, &csar)? {
-            Some(spawned_id) => {
-                Self::destroy_csar_pilot_unit(lua, &dcs_pilot_id);
-                csar.pilot_unit = spawned_id.clone();
-                if let Ok(unit) = Unit::get_instance(lua, &spawned_id) {
-                    prepare_csar_pilot_unit(&unit, false);
-                    let _ = refresh_csar_inst_from_unit(&mut csar, &unit, now);
-                }
-                info!(
-                    "csar: spawned coalition pilot on ejection for {ucid:?} at {spawned_id:?}"
-                );
-                spawned_id
-            }
-            None => {
-                warn!(
-                    "csar: spawn on ejection failed for {ucid:?} ({life_type}), keeping DCS pilot"
-                );
-                prepare_csar_pilot_unit(pilot, false);
-                csar.pilot_unit.clone()
-            }
-        };
+        let tracked_id = dcs_pilot_id.clone();
         if self.persisted.players.get(&ucid).is_some_and(|p| {
             p.csar_downed.iter().any(|c| c.pilot_unit == tracked_id)
         }) {
@@ -1319,7 +1305,9 @@ impl Db {
             .csar_pilot_unit
             .insert(tracked_id.clone(), ucid);
         self.ephemeral.dirty();
-        info!("csar: registered {life_type} downed pilot {ucid:?} at {tracked_id:?}");
+        info!(
+            "csar: registered {life_type} downed pilot {ucid:?} tracking DCS pilot {tracked_id:?}"
+        );
         Ok(())
     }
 
@@ -1373,7 +1361,9 @@ impl Db {
                 )?;
                 continue;
             };
-            prepare_csar_pilot_unit(&instance, csar.landed);
+            if csar.landed {
+                prepare_csar_pilot_unit(&instance, true);
+            }
             let pos = instance.get_position()?;
             let velocity = instance.get_velocity()?.0;
             let in_air = instance.in_air()?;

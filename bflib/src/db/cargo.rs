@@ -462,6 +462,25 @@ impl Db {
     }
 
     /// Live DCS world pos for a crate static (ship-linked crates move with the carrier).
+    /// Ramp-adjacent point for load-range checks (not airframe center).
+    fn crate_load_probe_point(&self, st: &SlotStats, slot: &SlotId) -> Vector2 {
+        let typ = self
+            .ephemeral
+            .slot_info
+            .get(slot)
+            .map(|s| s.typ.as_str())
+            .unwrap_or("");
+        let nose_m = crate::db::dynamic_cargo::fowl_crate_nose_distance_m(typ);
+        let dir = Vector2::new(st.pos.x.x, st.pos.x.z);
+        let mag = (dir.x * dir.x + dir.y * dir.y).sqrt();
+        let forward = if mag > 1e-3 {
+            dir / mag
+        } else {
+            Vector2::new(1., 0.)
+        };
+        st.point + forward * nose_m
+    }
+
     pub(super) fn crate_world_pos(lua: MizLua, name: &str, fallback: Vector2) -> Vector2 {
         match StaticObject::get_by_name(lua, name) {
             Ok(Static::Static(st)) if st.is_exist().unwrap_or(false) => st
@@ -537,9 +556,11 @@ impl Db {
         &'a self,
         lua: MizLua,
         st: &SlotStats,
+        slot: &SlotId,
     ) -> Result<SmallVec<[NearbyCrate<'a>; 4]>> {
         let max_dist = self.ephemeral.cfg.crate_load_distance as f64;
-        self.list_crates_near_point(lua, st.point, max_dist)
+        let probe = self.crate_load_probe_point(st, slot);
+        self.list_crates_near_point(lua, probe, max_dist)
     }
 
     pub fn destroy_nearby_crate(&mut self, lua: MizLua, slot: &SlotId) -> Result<()> {
@@ -547,7 +568,7 @@ impl Db {
         if st.in_air {
             bail!("you must land to destroy crates")
         }
-        let nearby = self.list_nearby_crates(lua, &st)?;
+        let nearby = self.list_nearby_crates(lua, &st, slot)?;
         let closest = nearby
             .into_iter()
             .find(|nc| !nc.loaded)
@@ -654,9 +675,12 @@ impl Db {
             "deslot"
         };
         for gid in gids {
-            info!("{why} {ucid}: deleting Fowl crate {gid} left in cargo bay");
+            if self.persisted.groups.get(&gid).is_none() {
+                continue;
+            }
+            info!("{why} {ucid:?}: deleting Fowl crate {gid} left in cargo bay");
             if let Err(e) = self.delete_group(&gid) {
-                warn!("{why} {ucid}: delete Fowl crate {gid} failed: {e:?}");
+                warn!("{why} {ucid:?}: delete Fowl crate {gid} failed: {e:?}");
             }
         }
     }
@@ -1576,9 +1600,9 @@ impl Db {
                 }
             }
         }
-        fn nearby(db: &Db, lua: MizLua, st: &SlotStats) -> Result<SmallVec<[Cifo; 8]>> {
+        fn nearby(db: &Db, lua: MizLua, st: &SlotStats, slot: &SlotId) -> Result<SmallVec<[Cifo; 8]>> {
             let nearby_player = db
-                .list_nearby_crates(lua, st)?
+                .list_nearby_crates(lua, st, slot)?
                 .into_iter()
                 .filter(|nc| !db.fowl_crate_is_on_ed_bay(lua, nc.group.id))
                 .map(Cifo::from)
@@ -2001,7 +2025,7 @@ impl Db {
             bail!("you must land to unpack crates")
         }
         let max_dist = self.ephemeral.cfg.crate_spread as f64;
-        let nearby = nearby(self, lua, &st)?;
+        let nearby = nearby(self, lua, &st, slot)?;
         let didx = Arc::clone(
             self.ephemeral
                 .deployable_idx
@@ -2009,7 +2033,7 @@ impl Db {
                 .ok_or_else(|| anyhow!("{:?} can't deploy anything", st.side))?,
         );
         if nearby.is_empty() {
-            let any_ground = self.list_nearby_crates(lua, &st)?;
+            let any_ground = self.list_nearby_crates(lua, &st, slot)?;
             if any_ground
                 .iter()
                 .any(|nc| self.fowl_crate_is_on_ed_bay(lua, nc.group.id))
@@ -2625,11 +2649,11 @@ impl Db {
             bail!("you already have a full load onboard")
         }
         let (gid, oid, crate_def) = {
-            let mut nearby = self.list_nearby_crates(lua, &st)?;
-            nearby.retain(|nc| nc.group.side == side);
+            let mut nearby = self.list_nearby_crates(lua, &st, slot)?;
+            nearby.retain(|nc| nc.group.side == side && !nc.loaded);
             if nearby.is_empty() {
                 bail!(
-                    "no friendly crates within {} meters",
+                    "no friendly crates within {} meters of the cargo ramp",
                     self.ephemeral.cfg.crate_load_distance
                 );
             }
@@ -2646,7 +2670,62 @@ impl Db {
         Trigger::singleton(lua)?
             .action()?
             .set_unit_internal_cargo(unit_name, weight as i64)?;
+        if let Some(ucid) = ucid {
+            info!(
+                "crate load: {ucid:?} slot {slot:?} loaded {} ({gid})",
+                crate_def.name
+            );
+        }
         Ok(crate_def)
+    }
+
+    /// F10 unload for shared-ED bay airframes (Mi-8 / C-130 / etc.).
+    pub fn unload_ed_bay_crate(&mut self, lua: MizLua, slot: &SlotId) -> Result<String> {
+        let st = SlotStats::get(self, lua, slot)?;
+        if st.in_air {
+            bail!("you must land to unload crates")
+        }
+        let unit = self.ephemeral.slot_instance_unit(lua, slot)?;
+        ensure_cargo_bay_ready(&unit)?;
+        let ucid = self
+            .ephemeral
+            .player_in_slot(slot)
+            .cloned()
+            .ok_or_else(|| anyhow!("no player in slot"))?;
+        let gids = self.fowl_crate_gids_on_ed_bay(lua, slot);
+        if gids.is_empty() {
+            bail!("no Fowl crates in the cargo bay")
+        }
+        let gid = gids[0];
+        let uid = self
+            .persisted
+            .groups
+            .get(&gid)
+            .and_then(|g| g.units.clone().into_iter().next().copied())
+            .ok_or_else(|| anyhow!("no unit for crate group {gid}"))?;
+        let name = self
+            .persisted
+            .units
+            .get(&uid)
+            .map(|u| u.name.clone())
+            .unwrap_or_else(|| String::from(format_compact!("crate {gid}")));
+        if self
+            .ephemeral
+            .shared_ed_eject_pending_place
+            .contains_key(&gid)
+        {
+            bail!("{name} is still clearing from the bay — wait a few seconds")
+        }
+        match self.place_fowl_crate_on_ed_unload_line(lua, gid, uid, &ucid, &[]) {
+            Ok(_) => {
+                info!("crate unload: {ucid:?} slot {slot:?} placed {name} ({gid}) on unload line");
+                Ok(name)
+            }
+            Err(e) => {
+                warn!("crate unload failed for {ucid:?} slot {slot:?} {name} ({gid}): {e:?}");
+                Err(e)
+            }
+        }
     }
 
     pub fn load_troops(

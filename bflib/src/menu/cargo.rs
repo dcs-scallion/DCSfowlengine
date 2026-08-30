@@ -33,6 +33,7 @@ use dcso3::{
     net::SlotId,
 };
 use fxhash::FxHashMap;
+use log::warn;
 use std::collections::hash_map::Entry;
 
 fn unpakistan(lua: MizLua, gid: GroupId) -> Result<()> {
@@ -116,12 +117,32 @@ fn load_crate(lua: MizLua, gid: GroupId) -> Result<()> {
         }
         Err(e) => {
             let err = format_compact!("{e}");
+            if let Some(ucid) = ctx.db.ephemeral.player_in_slot(&slot) {
+                warn!("crate load failed for {ucid:?} slot {slot:?}: {err}");
+            }
             let msg = if err.as_str() == "CARGO BAY IS NOT READY, CHECK THE DOOR" {
                 err
             } else {
                 format_compact!("crate could not be loaded: {err}")
             };
             ctx.db.ephemeral.msgs().panel_to_group(10, false, gid, msg)
+        }
+    }
+    Ok(())
+}
+
+fn unload_ed_bay_crate(lua: MizLua, gid: GroupId) -> Result<()> {
+    let ctx = unsafe { Context::get_mut() };
+    let (_side, slot) = slot_for_group(lua, ctx, &gid).context("getting slot for group")?;
+    match ctx.db.unload_ed_bay_crate(lua, &slot) {
+        Ok(name) => {
+            let msg = format_compact!("{name} crate unloaded to the ground");
+            ctx.db.ephemeral.msgs().panel_to_group(10, false, gid, msg);
+            ctx.db.play_sound_player(lua, "crate_unload", &slot);
+        }
+        Err(e) => {
+            let msg = format_compact!("{e}");
+            ctx.db.ephemeral.msgs().panel_to_group(10, false, gid, msg);
         }
     }
     Ok(())
@@ -269,7 +290,7 @@ fn list_nearby_crates(lua: MizLua, gid: GroupId) -> Result<()> {
     let st = SlotStats::get(&ctx.db, lua, &slot).context("getting slot stats")?;
     let nearby = ctx
         .db
-        .list_nearby_crates(lua, &st)
+        .list_nearby_crates(lua, &st, &slot)
         .context("listing nearby crates")?;
     let nearby_dyn = ctx
         .db
@@ -427,6 +448,14 @@ pub(super) fn add_cargo_menu_for_group(
             "Unload Crate".into(),
             Some(root.clone()),
             unload_crate,
+            group,
+        )?;
+    } else {
+        mc.add_command_for_group(
+            group,
+            "Unload Crate".into(),
+            Some(root.clone()),
+            unload_ed_bay_crate,
             group,
         )?;
     }

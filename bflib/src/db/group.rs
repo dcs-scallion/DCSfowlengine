@@ -1953,7 +1953,7 @@ impl Db {
     ) -> Result<()> {
         const BAY_DOOR_ARG: i32 = 86;
         const BAY_READY_MIN: f64 = 0.5;
-        const MAX_UNLOAD_ATTEMPTS: u8 = 3;
+        const MAX_UNLOAD_ATTEMPTS: u8 = 6;
 
         let (slot, name, typ) = {
             let player = self
@@ -2044,6 +2044,7 @@ impl Db {
                 });
             }
             if let Some(cargo) = matched {
+                let _ = ac.open_ramp(true);
                 if let Err(e) = ac.unload_cargo(&cargo) {
                     warn!("crate {gid}: UnloadCargo failed for {name}: {e:?}");
                 }

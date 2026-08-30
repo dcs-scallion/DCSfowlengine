@@ -400,7 +400,7 @@ impl Db {
                 }
             })
             .chain(self.instanced_players().filter_map(|(_, p, inst)| {
-                let slot = p.current_slot.as_ref().unwrap().0;
+                let slot = p.current_slot.as_ref().map(|(s, _)| *s)?;
                 let pos = inst.position.p.0;
                 let id = JtId::Slot(slot);
                 match self.ephemeral.cfg.airborne_jtacs.get(&inst.typ) {

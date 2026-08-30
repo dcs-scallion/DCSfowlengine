@@ -5565,6 +5565,25 @@ impl Db {
             Some(resource_meta.as_ref()),
         )
         .context("establish DCS warehouse after capture")?;
+        let post = read_warehouse_snapshot(&warehouse)
+            .context("warehouse snapshot after capture establish")?;
+        let mut weapon_rows = 0usize;
+        let mut aircraft_rows = 0usize;
+        for qty in post.weapons.values() {
+            if *qty > 0 {
+                weapon_rows += 1;
+            }
+        }
+        for qty in post.aircraft.values() {
+            if *qty > 0 {
+                aircraft_rows += 1;
+            }
+        }
+        info!(
+            "capture {name}: DCS established {} equipment row(s) \
+             ({weapon_rows} weapons, {aircraft_rows} aircraft)",
+            weapon_rows + aircraft_rows
+        );
         let dcs_names = collect_dcs_warehouse_equipment_names(&warehouse)
             .context("collect DCS equipment names after capture")?;
         rematch_virtual_equipment_to_dcs_names(obj, &dcs_names, resource_meta.as_ref());

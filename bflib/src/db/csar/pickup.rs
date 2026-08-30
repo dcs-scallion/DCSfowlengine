@@ -16,7 +16,7 @@ use compact_str::{format_compact, CompactString};
 use dcso3::{
     coalition::Side,
     controller::{ActionTyp, AltType, MissionPoint, PointType, Task, VehicleFormation},
-    group::{Group, GroupCategory},
+    group::{GroupCategory},
     land::Land,
     net::{SlotId, Ucid},
     object::{DcsObject, DcsOid},
@@ -430,11 +430,11 @@ impl Db {
             .map(|(g, s)| (*g, *s))
             .collect();
         for (gid, slot) in extracting {
-            let Some(helo) = self.csar_slot_point(&slot) else {
+            let Some(helo) = self.csar_slot_point(lua, &slot) else {
                 self.ephemeral.csar_extracting.remove(&gid);
                 continue;
             };
-            let inst_air = self.csar_slot_in_air(&slot);
+            let inst_air = self.csar_slot_in_air(lua, &slot);
             let Ok(ppos) = self.group_center(&gid) else {
                 self.ephemeral.csar_extracting.remove(&gid);
                 continue;
@@ -584,9 +584,20 @@ impl Db {
             .groups
             .get(gid)
             .ok_or_else(|| anyhow!("no group {gid}"))?;
-        let from = self.group_center(gid)?;
-        let dcs = Group::get_by_name(lua, group.name.as_str())?;
+        let units = group.units.clone();
+        let uid = units
+            .into_iter()
+            .next()
+            .ok_or_else(|| anyhow!("empty csar group {gid}"))?;
+        let oid = self
+            .ephemeral
+            .object_id_by_uid
+            .get(uid)
+            .ok_or_else(|| anyhow!("no object id for csar unit {uid}"))?;
+        let unit = Unit::get_instance(lua, oid)?;
+        let dcs = unit.get_group()?;
         let controller = dcs.get_controller()?;
+        let from = self.group_center(gid)?;
         let land = Land::singleton(lua)?;
         let alt0 = land.get_height(LuaVec2(from)).unwrap_or(0.);
         let alt1 = land.get_height(LuaVec2(target)).unwrap_or(0.);
@@ -667,7 +678,7 @@ impl Db {
         pucid: Ucid,
         idx: usize,
     ) -> Result<String> {
-        let (name, life_type, side, gid, unit) = {
+        let (name, life_type, side, _, _) = {
             let p = self
                 .persisted
                 .players
@@ -711,7 +722,7 @@ impl Db {
                 .action()?
                 .set_unit_internal_cargo(unit_name, mass);
         }
-        let mut csar = {
+        let csar = {
             let player = self
                 .persisted
                 .players
@@ -722,14 +733,8 @@ impl Db {
             }
             player.csar_downed.remove(idx)
         };
-        delete_csar_marks(self.ephemeral.msgs(), &mut csar);
-        self.ephemeral.csar_pilot_unit.remove(&unit);
-        if let Some(gid) = gid {
-            self.ephemeral.csar_extracting.remove(&gid);
-            if self.persisted.groups.get(&gid).is_some() {
-                let _ = self.delete_group(&gid);
-            }
-        }
+        self.remove_csar_entry(&csar);
+        self.flush_pending_csar_destroys(lua);
         self.ephemeral.dirty();
         Ok(format_compact!("{name} boarded").into())
     }
@@ -742,7 +747,7 @@ impl Db {
         idx: usize,
         name: String,
     ) -> Result<String> {
-        let (life_type, side, gid, unit) = {
+        let (life_type, side, _, _) = {
             let p = self
                 .persisted
                 .players
@@ -780,7 +785,7 @@ impl Db {
                 .action()?
                 .set_unit_internal_cargo(unit_name, mass);
         }
-        let mut csar = {
+        let csar = {
             let player = self
                 .persisted
                 .players
@@ -791,13 +796,8 @@ impl Db {
             }
             player.csar_downed.remove(idx)
         };
-        delete_csar_marks(self.ephemeral.msgs(), &mut csar);
-        self.ephemeral.csar_pilot_unit.remove(&unit);
-        if let Some(gid) = gid {
-            if self.persisted.groups.get(&gid).is_some() {
-                let _ = self.delete_group(&gid);
-            }
-        }
+        self.remove_csar_entry(&csar);
+        self.flush_pending_csar_destroys(lua);
         self.ephemeral.dirty();
         Ok(format_compact!("captured {name} boarded").into())
     }
@@ -903,24 +903,15 @@ impl Db {
         Ok((st.side, st.point))
     }
 
-    fn csar_slot_point(&self, slot: &SlotId) -> Option<Vector2> {
-        let ucid = self.ephemeral.players_by_slot.get(slot)?;
-        let p = self.persisted.players.get(ucid)?;
-        let inst = p.current_slot.as_ref().and_then(|(_, i)| i.as_ref())?;
-        Some(Vector2::new(inst.position.p.x, inst.position.p.z))
+    fn csar_slot_point(&self, lua: MizLua, slot: &SlotId) -> Option<Vector2> {
+        crate::db::cargo::SlotStats::get(self, lua, slot)
+            .ok()
+            .map(|s| s.point)
     }
 
-    fn csar_slot_in_air(&self, slot: &SlotId) -> bool {
-        let Some(ucid) = self.ephemeral.players_by_slot.get(slot) else {
-            return true;
-        };
-        let Some(p) = self.persisted.players.get(ucid) else {
-            return true;
-        };
-        p.current_slot
-            .as_ref()
-            .and_then(|(_, i)| i.as_ref())
-            .map(|i| i.in_air)
+    fn csar_slot_in_air(&self, lua: MizLua, slot: &SlotId) -> bool {
+        crate::db::cargo::SlotStats::get(self, lua, slot)
+            .map(|s| s.in_air)
             .unwrap_or(true)
     }
 
