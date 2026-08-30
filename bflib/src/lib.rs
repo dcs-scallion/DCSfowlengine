@@ -2531,7 +2531,7 @@ fn run_slow_timed_events(
         {
             // report kills
             let cfg = Arc::clone(&ctx.db.ephemeral.cfg);
-            for dead in ctx.shots_out.bring_out_your_dead(ts) {
+            for dead in ctx.shots_out.bring_out_your_dead(&ctx.db, ts) {
                 info!("kill {:?}", dead);
                 ctx.db.campaign_on_victim_killed(&dead);
                 ctx.db.campaign_top10_on_kill(&dead);

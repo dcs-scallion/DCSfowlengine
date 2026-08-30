@@ -231,18 +231,32 @@ impl ShotDb {
         Ok(())
     }
 
-    pub fn bring_out_your_dead(&mut self, now: DateTime<Utc>) -> Vec<Dead> {
+    pub fn bring_out_your_dead(&mut self, db: &Db, now: DateTime<Utc>) -> Vec<Dead> {
         let mut dead = Vec::with_capacity(self.dead.len());
         for (target, time) in self.dead.drain() {
-            if let Some(shots) = self.by_target.remove(&target) {
-                if shots.len() > 0 {
-                    let victim = shots[0].target.clone();
-                    dead.push(Dead {
-                        victim,
+            let entry = if let Some(shots) = self.by_target.remove(&target) {
+                if !shots.is_empty() {
+                    Some(Dead {
+                        victim: shots[0].target.clone(),
                         time,
                         shots,
-                    });
+                    })
+                } else {
+                    who(db, target.clone()).map(|victim| Dead {
+                        victim,
+                        time,
+                        shots: Vec::new(),
+                    })
                 }
+            } else {
+                who(db, target.clone()).map(|victim| Dead {
+                    victim,
+                    time,
+                    shots: Vec::new(),
+                })
+            };
+            if let Some(d) = entry {
+                dead.push(d);
             }
             self.recently_dead.insert(target, time);
         }
