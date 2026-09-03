@@ -242,8 +242,12 @@ pub struct Ephemeral {
     pub(super) shared_ed_eject_pending_place: FxHashMap<GroupId, Ucid>,
     /// Old crate static names to scrub from `getCargosOnBoard` after eject rename/respawn.
     pub(super) shared_ed_bay_ghost_names: FxHashMap<GroupId, String>,
+    /// Over-limit crate script could not eject (Mi-8 closed doors): discard on F8 rear unload.
+    pub(super) shared_ed_discard_on_f8_unload: FxHashMap<GroupId, Ucid>,
     /// Fowl crates last seen geometrically in a shared-ED bay (gid → carrier). F8 unload detect.
     pub(super) shared_ed_fowl_aboard: FxHashMap<GroupId, Ucid>,
+    /// F8 load order per carrier (oldest first) — over-limit eject drops the last entry.
+    pub(super) shared_ed_fowl_load_order: FxHashMap<Ucid, SmallVec<[GroupId; 8]>>,
     /// Crates delivered via sling hook — skip F8 unload-line relocation until re-loaded.
     pub(super) shared_ed_sling_landed: FxHashSet<GroupId>,
     /// Previous tick slung crates (gid → carrier) for drop-transition detection.
@@ -369,7 +373,9 @@ impl Default for Ephemeral {
             shared_ed_fowl_eject_grace_until: FxHashMap::default(),
             shared_ed_eject_pending_place: FxHashMap::default(),
             shared_ed_bay_ghost_names: FxHashMap::default(),
+            shared_ed_discard_on_f8_unload: FxHashMap::default(),
             shared_ed_fowl_aboard: FxHashMap::default(),
+            shared_ed_fowl_load_order: FxHashMap::default(),
             shared_ed_sling_landed: FxHashSet::default(),
             shared_ed_prev_slung: FxHashMap::default(),
             dynamic_cargo_registered_at: FxHashMap::default(),

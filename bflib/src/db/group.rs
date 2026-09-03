@@ -1887,6 +1887,12 @@ impl Db {
                     && self.ephemeral.cfg.dynamic_cargo_delivery.enabled
                 {
                     if let Some(carrier) = self.crate_static_ed_carrier(lua, uid) {
+                        if let Some(group) = self.persisted.groups.get_mut_cow(&gid) {
+                            if let DeployKind::Crate { ed_carrier, .. } = &mut group.origin {
+                                *ed_carrier = Some(carrier.clone());
+                            }
+                        }
+                        self.note_shared_ed_fowl_crate_loaded(&carrier, gid);
                         if self.shared_ed_fowl_load_exceeds_cargo_cfg(lua, &carrier) {
                             if let Err(e) = self.reject_shared_ed_fowl_crate_over_limit(
                                 lua, gid, uid, &carrier,
@@ -1897,11 +1903,6 @@ impl Db {
                                 self.delete_group(&gid)?
                             }
                         } else {
-                            if let Some(group) = self.persisted.groups.get_mut_cow(&gid) {
-                                if let DeployKind::Crate { ed_carrier, .. } = &mut group.origin {
-                                    *ed_carrier = Some(carrier);
-                                }
-                            }
                             // F8 / sling despawn — keep DeployKind::Crate for unload revive.
                             if let Some(id) = self.ephemeral.group_marks.remove(&gid) {
                                 self.ephemeral.msgs.delete_mark(id);
@@ -1941,6 +1942,44 @@ impl Db {
             || capacity.total_slots as usize <= crates.saturating_add(troops)
     }
 
+    /// Script eject failed (typically Mi-8 cargo doors closed): stop retries; player F8 unloads.
+    pub(super) fn mark_shared_ed_crate_discard_on_f8_unload(
+        &mut self,
+        gid: GroupId,
+        uid: UnitId,
+        carrier: &Ucid,
+        name: &str,
+    ) {
+        if self
+            .ephemeral
+            .shared_ed_discard_on_f8_unload
+            .contains_key(&gid)
+        {
+            return;
+        }
+        self.ephemeral
+            .shared_ed_discard_on_f8_unload
+            .insert(gid, carrier.clone());
+        self.ephemeral.shared_ed_eject_attempts.remove(&gid);
+        self.ephemeral.shared_ed_eject_pending_place.remove(&gid);
+        self.ephemeral.shared_ed_eject_ramp_warned.remove(&gid);
+        self.ephemeral
+            .shared_ed_bay_ghost_names
+            .insert(gid, String::from(name));
+        let label = self.fowl_crate_place_unit_name(gid, uid, name);
+        self.ephemeral.panel_to_player(
+            &self.persisted,
+            20,
+            carrier,
+            format_compact!(
+                "Deployables limit exceeded. Open cargo doors and unload {label} via F8 to remove the over-limit crate."
+            ),
+        );
+        info!(
+            "crate {gid}: over-limit eject deferred to F8 discard ({label}) for {carrier:?}"
+        );
+    }
+
     /// ED already took the crate into the bay; spit it back out for CFG Fowl slot limits.
     /// Force-open ramp, UnloadCargo (even if doors still closing), verify off board when possible,
     /// then relocate outside the bay footprint. After a few failed clears, force place anyway.
@@ -1951,9 +1990,19 @@ impl Db {
         uid: UnitId,
         carrier: &Ucid,
     ) -> Result<()> {
+        if self
+            .ephemeral
+            .shared_ed_discard_on_f8_unload
+            .contains_key(&gid)
+        {
+            return Ok(());
+        }
+
         const BAY_DOOR_ARG: i32 = 86;
         const BAY_READY_MIN: f64 = 0.5;
         const MAX_UNLOAD_ATTEMPTS: u8 = 6;
+        /// Closed ramp: stop script eject; player must F8-unload with doors open.
+        const RAMP_WAIT_MAX: u8 = 12;
 
         let (slot, name, typ) = {
             let player = self
@@ -1982,23 +2031,6 @@ impl Db {
             return Ok(());
         }
 
-        let _ = ac.open_ramp(true);
-        let bay_ready = ac.check_open_ramp().unwrap_or(false)
-            || ac
-                .get_draw_argument_value(BAY_DOOR_ARG)
-                .map(|v| v >= BAY_READY_MIN)
-                .unwrap_or(false);
-        if !bay_ready {
-            if self.ephemeral.shared_ed_eject_ramp_warned.insert(gid) {
-                self.ephemeral.panel_to_player(
-                    &self.persisted,
-                    12,
-                    carrier,
-                    "Deployables cargo limit exceeded; cargo bay forced open to unload the over-limit crate.",
-                );
-            }
-        }
-
         let on_board = |ac: &Unit, crate_name: &str| -> bool {
             let Ok(Some(cargos)) = ac.get_cargos_on_board() else {
                 return false;
@@ -2019,13 +2051,26 @@ impl Db {
             found
         };
 
+        let _ = ac.open_ramp(true);
+        let bay_ready = ac.check_open_ramp().unwrap_or(false)
+            || ac
+                .get_draw_argument_value(BAY_DOOR_ARG)
+                .map(|v| v >= BAY_READY_MIN)
+                .unwrap_or(false);
+        if !bay_ready && self.ephemeral.shared_ed_eject_ramp_warned.insert(gid) {
+            self.ephemeral.panel_to_player(
+                &self.persisted,
+                12,
+                carrier,
+                "Deployables cargo limit exceeded; cargo bay forced open to unload the over-limit crate.",
+            );
+        }
+
         let attempts = self
             .ephemeral
             .shared_ed_eject_attempts
             .entry(gid)
             .or_insert(0);
-        *attempts = attempts.saturating_add(1);
-        let attempt = *attempts;
 
         if on_board(&ac, name.as_str()) {
             let mut matched: Option<StaticObject> = None;
@@ -2050,7 +2095,18 @@ impl Db {
                 }
             }
             if on_board(&ac, name.as_str()) {
-                if attempt < MAX_UNLOAD_ATTEMPTS {
+                *attempts = attempts.saturating_add(1);
+                let attempt = *attempts;
+                if !bay_ready && attempt < RAMP_WAIT_MAX {
+                    return Ok(());
+                }
+                if !bay_ready && attempt >= RAMP_WAIT_MAX {
+                    self.mark_shared_ed_crate_discard_on_f8_unload(
+                        gid, uid, carrier, name.as_str(),
+                    );
+                    return Ok(());
+                }
+                if bay_ready && attempt < MAX_UNLOAD_ATTEMPTS {
                     info!(
                         "crate {gid}: still on board after UnloadCargo ({name}); retry {attempt}/{MAX_UNLOAD_ATTEMPTS}"
                     );
@@ -2059,7 +2115,6 @@ impl Db {
                 warn!(
                     "crate {gid}: UnloadCargo did not clear bay after {attempt} tries; defer place until bay clear ({name})"
                 );
-                // Force-clear ED bay object; do not respawn while still on board (ED ghost).
                 if let Ok(Some(cargos)) = ac.get_cargos_on_board() {
                     let mut matched: Option<StaticObject> = None;
                     let _ = cargos.for_each(|c| {
@@ -2075,28 +2130,26 @@ impl Db {
                         Ok(())
                     });
                     if let Some(cargo) = matched {
+                        let _ = ac.open_ramp(true);
                         let _ = ac.unload_cargo(&cargo);
                         if on_board(&ac, name.as_str()) {
                             self.ephemeral.shared_ed_place_ignore_dead.insert(gid);
+                            let _ = ac.open_ramp(true);
                             let _ = cargo.destroy();
                         }
                     }
                 }
                 if on_board(&ac, name.as_str()) {
+                    self.ephemeral.shared_ed_eject_attempts.remove(&gid);
+                    self.ephemeral
+                        .shared_ed_bay_ghost_names
+                        .insert(gid, name.clone());
                     self.ephemeral
                         .shared_ed_eject_pending_place
                         .insert(gid, carrier.clone());
                     self.ephemeral
                         .shared_ed_fowl_eject_grace_until
                         .insert(gid, Utc::now() + chrono::Duration::seconds(30));
-                    if self.ephemeral.shared_ed_eject_ramp_warned.insert(gid) {
-                        self.ephemeral.panel_to_player(
-                            &self.persisted,
-                            12,
-                            carrier,
-                            "Deployables cargo limit exceeded; clearing cargo bay ghost before returning the crate to the ground.",
-                        );
-                    }
                     return Ok(());
                 }
             } else {
@@ -2104,8 +2157,19 @@ impl Db {
             }
         }
 
+        self.ephemeral.shared_ed_eject_attempts.remove(&gid);
         self.ephemeral.shared_ed_eject_pending_place.remove(&gid);
-        self.place_fowl_crate_on_ed_unload_line(lua, gid, uid, carrier, &[])?;
+        self.ephemeral
+            .shared_ed_bay_ghost_names
+            .insert(gid, name.clone());
+        self.place_fowl_crate_on_ed_unload_line(lua, gid, uid, carrier, &[], None)?;
+        if !self.try_clear_ed_bay_cargo_named(lua, gid, name.as_str()) {
+            self.ephemeral.shared_ed_bay_ghost_names.remove(&gid);
+        }
+        self.ephemeral
+            .shared_ed_fowl_load_order
+            .values_mut()
+            .for_each(|order| order.retain(|g| *g != gid));
         self.ephemeral.panel_to_player(
             &self.persisted,
             12,
@@ -2139,17 +2203,17 @@ impl Db {
         extent + GAP_M
     }
 
-    /// Nose packing distance past bay OBB (airframe-specific; C-130 > 25 m).
+    /// Cabin-relative nose distance for this carrier (all Fowl crate placement).
     pub(super) fn fowl_crate_nose_m_for_carrier(&self, carrier: &Ucid) -> f64 {
-        self.persisted
+        let typ = self
+            .persisted
             .players
             .get(carrier)
             .and_then(|p| p.current_slot.as_ref())
             .and_then(|(_, inst)| inst.as_ref())
-            .map(|inst| {
-                crate::db::dynamic_cargo::fowl_crate_nose_distance_m(inst.typ.as_str())
-            })
-            .unwrap_or(25.)
+            .map(|inst| inst.typ.as_str())
+            .unwrap_or("");
+        crate::db::dynamic_cargo::fowl_crate_nose_m(typ)
     }
 
     /// Nose then alternating left/right from pilot view; spacing = crate size + 1 m.
@@ -2232,6 +2296,7 @@ impl Db {
         uid: UnitId,
         carrier: &Ucid,
         extra_occupied: &[Vector2],
+        nose_m: Option<f64>,
     ) -> Result<Vector2> {
         let (slot, side, name) = {
             let player = self
@@ -2286,7 +2351,7 @@ impl Db {
             Vector2::new(1., 0.)
         };
         let spacing = Self::fowl_crate_spacing_m(lua, Some(name.as_str()));
-        let nose_m = self.fowl_crate_nose_m_for_carrier(carrier);
+        let nose_m = nose_m.unwrap_or_else(|| self.fowl_crate_nose_m_for_carrier(carrier));
         let drop_pos = self.fowl_crate_nose_line_pos(
             lua,
             ac_pos,
@@ -2352,11 +2417,11 @@ impl Db {
             (final_pos, ground + GROUND_PLACE_AGL_M, None, None)
         };
 
-        // Prefer clearing ED bay before destroy+respawn (same name must leave getCargosOnBoard).
+        // Bay must not still list this name before same-name respawn.
         if let Ok(ac) = self.ephemeral.slot_instance_unit(lua, &slot) {
             if crate::db::dynamic_cargo::unit_has_cargo_named(&ac, name.as_str()) {
                 let _ = ac.open_ramp(true);
-                let mut matched: Option<StaticObject> = None;
+                let mut matched: SmallVec<[StaticObject; 4]> = smallvec![];
                 if let Ok(Some(cargos)) = ac.get_cargos_on_board() {
                     let _ = cargos.for_each(|c| {
                         let Ok(c) = c else {
@@ -2366,15 +2431,16 @@ impl Db {
                             .map(|n| n.as_str() == name.as_str())
                             .unwrap_or(false)
                         {
-                            matched = Some(c);
+                            matched.push(c);
                         }
                         Ok(())
                     });
                 }
-                if let Some(cargo) = matched {
+                for cargo in matched {
                     let _ = ac.unload_cargo(&cargo);
                     if crate::db::dynamic_cargo::unit_has_cargo_named(&ac, name.as_str()) {
                         self.ephemeral.shared_ed_place_ignore_dead.insert(gid);
+                        let _ = ac.open_ramp(true);
                         let _ = cargo.destroy();
                     }
                 }
@@ -2403,8 +2469,6 @@ impl Db {
         position.p.y = alt;
         position.p.z = final_pos.y;
 
-        // Keep / restore a player-readable unit name (ED F8 menu shows StaticObject name).
-        // Opaque `fowl{uid}-{ms}` was only for ghost scrub; bay is already clear here.
         let spawn_name = self.fowl_crate_place_unit_name(gid, uid, name.as_str());
         if spawn_name.as_str() != name.as_str() {
             info!(
@@ -2457,7 +2521,6 @@ impl Db {
         self.ephemeral.shared_ed_fowl_aboard.remove(&gid);
         self.ephemeral.shared_ed_sling_landed.remove(&gid);
         self.ephemeral.shared_ed_eject_pending_place.remove(&gid);
-        self.ephemeral.shared_ed_bay_ghost_names.remove(&gid);
         self.ephemeral
             .shared_ed_fowl_eject_grace_until
             .insert(gid, Utc::now() + chrono::Duration::seconds(30));
@@ -2469,11 +2532,24 @@ impl Db {
             "crate {gid}: placed on ED unload line for {carrier:?} as {spawn_name} at ({:.1},{:.1})",
             final_pos.x, final_pos.y
         );
+        if self.ephemeral.shared_ed_bay_ghost_names.contains_key(&gid) {
+            let scrub_name = self
+                .ephemeral
+                .shared_ed_bay_ghost_names
+                .get(&gid)
+                .cloned()
+                .unwrap_or_else(|| spawn_name.clone());
+            if self.try_clear_ed_bay_cargo_named(lua, gid, scrub_name.as_str()) {
+                info!("crate {gid}: post-place bay ghost scrub pending ({scrub_name})");
+            } else {
+                self.ephemeral.shared_ed_bay_ghost_names.remove(&gid);
+            }
+        }
         Ok(final_pos)
     }
 
     /// Readable StaticObject name for ED F8 / ground place (no opaque `fowl…` rename).
-    fn fowl_crate_place_unit_name(&self, gid: GroupId, uid: UnitId, current: &str) -> String {
+    pub(super) fn fowl_crate_place_unit_name(&self, gid: GroupId, uid: UnitId, current: &str) -> String {
         if !current.starts_with("fowl") {
             return String::from(current);
         }
@@ -2715,11 +2791,16 @@ impl Db {
                 || self.fowl_crate_is_slung_by_player(lua, &carrier, name.as_str())
             {
                 info!("crate {gid}: revive in place (sling / airborne), skip unload line");
-            } else if let Err(e) =
-                self.place_fowl_crate_on_ed_unload_line(lua, gid, uid, &carrier, &[])
-            {
-                warn!("crate {gid}: ED unload place after revive failed: {e:?}");
-            }
+            } else if let Err(e) = self.place_fowl_crate_on_ed_unload_line(
+                    lua,
+                    gid,
+                    uid,
+                    &carrier,
+                    &[],
+                    None,
+                ) {
+                    warn!("crate {gid}: ED unload place after revive failed: {e:?}");
+                }
         }
         Ok(())
     }

@@ -172,9 +172,15 @@ pub struct NearbyDynamicCargo {
 /// MOOSE `DYNAMICCARGO.AircraftDimensions` (half-box around unit origin).
 struct DynamicCargoAircraftDim {
     width: f64,
+    /// Forward half-extent from unit origin to nose (MOOSE cargo bay OBB).
     length: f64,
     ropelength: f64,
+    /// Unit origin → cabin reference along +forward (0 = cockpit at origin).
+    cabin_forward_m: f64,
 }
+
+/// Meters ahead of cabin reference for all Fowl crate nose-line placement.
+const FOWL_CRATE_AHEAD_OF_CABIN_M: f64 = 15.;
 
 fn dynamic_cargo_aircraft_dim(type_name: &str) -> Option<DynamicCargoAircraftDim> {
     match type_name {
@@ -182,38 +188,55 @@ fn dynamic_cargo_aircraft_dim(type_name: &str) -> Option<DynamicCargoAircraftDim
             width: 4.,
             length: 11.,
             ropelength: 30.,
+            cabin_forward_m: 0.,
         }),
         "Mi-8MTV2" | "Mi-8MT" => Some(DynamicCargoAircraftDim {
             width: 6.,
             length: 15.,
             ropelength: 30.,
+            cabin_forward_m: 0.,
         }),
         "UH-1H" => Some(DynamicCargoAircraftDim {
             width: 2.5,
             length: 5.,
             ropelength: 30.,
+            cabin_forward_m: 0.,
         }),
         "Mi-24P" => Some(DynamicCargoAircraftDim {
             width: 3.,
             length: 6.,
             ropelength: 30.,
+            cabin_forward_m: 0.,
         }),
         "C-130J-30" => Some(DynamicCargoAircraftDim {
             width: 4.,
             length: 35.,
             ropelength: 0.,
+            // Origin amidships; cockpit well forward of CG.
+            cabin_forward_m: 18.,
         }),
         _ => None,
     }
 }
 
-/// Nose packing distance: past bay OBB so ground crates are not "aboard" / colliding.
-pub(crate) fn fowl_crate_nose_distance_m(type_name: &str) -> f64 {
-    const MIN_NOSE_M: f64 = 25.;
-    const PAST_BAY_M: f64 = 5.;
+/// Cabin reference along +forward from DCS unit origin.
+fn fowl_crate_cabin_forward_m(type_name: &str) -> f64 {
     dynamic_cargo_aircraft_dim(type_name)
-        .map(|d| (d.length + PAST_BAY_M).max(MIN_NOSE_M))
-        .unwrap_or(MIN_NOSE_M)
+        .map(|d| d.cabin_forward_m)
+        .unwrap_or(0.)
+}
+
+/// Nose-line distance from unit origin: cabin reference + fixed ahead.
+pub(crate) fn fowl_crate_nose_m(type_name: &str) -> f64 {
+    fowl_crate_cabin_forward_m(type_name) + FOWL_CRATE_AHEAD_OF_CABIN_M
+}
+
+pub(crate) fn fowl_crate_spawn_nose_m(type_name: &str) -> f64 {
+    fowl_crate_nose_m(type_name)
+}
+
+pub(crate) fn fowl_crate_nose_distance_m(type_name: &str) -> f64 {
+    fowl_crate_nose_m(type_name)
 }
 
 /// Airframes that use ED F8 / bay for Fowl crates when listed in CFG `shared_ed_cargo_airframes`.
@@ -2028,7 +2051,13 @@ pub(crate) fn dynamic_cargo_is_aboard_unit(
     let along = rel.x * fwd.x + rel.y * fwd.y;
     let lat = rel.x * right.x + rel.y * right.y;
     // Table length/width are half-extents (MOOSE CH-47 comment).
-    if along.abs() <= dim.length && lat.abs() <= dim.width {
+    let in_obb = if landed {
+        // Ground: bay forward of origin only; closer spawn must not false-trigger aft box.
+        along >= 0. && along <= dim.length && lat.abs() <= dim.width
+    } else {
+        along.abs() <= dim.length && lat.abs() <= dim.width
+    };
+    if in_obb {
         return Ok(true);
     }
     if !landed && dim.ropelength > 0. {
@@ -2155,6 +2184,21 @@ pub(crate) fn unit_has_cargo_named(ac: &Unit, crate_name: &str) -> bool {
         Ok(())
     });
     found
+}
+
+/// Count all entries returned by `Unit.getCargosOnBoard` (including nameless ghosts).
+pub(crate) fn ed_bay_cargo_count(ac: &Unit) -> u32 {
+    let Ok(Some(cargos)) = ac.get_cargos_on_board() else {
+        return 0;
+    };
+    let mut n = 0u32;
+    let _ = cargos.for_each(|c| {
+        if c.is_ok() {
+            n += 1;
+        }
+        Ok(())
+    });
+    n
 }
 
 fn delivery_tons(weight_kg: f64) -> f64 {
