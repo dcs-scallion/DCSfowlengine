@@ -230,6 +230,28 @@ impl<'lua> Unit<'lua> {
     pub fn open_ramp(&self, open: bool) -> Result<()> {
         Ok(self.t.call_method("openRamp", open)?)
     }
+
+    /// Like [`DcsObject::get_instance`], but `Ok(None)` when missing/dead (no warn spam).
+    pub fn get_instance_optional(
+        lua: MizLua<'lua>,
+        id: &DcsOid<ClassUnit>,
+    ) -> Result<Option<Self>> {
+        let t = lua.inner().create_table()?;
+        t.set_metatable(Some(lua.inner().globals().raw_get(&**id.class)?));
+        t.raw_set("id_", id.id)?;
+        let t = Unit {
+            t,
+            lua: lua.inner(),
+        };
+        if !t.is_exist()? {
+            return Ok(None);
+        }
+        // work around DCS bug that results in isExist => true for dead units
+        if t.get_life()? <= 0 {
+            return Ok(None);
+        }
+        Ok(Some(t))
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -247,23 +269,13 @@ impl<'lua> DcsObject<'lua> for Unit<'lua> {
     }
 
     fn get_instance(lua: MizLua<'lua>, id: &DcsOid<Self::Class>) -> Result<Self> {
-        let t = lua.inner().create_table()?;
-        t.set_metatable(Some(lua.inner().globals().raw_get(&**id.class)?));
-        t.raw_set("id_", id.id)?;
-        let t = Unit {
-            t,
-            lua: lua.inner(),
-        };
-        if !t.is_exist()? {
-            warn!("{} is an invalid unit", id.id);
-            bail!("{} is an invalid unit", id.id)
+        match Self::get_instance_optional(lua, id)? {
+            Some(t) => Ok(t),
+            None => {
+                warn!("{} is an invalid unit", id.id);
+                bail!("{} is an invalid unit", id.id)
+            }
         }
-        // work around DCS bug that results in isExist => true for dead units
-        if t.get_life()? <= 0 {
-            warn!("{} is dead", id.id);
-            bail!("{} is dead", id.id)
-        }
-        Ok(t)
     }
 
     fn get_instance_dyn<T>(lua: MizLua<'lua>, id: &DcsOid<T>) -> Result<Self> {
