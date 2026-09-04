@@ -31,7 +31,7 @@ use chrono::{Duration, prelude::*};
 use compact_str::{CompactString, format_compact};
 use dcso3::{
     LuaVec2, LuaVec3, MizLua, String, Vector2, Vector3,
-    coalition::{Side, Static},
+    coalition::Side,
     controller::{
         ActionTyp, AltType, AttackParams, MissionPoint, PointType, Task, TurnMethod,
         VehicleFormation, WeaponExpend,
@@ -43,7 +43,6 @@ use dcso3::{
     object::{DcsObject, DcsOid},
     radians_to_degrees, simple_enum,
     spot::{ClassSpot, Spot},
-    static_object::StaticObject,
     trigger::{MarkId, SmokeColor, Trigger},
     unit::{ClassUnit, Unit},
     weapon::Weapon,
@@ -1120,11 +1119,8 @@ impl Jtac {
                         .ok()
                         .is_some_and(|g| g.class.is_me_objective_static())
                     {
-                        let pos = match StaticObject::get_by_name(lua, unit.name.as_str()) {
-                            Ok(Static::Static(st)) => st.get_point()?.0,
-                            Ok(Static::Airbase(_)) | Err(_) => unit.position.p.0,
-                        };
-                        (pos, Vector3::default())
+                        // ME statics do not move; match contact-scan aim (persisted pos).
+                        (unit.position.p.0, Vector3::default())
                     } else {
                         let v = db
                             .ephemeral
@@ -1801,22 +1797,20 @@ impl Jtacs {
             if !tags.contains(jtac.filter) {
                 lost_static!();
             }
-            // Aim +10 m AGL-ish so terrain LOS hits the building volume, not the footprint.
-            let mut pos3 = match StaticObject::get_by_name(lua, unit.name.as_str()) {
-                Ok(Static::Static(st)) => st.get_point().map(|p| p.0).unwrap_or(unit.position.p.0),
-                Ok(Static::Airbase(_)) | Err(_) => unit.position.p.0,
-            };
+            // ME statics do not move: persisted pos +10 m AGL aim (no per-tick get_by_name).
+            let mut pos3 = unit.position.p.0;
             pos3.y += 10.;
+            let dist = na::distance_squared(&pos.into(), &pos3.into());
+            if dist > range {
+                lost_static!();
+            }
             if let Some(ct) = jtac.contacts.get(&id) {
                 if !jtac_moved && (ct.pos - pos3).magnitude_squared() <= 2. {
                     detected.detected = true;
                     continue;
                 }
             }
-            let dist = na::distance_squared(&pos.into(), &pos3.into());
-            if dist <= range
-                && (spec.nolos || landcache.is_visible(&land, dist.sqrt(), pos, pos3)?)
-            {
+            if spec.nolos || landcache.is_visible(&land, dist.sqrt(), pos, pos3)? {
                 detected.detected = true;
                 jtac.add_unit_contact_at(unit, pos3, tags)
             } else {
