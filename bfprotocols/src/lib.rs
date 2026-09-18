@@ -1,9 +1,12 @@
+pub mod api;
 pub mod stats;
 pub mod db;
 pub mod cfg;
 pub mod discord_map_icon_manifest;
 pub mod discord_map_viewport;
 pub mod fowl_miz_export;
+pub mod frontline;
+pub mod gci;
 pub mod shots;
 pub mod perf;
 pub mod miz_trigger;

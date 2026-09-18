@@ -43,6 +43,15 @@ impl ObjectiveKind {
         }
     }
 
+    /// Vector naval/SAM kinds are not used in Fowl; keep bfdb filters compiling.
+    pub fn is_special_sam_site(&self) -> bool {
+        false
+    }
+
+    pub fn is_carrier_group(&self) -> bool {
+        false
+    }
+
     pub fn name(&self) -> &'static str {
         match self {
             Self::Airbase => "Airbase",

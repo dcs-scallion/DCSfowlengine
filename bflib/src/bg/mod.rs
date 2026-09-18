@@ -193,6 +193,9 @@ fn rotate_state(path: &Path) -> Result<()> {
 async fn save(path: PathBuf, encoded: Bytes) -> Result<()> {
     task::spawn_blocking(move || {
         use std::fs::File;
+        if let Some(parent) = path.parent() {
+            fs::create_dir_all(parent)?;
+        }
         let mut tmp = PathBuf::from(&path);
         tmp.set_extension("tmp");
         let file = File::options()
@@ -303,11 +306,13 @@ enum Logs {
         perf: PubPerf,
         stats: Statspub,
         log: LogPublisher,
+        stats_jsonl: Option<std::fs::File>,
     },
     Files {
         log_path: PathBuf,
         log_file: Option<File>,
         stats_path: PathBuf,
+        stats_jsonl: Option<std::fs::File>,
     },
 }
 
@@ -319,6 +324,7 @@ impl Logs {
                 log_path,
                 log_file,
                 stats_path: _,
+                ..
             } => {
                 if let Some(parent) = log_path.parent() {
                     tokio::fs::create_dir_all(parent)
@@ -348,11 +354,27 @@ impl Logs {
         let logs_dir = write_dir.join("Logs");
         let stats_path = logs_dir.join("stats");
         let log_path = logs_dir.join("bfnext.txt");
+        let jsonl_path = logs_dir.join("stats.jsonl");
         rotate_log(&log_path);
+        let stats_jsonl = match std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&jsonl_path)
+        {
+            Ok(f) => {
+                eprintln!("stats JSONL file opened at {jsonl_path:?}");
+                Some(f)
+            }
+            Err(e) => {
+                eprintln!("could not open stats JSONL file at {jsonl_path:?}: {e:?}");
+                None
+            }
+        };
         let mut t = Self::Files {
             log_file: None,
             log_path,
             stats_path,
+            stats_jsonl,
         };
         t.open_files().await?;
         Ok(t)
@@ -394,6 +416,18 @@ impl Logs {
     }
 
     fn write_stat(&mut self, stat: &Stat) -> Result<()> {
+        let jsonl = match self {
+            Self::Files { stats_jsonl, .. } => stats_jsonl,
+            Self::Netidx { stats_jsonl, .. } => stats_jsonl,
+        };
+        if let Some(f) = jsonl {
+            use std::io::Write;
+            let ts = Utc::now();
+            let line = serde_json::json!({"ts": ts.to_rfc3339(), "stat": stat});
+            if let Err(e) = writeln!(f, "{}", line) {
+                eprintln!("failed to write stat to JSONL: {e:?}");
+            }
+        }
         match self {
             Self::Files { .. } => Ok(()),
             Self::Netidx { stats, .. } => stats.append(Utc::now(), stat),
@@ -427,8 +461,10 @@ impl Logs {
                 log_path,
                 log_file,
                 stats_path,
+                stats_jsonl,
             } => {
                 drop(log_file.take());
+                let taken_jsonl = stats_jsonl.take();
                 let go = || async {
                     let perf = PubPerf::new(
                         &publisher,
@@ -448,19 +484,21 @@ impl Logs {
                     .context("starting stats pub")?;
                     let log = LogPublisher::new(publisher.clone(), log_path, base.append("log"))
                         .context("starting log pub")?;
-                    Ok::<_, anyhow::Error>(Self::Netidx {
-                        publisher: publisher.clone(),
-                        perf,
-                        stats,
-                        log,
-                    })
+                    Ok::<_, anyhow::Error>((perf, stats, log))
                 };
                 match go().await {
-                    Ok(t) => {
-                        *self = t;
+                    Ok((perf, stats, log)) => {
+                        *self = Self::Netidx {
+                            publisher: publisher.clone(),
+                            perf,
+                            stats,
+                            log,
+                            stats_jsonl: taken_jsonl,
+                        };
                         Ok(())
                     }
                     Err(e) => {
+                        *stats_jsonl = taken_jsonl;
                         if let Err(e) = self.open_files().await {
                             eprintln!("netidx init failed and reopening files also failed {e:?}")
                         }

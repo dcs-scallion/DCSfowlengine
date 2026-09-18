@@ -634,7 +634,7 @@ fn with_mut_cfg<F: FnOnce(&mut Cfg) -> Result<()>>(ctx: &mut Context, f: F) -> R
         f(cfg)?
     }
     let cfg = Arc::clone(&ctx.db.ephemeral.cfg);
-    ctx.do_bg_task(Task::SaveConfig(ctx.miz_state_path.clone(), cfg));
+    ctx.do_bg_task(Task::SaveConfig(ctx.cfg_base_path.clone(), cfg));
     Ok(())
 }
 
@@ -764,7 +764,7 @@ pub(super) fn admin_shutdown(
             error!("acmi_sanitize: {e:?}");
         }
         let new_campaign = reset.is_some();
-        match crate::db::discord_map::resolve_mission_miz_path(lua, &ctx.miz_state_path) {
+        match crate::db::discord_map::resolve_mission_miz_path(lua, &ctx.cfg_base_path) {
             Ok(miz_path) => {
                 let cfg = &ctx.db.ephemeral.cfg;
                 let args = crate::setmissionstartdatetime::SpawnArgs {
@@ -1043,7 +1043,7 @@ pub(crate) fn dcs_product_version(lua: MizLua, writedir: &Path) -> std::string::
 
 fn dcs_version_slug(ctx: &Context, lua: MizLua) -> std::string::String {
     let writedir = ctx
-        .miz_state_path
+        .cfg_base_path
         .parent()
         .unwrap_or_else(|| Path::new("."));
     slugify(&dcs_product_version(lua, writedir), true)
@@ -1269,7 +1269,7 @@ fn export_runtime_airbases(ctx: &Context, lua: MizLua) -> Result<PathBuf> {
     let slug = dcs_version_slug(ctx, lua);
     let theatre = theatre_slug(lua);
     let out = ctx
-        .miz_state_path
+        .cfg_base_path
         .with_file_name(format!("fowl_airbase_export-DCS.version.{slug}_{theatre}.json"));
     std::fs::write(&out, serde_json::to_string_pretty(&doc)?)?;
     Ok(out)
@@ -1462,7 +1462,7 @@ pub(super) fn run_admin_commands(ctx: &mut Context, lua: MizLua) -> Result<Admin
                 match export_water_grid(
                     &ctx.db.ephemeral.cfg,
                     &ctx.db.persisted,
-                    &ctx.miz_state_path,
+                    &ctx.cfg_base_path,
                     theatre.as_str(),
                     lua,
                 ) {

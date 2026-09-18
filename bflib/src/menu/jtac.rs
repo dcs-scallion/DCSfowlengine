@@ -908,15 +908,17 @@ pub(super) fn add_menu_for_jtac(
         jtac.nearby_artillery(),
     )?;
 
-    add_calcm_menu_for_jtac(
-        lua,
-        mizgid,
-        *ucid,
-        &mut root,
-        &mut root_page_count,
-        jtac.gid(),
-        jtac.nearby_calcm(),
-    )?;
+    if db.ephemeral.cfg.calcm_mission {
+        add_calcm_menu_for_jtac(
+            lua,
+            mizgid,
+            *ucid,
+            &mut root,
+            &mut root_page_count,
+            jtac.gid(),
+            jtac.nearby_calcm(),
+        )?;
+    }
 
     let bomber_missions = db.ephemeral.cfg.actions.get(&side);
     let bomber_missions = bomber_missions.iter().flat_map(|acts| {

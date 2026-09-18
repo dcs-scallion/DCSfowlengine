@@ -1877,6 +1877,22 @@ fn default_jtac_default_code_red() -> u16 {
     1113
 }
 
+fn default_jtac_los_unit_aim_m() -> u32 {
+    2
+}
+
+fn default_jtac_los_static_aim_m() -> u32 {
+    10
+}
+
+fn default_jtac_los_observer_ground_m() -> i32 {
+    2
+}
+
+fn default_jtac_los_observer_air_m() -> i32 {
+    -5
+}
+
 fn default_calcm_mission() -> bool {
     true
 }
@@ -2023,8 +2039,8 @@ pub struct Cfg {
     #[serde(default = "default_cull_after")]
     pub cull_after: u32,
     /// Spread objective group spawn/despawn queue over time (spawn and despawn).
-    /// 1 = legacy rate (~1/16 of queue per second). 2..=10 = that many times slower peak.
-    /// Default 5. Values outside 1..=10 are treated as 5.
+    /// 1 = legacy rate (~1/16 of queue per second). 2..=50 = that many times slower peak.
+    /// Default 5. Values outside 1..=50 are treated as 5.
     #[serde(default = "default_groups_spawn_queue_stretch")]
     pub groups_spawn_queue_stretch: u32,
     /// how often to do more expensive checks such as unit culling and
@@ -2047,7 +2063,7 @@ pub struct Cfg {
     /// how close a CALCM unit must be to participate in a CALCM mission
     /// (meters).
     pub calcm_mission_range: u32,
-    /// When false, CALCM deploy/waypoint actions are hidden from F10 Actions and chat.
+    /// When false, CALCM deploy/waypoint actions are hidden from F10 Actions, JTAC, and chat.
     #[serde(default = "default_calcm_mission")]
     pub calcm_mission: bool,
     /// If true players will be locked to the side they initially
@@ -2124,6 +2140,18 @@ pub struct Cfg {
     /// Default laser code for new Red-coalition JTACs (DCS range 1111–1788).
     #[serde(default = "default_jtac_default_code_red")]
     pub jtac_default_code_red: u16,
+    /// Metres added to mobile unit / player aim point for JTAC `Land.isVisible` (ground origin clip).
+    #[serde(default = "default_jtac_los_unit_aim_m")]
+    pub jtac_los_unit_aim_m: u32,
+    /// Metres added to ME static aim point for JTAC `Land.isVisible`.
+    #[serde(default = "default_jtac_los_static_aim_m")]
+    pub jtac_los_static_aim_m: u32,
+    /// Metres added to ground / embarked JTAC observer point for LOS (and laser attach).
+    #[serde(default = "default_jtac_los_observer_ground_m")]
+    pub jtac_los_observer_ground_m: i32,
+    /// Metres added to airborne JTAC / drone observer point for LOS (and laser attach).
+    #[serde(default = "default_jtac_los_observer_air_m")]
+    pub jtac_los_observer_air_m: i32,
     /// Objectives that can host fixed wing even though they aren't
     /// airbases. Used by actions to choose a spawn point. E.G. You
     /// want to make an airbase a logistics hub because it's close to
@@ -2253,7 +2281,7 @@ impl Cfg {
     /// Effective spawn/despawn queue stretch; out-of-range CFG values fall back to default (5).
     pub fn groups_spawn_queue_stretch_effective(&self) -> u32 {
         match self.groups_spawn_queue_stretch {
-            1..=10 => self.groups_spawn_queue_stretch,
+            1..=50 => self.groups_spawn_queue_stretch,
             _ => default_groups_spawn_queue_stretch(),
         }
     }

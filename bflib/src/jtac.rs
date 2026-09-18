@@ -393,16 +393,18 @@ impl Jtac {
             }
         }
         write!(msg, "]\n")?;
-        write!(msg, "available CALCM: [")?;
-        let len = self.nearby_calcm.len();
-        for (i, (gid, ammo)) in self.nearby_calcm.iter().enumerate() {
-            if i < len - 1 {
-                write!(msg, "{gid}({ammo}),")?;
-            } else {
-                write!(msg, "{gid}({ammo})")?;
+        if db.ephemeral.cfg.calcm_mission {
+            write!(msg, "available CALCM: [")?;
+            let len = self.nearby_calcm.len();
+            for (i, (gid, ammo)) in self.nearby_calcm.iter().enumerate() {
+                if i < len - 1 {
+                    write!(msg, "{gid}({ammo}),")?;
+                } else {
+                    write!(msg, "{gid}({ammo})")?;
+                }
             }
+            write!(msg, "]")?;
         }
-        write!(msg, "]")?;
         Ok(msg)
     }
 
@@ -468,7 +470,12 @@ impl Jtac {
                     db.artillery_near_point(self.side, Vector2::new(pos.x, pos.z));
                 self.menu_dirty |= prev_arty != self.nearby_artillery;
 
-                self.nearby_calcm = db.calcm_near_point(self.side, lua, Vector2::new(pos.x, pos.z));
+                if db.ephemeral.cfg.calcm_mission {
+                    self.nearby_calcm =
+                        db.calcm_near_point(self.side, lua, Vector2::new(pos.x, pos.z));
+                } else {
+                    self.nearby_calcm.clear();
+                }
                 self.menu_dirty |= prev_calcm != self.nearby_calcm;
 
                 Ok(false)
@@ -495,9 +502,9 @@ impl Jtac {
                     }
                 };
                 let offset = if self.air {
-                    Vector3::new(0., -5., 0.)
+                    Vector3::new(0., db.ephemeral.cfg.jtac_los_observer_air_m as f64, 0.)
                 } else {
-                    Vector3::new(0., 10., 0.)
+                    Vector3::new(0., db.ephemeral.cfg.jtac_los_observer_ground_m as f64, 0.)
                 };
                 let spot = Spot::create_laser(
                     lua,
@@ -533,7 +540,12 @@ impl Jtac {
                 });
                 self.nearby_artillery =
                     db.artillery_near_point(self.side, Vector2::new(pos.x, pos.z));
-                self.nearby_calcm = db.calcm_near_point(self.side, lua, Vector2::new(pos.x, pos.z));
+                if db.ephemeral.cfg.calcm_mission {
+                    self.nearby_calcm =
+                        db.calcm_near_point(self.side, lua, Vector2::new(pos.x, pos.z));
+                } else {
+                    self.nearby_calcm.clear();
+                }
                 self.menu_dirty |= prev_arty != self.nearby_artillery;
                 self.menu_dirty |= prev_calcm != self.nearby_calcm;
                 self.mark_target(lua).context("marking target")?;
@@ -1397,6 +1409,9 @@ impl Jtacs {
         shooter: &GroupId,
         n: Vec<u8>,
     ) -> Result<()> {
+        if !db.ephemeral.cfg.calcm_mission {
+            bail!("calcm missions are disabled");
+        }
         let jtac = self
             .jtacs
             .iter_mut()
@@ -1707,10 +1722,13 @@ impl Jtacs {
             menu.insert(jtac.location.oid);
         }
         if air {
-            pos.y -= 5.
+            pos.y += db.ephemeral.cfg.jtac_los_observer_air_m as f64;
         } else {
-            pos.y += 10.
+            pos.y += db.ephemeral.cfg.jtac_los_observer_ground_m as f64;
         };
+
+        let unit_aim = db.ephemeral.cfg.jtac_los_unit_aim_m as f64;
+        let static_aim = db.ephemeral.cfg.jtac_los_static_aim_m as f64;
 
         for (unit, _) in db.instanced_units() {
             let id = EnId::Unit(unit.id);
@@ -1744,10 +1762,11 @@ impl Jtacs {
                     continue;
                 }
             };
-            let dist = na::distance_squared(&pos.into(), &unit.position.p.0.into());
+            let mut aim = unit.position.p.0;
+            aim.y += unit_aim;
+            let dist = na::distance_squared(&pos.into(), &aim.into());
             if dist <= range
-                && (spec.nolos
-                    || landcache.is_visible(&land, dist.sqrt(), pos, unit.position.p.0)?)
+                && (spec.nolos || landcache.is_visible(&land, dist.sqrt(), pos, aim)?)
             {
                 detected.detected = true;
                 jtac.add_unit_contact(unit)
@@ -1797,9 +1816,9 @@ impl Jtacs {
             if !tags.contains(jtac.filter) {
                 lost_static!();
             }
-            // ME statics do not move: persisted pos +10 m AGL aim (no per-tick get_by_name).
+            // ME statics: persisted pos + CFG AGL aim (no per-tick get_by_name).
             let mut pos3 = unit.position.p.0;
-            pos3.y += 10.;
+            pos3.y += static_aim;
             let dist = na::distance_squared(&pos.into(), &pos3.into());
             if dist > range {
                 lost_static!();
@@ -1848,10 +1867,11 @@ impl Jtacs {
             if inst.in_air && !tags.contains(UnitTag::Helicopter) {
                 continue;
             }
-            let dist = na::distance_squared(&pos.into(), &inst.position.p.0.into());
+            let mut aim = inst.position.p.0;
+            aim.y += unit_aim;
+            let dist = na::distance_squared(&pos.into(), &aim.into());
             if dist <= range
-                && (spec.nolos
-                    || landcache.is_visible(&land, dist.sqrt(), pos, inst.position.p.0)?)
+                && (spec.nolos || landcache.is_visible(&land, dist.sqrt(), pos, aim)?)
             {
                 detected.detected = true;
                 jtac.add_player_contact(*ucid, inst)
@@ -1956,7 +1976,12 @@ impl Jtacs {
         let mut new_contacts: SmallVec<[&Jtac; 32]> = smallvec![];
         for j in self.jtacs.values_mut() {
             for (_, jtac) in j.iter_mut() {
-                jtac.nearby_calcm = db.calcm_near_point(jtac.side, lua, jtac.location().pos);
+                if db.ephemeral.cfg.calcm_mission {
+                    jtac.nearby_calcm = db.calcm_near_point(jtac.side, lua, jtac.location().pos);
+                } else if !jtac.nearby_calcm.is_empty() {
+                    jtac.nearby_calcm.clear();
+                    jtac.menu_dirty = true;
+                }
                 match jtac.sort_contacts(db, lua) {
                     Ok(false) => (),
                     Ok(true) => new_contacts.push(jtac),

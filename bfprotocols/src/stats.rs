@@ -120,6 +120,10 @@ pub enum Stat {
         by: Ucid,
         gid: GroupId,
         deployable: String,
+        #[serde(default)]
+        aircraft: Option<String>,
+        #[serde(default)]
+        method: Option<String>,
     },
     DeployFarp {
         by: Ucid,
@@ -215,4 +219,51 @@ pub enum Stat {
         id: Ucid,
         token: String,
     },
+    ConvoyDestroyed {
+        from: ObjectiveId,
+        to: ObjectiveId,
+        side: Side,
+        killer: Option<Ucid>,
+    },
+    AirRouteDelivered {
+        from: ObjectiveId,
+        to: ObjectiveId,
+        side: Side,
+    },
+    AirRouteDestroyed {
+        from: ObjectiveId,
+        to: ObjectiveId,
+        side: Side,
+    },
+    SeaRouteDelivered {
+        from: ObjectiveId,
+        to: ObjectiveId,
+        side: Side,
+    },
+    SeaRouteDestroyed {
+        from: ObjectiveId,
+        to: ObjectiveId,
+        side: Side,
+    },
+    CampaignEvent {
+        event_type: String,
+        side: Side,
+    },
+    PilotXp {
+        id: Ucid,
+        xp: u32,
+        reason: String,
+    },
+    Weather {
+        temp_c: f64,
+        wind_speed_kts: f64,
+        wind_from_deg: f64,
+        cloud_base_m: f64,
+        qnh_hpa: f64,
+        #[serde(default)]
+        cloud_density: Option<u8>,
+        #[serde(default)]
+        visibility_m: Option<f64>,
+    },
+    GciPicture(crate::gci::GciPicture),
 }

@@ -15,7 +15,12 @@ for more details.
 */
 
 use bfprotocols::fowl_miz_export::FowlMizExport;
-use dcso3::{env::miz::UnitId, net::SlotId, trigger::Trigger, MizLua};
+use dcso3::{
+    env::miz::{GroupId, UnitId},
+    net::SlotId,
+    trigger::Trigger,
+    MizLua,
+};
 use log::{debug, warn};
 use std::sync::Arc;
 
@@ -39,6 +44,21 @@ pub fn play_player(export: &FowlMizExport, lua: MizLua, key: &str, slot: &SlotId
         return;
     };
     play_unit(export, lua, key, unit);
+}
+
+pub fn play_group(export: &FowlMizExport, lua: MizLua, key: &str, group: GroupId) {
+    let Some(path) = export.sounds_player.get(key) else {
+        return;
+    };
+    let Ok(trigger) = Trigger::singleton(lua) else {
+        return;
+    };
+    let Ok(action) = trigger.action() else {
+        return;
+    };
+    if let Err(e) = action.out_sound_for_group(group, path.clone().into()) {
+        debug!("sound {key} for group skipped: {e:?}");
+    }
 }
 
 pub fn play_unit_export(export: &Arc<FowlMizExport>, lua: MizLua, key: &str, unit: UnitId) {

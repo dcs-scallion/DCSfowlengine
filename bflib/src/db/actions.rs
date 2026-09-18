@@ -2129,6 +2129,7 @@ impl Db {
                 drone_climb_pos: None,
                 drone_climb_hub: None,
                 drone_climb_orbit: None,
+                drone_orbit_engaged: false,
                 rehydrate_fail_streak: 0,
             },
             owner_lock_released: false,
@@ -2986,6 +2987,8 @@ impl Db {
                     gid,
                     deployable: dep,
                     by: ucid,
+                    aircraft: None,
+                    method: None,
                 });
                 Ok(())
             }

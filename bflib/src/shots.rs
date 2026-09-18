@@ -161,10 +161,16 @@ impl ShotDb {
         let shooter = some!(who(db, e.initiator.object_id()?));
         let target_typ = target.get_type_name()?;
         let target = some!(who(db, target_oid.clone()));
+        let shooter_typ = e
+            .initiator
+            .get_type_name()
+            .ok()
+            .map(|s| dcso3::String::from(s.as_str()));
         self.by_target.entry(target_oid).or_default().push(Shot {
             weapon_name: Some(e.weapon_name.clone()),
             weapon: Some(e.weapon.object_id()?),
             shooter,
+            shooter_typ,
             target,
             target_typ,
             time: now,
@@ -182,8 +188,12 @@ impl ShotDb {
         shooter: &Unit,
         weapon_name: String,
     ) -> Result<()> {
+        let shooter_typ = shooter
+            .get_type_name()
+            .ok()
+            .map(|s| dcso3::String::from(s.as_str()));
         let shooter = some!(who(db, shooter.object_id()?));
-        self.record_hit(db, now, dead, target, shooter, weapon_name)
+        self.record_hit(db, now, dead, target, shooter, shooter_typ, weapon_name)
     }
 
     pub fn hit_by_who(
@@ -195,7 +205,7 @@ impl ShotDb {
         shooter: Who,
         weapon_name: String,
     ) -> Result<()> {
-        self.record_hit(db, now, dead, target, shooter, weapon_name)
+        self.record_hit(db, now, dead, target, shooter, None, weapon_name)
     }
 
     fn record_hit(
@@ -205,6 +215,7 @@ impl ShotDb {
         dead: bool,
         target: &Unit,
         shooter: Who,
+        shooter_typ: Option<dcso3::String>,
         weapon_name: String,
     ) -> Result<()> {
         let target_oid = target.object_id()?;
@@ -220,6 +231,7 @@ impl ShotDb {
                 weapon_name: Some(weapon_name),
                 weapon: None,
                 shooter,
+                shooter_typ,
                 target,
                 target_typ,
                 time: now,

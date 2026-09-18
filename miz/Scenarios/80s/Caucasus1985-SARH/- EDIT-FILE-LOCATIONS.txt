@@ -12,12 +12,14 @@ $target_cfg_name = "${mission_name}_CFG"
 
 
 ###################################################################
-# settings for compilation Fowl DLL & FowlTools                   #
+# settings for compilation Fowl DLL, FowlTools, bfdb              #
 ###################################################################
 # Workspace root Fowl Engine repository                           #
 $work_path_engine = "C:\GitHub\DCSfowlengine"
 # bftools folder under repository                                 #
 $bftools          = "\bftools"
+# bfdb folder under repository (durable bfdb.exe copy lands here) #
+$bfdb             = "\bfdb"
 # Mission folder under repository                                 #
 $path_engine_mission = "\miz\Scenarios\80s\Caucasus1985-SARH"
 ###################################################################

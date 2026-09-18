@@ -137,3 +137,10 @@ bftools/analyze_export_detail.ps1
 .cursor/
 # Attrition static site — local/DCS host only, not part of the engine repo
 /website/
+# Proprietary dashboard / marketing UI — keep local; do not push to public GitHub
+/bfweb/
+/bfsite/
+**/node_modules/
+
+bfsystem.local.ps1
+

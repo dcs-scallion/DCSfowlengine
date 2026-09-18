@@ -2702,6 +2702,8 @@ impl Db {
                                     gid,
                                     by: st.ucid,
                                     deployable: dep.clone(),
+                                    aircraft: None,
+                                    method: None,
                                 });
                                 let invest = deployable_invest_bucket(template, &self.ephemeral.cfg);
                                 let frac = self.charge_for_item(

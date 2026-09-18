@@ -1267,6 +1267,24 @@ impl Db {
                 }
             }
         }
+        if !unit.in_air().unwrap_or(false) {
+            if let Ok(pos) = unit.get_ground_position() {
+                if self.ground_spawn_parking_occupied(
+                    &slot,
+                    &ucid,
+                    objective,
+                    parking_subplace,
+                    pos.0,
+                    &id,
+                ) {
+                    info!(
+                        "player {ucid} spawn blocked: parking occupied subplace {parking_subplace:?} at {objective}"
+                    );
+                    unit.clone().destroy()?;
+                    return Ok(BirthRes::DynamicSlotDenied(ucid, SlotAuth::ParkingOccupied));
+                }
+            }
+        }
         self.ephemeral.stat(Stat::Unit {
             id: EnId::Player(ucid),
             gid: None,

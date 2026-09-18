@@ -782,21 +782,47 @@ fn front_line_svg(
 
 fn status_vs_html(blue: u32, red: u32) -> String {
     format!(
-        r#"<span class="stat-blue">{blue}</span> vs <span class="stat-red">{red}</span>"#
+        r#"<span class="stat-vs"><span class="stat-blue">{blue}</span> vs <span class="stat-red">{red}</span></span>"#
+    )
+}
+
+/// Thin blue|red bar under vs values; omitted when both sides are 0.
+fn status_ratio_bar_html(blue: f64, red: f64) -> String {
+    let total = blue + red;
+    if total <= 0.0 {
+        return String::new();
+    }
+    let blue_pct = 100.0 * blue / total;
+    let red_pct = 100.0 * red / total;
+    format!(
+        r#"<div class="stat-ratio" aria-hidden="true"><span class="stat-ratio-b" style="width:{blue_pct:.4}%"></span><span class="stat-ratio-r" style="width:{red_pct:.4}%"></span></div>"#
+    )
+}
+
+fn status_vs_with_ratio_html(blue: u32, red: u32) -> String {
+    format!(
+        "{vs}{bar}",
+        vs = status_vs_html(blue, red),
+        bar = status_ratio_bar_html(blue as f64, red as f64),
     )
 }
 
 fn status_production_html(blue: Option<u8>, red: Option<u8>) -> String {
     let blue_s = blue.map(|v| v.to_string()).unwrap_or_else(|| "—".into());
     let red_s = red.map(|v| v.to_string()).unwrap_or_else(|| "—".into());
+    let bar = match (blue, red) {
+        (Some(b), Some(r)) => status_ratio_bar_html(b as f64, r as f64),
+        _ => String::new(),
+    };
     format!(
-        r#"<span class="stat-blue">{blue_s}</span> vs <span class="stat-red">{red_s}</span>"#
+        r#"<span class="stat-vs"><span class="stat-blue">{blue_s}</span> vs <span class="stat-red">{red_s}</span></span>{bar}"#
     )
 }
 
 fn status_balancing_html(blue: i32, red: i32) -> String {
+    let bar = status_ratio_bar_html(blue.max(0) as f64, red.max(0) as f64);
     format!(
-        r#"<span class="stat-blue">{blue}</span> vs <span class="stat-red">{red}</span>"#
+        r#"<span class="stat-vs"><span class="stat-blue">{blue}</span> vs <span class="stat-red">{red}</span></span>{bar}"#
     )
 }
 
@@ -848,7 +874,7 @@ fn pilot_section(
 fn sidebar_online_stat_html(bar: &DiscordMapStatusBar) -> String {
     format!(
         r#"<div class="stat sidebar-online-stat"><div class="stat-h">Online pilots</div><div class="stat-v">{online}</div></div>"#,
-        online = status_vs_html(bar.online_blue, bar.online_red),
+        online = status_vs_with_ratio_html(bar.online_blue, bar.online_red),
     )
 }
 
@@ -937,13 +963,12 @@ fn stats_row_html(bar: &DiscordMapStatusBar, top: bool) -> String {
         bar.mission_elapsed_days + 1
     };
     let online_hours = if bar.campaign_stats_enabled {
-        format!(
-            r#"<span class="stat-blue">{blue}</span> vs <span class="stat-red">{red}</span>"#,
-            blue = bar.campaign_online_hours_blue,
-            red = bar.campaign_online_hours_red,
+        status_vs_with_ratio_html(
+            bar.campaign_online_hours_blue,
+            bar.campaign_online_hours_red,
         )
     } else {
-        r#"<span class="stat-blue">?</span> vs <span class="stat-red">?</span>"#.into()
+        r#"<span class="stat-vs"><span class="stat-blue">?</span> vs <span class="stat-red">?</span></span>"#.into()
     };
     if top {
         format!(
@@ -955,16 +980,16 @@ fn stats_row_html(bar: &DiscordMapStatusBar, top: bool) -> String {
   <div class="stat"><div class="stat-h">Carrier objectives</div><div class="stat-v">{carrier}</div></div>
   <div class="stat"><div class="stat-h">Factories</div><div class="stat-v">{factories}</div></div>
   <div class="stat"><div class="stat-h">Production %</div><div class="stat-v">{production}</div></div>
-  <div class="stat"><div class="stat-h">Balancing points</div><div class="stat-v">{balancing}</div></div>
   <div class="stat"><div class="stat-h">Online hours</div><div class="stat-v stat-plain">{online_hours}</div></div>
+  <div class="stat"><div class="stat-h">Balancing points</div><div class="stat-v">{balancing}</div></div>
 </div>"#,
             mission_datetime_initial = mission_datetime_initial,
             mission_day_initial = mission_day_initial,
             restart_initial = restart_initial,
             restart_cls = restart_cls,
-            ground = status_vs_html(bar.ground_blue, bar.ground_red),
-            carrier = status_vs_html(bar.carrier_blue, bar.carrier_red),
-            factories = status_vs_html(bar.factories_blue, bar.factories_red),
+            ground = status_vs_with_ratio_html(bar.ground_blue, bar.ground_red),
+            carrier = status_vs_with_ratio_html(bar.carrier_blue, bar.carrier_red),
+            factories = status_vs_with_ratio_html(bar.factories_blue, bar.factories_red),
             production = status_production_html(bar.production_blue, bar.production_red),
             balancing = status_balancing_html(bar.balancing_blue, bar.balancing_red),
             online_hours = online_hours,
@@ -1250,6 +1275,7 @@ body{{margin:0;background:#000;color:#686a6e;font-family:"Roboto Condensed",Robo
 .left-col{{flex:0 0 {sidebar_w}px;width:{sidebar_w}px;min-width:{sidebar_w}px;box-sizing:border-box}}
 .right-col{{flex:0 0 {campaign_sidebar_w}px;width:{campaign_sidebar_w}px;min-width:{campaign_sidebar_w}px;box-sizing:border-box;display:flex;flex-direction:column;gap:{layout_gap}px;align-self:stretch;font-size:clamp(12px,calc(100vw*24/{img_w}),24px)}}
 .campaign-stats-col .stat-section-hdr,.campaign-stats-col .stat-row{{grid-template-columns:1fr {value_col}px 10px {value_col}px}}
+.campaign-stats-col .stat-kv{{grid-template-columns:1fr calc({value_col}px - 3ch) 10px {value_col}px}}
 .campaign-stats-col .stat{{flex:0 0 auto;width:100%;min-width:0;border:1px solid #2e3138;box-sizing:border-box;display:flex;flex-direction:column}}
 .campaign-stats-col .stat-body{{background:#000;color:#686a6e;padding:4px 0 6px;flex:0 0 auto;min-height:0}}
 .campaign-stats-col .stat-h{{font-weight:700}}
@@ -1267,9 +1293,9 @@ body{{margin:0;background:#000;color:#686a6e;font-family:"Roboto Condensed",Robo
 .stat-blue{{color:#2E5AAC;text-align:right}}
 .stat-red{{color:#C43838;text-align:left}}
 .stat-sep{{color:#686a6e;text-align:center;font-weight:400}}
-.stat-kv{{display:flex;flex-direction:row;justify-content:space-between;gap:6px;padding:2px 6px;line-height:1.3}}
-.stat-kv .lbl{{flex:1 1 auto;text-align:left}}
-.stat-kv .val{{flex:0 0 auto;font-weight:700;color:#686a6e;font-variant-numeric:tabular-nums;text-align:right}}
+.stat-kv{{display:grid;grid-template-columns:1fr calc(48px - 3ch) 10px 48px;gap:0 2px;align-items:baseline;padding:2px 6px;line-height:1.3}}
+.stat-kv .lbl{{grid-column:1;text-align:left;padding-right:2px;white-space:nowrap}}
+.stat-kv .val{{grid-column:2 / -1;text-align:left;font-weight:700;color:#686a6e;font-variant-numeric:tabular-nums;white-space:nowrap}}
 .main-col{{display:flex;flex-direction:column;gap:{layout_gap}px;flex:0 0 {img_w}px;width:{img_w}px;min-width:{img_w}px;box-sizing:border-box}}
 .stats{{display:flex;flex-wrap:nowrap;gap:4px;width:100%;box-sizing:border-box;font-size:clamp(12px,calc(100vw*24/{img_w}),24px)}}
 .stats-top{{flex:1 1 0;min-width:0}}
@@ -1277,7 +1303,12 @@ body{{margin:0;background:#000;color:#686a6e;font-family:"Roboto Condensed",Robo
 .stats-top .stat:first-child,.stats-bottom .stat:first-child{{flex:0 0 32ch;width:32ch;max-width:32ch}}
 .sidebar-online-stat{{flex:0 0 {sidebar_w}px;width:{sidebar_w}px;min-width:{sidebar_w}px;min-height:0;border:1px solid #2e3138;box-sizing:border-box;display:flex;flex-direction:column;font-size:clamp(12px,calc(100vw*24/{img_w}),24px)}}
 .stat-h{{background:#15161a;color:#686a6e;line-height:1.2;padding:5px 2px;text-align:center;white-space:normal;word-break:break-word;overflow:hidden;border-bottom:1px solid #2e3138;font-weight:400;flex:0 0 auto}}
-.stat-v{{background:#000;color:#686a6e;line-height:1.3;padding:6px 4px;text-align:center;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;flex:1 1 auto;min-height:0;font-weight:700}}
+.stat-v{{background:#000;color:#686a6e;line-height:1.3;padding:6px 4px 5px;text-align:center;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;flex:1 1 auto;min-height:0;font-weight:700;box-sizing:border-box}}
+.stat-vs{{white-space:nowrap}}
+.stat-ratio{{display:flex;flex-direction:row;flex-wrap:nowrap;width:100%;height:5px;margin-top:4px;overflow:hidden;box-sizing:border-box}}
+.stat-ratio-b,.stat-ratio-r{{display:block;height:100%;flex:0 0 auto}}
+.stat-ratio-b{{background:#2E5AAC}}
+.stat-ratio-r{{background:#C43838}}
 .stat-plain{{color:#686a6e}}
 .stat-red{{color:#C43838}}
 .stat-blue{{color:#2E5AAC}}

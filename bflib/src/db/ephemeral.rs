@@ -54,9 +54,9 @@ use dcso3::{
     airbase::ClassAirbase,
     centroid2d,
     coalition::Side,
-    controller::MissionPoint,
+    controller::{Command, MissionPoint},
     env::miz::{self, GroupKind, Miz, MizIndex},
-    group::ClassGroup,
+    group::{ClassGroup, Group},
     net::{SlotId, Ucid},
     object::{DcsObject, DcsOid},
     perf::record_perf,
@@ -160,7 +160,7 @@ pub struct Ephemeral {
     /// Cached ground position when player claimed a hub parking slot.
     pub(super) player_hub_blocker_positions:
         FxHashMap<dcso3::net::SlotId, (ObjectiveId, Vector2)>,
-    /// Birth `subPlace` indices occupied by players (blocks AI by table index).
+    /// Birth `subPlace` indices occupied by players (blocks AI and player-vs-player spawn).
     pub(super) player_hub_subplaces: FxHashSet<(ObjectiveId, i64)>,
     pub(super) player_hub_subplace_by_slot:
         FxHashMap<dcso3::net::SlotId, (ObjectiveId, i64)>,
@@ -1029,6 +1029,24 @@ impl Ephemeral {
             .push(ucid.clone())
     }
 
+    pub(super) fn reserve_player_spawn_pad(
+        &mut self,
+        slot: SlotId,
+        oid: ObjectiveId,
+        pos: Vector2,
+        parking_subplace: Option<i64>,
+    ) {
+        self.player_hub_blocker_positions.insert(slot, (oid, pos));
+        if let Some(sub) = parking_subplace {
+            if let Some(old) = self.player_hub_subplace_by_slot.remove(&slot) {
+                self.player_hub_subplaces.remove(&old);
+            }
+            let key = (oid, sub);
+            self.player_hub_subplaces.insert(key);
+            self.player_hub_subplace_by_slot.insert(slot, key);
+        }
+    }
+
     pub(super) fn set_player_hub_slot_claims(
         &mut self,
         slot: SlotId,
@@ -1480,6 +1498,7 @@ impl Ephemeral {
             }
             let point = centroid2d(points.iter().map(|p| *p));
             template.group.set_pos(point)?;
+            let activate_gci = me_route_activate_gci(&template.group);
             /*
             let radius = points
                 .iter()
@@ -1511,10 +1530,102 @@ impl Ephemeral {
                             self.remap_slot_miz_gid(old_gid, new_gid);
                         }
                     }
+                    if let Some(gci) = activate_gci {
+                        if let Err(e) = push_activate_gci(g, gci) {
+                            warn!(
+                                "ActivateGCI after spawn of {}: {e:#}",
+                                group.template_name
+                            );
+                        }
+                    }
                 }
             }
             record_perf(&mut perf.spawn, ts);
             Ok(Some(spawned))
         }
     }
+}
+
+#[derive(Clone, Copy)]
+struct ActivateGciParams {
+    channel: i64,
+    radius: f64,
+    x: f64,
+    y: f64,
+}
+
+/// ME ActivateGCI keeps template unitId; DEP addGroup assigns a new one.
+fn me_route_activate_gci(group: &miz::Group) -> Option<ActivateGciParams> {
+    let route: LuaTable = group.raw_get("route").ok()?;
+    let points: LuaTable = route.raw_get("points").ok()?;
+    for pair in points.pairs::<i64, LuaTable>() {
+        let (_, point) = pair.ok()?;
+        let Ok(task) = point.raw_get::<_, LuaTable>("task") else {
+            continue;
+        };
+        let Ok(params) = task.raw_get::<_, LuaTable>("params") else {
+            continue;
+        };
+        let Ok(tasks) = params.raw_get::<_, LuaTable>("tasks") else {
+            continue;
+        };
+        for tpair in tasks.pairs::<i64, LuaTable>() {
+            let (_, t) = tpair.ok()?;
+            let Ok(id) = t.raw_get::<_, String>("id") else {
+                continue;
+            };
+            if id.as_str() != "WrappedAction" {
+                continue;
+            }
+            let Ok(tparams) = t.raw_get::<_, LuaTable>("params") else {
+                continue;
+            };
+            let Ok(action) = tparams.raw_get::<_, LuaTable>("action") else {
+                continue;
+            };
+            let Ok(aid) = action.raw_get::<_, String>("id") else {
+                continue;
+            };
+            if aid.as_str() != "ActivateGCI" {
+                continue;
+            }
+            let Ok(ap) = action.raw_get::<_, LuaTable>("params") else {
+                continue;
+            };
+            let channel: i64 = ap.raw_get("channel").ok()?;
+            let radius: f64 = ap.raw_get("radius").ok()?;
+            let x: f64 = ap.raw_get("x").unwrap_or(0.);
+            let y: f64 = ap.raw_get("y").unwrap_or(0.);
+            return Some(ActivateGciParams {
+                channel,
+                radius,
+                x,
+                y,
+            });
+        }
+    }
+    None
+}
+
+fn push_activate_gci(g: &Group, gci: ActivateGciParams) -> Result<()> {
+    let unit = g.get_unit(1).context("GCI group unit")?;
+    let unit_id = unit.id().context("GCI unit id")?;
+    g.get_controller()
+        .context("GCI controller")?
+        .set_command(Command::ActivateGCI {
+            channel: gci.channel,
+            radius: gci.radius,
+            unit: unit_id,
+            x: gci.x,
+            y: gci.y,
+        })
+        .context("ActivateGCI setCommand")?;
+    info!(
+        "ActivateGCI channel={} radius={} unitId={} group={}",
+        gci.channel,
+        gci.radius,
+        unit_id.inner(),
+        g.get_name().unwrap_or_else(|_| String::from("?"))
+    );
+    Ok(())
 }

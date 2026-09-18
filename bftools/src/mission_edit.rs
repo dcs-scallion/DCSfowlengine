@@ -10359,11 +10359,12 @@ fn ensure_land_objective_opposite_dyn_templ_rows(
     Ok(ensured)
 }
 
-/// Registration stub for ferry / re-owner: DCS registers a warehouse `linkDynTempl` at load only when
-/// `initialAmount > 0`. Any aircraft row already carrying a link but with `initialAmount == 0` is
-/// bumped to 1 so a ferried or captured airframe can spawn a Dynamic Slot at that base. bflib
-/// `prune_registration_aircraft_outside_export_profile` zeros stubs outside owner export after load;
-/// ferried airframes with persisted `stored > 0` survive. Caller must exclude naval and DEP FARP.
+/// Registration stub for ferry / re-owner / occupied OLO: DCS registers a warehouse `linkDynTempl`
+/// at load only when `initialAmount > 0`. Any aircraft row already carrying a link but with
+/// `initialAmount == 0` is bumped to 1 so a ferried or captured airframe can spawn a Dynamic Slot
+/// at that base. bflib `prune_registration_aircraft_outside_export_profile` zeros stubs outside
+/// owner export after load; ferried airframes with persisted `stored > 0` survive. Caller must
+/// exclude naval and DEP FARP.
 fn ensure_registration_stubs_for_linked_aircraft_rows(
     _lua: &Lua,
     wh: &Table<'_>,
@@ -12434,8 +12435,8 @@ fn patch_warehouse_dynamic_spawn_links(
             if !mult_cfg.naval_warehouse_ids.contains(&wid)
                 && !mult_cfg.dep_farp_warehouse_ids.contains(&wid)
             {
-                // OLO: linkDynTempl only (no amount=1 stubs; INV×mult is stock). OFO/OAB: after
-                // owner TTD prune below.
+                // OLO / no O* zone: wire linkDynTempl for owner+opposite DT rows (amount stubs
+                // applied later — OLO via ensure_registration_stubs before continue; others below).
                 if obj_zone.is_some_and(|o| o.is_logistics_hub) || obj_zone.is_none() {
                     let n = ensure_land_objective_opposite_dyn_templ_rows(
                         lua,
@@ -12468,7 +12469,19 @@ fn patch_warehouse_dynamic_spawn_links(
                         None,
                         &mut zone_stock_applied,
                     )?;
-                    // No blind amount=1 bump (pre-opposite OLO stock semantics).
+                    // OLO: INV×mult is real stock; still need amount>0 on every linked DT row so
+                    // DCS registers both coalitions at load (occupied hub / ferry). Same helper
+                    // as OFO/OAB below — skips rows that already have stock.
+                    if !mult_cfg.naval_warehouse_ids.contains(&wid)
+                        && !mult_cfg.dep_farp_warehouse_ids.contains(&wid)
+                    {
+                        let n = ensure_registration_stubs_for_linked_aircraft_rows(lua, &wh)?;
+                        if n > 0 {
+                            info!(
+                                "warehouse {wid}: ensured {n} OLO registration stub(s) initialAmount=1 for linked aircraft rows"
+                            );
+                        }
+                    }
                     continue;
                 }
                 // DEP template pads: `TTDdynFARP` + weapon allowlist below, not O* zone TTD / zone ws.

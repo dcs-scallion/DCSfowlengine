@@ -859,12 +859,21 @@ impl<'lua> IntoLua<'lua> for Task<'lua> {
                 speed,
                 altitude,
             } => {
+                // ME omits undefined optionals; raw_set(None) leaves nil keys and can change AI join.
                 root.raw_set("id", "Orbit")?;
                 params.raw_set("pattern", pattern)?;
-                params.raw_set("point", point)?;
-                params.raw_set("point2", point2)?;
-                params.raw_set("speed", speed)?;
-                params.raw_set("altitude", altitude)?;
+                if let Some(p) = point {
+                    params.raw_set("point", p)?;
+                }
+                if let Some(p) = point2 {
+                    params.raw_set("point2", p)?;
+                }
+                if let Some(s) = speed {
+                    params.raw_set("speed", s)?;
+                }
+                if let Some(a) = altitude {
+                    params.raw_set("altitude", a)?;
+                }
             }
             Self::Refuelling => root.raw_set("id", "Refueling")?,
             Self::Land { point, duration } => {
@@ -1120,8 +1129,11 @@ impl<'lua> IntoLua<'lua> for Task<'lua> {
                 let tbl = lua.create_table()?;
                 for (i, task) in tasks.into_iter().enumerate() {
                     tbl.push(task)?;
-                    tbl.raw_get::<_, LuaTable>(i + 1)?
-                        .raw_set("number", i + 1)?;
+                    let entry: LuaTable = tbl.raw_get(i + 1)?;
+                    // ME waypoint actions: enabled=true, auto=false (Orbit must not auto-start early).
+                    entry.raw_set("number", i + 1)?;
+                    entry.raw_set("enabled", true)?;
+                    entry.raw_set("auto", false)?;
                 }
                 params.raw_set("tasks", tbl)?;
             }
@@ -1255,6 +1267,15 @@ pub enum Command {
         cargo: i64,
         unit: UnitId,
     },
+    /// MiG-29A Lazur / KRU GCI station (ME Activate GCI).
+    ActivateGCI {
+        channel: i64,
+        radius: f64,
+        unit: UnitId,
+        x: f64,
+        y: f64,
+    },
+    DeactivateGCI,
 }
 
 impl<'lua> IntoLua<'lua> for Command {
@@ -1409,6 +1430,21 @@ impl<'lua> IntoLua<'lua> for Command {
                 params.raw_set("cargo", cargo)?;
                 params.raw_set("unitId", unit)?;
             }
+            Self::ActivateGCI {
+                channel,
+                radius,
+                unit,
+                x,
+                y,
+            } => {
+                root.raw_set("id", "ActivateGCI")?;
+                params.raw_set("channel", channel)?;
+                params.raw_set("radius", radius)?;
+                params.raw_set("unitId", unit)?;
+                params.raw_set("x", x)?;
+                params.raw_set("y", y)?;
+            }
+            Self::DeactivateGCI => root.raw_set("id", "DeactivateGCI")?,
         }
         root.raw_set("params", params)?;
         Ok(Value::Table(root))
@@ -1481,6 +1517,14 @@ impl<'lua> FromLua<'lua> for Command {
                 cargo: params.raw_get("cargo")?,
                 unit: params.raw_get("unitId")?,
             }),
+            "ActivateGCI" => Ok(Self::ActivateGCI {
+                channel: params.raw_get("channel")?,
+                radius: params.raw_get("radius")?,
+                unit: params.raw_get("unitId")?,
+                x: params.raw_get("x").unwrap_or(0.),
+                y: params.raw_get("y").unwrap_or(0.),
+            }),
+            "DeactivateGCI" => Ok(Self::DeactivateGCI),
             x => Err(err(&format_compact!("unknown {x}"))),
         }
     }

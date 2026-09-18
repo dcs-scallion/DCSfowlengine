@@ -184,6 +184,8 @@ pub enum ObjGroupClass {
     /// ME static in OFO / OLO / OAB (CFG `objective_static_units`).
     ObjectiveStatic,
     Other,
+    /// Strategic / long-range SAM templates (`BSLR` / `RSLR` / …).
+    Slr,
 }
 
 impl ObjGroupClass {
@@ -193,6 +195,7 @@ impl ObjGroupClass {
             Self::Logi
             | Self::Aaa
             | Self::Lr
+            | Self::Slr
             | Self::Mr
             | Self::Sr
             | Self::Armor
@@ -207,9 +210,10 @@ impl ObjGroupClass {
         matches!(self, Self::Production)
     }
 
-    /// Higher = spawn sooner within an objective activate wave (Lr first).
+    /// Higher = spawn sooner within an objective activate wave (Slr first).
     pub fn spawn_queue_priority(self) -> u8 {
         match self {
+            Self::Slr => 5,
             Self::Lr => 4,
             Self::Mr => 3,
             Self::Sr => 2,
@@ -234,6 +238,7 @@ impl ObjGroupClass {
             Self::Services
             | Self::Aaa
             | Self::Lr
+            | Self::Slr
             | Self::Mr
             | Self::Sr
             | Self::Armor
@@ -271,6 +276,12 @@ impl From<&str> for ObjGroupClass {
             || s.starts_with("AAA")
         {
             ObjGroupClass::Aaa
+        } else if s.starts_with("BSLR")
+            || s.starts_with("RSLR")
+            || s.starts_with("NSLR")
+            || s.starts_with("SLR")
+        {
+            ObjGroupClass::Slr
         } else if s.starts_with("BLR")
             || s.starts_with("RLR")
             || s.starts_with("NLR")
@@ -1730,11 +1741,13 @@ impl Db {
             )
         };
         let mut changed = false;
+        let mut health_or_logi_changed = false;
         {
             let obj = objective_mut!(self, oid)?;
             let health_changed = obj.health != health;
             let logi_changed = obj.logi != logi;
-            changed |= health_changed || logi_changed;
+            health_or_logi_changed = health_changed || logi_changed;
+            changed |= health_or_logi_changed;
             obj.health = health;
             obj.logi = logi;
             if matches!(kind, ObjectiveKind::Production) {
@@ -1754,16 +1767,18 @@ impl Db {
                     changed = true;
                 }
             }
-            if health_changed || logi_changed {
+            if health_or_logi_changed {
                 obj.last_change_ts = now;
             }
         }
-        self.ephemeral.stat(Stat::ObjectiveHealth {
-            id: *oid,
-            last_change: now,
-            health,
-            logi,
-        });
+        if health_or_logi_changed {
+            self.ephemeral.stat(Stat::ObjectiveHealth {
+                id: *oid,
+                last_change: now,
+                health,
+                logi,
+            });
+        }
         if let ObjectiveKind::Farp { .. } = &kind {
             if logi == 0 {
                 self.delete_objective(oid)?;
@@ -1811,6 +1826,7 @@ impl Db {
                 ObjGroupClass::Aaa,
                 ObjGroupClass::Mr,
                 ObjGroupClass::Lr,
+                ObjGroupClass::Slr,
                 ObjGroupClass::Armor,
                 ObjGroupClass::Other,
             ] {
@@ -1988,7 +2004,7 @@ impl Db {
                         wave.push((group.class.spawn_queue_priority(), *gid));
                     }
                 }
-                // High priority (Lr) first within this activate wave.
+                // High priority (Slr, then Lr) first within this activate wave.
                 wave.sort_by(|a, b| b.0.cmp(&a.0).then_with(|| a.1.cmp(&b.1)));
                 for (_, gid) in wave {
                     self.ephemeral.push_spawn(gid);

@@ -195,7 +195,7 @@ pub struct PerfInner {
 }
 
 impl PerfInner {
-    fn stat(&self, frame: &HistogramSer) -> PerfStat {
+    pub fn stat(&self, frame: &HistogramSer) -> PerfStat {
         let Self {
             timed_events,
             slow_timed,

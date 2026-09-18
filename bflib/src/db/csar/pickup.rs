@@ -15,11 +15,8 @@ use chrono::prelude::*;
 use compact_str::{format_compact, CompactString};
 use dcso3::{
     coalition::Side,
-    controller::{
-        ActionTyp, AiOption, AlarmState, AltType, GroundOption, MissionPoint, PointType, Task,
-        VehicleFormation,
-    },
-    group::{GroupCategory},
+    controller::{ActionTyp, AltType, MissionPoint, PointType, Task, VehicleFormation},
+    group::{Group, GroupCategory},
     land::Land,
     net::{SlotId, Ucid},
     object::{DcsObject, DcsOid},
@@ -27,7 +24,7 @@ use dcso3::{
     unit::{ClassUnit, Unit},
     LuaVec2, LuaVec3, MizLua, String, Vector2,
 };
-use log::{info, warn};
+use log::{error, info, warn};
 use smallvec::SmallVec;
 
 const CSAR_EXTRACT_WALK_REISSUE: chrono::Duration = chrono::Duration::seconds(5);
@@ -242,7 +239,10 @@ impl Db {
         else {
             bail!("downed pilot is not on the ground yet")
         };
-        self.csar_order_walk(lua, &gid, point)?;
+        self.csar_order_walk(lua, &gid, point).map_err(|e| {
+            error!("csar: extract walk order failed for {gid}: {e:?}");
+            e
+        })?;
         self.ephemeral.csar_extracting.insert(gid, *slot);
         self.ephemeral
             .csar_extract_walk_at
@@ -483,10 +483,15 @@ impl Db {
                     now - *t >= CSAR_EXTRACT_WALK_REISSUE || moved
                 }
             };
-            if reissue && self.csar_order_walk(lua, &gid, helo).is_ok() {
-                self.ephemeral
-                    .csar_extract_walk_at
-                    .insert(gid, (now, helo));
+            if reissue {
+                match self.csar_order_walk(lua, &gid, helo) {
+                    Ok(()) => {
+                        self.ephemeral
+                            .csar_extract_walk_at
+                            .insert(gid, (now, helo));
+                    }
+                    Err(e) => error!("csar: reissue walk failed for {gid}: {e:?}"),
+                }
             }
         }
         let walks: Vec<(GroupId, GroupId)> = self
@@ -614,53 +619,51 @@ impl Db {
         Ok(())
     }
 
+    /// Same pattern as bfnext-vector `move_pilot_toward` (OffRoad Hold @ 3.5 m/s).
     fn csar_order_walk(&self, lua: MizLua, gid: &GroupId, target: Vector2) -> Result<()> {
         let group = self
             .persisted
             .groups
             .get(gid)
             .ok_or_else(|| anyhow!("no group {gid}"))?;
-        let units = group.units.clone();
-        let uid = units
-            .into_iter()
-            .next()
-            .ok_or_else(|| anyhow!("empty csar group {gid}"))?;
-        let oid = self
-            .ephemeral
-            .object_id_by_uid
-            .get(uid)
-            .ok_or_else(|| anyhow!("no object id for csar unit {uid}"))?;
-        let unit = Unit::get_instance(lua, oid)?;
-        let dcs = unit.get_group()?;
-        let _ = dcs.activate();
-        let controller = dcs.get_controller()?;
-        let _ = controller.reset_task();
-        let _ = controller.set_option(AiOption::Ground(GroundOption::AlarmState(
-            AlarmState::Green,
-        )));
+        let dcs_group = match Group::get_by_name(lua, group.name.as_str()) {
+            Ok(g) => g,
+            Err(_) => {
+                let uid = group
+                    .units
+                    .into_iter()
+                    .next()
+                    .ok_or_else(|| anyhow!("empty csar group {gid}"))?;
+                let oid = self
+                    .ephemeral
+                    .object_id_by_uid
+                    .get(uid)
+                    .ok_or_else(|| anyhow!("no object id for csar unit {uid}"))?;
+                Unit::get_instance(lua, oid)?.get_group()?
+            }
+        };
+        let controller = dcs_group.get_controller()?;
         let land = Land::singleton(lua)?;
-        let alt1 = land.get_height(LuaVec2(target)).unwrap_or(0.);
+        let alt = land.get_height(LuaVec2(target)).unwrap_or(0.);
         controller.set_task(Task::Mission {
             airborne: Some(false),
             route: vec![MissionPoint {
-                action: Some(ActionTyp::Ground(VehicleFormation::OffRoad)),
-                airdrome_id: None,
-                helipad: None,
                 typ: PointType::TurningPoint,
-                link_unit: None,
-                pos: LuaVec2(target),
-                alt: alt1,
-                alt_typ: Some(AltType::BARO),
+                airdrome_id: None,
                 time_re_fu_ar: None,
+                helipad: None,
+                link_unit: None,
+                action: Some(ActionTyp::Ground(VehicleFormation::OffRoad)),
+                pos: LuaVec2(target),
+                alt,
+                alt_typ: Some(AltType::BARO),
+                speed: 3.5,
+                speed_locked: Some(true),
                 eta: None,
                 eta_locked: None,
-                speed: 10.,
-                speed_locked: Some(true),
-                name: Some(String::from("csar")),
+                name: None,
                 parking: None,
-                task: Box::new(Task::ComboTask(vec![Task::WrappedOption(
-                    AiOption::Ground(GroundOption::AlarmState(AlarmState::Green)),
-                )])),
+                task: Box::new(Task::Hold),
             }],
         })?;
         Ok(())

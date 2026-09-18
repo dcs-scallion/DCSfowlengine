@@ -3473,6 +3473,86 @@ impl Db {
         }
     }
 
+    /// Persisted load only: DEFAULT-only rows (`production == 0`) at `stored == 0` on
+    /// non-occupy OLOs → `floor(baseline × hub Production% / 100)`. Clean start skips this.
+    fn top_up_default_stock_on_persisted_load(
+        &mut self,
+        resource_meta: &FxHashMap<String, WarehouseResourceMeta>,
+    ) -> Result<()> {
+        let export = Arc::clone(&self.ephemeral.fowl_miz_export);
+        if !export_has_objective_stock(export.as_ref()) {
+            return Ok(());
+        }
+        self.refresh_hub_production_from_opr()
+            .context("refresh hub production before DEFAULT top-up")?;
+        let hub_oids: Vec<ObjectiveId> = self.persisted.logistics_hubs.into_iter().copied().collect();
+        let mut hubs_touched = 0u32;
+        let mut rows_filled = 0u32;
+        for oid in hub_oids {
+            let (hub_name, hub_prod, profile_items) = {
+                let obj = objective!(self, oid)?;
+                if !obj.is_normal_logistics_hub() {
+                    continue;
+                }
+                let hub_prod =
+                    effective_hub_production(&self.ephemeral.cfg, &self.persisted, obj);
+                if hub_prod == 0 {
+                    continue;
+                }
+                let Some(profile) =
+                    objective_coalition_stock_for_objective(export.as_ref(), obj)
+                else {
+                    continue;
+                };
+                let items: Vec<(std::string::String, u32)> = profile
+                    .equipment
+                    .iter()
+                    .filter(|(_, item)| item.baseline > 0 && item.production == 0)
+                    .map(|(name, item)| (name.clone(), item.baseline))
+                    .collect();
+                if items.is_empty() {
+                    continue;
+                }
+                (obj.name.clone(), hub_prod, items)
+            };
+            let mut filled_here = 0u32;
+            {
+                let obj = objective_mut!(self, oid)?;
+                for (export_name, baseline) in profile_items {
+                    let dcs_name =
+                        resolve_export_equipment_dcs_name(export_name.as_str(), resource_meta);
+                    let target = scale_capacity_by_percent_floor(baseline, hub_prod);
+                    if target == 0 {
+                        continue;
+                    }
+                    let row = obj.warehouse.equipment.get_or_default_cow(dcs_name);
+                    if row.stored != 0 {
+                        continue;
+                    }
+                    if baseline > row.capacity {
+                        row.capacity = baseline;
+                    }
+                    row.stored = target;
+                    filled_here = filled_here.saturating_add(1);
+                }
+            }
+            if filled_here > 0 {
+                hubs_touched = hubs_touched.saturating_add(1);
+                rows_filled = rows_filled.saturating_add(filled_here);
+                wh_diag(format_compact!(
+                    "DEFAULT top-up {hub_name}: prod={hub_prod}% filled_rows={filled_here}"
+                ));
+            }
+        }
+        if hubs_touched > 0 {
+            info!(
+                "loaded campaign: DEFAULT stock top-up on {hubs_touched} normal OLO(s), {rows_filled} row(s)"
+            );
+            self.ephemeral.dirty();
+        }
+        Ok(())
+    }
+
     pub(super) fn setup_warehouses_after_load(&mut self, lua: MizLua) -> Result<()> {
         self.init_resource_map(lua)
             .context("initializing resource map")?;
@@ -3899,6 +3979,10 @@ impl Db {
         let preserve_fill = self.ephemeral.preserve_initial_warehouse_fill;
         let apply_persisted = self.ephemeral.warehouses_apply_persisted;
         let debug_coalition_switch = self.ephemeral.cfg.debugging_objectives_coalition_switch;
+        if apply_persisted && !debug_coalition_switch {
+            self.top_up_default_stock_on_persisted_load(resource_meta.as_ref())
+                .context("DEFAULT stock top-up for normal OLOs on persisted load")?;
+        }
         for oid in sync_oids {
             if matches!(objective!(self, oid)?.kind, ObjectiveKind::Production) {
                 continue;

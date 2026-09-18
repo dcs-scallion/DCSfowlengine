@@ -84,6 +84,7 @@ use smallvec::{smallvec, SmallVec};
 use spawnctx::SpawnCtx;
 use std::{
     backtrace::Backtrace,
+    fs,
     panic::{catch_unwind, AssertUnwindSafe},
     path::PathBuf,
     sync::Arc,
@@ -364,6 +365,9 @@ struct JtacSlotIfo {
 struct Context {
     sortie: String,
     event_handler_id: Option<HandlerId>,
+    /// `{writedir}/{sortie}` — base for `*_CFG`, `_fowl_export.json`, Discord map sidecars.
+    cfg_base_path: PathBuf,
+    /// `{writedir}/Persistence/{sortie}` — campaign save + rotate backups.
     miz_state_path: PathBuf,
     shutdown: Option<AutoShutdown>,
     /// Restart countdown warnings (panels when CFG `shutdown` or DCSServerBot schedule).
@@ -514,7 +518,7 @@ fn on_player_try_connect(
                 ));
             }
             Some(_) => {
-                let path = ctx.miz_state_path.clone();
+                let path = ctx.cfg_base_path.clone();
                 {
                     let cfg = Arc::make_mut(&mut ctx.db.ephemeral.cfg);
                     cfg.banned.remove(&ucid);
@@ -609,6 +613,14 @@ fn process_slot_rejection(ctx: &mut Context, id: PlayerId, ucid: Ucid, rej: Slot
                 format_compact!("cannot switch to observer/spectator slots while airborne")
             };
             ctx.db.ephemeral.msgs().send(MsgTyp::Chat(Some(id)), msg);
+        }
+        SlotAuth::ParkingOccupied => {
+            ctx.db.ephemeral.msgs().send(
+                MsgTyp::Chat(Some(id)),
+                format_compact!(
+                    "Parking occupied — spawn cancelled, no life taken. Try again."
+                ),
+            );
         }
         SlotAuth::NotRegistered(_) => warn!("unexpected NotRegistered"),
         SlotAuth::Yes(_) => warn!("slot was not rejected!"),
@@ -1048,7 +1060,7 @@ fn on_player_try_change_slot(
 }
 
 fn spawn_setmissionstartdatetime(ctx: &Context, lua: MizLua, new_campaign: bool) {
-    let miz_path = match crate::db::discord_map::resolve_mission_miz_path(lua, &ctx.miz_state_path)
+    let miz_path = match crate::db::discord_map::resolve_mission_miz_path(lua, &ctx.cfg_base_path)
     {
         Ok(p) => p,
         Err(e) => {
@@ -1492,8 +1504,10 @@ fn on_event(lua: MizLua, ev: Event) -> Result<()> {
                                     );
                                 }
                             }
+                            ctx.db.play_sound_group(lua, "life_return", miz_gid);
+                        } else {
+                            ctx.db.play_sound_player(lua, "life_return", &slot);
                         }
-                        ctx.db.play_sound_player(lua, "life_return", &slot);
                         if let Some((ucid, slot)) = deslot {
                             ctx.db.player_deslot_slot(&ucid, &slot);
                         }
@@ -1781,7 +1795,7 @@ fn on_event(lua: MizLua, ev: Event) -> Result<()> {
                 if let Some(place) = e.place.as_ref() {
                     if let Ok(slot) = unit.slot() {
                         if let Some(oid) = ctx.db.objective_id_for_land_place(lua, place) {
-                            ctx.db.mark_landed_at_objective_from_place(&slot, oid);
+                            ctx.db.mark_landed_at_objective_from_place(lua, &slot, oid);
                         }
                     }
                 }
@@ -2142,7 +2156,7 @@ fn return_lives(lua: MizLua, ctx: &mut Context, ts: DateTime<Utc>) {
             return false;
         }
         debug!(
-            "land() not armed slot={slot:?} pos=({:.0},{:.0}) — outside friendly objective / airbase?",
+            "land() not armed slot={slot:?} pos=({:.0},{:.0}) — outside friendly objective zone",
             pos.0.x, pos.0.y
         );
         true
@@ -2337,8 +2351,10 @@ fn handle_player_leave_unit_no_initiator(
                             );
                         }
                     }
+                    ctx.db.play_sound_group(lua, "life_return", miz_gid);
+                } else {
+                    ctx.db.play_sound_player(lua, "life_return", &slot);
                 }
-                ctx.db.play_sound_player(lua, "life_return", &slot);
                 if let Some((ucid, slot)) = deslot {
                     ctx.db.player_deslot_slot(&ucid, &slot);
                 }
@@ -2847,18 +2863,22 @@ fn delayed_init_miz(lua: MizLua) -> Result<()> {
             .context("adding event handlers")?,
     );
     let sortie = miz.sortie().context("getting the sortie")?;
-    let path = {
+    let (cfg_base_path, path) = {
         let s = Env::singleton(lua)?.get_value_dict_by_key(sortie)?;
         if s.is_empty() {
             bail!("missing sortie in miz file")
         }
         ctx.sortie = s;
-        ctx.miz_state_path = PathBuf::from(Lfs::singleton(lua)?.writedir()?.as_str())
-            .join(ctx.sortie.as_str());
-        ctx.miz_state_path.clone()
+        let writedir = PathBuf::from(Lfs::singleton(lua)?.writedir()?.as_str());
+        ctx.cfg_base_path = writedir.join(ctx.sortie.as_str());
+        let persist_dir = writedir.join("Persistence");
+        fs::create_dir_all(&persist_dir)
+            .with_context(|| format!("create Persistence dir {persist_dir:?}"))?;
+        ctx.miz_state_path = persist_dir.join(ctx.sortie.as_str());
+        (ctx.cfg_base_path.clone(), ctx.miz_state_path.clone())
     };
     debug!("sortie is {:?}", ctx.sortie);
-    let cfg = Arc::new(Cfg::load(&path)?);
+    let cfg = Arc::new(Cfg::load(&cfg_base_path)?);
     {
         let writedir = PathBuf::from(Lfs::singleton(lua)?.writedir()?.as_str());
         crate::db::server_maintenance::run(&writedir, &cfg.server_maintenance);
@@ -2872,8 +2892,8 @@ fn delayed_init_miz(lua: MizLua) -> Result<()> {
         cfg.virtual_resupply,
         cfg.virtual_resupply_threatened_without_deliveries,
     );
-    let export_path = FowlMizExport::path(&path);
-    let fowl_export = Arc::new(FowlMizExport::load_required(&path)?);
+    let export_path = FowlMizExport::path(&cfg_base_path);
+    let fowl_export = Arc::new(FowlMizExport::load_required(&cfg_base_path)?);
     info!("loaded Fowl mission export from {:?}", export_path);
     debug!(
         "Fowl mission export schema_version {} weapon_bridge_used={} blue_ws={} red_ws={}",
@@ -2888,6 +2908,7 @@ fn delayed_init_miz(lua: MizLua) -> Result<()> {
         admin_channel: Arc::clone(&ctx.external_admin_commands),
     });
     debug!("path to saved state is {:?}", path);
+    debug!("path to campaign cfg base is {:?}", cfg_base_path);
     info!("initializing db");
     let to_bg = ctx.to_background.as_ref().unwrap().clone();
     crate::db::tisp_init::validate_tisp_zones_on_water(lua, &miz)?;
@@ -2933,11 +2954,11 @@ fn delayed_init_miz(lua: MizLua) -> Result<()> {
         let theatre = theatre_slug(lua);
         ctx.db
             .ephemeral
-            .load_front_line_water_grid(&path, theatre.as_str());
+            .load_front_line_water_grid(&cfg_base_path, theatre.as_str());
     }
     {
-        let miz_path = db::discord_map::resolve_mission_miz_path(lua, &path)?;
-        db::discord_map::init_discord_map(lua, &mut ctx.db, &miz, &miz_path, &path)
+        let miz_path = db::discord_map::resolve_mission_miz_path(lua, &cfg_base_path)?;
+        db::discord_map::init_discord_map(lua, &mut ctx.db, &miz, &miz_path, &cfg_base_path)
             .context("discord map init")?;
     }
     ctx.shutdown = ctx

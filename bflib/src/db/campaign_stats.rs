@@ -1026,7 +1026,7 @@ fn static_class_loss_bucket(class: ObjGroupClass) -> Option<LossBucketField> {
         ObjGroupClass::Aaa => Some(LossBucketField::Aaa),
         ObjGroupClass::Sr => Some(LossBucketField::SamSr),
         ObjGroupClass::Mr => Some(LossBucketField::SamMr),
-        ObjGroupClass::Lr => Some(LossBucketField::SamLr),
+        ObjGroupClass::Lr | ObjGroupClass::Slr => Some(LossBucketField::SamLr),
         ObjGroupClass::Armor => Some(LossBucketField::Armored),
         _ => None,
     }
