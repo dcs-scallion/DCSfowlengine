@@ -1080,6 +1080,14 @@ fn map_header_link_if_url(
 
 fn map_header_links_html(bar: &DiscordMapStatusBar) -> String {
     let mut links = String::new();
+    links.push_str(&map_header_link_if_url(
+        &bar.stats_url,
+        "Dashboard",
+        STATS_HDR_ICON_OFF_B64.as_str(),
+        STATS_HDR_ICON_ON_B64.as_str(),
+        STATS_HDR_ICON_SRC.0,
+        STATS_HDR_ICON_SRC.1,
+    ));
     if bar.dowload_acmi {
         links.push_str(&map_header_link_if_url(
             &bar.dowload_acmi_url,
@@ -1097,14 +1105,6 @@ fn map_header_links_html(bar: &DiscordMapStatusBar) -> String {
         DISCORD_HDR_ICON_ON_B64.as_str(),
         DISCORD_HDR_ICON_SRC.0,
         DISCORD_HDR_ICON_SRC.1,
-    ));
-    links.push_str(&map_header_link_if_url(
-        &bar.stats_url,
-        "Stats",
-        STATS_HDR_ICON_OFF_B64.as_str(),
-        STATS_HDR_ICON_ON_B64.as_str(),
-        STATS_HDR_ICON_SRC.0,
-        STATS_HDR_ICON_SRC.1,
     ));
     links.push_str(&map_header_link_if_url(
         &bar.manual_url,

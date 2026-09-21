@@ -69,6 +69,11 @@ pub enum Stat {
     SessionStart {
         stop: Option<DateTime<Utc>>,
         cfg: Box<Cfg>,
+        /// Mission Sortie name (miz). Used by bfdb offline ingest when
+        /// `netidx_base` is unset so SessionStart can open/reattach a round
+        /// without a preceding NewRound (load-from-save path).
+        #[serde(default)]
+        sortie: String,
     },
     SessionEnd {
         api_perf: ApiPerfInner,
@@ -135,6 +140,12 @@ pub enum Stat {
         last_change: DateTime<Utc>,
         health: u8,
         logi: u8,
+        /// OPR capacity % (Production sites). Older JSONL omit this.
+        #[serde(default)]
+        production: Option<u8>,
+        /// Threat flag for dashboard/map. Older JSONL omit this.
+        #[serde(default)]
+        threatened: Option<bool>,
     },
     ObjectiveSupply {
         id: ObjectiveId,

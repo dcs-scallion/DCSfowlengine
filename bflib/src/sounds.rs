@@ -15,9 +15,10 @@ for more details.
 */
 
 use bfprotocols::fowl_miz_export::FowlMizExport;
+use compact_str::format_compact;
 use dcso3::{
     env::miz::{GroupId, UnitId},
-    net::SlotId,
+    net::{DcsLuaEnvironment, Net, SlotId},
     trigger::Trigger,
     MizLua,
 };
@@ -36,6 +37,38 @@ pub fn play_unit(export: &FowlMizExport, lua: MizLua, key: &str, unit: UnitId) {
     };
     if let Err(e) = action.out_sound_for_unit(unit, path.clone().into()) {
         debug!("sound {key} for unit skipped: {e:?}");
+    }
+}
+
+/// Hooks have no `trigger.action`; play via mission `dostring_in` while the player still occupies.
+pub fn play_unit_from_hooks(export: &FowlMizExport, lua: MizLua, key: &str, unit: UnitId) -> bool {
+    let Some(path) = export.sounds_player.get(key) else {
+        warn!("sound {key} missing from fowl export");
+        return false;
+    };
+    if let Ok(trigger) = Trigger::singleton(lua) {
+        if let Ok(action) = trigger.action() {
+            if action.out_sound_for_unit(unit, path.clone().into()).is_ok() {
+                return true;
+            }
+        }
+    }
+    if path.contains('"') || path.contains('\n') {
+        return false;
+    }
+    let chunk = format_compact!(
+        "trigger.action.outSoundForUnit({}, \"{}\")",
+        unit.inner(),
+        path
+    );
+    match Net::singleton(lua).and_then(|n| {
+        n.dostring_in(DcsLuaEnvironment::Mission, chunk.clone().into())
+    }) {
+        Ok(_) => true,
+        Err(e) => {
+            debug!("sound {key} mission bridge skipped: {e:?}");
+            false
+        }
     }
 }
 

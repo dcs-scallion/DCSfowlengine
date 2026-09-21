@@ -267,6 +267,8 @@ pub struct Ephemeral {
     pub(super) pending_deslot_airframe_fix: Vec<(DateTime<Utc>, ObjectiveId, String, u32)>,
     /// Aircraft inst snapshot when MP slot change (FO/observer) overwrites `current_slot` before LeaveUnit.
     pub(super) pending_aircraft_deslot: FxHashMap<dcso3::net::SlotId, super::player::InstancedPlayer>,
+    /// `life_return` already played at TryChangeSlot (player still in aircraft).
+    pub(super) life_return_sound_played: FxHashSet<Ucid>,
     /// Airframe loss: delayed destroy of dumped ED cargo `(due, ucid, wreck_x, wreck_y)`.
     pub(super) pending_airframe_loss_dynamic_cargo: Vec<(DateTime<Utc>, Ucid, f64, f64)>,
     /// Hub/crate transfer credits for sync-to (target oid + item → amount).
@@ -387,6 +389,7 @@ impl Default for Ephemeral {
             dynamic_cargo_air_dropped_at: FxHashMap::default(),
             pending_deslot_airframe_fix: Vec::default(),
             pending_aircraft_deslot: FxHashMap::default(),
+            life_return_sound_played: FxHashSet::default(),
             pending_airframe_loss_dynamic_cargo: Vec::default(),
             sync_to_equipment_credit: FxHashMap::default(),
             sync_to_liquid_credit: FxHashMap::default(),
@@ -1108,6 +1111,7 @@ impl Ephemeral {
                     error!("players_by_slot ucid mismatch {expected_ucid} vs {ucid} in slot {slot}")
                 }
             }
+            self.life_return_sound_played.remove(&ucid);
             info!("deslotting player {ucid}");
             if let Some(player) = per.players.get(&ucid) {
                 if !player.changing_slots && !player.jtac_or_spectators {

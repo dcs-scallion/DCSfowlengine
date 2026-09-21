@@ -54,10 +54,36 @@ const MIN_MARK_HUB_AIRFIELD_HELI_DIST_SQ: f64 = 1_000_000.;
 /// Player on parking/helipad blocks AI spawn within this radius (m).
 const PLAYER_HUB_SLOT_BLOCK_RADIUS_M: f64 = 120.;
 
-fn objective_is_heli_spawn_hub(db: &Db, obj: &Objective) -> bool {
-    match obj.kind {
-        ObjectiveKind::Airbase | ObjectiveKind::Fob | ObjectiveKind::Farp { .. } => true,
-        ObjectiveKind::Logistics => objective_has_airfield_hub(db, obj),
+/// DCS Airbase desc.category: 0 land runway, 1 FARP/helipad, 2 ship.
+fn objective_has_land_aerodrome_hub(lua: MizLua, db: &Db, oid: ObjectiveId) -> bool {
+    let Some(ab_oids) = db.ephemeral.airbases_by_oid.get(&oid) else {
+        return false;
+    };
+    for ab_oid in ab_oids {
+        let Ok(ab) = Airbase::get_instance(lua, ab_oid) else {
+            continue;
+        };
+        let Ok(desc) = ab.get_desc() else {
+            continue;
+        };
+        if desc.raw_get::<_, i64>("category").unwrap_or(-1) == 0 {
+            return true;
+        }
+    }
+    false
+}
+
+fn objective_is_heli_spawn_hub(lua: MizLua, db: &Db, obj: &Objective) -> bool {
+    match &obj.kind {
+        // Temporary: FOB / ground DEP FARP / OLO pad airbases (DCS category 1) break AI
+        // spawn ("No heliport" / "No aerodrom 0 … spawn on land" → vanish). Keep AI heli
+        // on OAB + OLO with real land runway (category 0) + mobile ship FARPs. Do not
+        // re-enable pad hubs without the deferred pad-spawn fix.
+        ObjectiveKind::Airbase => true,
+        ObjectiveKind::Fob => false,
+        ObjectiveKind::Farp { mobile: false, .. } => false,
+        ObjectiveKind::Farp { mobile: true, .. } => true,
+        ObjectiveKind::Logistics => objective_has_land_aerodrome_hub(lua, db, obj.id),
         _ => false,
     }
 }
@@ -121,6 +147,14 @@ fn helipads_near_point(
     out
 }
 
+fn pos_in_ground_dep_farp(db: &Db, side: Side, pos: Vector2) -> bool {
+    db.persisted.objectives.into_iter().any(|(_, obj)| {
+        obj.owner == side
+            && matches!(obj.kind, ObjectiveKind::Farp { mobile: false, .. })
+            && obj.zone.contains(pos)
+    })
+}
+
 fn helipad_slots_for_heli_hub(
     lua: MizLua,
     db: &Db,
@@ -132,6 +166,10 @@ fn helipad_slots_for_heli_hub(
     let center = hub.zone.pos();
     if matches!(hub.kind, ObjectiveKind::Fob | ObjectiveKind::Logistics) {
         for slot in helipads_near_point(lua, db, side, center, FO_HELIPAD_SEARCH_RADIUS_SQ) {
+            // Same DEP FARP pad-spawn ban: do not borrow those pads onto FOB/OLO hubs.
+            if pos_in_ground_dep_farp(db, side, slot.pos) {
+                continue;
+            }
             if seen.insert(slot.slot_id) {
                 out.push(slot);
             }
@@ -139,7 +177,10 @@ fn helipad_slots_for_heli_hub(
     }
     if matches!(hub.kind, ObjectiveKind::Fob) {
         for (_, farp) in db.persisted.objectives.into_iter() {
-            if farp.owner != side || !matches!(farp.kind, ObjectiveKind::Farp { .. }) {
+            // Skip ground DEP FARP pads until AI helipad spawn on those pads is fixed.
+            if farp.owner != side
+                || !matches!(farp.kind, ObjectiveKind::Farp { mobile: true, .. })
+            {
                 continue;
             }
             for slot in helipad_slots_in_zone(lua, db, farp, side)? {
@@ -862,7 +903,7 @@ fn hub_airbase_oid(
 fn hub_supports_ai_air(lua: MizLua, db: &Db, obj: &Objective, kind: AiPlaneKind) -> bool {
     match kind {
         AiPlaneKind::Helicopter => {
-            objective_is_heli_spawn_hub(db, obj)
+            objective_is_heli_spawn_hub(lua, db, obj)
                 || objective_has_operational_carrier(lua, db, obj)
         }
         AiPlaneKind::FixedWing => {
@@ -904,8 +945,12 @@ fn hub_candidate_filter<'a>(
         if mode == HubSelectMode::Spawn && obj.captureable() {
             let naval_spawn_hub = objective_is_naval_carrier(db, obj)
                 && objective_has_operational_carrier(lua, db, obj);
-            let mobile_farp_heli = matches!(obj.kind, ObjectiveKind::Farp { .. })
-                && matches!(kind, AiPlaneKind::Helicopter);
+            // Ship FARPs only — ground DEP FARPs must not bypass captureable spawn filter
+            // (same broken pad spawn as FOB; see objective_is_heli_spawn_hub).
+            let mobile_farp_heli = matches!(
+                obj.kind,
+                ObjectiveKind::Farp { mobile: true, .. }
+            ) && matches!(kind, AiPlaneKind::Helicopter);
             if !naval_spawn_hub && !mobile_farp_heli {
                 return None;
             }
@@ -2081,7 +2126,7 @@ fn hub_slots_for_occupancy_check(
     side: Side,
 ) -> Result<Vec<HubSlot>> {
     let mut pool = helipad_slots_for_heli_hub(lua, db, obj, side)?;
-    if pool.is_empty() && matches!(obj.kind, ObjectiveKind::Farp { .. }) {
+    if pool.is_empty() && matches!(obj.kind, ObjectiveKind::Farp { mobile: true, .. }) {
         pool.extend(helipads_near_point(
             lua,
             db,
@@ -2141,7 +2186,7 @@ pub(super) fn resolve_player_parking_claims(
     pos: Vector2,
 ) -> Result<FxHashSet<(ObjectiveId, HubSlotKind, i64)>> {
     let mut set = FxHashSet::default();
-    if !objective_is_heli_spawn_hub(db, obj)
+    if !objective_is_heli_spawn_hub(lua, db, obj)
         && !objective_has_airfield_hub(db, obj)
         && !objective_is_naval_carrier(db, obj)
     {
@@ -2196,7 +2241,7 @@ pub(super) fn resolve_player_hub_slot_claim(
     side: Side,
     pos: Vector2,
 ) -> Result<Option<(ObjectiveId, HubSlotKind, i64)>> {
-    if !objective_is_heli_spawn_hub(db, obj)
+    if !objective_is_heli_spawn_hub(lua, db, obj)
         && !objective_has_airfield_hub(db, obj)
         && !objective_is_naval_carrier(db, obj)
     {
@@ -2362,25 +2407,19 @@ fn free_slots_at_hub(
     let naval = objective_is_naval_carrier(db, obj);
     let mut pool = match kind {
         AiPlaneKind::Helicopter => {
-            let mut helis = helipad_slots_for_heli_hub(lua, db, obj, side)?;
-            if helis.is_empty() && matches!(obj.kind, ObjectiveKind::Farp { .. }) {
-                helis.extend(helipads_near_point(
-                    lua,
-                    db,
-                    side,
-                    obj.zone.pos(),
-                    FO_HELIPAD_SEARCH_RADIUS_SQ,
-                ));
-            }
-            if helis.is_empty() && objective_has_operational_carrier(lua, db, obj) {
+            // Skip ground helipad pads and OLO Invisible-FARP airbases (DCS category 1):
+            // parking there yields "No aerodrom 0 … spawn on land". Land runway only
+            // (category 0); naval = carrier deck.
+            let mut helis = Vec::new();
+            if objective_has_operational_carrier(lua, db, obj) {
                 if let Some(deck) = carrier_fallback_deck_slot(lua, db, obj)? {
                     helis.push(deck);
                 }
             }
             if !helis.is_empty() {
                 helis
-            } else if objective_has_airfield_hub(db, obj)
-                && matches!(obj.kind, ObjectiveKind::Airbase | ObjectiveKind::Logistics)
+            } else if matches!(obj.kind, ObjectiveKind::Airbase | ObjectiveKind::Logistics)
+                && objective_has_land_aerodrome_hub(lua, db, obj.id)
             {
                 let Some(ab) = hub_airbase_oid(lua, db, obj.id)? else {
                     return Ok(vec![]);

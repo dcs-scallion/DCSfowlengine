@@ -46,6 +46,11 @@ pub struct Rpcs {
     _remark: Proc,
     _reset: Proc,
     _shutdown: Proc,
+    _query_objectives: Proc,
+    _query_objective: Proc,
+    _query_campaign_state: Proc,
+    _query_perf: Proc,
+    _query_briefing: Proc,
 }
 
 async fn wait_task(mut ch: mpsc::Receiver<(RpcCall, oneshot::Receiver<Value>)>) {
@@ -448,6 +453,79 @@ impl Rpcs {
             Some(wait.clone()),
             arg: Value = Value::Null; ""
         )?;
+        let _q = Arc::clone(&q);
+        let query_objectives = define_rpc!(
+            publisher,
+            base.append("query-objectives"),
+            "Query all objectives (returns JSON)",
+            |c: RpcCall, _: Value| {
+                let (tx, rx) = oneshot::channel();
+                _q.push((AdminCommand::QueryObjectives, tx));
+                Some((c, rx))
+            },
+            Some(wait.clone()),
+            arg: Value = Value::Null; ""
+        )?;
+        let _q = Arc::clone(&q);
+        let query_objective = define_rpc!(
+            publisher,
+            base.append("query-objective"),
+            "Query a single objective by name (returns JSON)",
+            |c: RpcCall, name: Chars| {
+                let (tx, rx) = oneshot::channel();
+                let cmd = AdminCommand::QueryObjective { name: name.as_ref().into() };
+                _q.push((cmd, tx));
+                Some((c, rx))
+            },
+            Some(wait.clone()),
+            name: Chars = Value::Null; "The objective name or partial match"
+        )?;
+        let _q = Arc::clone(&q);
+        let query_campaign_state = define_rpc!(
+            publisher,
+            base.append("query-campaign-state"),
+            "Query overall campaign state summary (returns JSON)",
+            |c: RpcCall, _: Value| {
+                let (tx, rx) = oneshot::channel();
+                _q.push((AdminCommand::QueryCampaignState, tx));
+                Some((c, rx))
+            },
+            Some(wait.clone()),
+            arg: Value = Value::Null; ""
+        )?;
+        let _q = Arc::clone(&q);
+        let query_perf = define_rpc!(
+            publisher,
+            base.append("query-perf"),
+            "Query live engine/API performance stats for the current session (returns JSON)",
+            |c: RpcCall, _: Value| {
+                let (tx, rx) = oneshot::channel();
+                _q.push((AdminCommand::QueryPerf, tx));
+                Some((c, rx))
+            },
+            Some(wait.clone()),
+            arg: Value = Value::Null; ""
+        )?;
+        let _q = Arc::clone(&q);
+        let query_briefing = define_rpc!(
+            publisher,
+            base.append("query-briefing"),
+            "Query the per-side kneeboard briefing (returns JSON)",
+            |mut c: RpcCall, side: Chars| {
+                let (tx, rx) = oneshot::channel();
+                let side = match Side::from_str(&side.trim().to_lowercase()) {
+                    Ok(side) => side,
+                    Err(e) => {
+                        c.reply.send(Value::Error(format!("{e:?}").into()));
+                        return None
+                    }
+                };
+                _q.push((AdminCommand::QueryBriefing { side }, tx));
+                Some((c, rx))
+            },
+            Some(wait.clone()),
+            side: Chars = Value::Null; "The side (blue, red, neutral)"
+        )?;
         Ok(Self {
             _reduce_inventory: reduce_inventory,
             _transfer_supply: transfer_supply,
@@ -474,6 +552,11 @@ impl Rpcs {
             _remark: remark,
             _reset: reset,
             _shutdown: shutdown,
+            _query_objectives: query_objectives,
+            _query_objective: query_objective,
+            _query_campaign_state: query_campaign_state,
+            _query_perf: query_perf,
+            _query_briefing: query_briefing,
         })
     }
 }

@@ -143,4 +143,11 @@ bftools/analyze_export_detail.ps1
 **/node_modules/
 
 bfsystem.local.ps1
+# Local netidx.exe drop (cargo install / copy) — not for GitHub.
+# Keep netidx/*.json (resolver + client example) tracked.
+/netidx/*.exe
+/netidx/netidx.exe
+# Per-scenario copies (machine paths / local overrides) — not for GitHub
+miz/Scenarios/**/bfsystem.ps1
+miz/Scenarios/**/bfsystem.local.ps1
 

@@ -7,15 +7,18 @@
 # subfolder of this, not the old, unused "server_2" folder.
 $dcsWriteDir = "C:\Users\ATPAdmin\Saved Games\DCS"
 
-# Path to the netidx resolver config (tracked in the repo root). Only used
-# when $netidxBase below is non-empty -- see user-guide/src/server-setup for
-# the one-time setup this depends on (installing netidx-tools, and creating
-# %APPDATA%\netidx\client.json for both this account and whichever account
-# runs DCS.exe/bflib.dll).
-$netidxResolverConfig = Join-Path $PSScriptRoot "netidx-resolver.json"
+# Path to the netidx resolver config. Only used when $netidxBase below is
+# non-empty. One-time setup: copy netidx.exe next to bfdb.exe / campaign CFG
+# ($dcsWriteDir), and copy netidx/netidx-client.json.example to
+# %APPDATA%\netidx\client.json for BOTH this account and the account that
+# runs DCS.exe/bflib.dll.
+$netidxResolverConfig = Join-Path $PSScriptRoot "netidx\netidx-resolver.json"
 
 # Path to bfdb.exe (copy it here from target\release\bfdb.exe)
 $bfdbExe = Join-Path $dcsWriteDir "bfdb.exe"
+
+# netidx resolver CLI — always next to bfdb.exe and the campaign CFG
+$netidxExe = Join-Path $dcsWriteDir "netidx.exe"
 
 # Path where the Sled database will be stored (dedicated folder)
 $dbPath = Join-Path $dcsWriteDir "bfdb"
@@ -41,11 +44,12 @@ $statsDir = Join-Path $dcsWriteDir "Logs\stats"
 # Path where bfdb.exe will natively write its plain-text logs
 $logFile = Join-Path $dcsWriteDir "Logs\bfdb.log"
 
-# Dashboard address (stats + API + map)
-$listenAddress = "0.0.0.0:8880"
+# bfdb binds here only. Public HTTPS is Caddy -> this address
+# (see deploy/stats.Caddyfile.snippet). Do not expose :8880 on the firewall.
+$listenAddress = "127.0.0.1:8880"
 
-# Public website address (separate port)
-$siteAddress = "0.0.0.0:8766"
+# Public hostname users type (obscure URL; not linked from the website yet).
+$publicStatsUrl = "https://stats.attrition.cz"
 
 # Admin panel local login (username + password — no Discord required)
 # Leave blank to disable local login (Discord-only)
@@ -57,8 +61,7 @@ $adminUsername = "admin"
 #
 # Redirect URI must match EXACTLY (byte-for-byte) the redirect URL registered
 # under OAuth2 -> Redirects in the Discord Developer Portal for this app.
-# Since bfdb is reverse-proxied behind Caddy for TLS (see deploy/README.md),
-# this points at the public HTTPS hostname, not the local listen address.
+# Same-origin behind Caddy: use the public HTTPS host, not 127.0.0.1:8880.
 $discordRedirectUri  = "https://stats.attrition.cz/api/auth/callback"
 
 # Right-click your Discord server icon -> Copy Server ID (needs Developer
@@ -68,9 +71,13 @@ $discordGuildId      = ""
 # Right-click the role that should grant dashboard admin access -> Copy Role ID.
 $discordAdminRoleId  = ""
 
-# SRS radio panel — URL of the SRS server (e.g. "http://localhost:5002")
-# Leave blank to disable the SRS panel on the dashboard (or set srsUrl in campaign.json instead)
-$srsUrl = ""
+# SRS radio panel — Ciribob HTTP API base (bfdb GETs {url}/clients + X-API-KEY).
+# Voice clients still use :5002; this is only the localhost HTTP port (often 8081).
+# Leave blank to disable (or set srsUrl in campaign.json instead).
+$srsUrl = "http://localhost:8081"
+# Optional: HTTP_SERVER_API_KEY from SRS.cfg. Empty is fine when the cfg key is blank
+# (bfdb still sends the X-API-KEY header). Put a real secret in bfsystem.local.ps1.
+$srsApiKey = ""
 
 # DCSServerBot's RestAPI plugin — bfdb has no Discord-link database of its
 # own; it resolves a Discord user's ucid by querying the bot's own player
@@ -87,28 +94,18 @@ $dcsServerBotUrl = ""
 # X-API-Key from the bot's restapi.yaml (api_key). Secret -- lives in
 # bfsystem.local.ps1 as $dcsServerBotApiKey, not here.
 
-# Allow the dashboard/site to call this API cross-origin (they're on separate
-# domains now: vectorstrike.org and dashboard.vectorstrike.org via Vercel).
-# Also flips the session cookie to SameSite=None; Secure, required for that.
-$corsOrigins = @(
-    "https://attrition.cz",
-    "https://www.attrition.cz",
-    "https://stats.attrition.cz",
-    "https://attrition.cz"
-)
+# Same-origin behind Caddy (stats host serves SPA + proxies /api): leave empty.
+# Only set origins if the SPA is on a different host than bfdb (then cookies
+# need SameSite=None; Secure and bfdb must be reached over HTTPS).
+$corsOrigins = @()
 
-# Netidx base path bflib publishes under. bflib takes the "netidx_base"
-# field from the engine config above and appends the mission's "Sortie" name
-# to it (base.append(sortie)) -- so the real value bfdb needs to subscribe
-# to is "<netidx_base>/<sortie>", not just netidx_base alone.
-# "/local/fowl/campaign" below is netidx_base from the engine CFG -- VERIFY
-# this matches your live $engineConfigPath above,
-# and confirm the full path (including the sortie suffix) against bflib's
-# own startup log, which logs the exact base path it publishes to.
-# Leave blank to run bfdb without netidx -- REST endpoints backed by
-# --stats-jsonl still work, but live engine-side features (Engine Log,
-# the Discord bot's engine log relay, and priority/commander-spawn RPCs)
-# won't, since those need a live subscription to bflib.
+# Must match "netidx_base" in the engine CFG ($engineConfigPath). bflib and
+# bfdb both append the mission Sortie themselves (…/<sortie>/api/…, …/log);
+# do NOT put the sortie in this value. Leave blank to run bfdb without
+# netidx (JSONL stats still work; LIVE badge / engine RPC / engine logs will not).
+# One-time setup: netidx.exe in $dcsWriteDir (beside bfdb.exe / CFG), resolver
+# at netidx\netidx-resolver.json, and %APPDATA%\netidx\client.json on BOTH the
+# bfdb account and the DCS account (see netidx\netidx-client.json.example).
 $netidxBase = "/local/fowl/campaign"
 
 # ==========================================================
@@ -123,6 +120,7 @@ $netidxBase = "/local/fowl/campaign"
 $discordClientId     = ""
 $discordClientSecret = ""
 $dcsServerBotApiKey  = ""
+if ($null -eq $srsApiKey) { $srsApiKey = "" }
 $localSecrets = Join-Path $PSScriptRoot "bfsystem.local.ps1"
 if (-not (Test-Path $localSecrets)) {
     Write-Host "Missing $localSecrets -- copy bfsystem.local.ps1.example and set a real `$adminPassword." -ForegroundColor Red
@@ -162,19 +160,20 @@ function Start-FowlStats {
 
     # bfdb's --base needs a running netidx resolver to subscribe to, and
     # bflib (inside DCS) needs one to publish to -- start it first so it's
-    # up before bfdb tries to connect. Requires netidx-tools installed
-    # (cargo install netidx-tools) and %APPDATA%\netidx\client.json set up
-    # for this account -- see user-guide/src/server-setup.
+    # up before bfdb tries to connect. netidx.exe lives next to bfdb.exe / CFG
+    # ($dcsWriteDir); %APPDATA%\netidx\client.json must exist for this account.
     if ($netidxBase -ne "" -and $resolverUp) {
         Write-Host "Skipping netidx resolver start -- already up on 127.0.0.1:4564." -ForegroundColor Gray
     }
     elseif ($netidxBase -ne "") {
-        if (-not (Get-Command netidx -ErrorAction SilentlyContinue)) {
-            Write-Host "netidx CLI not found on PATH -- run 'cargo install netidx-tools' first, or clear `$netidxBase to skip the resolver." -ForegroundColor Red
+        if (-not (Test-Path $netidxExe)) {
+            Write-Host "netidx.exe not found at $netidxExe -- copy it next to bfdb.exe / the campaign CFG, or clear `$netidxBase to skip the resolver." -ForegroundColor Red
+        } elseif (-not (Test-Path $netidxResolverConfig)) {
+            Write-Host "Resolver config missing: $netidxResolverConfig" -ForegroundColor Red
         } else {
-            Write-Host "Starting netidx resolver..." -ForegroundColor Cyan
+            Write-Host "Starting netidx resolver ($netidxExe)..." -ForegroundColor Cyan
             Start-Job -Name "NetidxResolver" -ScriptBlock {
-                netidx resolver-server -f -c $using:netidxResolverConfig
+                & $using:netidxExe resolver-server -f -c $using:netidxResolverConfig
             } | Out-Null
             Start-Sleep -Seconds 2
             $resolverJob = Get-Job -Name "NetidxResolver"
@@ -182,7 +181,7 @@ function Start-FowlStats {
                 Write-Host "Resolver job exited immediately (state: $($resolverJob.State)) -- it's not actually running. Output below:" -ForegroundColor Red
                 Receive-Job -Name "NetidxResolver" -Keep
             } elseif (-not (Test-NetConnection -ComputerName 127.0.0.1 -Port 4564 -InformationLevel Quiet -WarningAction SilentlyContinue)) {
-                Write-Host "Resolver job is running but nothing is listening on 127.0.0.1:4564 yet -- check netidx-resolver.json's addr and the resolver output in the status loop below." -ForegroundColor Yellow
+                Write-Host "Resolver job is running but nothing is listening on 127.0.0.1:4564 yet -- check netidx\netidx-resolver.json addr and the resolver output in the status loop below." -ForegroundColor Yellow
             } else {
                 Write-Host "Resolver is listening on 127.0.0.1:4564." -ForegroundColor Green
             }
@@ -197,12 +196,12 @@ function Start-FowlStats {
             "--config",         $using:configPath,
             "--stats-jsonl",    $using:statsJsonl,
             "--listen-address", $using:listenAddress,
-            "--site-address",   $using:siteAddress,
             "--admin-username", $using:adminUsername,
             "--admin-password", $using:adminPassword
         )
         if ($using:srsUrl -ne "") {
             $argList += "--srs-url", $using:srsUrl
+            $argList += "--srs-api-key", $using:srsApiKey
         }
         if ($using:dcsServerBotUrl -ne "" -and $using:dcsServerBotApiKey -ne "") {
             $argList += "--dcsserverbot-url", $using:dcsServerBotUrl
@@ -234,9 +233,8 @@ function Start-FowlStats {
     } | Out-Null
 
     $dashPort = $listenAddress.Split(':')[1]
-    $sitePort  = $siteAddress.Split(':')[1]
-    Write-Host "Dashboard : http://localhost:$dashPort/"  -ForegroundColor Green
-    Write-Host "Website   : http://localhost:$sitePort/"  -ForegroundColor Green
+    Write-Host "bfdb API  : http://127.0.0.1:$dashPort/  (Caddy only)" -ForegroundColor Green
+    Write-Host "Public UI : $publicStatsUrl" -ForegroundColor Green
     Write-Host "Press 'Q' to stop and exit.`n" -ForegroundColor Yellow
 
     while ($true) {
@@ -265,7 +263,7 @@ function Start-FowlStats {
         }
 
         Write-Host "`n======================================"
-        Write-Host "Dashboard: http://localhost:$dashPort/  |  Website: http://localhost:$sitePort/  |  Press 'Q' to shutdown" -ForegroundColor Gray
+        Write-Host "Public: $publicStatsUrl  |  API: 127.0.0.1:$dashPort  |  Press 'Q' to shutdown" -ForegroundColor Gray
 
         Start-Sleep -Seconds 2
     }

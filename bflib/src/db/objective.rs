@@ -571,6 +571,38 @@ impl Objective {
         self.logi
     }
 
+    pub fn supply(&self) -> u8 {
+        self.supply
+    }
+
+    pub fn fuel(&self) -> u8 {
+        self.fuel
+    }
+
+    pub fn production(&self) -> u8 {
+        self.production
+    }
+
+    pub fn threatened(&self) -> bool {
+        self.threatened
+    }
+
+    pub fn kind(&self) -> &ObjectiveKind {
+        &self.kind
+    }
+
+    pub fn groups(&self) -> &MapS<Side, Set<GroupId>> {
+        &self.groups
+    }
+
+    pub fn warehouse(&self) -> &Warehouse {
+        &self.warehouse
+    }
+
+    pub fn points(&self) -> i32 {
+        self.points
+    }
+
     /// Crates to reach 100 %: one crate respawns one factory static (HP < 100).
     pub(super) fn production_repair_slots_needed(&self) -> u16 {
         self.production_repair_need
@@ -719,6 +751,46 @@ fn apply_farp_zone_pos(obj: &mut Objective, lua: MizLua, new_pos: Vector2) {
 }
 
 impl Db {
+    /// Emit one Objective + Health + Supply per base for bfdb JSONL.
+    /// Needed after load-from-save (init already emits creates on fresh start).
+    pub fn publish_objectives_as_stats(&mut self, lua: MizLua) -> Result<()> {
+        let coord = Coord::singleton(lua)?;
+        let n = self.persisted.objectives.len();
+        for (oid, obj) in &self.persisted.objectives {
+            let pos = obj.zone().pos();
+            match coord.lo_to_ll(LuaVec3(Vector3::new(pos.x, 0., pos.y))) {
+                Ok(llpos) => {
+                    self.ephemeral.stat(Stat::Objective {
+                        name: obj.name.clone(),
+                        id: *oid,
+                        kind: obj.kind.clone(),
+                        owner: obj.owner,
+                        pos: llpos,
+                    });
+                    self.ephemeral.stat(Stat::ObjectiveHealth {
+                        id: *oid,
+                        last_change: obj.last_change_ts,
+                        health: obj.health,
+                        logi: obj.logi,
+                        production: Some(obj.production),
+                        threatened: Some(obj.threatened),
+                    });
+                    self.ephemeral.stat(Stat::ObjectiveSupply {
+                        id: *oid,
+                        supply: obj.supply,
+                        fuel: obj.fuel,
+                    });
+                }
+                Err(e) => log::error!(
+                    "failed to convert objective position for {}: {e:?}",
+                    obj.name
+                ),
+            }
+        }
+        log::info!("published {n} objectives as stats");
+        Ok(())
+    }
+
     pub(super) fn sync_ground_dep_farp_zone_from_pad(
         &mut self,
         lua: MizLua,
@@ -1742,8 +1814,11 @@ impl Db {
         };
         let mut changed = false;
         let mut health_or_logi_changed = false;
+        let mut production_changed = false;
+        let threatened;
         {
             let obj = objective_mut!(self, oid)?;
+            threatened = obj.threatened;
             let health_changed = obj.health != health;
             let logi_changed = obj.logi != logi;
             health_or_logi_changed = health_changed || logi_changed;
@@ -1751,9 +1826,10 @@ impl Db {
             obj.health = health;
             obj.logi = logi;
             if matches!(kind, ObjectiveKind::Production) {
-                changed |= obj.production != production
+                production_changed = obj.production != production
                     || obj.production_hp_sum != hp_sum
                     || obj.production_repair_need != repair_need;
+                changed |= production_changed;
                 obj.production = production;
                 obj.production_hp_sum = hp_sum;
                 obj.production_repair_need = repair_need;
@@ -1771,12 +1847,14 @@ impl Db {
                 obj.last_change_ts = now;
             }
         }
-        if health_or_logi_changed {
+        if health_or_logi_changed || production_changed {
             self.ephemeral.stat(Stat::ObjectiveHealth {
                 id: *oid,
                 last_change: now,
                 health,
                 logi,
+                production: Some(production),
+                threatened: Some(threatened),
             });
         }
         if let ObjectiveKind::Farp { .. } = &kind {
@@ -2066,6 +2144,18 @@ impl Db {
         self.ephemeral
             .units_potentially_close_to_enemies
             .retain(|uid| is_close_to_enemies.contains(uid));
+        for oid in became_threatened.iter().chain(became_clear.iter()) {
+            if let Ok(obj) = objective!(self, oid) {
+                self.ephemeral.stat(Stat::ObjectiveHealth {
+                    id: *oid,
+                    last_change: now,
+                    health: obj.health,
+                    logi: obj.logi,
+                    production: Some(obj.production),
+                    threatened: Some(obj.threatened),
+                });
+            }
+        }
         Ok((became_threatened, became_clear))
     }
 

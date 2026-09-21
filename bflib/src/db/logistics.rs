@@ -561,6 +561,16 @@ pub struct Warehouse {
     pub(super) destination: SetS<ObjectiveId>,
 }
 
+impl Warehouse {
+    pub fn equipment(&self) -> &Map<String, Inventory> {
+        &self.equipment
+    }
+
+    pub fn liquids(&self) -> &MapS<LiquidType, Inventory> {
+        &self.liquids
+    }
+}
+
 fn sync_obj_to_warehouse(
     oid: ObjectiveId,
     obj: &mut Objective,

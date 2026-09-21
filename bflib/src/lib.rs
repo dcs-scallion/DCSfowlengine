@@ -656,6 +656,7 @@ fn try_occupy_slot(
             process_slot_rejection(ctx, id, ifo.ucid, rej);
             return Ok(false);
         }
+        ctx.db.play_life_return_while_in_aircraft(miz, &ifo.ucid);
     }
     match ctx.db.try_occupy_slot(miz, now, side, slot, &ifo.ucid) {
         SlotAuth::NotRegistered(side) => {
@@ -1504,8 +1505,8 @@ fn on_event(lua: MizLua, ev: Event) -> Result<()> {
                                     );
                                 }
                             }
-                            ctx.db.play_sound_group(lua, "life_return", miz_gid);
-                        } else {
+                        }
+                        if !ctx.db.life_return_sound_already_played(&ucid) {
                             ctx.db.play_sound_player(lua, "life_return", &slot);
                         }
                         if let Some((ucid, slot)) = deslot {
@@ -2351,8 +2352,8 @@ fn handle_player_leave_unit_no_initiator(
                             );
                         }
                     }
-                    ctx.db.play_sound_group(lua, "life_return", miz_gid);
-                } else {
+                }
+                if !ctx.db.life_return_sound_already_played(&ucid) {
                     ctx.db.play_sound_player(lua, "life_return", &slot);
                 }
                 if let Some((ucid, slot)) = deslot {
@@ -2970,9 +2971,13 @@ fn delayed_init_miz(lua: MizLua) -> Result<()> {
     ctx.do_bg_task(Task::Stat(Stat::SessionStart {
         stop: ctx.shutdown.map(|a| a.when),
         cfg: Box::new((*ctx.db.ephemeral.cfg).clone()),
+        sortie: ctx.sortie.clone().into(),
     }));
     info!("spawning units");
     ctx.respawn_groups(lua, &miz).context("setting up the mission after load")?;
+    ctx.db
+        .publish_objectives_as_stats(lua)
+        .context("publish objectives as stats")?;
     db::discord_map::capture_restart_display_skew(lua, &mut ctx.db)
         .context("restart countdown skew")?;
     if ctx.db.ephemeral.cfg.discord_map.enabled {
@@ -2999,8 +3004,22 @@ fn delayed_init_miz(lua: MizLua) -> Result<()> {
             Err(_) => continue,
         };
         let addr = ifo.ip().ok().flatten();
-        let _ = ctx.connected.player_connected(id, PlayerInfo { name: name.clone(), addr, ucid });
+        let _ = ctx.connected.player_connected(
+            id,
+            PlayerInfo {
+                name: name.clone(),
+                addr: addr.clone(),
+                ucid,
+            },
+        );
         ctx.db.player_connected(ucid, name.clone());
+        // Same as onPlayerTryConnect — without this, /api/online stays empty
+        // for anyone who was already on the server when the mission loaded.
+        ctx.do_bg_task(Task::Stat(Stat::Connect {
+            id: ucid,
+            addr: addr.unwrap_or_default(),
+            name: name.clone(),
+        }));
         let welcome = if let Some(player) = ctx.db.player(&ucid) {
             format_compact!(
                 "Welcome back, {}! You are on the {:?} team. Type -help for commands.",

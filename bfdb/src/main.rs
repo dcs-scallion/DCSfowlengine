@@ -1,5 +1,6 @@
 use anyhow::Result;
 use bfprotocols::cfg::UnitTag;
+use bfprotocols::db::objective::ObjectiveKind;
 use clap::Parser;
 use db::{SessionData, SessionEnd, StatsDb, WikiImage, WikiPage};
 use futures::{SinkExt, StreamExt};
@@ -83,9 +84,15 @@ struct Args {
     /// Local admin password for password-based login
     #[arg(long)]
     admin_password: Option<String>,
-    /// SRS server URL to proxy for the dashboard radio panel (e.g. http://localhost:5002)
+    /// SRS HTTP base URL for the dashboard radio panel (e.g. http://localhost:8081).
+    /// bfdb GETs {url}/clients with header X-API-KEY (Ciribob DCS-SRS 2.3+).
     #[arg(long)]
     srs_url: Option<String>,
+    /// Value for the X-API-KEY header (HTTP_SERVER_API_KEY in SRS.cfg).
+    /// Required even when the key is empty — omit the header and SRS returns 401.
+    /// Leave unset to send an empty key (matches a blank HTTP_SERVER_API_KEY).
+    #[arg(long)]
+    srs_api_key: Option<String>,
     /// Path to the campaign engine config JSON that bflib loads (e.g. ODFv2_CFG).
     /// Enables the admin config editor at GET/POST /api/admin/cfg. Distinct from
     /// --config, which is just dashboard branding.
@@ -126,6 +133,11 @@ struct Args {
     /// /api/admin/banned. Round/kill/objective/pilot data is untouched.
     #[arg(long = "clear-sessions")]
     clear_sessions: bool,
+    /// Wipe derived stats trees and rewind JSONL/archive cursors, then exit.
+    /// Next normal start re-ingests from the top with idempotency guards.
+    /// Needs --stats-jsonl and/or --stats-dir still present as the source.
+    #[arg(long = "rebuild-stats")]
+    rebuild_stats: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -430,9 +442,16 @@ async fn api_leaderboard(db: StatsDb) -> std::result::Result<impl warp::Reply, E
         let entries: Vec<_> = pilots
             .iter()
             .map(|(ucid, name, agg)| {
+                let side = db
+                    .pilot_current_side(ucid)
+                    .ok()
+                    .flatten()
+                    .filter(|s| matches!(s, dcso3::coalition::Side::Blue | dcso3::coalition::Side::Red))
+                    .map(|s| format!("{s:?}"));
                 serde_json::json!({
                     "ucid": ucid.to_string(),
                     "name": name.to_string(),
+                    "side": side,
                     "air_kills": agg.air_kills,
                     "ground_kills": agg.ground_kills,
                     "captures": agg.captures,
@@ -529,6 +548,10 @@ async fn api_objectives(
                 // Carrier groups are shown for status (health/supply/owner/etc)
                 // but their position is withheld -- it's mobile and sensitive.
                 let hide_pos = obj.kind.is_carrier_group();
+                let mobile = matches!(
+                    &obj.kind,
+                    ObjectiveKind::Farp { mobile: true, .. }
+                );
                 Some(serde_json::json!({
                     "id": format!("{:?}", oid),
                     "name": obj.name.to_string(),
@@ -540,12 +563,14 @@ async fn api_objectives(
                     "logi": obj.logi,
                     "supply": obj.supply,
                     "fuel": obj.fuel,
+                    "production": obj.production,
                     "last_change": obj.last_change.to_rfc3339(),
                     // Overwritten below with live values for the active round,
                     // when bflib is reachable. Historical rounds keep the defaults.
                     "priority": false,
-                    "threatened": false,
+                    "threatened": obj.threatened,
                     "captureable": false,
+                    "mobile": mobile,
                 }))
             })
             .collect();
@@ -557,12 +582,12 @@ async fn api_objectives(
     // bflib's netidx RPC has no timeout of its own, so if the mission is
     // restarting/unreachable this call would otherwise hang the whole
     // request indefinitely -- bound it so /api/objectives always answers
-    // within a few seconds, falling back to the persisted (possibly stale)
+    // within 8s, falling back to the persisted (possibly stale)
     // priority flags on timeout rather than blocking every caller (including
     // the Discord bot's poller, which has its own 10s client timeout).
     if is_active {
         match tokio::time::timeout(
-            std::time::Duration::from_secs(3),
+            std::time::Duration::from_secs(8),
             call_engine_rpc_str(&db, "query-objectives", vec![]),
         ).await {
             Ok(Ok(json)) => {
@@ -572,11 +597,15 @@ async fn api_objectives(
                     // 100, or if the archive replay missed a batch), which made
                     // the tactical map disagree with the in-game markup. For the
                     // active round, take these straight from the engine.
-                    let by_name: std::collections::HashMap<&str, &bfprotocols::api::ObjectiveInfo> =
-                        live.iter().map(|o| (o.name.as_str(), o)).collect();
+                    // Match by ObjectiveId — ME mirrors (OPRR/OPRB Ind.Park.N)
+                    // share display names; a name key collapsed both to one owner.
+                    let by_id: std::collections::HashMap<String, &bfprotocols::api::ObjectiveInfo> =
+                        live.iter()
+                            .map(|o| (format!("{:?}", o.id), o))
+                            .collect();
                     for entry in entries.iter_mut() {
-                        if let Some(name) = entry.get("name").and_then(|n| n.as_str()) {
-                            if let Some(&o) = by_name.get(name) {
+                        if let Some(id) = entry.get("id").and_then(|n| n.as_str()) {
+                            if let Some(&o) = by_id.get(id) {
                                 entry["priority"] = serde_json::Value::Bool(o.priority);
                                 entry["health"] = serde_json::json!(o.health);
                                 entry["logi"] = serde_json::json!(o.logi);
@@ -585,13 +614,19 @@ async fn api_objectives(
                                 entry["owner"] = serde_json::json!(format!("{:?}", o.owner));
                                 entry["threatened"] = serde_json::Value::Bool(o.threatened);
                                 entry["captureable"] = serde_json::Value::Bool(o.captureable);
+                                if let Some(p) = o.production {
+                                    entry["production"] = serde_json::json!(p);
+                                }
+                                if let Some(ref dn) = o.display_name {
+                                    entry["display_name"] = serde_json::json!(dn);
+                                }
                             }
                         }
                     }
                 }
             }
             Ok(Err(e)) => log::warn!("api_objectives: query-objectives RPC failed: {}", e.0),
-            Err(_) => log::warn!("api_objectives: query-objectives RPC timed out after 3s, engine may be unreachable"),
+            Err(_) => log::warn!("api_objectives: query-objectives RPC timed out after 8s, engine may be unreachable"),
         }
     }
 
@@ -600,14 +635,16 @@ async fn api_objectives(
 }
 
 /// GET /api/frontline?round=N — the dividing line between blue-held and
-/// red-held ground, as `[{mid, blue, red}]` where each is a `[[lat, lon], …]`
+/// red-held ground, as `{mid, blue, red}` where each is a `[[lat, lon], …]`
 /// polyline. Computed with the exact same code bflib uses for the F10-map
-/// overlay (`bfprotocols::frontline`), so the two never disagree. Only the
-/// line geometry is returned — never an objective's position.
+/// overlay (`bfprotocols::frontline`). Empty rounds return
+/// `{mid:[],blue:[],red:[]}` (not `[]`) so the dashboard TacMap can `.map` safely.
+/// Fowl F10/HTML live-map ribbons stay in `bflib` `front_line` — separate path.
 async fn api_frontline(
     db: StatsDb,
     round_id: Option<u64>,
 ) -> std::result::Result<impl warp::Reply, Error> {
+    let empty = || Ok(r#"{"mid":[],"blue":[],"red":[]}"#.to_string());
     let data = task::block_in_place(|| -> Result<String> {
         let rounds = db.latest_rounds()?;
         let rid = match round_id {
@@ -616,7 +653,7 @@ async fn api_frontline(
                 Some((_, rid, _)) => *rid,
                 None => match rounds.first() {
                     Some((_, rid, _)) => *rid,
-                    None => return Ok("[]".to_string()),
+                    None => return empty(),
                 },
             },
         };
@@ -631,7 +668,7 @@ async fn api_frontline(
             .map(|(_, o)| (o.pos.latitude, o.pos.longitude, o.owner))
             .collect();
         if ll.len() < 4 {
-            return Ok("[]".to_string());
+            return empty();
         }
 
         // Project lat/lon to a local equirectangular frame in metres so the
@@ -1323,15 +1360,22 @@ async fn api_auth_me(
     let Some(s) = session else {
         return Ok(json_response(r#"{"user":null}"#.to_string()));
     };
-    let ucid = resolve_ucid_via_bot(&bot_cfg, &s.discord_id).await
-        .map(|u| u.to_string());
+    let ucid = resolve_ucid_via_bot(&bot_cfg, &s.discord_id).await;
+    // Coalition in the active round — gates TACMAP (and future coalition pages).
+    let side = match &ucid {
+        Some(u) => task::block_in_place(|| db.pilot_current_side(u))?
+            .filter(|s| matches!(s, dcso3::coalition::Side::Blue | dcso3::coalition::Side::Red))
+            .map(|s| format!("{s:?}")),
+        None => None,
+    };
     Ok(json_response(serde_json::to_string(&serde_json::json!({
         "user": {
             "discord_id": s.discord_id,
             "username":   s.username,
             "avatar":     s.avatar,
             "is_admin":   s.is_admin,
-            "ucid":       ucid,
+            "ucid":       ucid.map(|u| u.to_string()),
+            "side":       side,
         }
     })).map_err(anyhow::Error::from)?))
 }
@@ -1624,6 +1668,89 @@ async fn api_admin_reset(
     task::block_in_place(|| db.reset_campaign_data())?;
     log::info!("ADMIN: campaign data reset by admin");
     Ok(warp::reply::json(&serde_json::json!({"ok": true})))
+}
+
+/// POST /api/admin/rebuild-stats — wipe derived stats and re-ingest JSONL from 0
+async fn api_admin_rebuild_stats(
+    session_id: Option<Uuid>,
+    db: StatsDb,
+) -> std::result::Result<impl warp::Reply, Error> {
+    require_admin(session_id, db.clone()).await?;
+    task::block_in_place(|| db.request_jsonl_rebuild())?;
+    log::info!("ADMIN: JSONL stats rebuild queued");
+    Ok(warp::reply::json(&serde_json::json!({
+        "ok": true,
+        "message": "rebuild queued — JSONL reader will wipe and re-ingest on its next tick",
+    })))
+}
+
+/// GET /api/health — bfdb liveness + optional engine probe (cached 15s).
+async fn api_health(db: StatsDb) -> std::result::Result<impl warp::Reply, Error> {
+    const CACHE_FOR: std::time::Duration = std::time::Duration::from_secs(15);
+    const PROBE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(8);
+
+    let cached = {
+        let cache = db.health_cache.lock().unwrap();
+        match &*cache {
+            Some((at, ok, err)) if at.elapsed() < CACHE_FOR => {
+                Some((*ok, err.clone(), at.elapsed().as_millis() as u64))
+            }
+            _ => None,
+        }
+    };
+
+    let (engine_ok, engine_err, elapsed_ms) = match cached {
+        Some((ok, err, _)) => (ok, err, 0u64),
+        None => {
+            let started = std::time::Instant::now();
+            let probe = tokio::time::timeout(
+                PROBE_TIMEOUT,
+                call_engine_rpc_str(&db, "query-campaign-state", vec![]),
+            )
+            .await;
+            let elapsed_ms = started.elapsed().as_millis() as u64;
+            let (ok, err) = match probe {
+                Ok(Ok(_)) => (true, None),
+                Ok(Err(e)) => (false, Some(e.0.to_string())),
+                Err(_) => (
+                    false,
+                    Some(format!(
+                        "engine RPC timed out after {}s",
+                        PROBE_TIMEOUT.as_secs()
+                    )),
+                ),
+            };
+            if !ok {
+                log::warn!(
+                    "api_health: query-campaign-state probe failed after {}ms: {}",
+                    elapsed_ms,
+                    err.as_deref().unwrap_or("unknown")
+                );
+            }
+            *db.health_cache.lock().unwrap() =
+                Some((std::time::Instant::now(), ok, err.clone()));
+            (ok, err, elapsed_ms)
+        }
+    };
+
+    let round = task::block_in_place(|| -> Result<Option<serde_json::Value>> {
+        let rounds = db.latest_rounds()?;
+        Ok(rounds
+            .iter()
+            .find(|(_, _, r)| r.end.is_none())
+            .map(|(_, rid, r)| serde_json::json!({ "id": rid.0, "start": r.start.to_rfc3339() })))
+    })?;
+
+    Ok(warp::reply::json(&serde_json::json!({
+        "ok": engine_ok,
+        "bfdb": "ok",
+        "engine": {
+            "reachable": engine_ok,
+            "latency_ms": if engine_ok && elapsed_ms > 0 { Some(elapsed_ms) } else { None },
+            "error": engine_err,
+        },
+        "active_round": round,
+    })))
 }
 
 /// GET /api/admin/bot/status  — current DCS server name/status via
@@ -2674,28 +2801,49 @@ async fn ws_units(ws: WebSocket, state: LiveState, mut rx: broadcast::Receiver<S
 }
 
 // ── SRS proxy ───────────────────────────────────────────────────────
+// Ciribob DCS-SRS HttpServer: GET /clients, header X-API-KEY (exact match;
+// missing header → 401 even when HTTP_SERVER_API_KEY is blank).
 
-async fn api_srs(srs_url: Arc<Option<String>>) -> Response {
+fn srs_clients_url(base: &str) -> String {
+    let base = base.trim_end_matches('/');
+    if base.ends_with("/clients") {
+        base.to_string()
+    } else {
+        format!("{base}/clients")
+    }
+}
+
+fn normalize_srs_status(v: serde_json::Value) -> serde_json::Value {
+    let clients = v
+        .get("clients")
+        .or_else(|| v.get("Clients"))
+        .cloned()
+        .unwrap_or_else(|| serde_json::json!([]));
+    let version = v
+        .get("version")
+        .or_else(|| v.get("ServerVersion"))
+        .cloned()
+        .unwrap_or(serde_json::Value::Null);
+    serde_json::json!({ "version": version, "clients": clients })
+}
+
+async fn api_srs(srs: Arc<(Option<String>, String)>) -> Response {
     let empty = warp::reply::json(&serde_json::json!({"version": null, "clients": []}));
-    let url = match srs_url.as_deref() {
-        Some(u) => u.to_string(),
-        None => return empty.into_response(),
+    let (Some(base), api_key) = (srs.0.as_deref(), srs.1.as_str()) else {
+        return empty.into_response();
     };
-    // reqwest::get() uses a default client with no timeout -- if the local
-    // SRS server is down or hanging (not just refusing the connection
-    // outright), this would otherwise block the request indefinitely,
-    // right through to Cloudflare's own ~100s edge timeout (a 524) instead
-    // of falling back quickly like every other failure mode here already does.
+    let url = srs_clients_url(base);
+    // Bounded timeout: hang must not become a Cloudflare 524.
     let client = reqwest::Client::builder()
         .timeout(std::time::Duration::from_secs(3))
         .build();
     let Ok(client) = client else { return empty.into_response() };
-    match client.get(&url).send().await {
-        Ok(resp) => match resp.json::<serde_json::Value>().await {
-            Ok(json) => warp::reply::json(&json).into_response(),
-            Err(_)   => empty.into_response(),
+    match client.get(&url).header("X-API-KEY", api_key).send().await {
+        Ok(resp) if resp.status().is_success() => match resp.json::<serde_json::Value>().await {
+            Ok(json) => warp::reply::json(&normalize_srs_status(json)).into_response(),
+            Err(_) => empty.into_response(),
         },
-        Err(_) => empty.into_response(),
+        _ => empty.into_response(),
     }
 }
 
@@ -2728,6 +2876,13 @@ async fn main() -> Result<()> {
         let db = StatsDb::new_offline(args.db, None, None)?;
         db.clear_stale_sessions()?;
         println!("cleared the session tree -- perf history and cfg-derived ban entries are gone, round/kill/objective/pilot data is untouched");
+        return Ok(());
+    }
+
+    if args.rebuild_stats {
+        let db = StatsDb::new_offline(args.db.clone(), args.stats_dir.clone(), args.stats_jsonl.clone())?;
+        db.rebuild_stats_from_archive()?;
+        println!("wiped derived stats trees and rewound JSONL/archive cursors -- restart bfdb normally to re-ingest");
         return Ok(());
     }
 
@@ -2771,7 +2926,15 @@ async fn main() -> Result<()> {
             let subscriber = SubscriberBuilder::new()
                 .config(Config::load_default()?)
                 .build()?;
-            StatsDb::new(subscriber, args.db, base, args.stats_dir, args.include, args.exclude)?
+            StatsDb::new(
+                subscriber,
+                args.db,
+                base,
+                args.stats_dir,
+                args.stats_jsonl,
+                args.include,
+                args.exclude,
+            )?
         }
         None => {
             log::info!("Running in offline mode (no --base specified, Netidx disabled)");
@@ -2862,8 +3025,10 @@ async fn main() -> Result<()> {
     };
     // CLI --srs-url takes precedence over campaign.json srsUrl
     let effective_srs_url = args.srs_url.clone().or(srs_url_from_cfg);
+    let srs_api_key = args.srs_api_key.clone().unwrap_or_default();
     if let Some(ref u) = effective_srs_url {
-        log::info!("SRS proxy enabled → {u}");
+        log::info!("SRS proxy enabled → {u}/clients (X-API-KEY {})",
+            if srs_api_key.is_empty() { "empty" } else { "set" });
     }
 
     let engine_config_path: Arc<Option<PathBuf>> = Arc::new(args.engine_config.clone());
@@ -2961,9 +3126,10 @@ async fn main() -> Result<()> {
     // Cheap liveness probe -- no DB access, no archive-replay contention.
     // Process supervisors should poll this, not /api/stats (which runs
     // several Sled queries and can be slow while the stats archive is
-    // still replaying at startup).
+    // still replaying at startup). Engine probe is cached 15s inside api_health.
     let health = warp::path!("api" / "health")
-        .map(|| warp::reply::with_status("ok", warp::http::StatusCode::OK));
+        .and(with_db(db.clone()))
+        .then(api_health);
 
     let stats = warp::path!("api" / "stats")
         .and(with_db(db.clone()))
@@ -3074,6 +3240,12 @@ async fn main() -> Result<()> {
         .and(extract_session_cookie())
         .and(with_db(db.clone()))
         .then(api_admin_reset);
+
+    let admin_rebuild_stats = warp::path!("api" / "admin" / "rebuild-stats")
+        .and(warp::post())
+        .and(extract_session_cookie())
+        .and(with_db(db.clone()))
+        .then(api_admin_rebuild_stats);
 
     let admin_bot_status = warp::path!("api" / "admin" / "bot" / "status")
         .and(extract_session_cookie())
@@ -3233,9 +3405,10 @@ async fn main() -> Result<()> {
         .and(warp::any().map(move || campaign_json.clone()))
         .then(api_config);
 
-    let srs_url_arc: Arc<Option<String>> = Arc::new(effective_srs_url);
+    let srs_cfg_arc: Arc<(Option<String>, String)> =
+        Arc::new((effective_srs_url, srs_api_key));
     let srs_route = warp::path!("api" / "srs")
-        .and(warp::any().map(move || srs_url_arc.clone()))
+        .and(warp::any().map(move || srs_cfg_arc.clone()))
         .then(api_srs);
 
     let admin_cfg_get_route = warp::path!("api" / "admin" / "cfg")
@@ -3366,6 +3539,7 @@ async fn main() -> Result<()> {
         )
         .or(auth_local_login)
         .or(admin_reset)
+        .or(admin_rebuild_stats)
         .or(admin_ban_route)
         .or(admin_unban_route)
         .or(admin_cfg_post_route)

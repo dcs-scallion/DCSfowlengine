@@ -37,7 +37,10 @@ use std::{
     ops::Deref,
     path::{Path, PathBuf},
     str::FromStr,
-    sync::{Arc, Mutex as StdMutex, RwLock},
+    sync::{
+        atomic::{AtomicBool, Ordering},
+        Arc, Mutex as StdMutex, RwLock,
+    },
     time::Duration,
 };
 use tokio::{sync::broadcast, task};
@@ -234,6 +237,14 @@ pub(crate) struct Objective {
     pub(crate) logi: u8,
     pub(crate) supply: u8,
     pub(crate) fuel: u8,
+    #[serde(default = "default_production_pct")]
+    pub(crate) production: u8,
+    #[serde(default)]
+    pub(crate) threatened: bool,
+}
+
+fn default_production_pct() -> u8 {
+    100
 }
 
 #[derive(Clone)]
@@ -456,6 +467,13 @@ pub(crate) struct StatsDbInner {
     session: Tree<(RoundId, DateTime<Utc>), Session>,
     kills: Tree<(EnId, RoundId, KillId), Dead>,
     shared_kills: Tree<KillId, SmallVec<[EnId; 2]>>,
+    /// (round, victim, death time millis) — skip redelivered Stat::Kill
+    /// (JSONL/archive replay) so air/ground victories are not doubled.
+    kill_seen: Tree<(RoundId, EnId, i64), KillId>,
+    /// (round, pilot, takeoff millis) — skip redelivered Stat::Takeoff.
+    sortie_seen: Tree<(RoundId, Ucid, i64), SortieId>,
+    /// (round, group) — skip redelivered Stat::DeployGroup.
+    deploy_seen: Tree<(RoundId, GroupId), DeployId>,
     units: Tree<(RoundId, EnId), Unit>,
     groups: Tree<(RoundId, GroupId), Group>,
     detected: Tree<(RoundId, EnId), BitFlags<DetectionSource, u8>>,
@@ -505,6 +523,15 @@ pub(crate) struct StatsDbInner {
     // (see background_loop -- a corrupted/duplicate-spammed archive segment
     // otherwise gets re-read in full on every single bfdb startup).
     replay_cursor: Tree<u8, DateTime<Utc>>,
+    /// Byte offset into stats.jsonl last fully ingested. Without this, every
+    /// bfdb restart re-reads the file from 0 and re-applies every Stat::Kill
+    /// (inflating A/A and A/G victories). Key 0u8 — single-server layout.
+    jsonl_cursor: Tree<u8, u64>,
+    /// Set by POST /api/admin/rebuild-stats; jsonl_loop wipes derived trees
+    /// and re-ingests from offset 0 on the next tick.
+    jsonl_reset: Arc<AtomicBool>,
+    /// Cached engine probe for GET /api/health (Instant, reachable, error).
+    pub(crate) health_cache: Arc<StdMutex<Option<(std::time::Instant, bool, Option<std::string::String>)>>>,
 }
 
 const ENGINE_LOG_HISTORY_CAP: usize = 500;
@@ -653,6 +680,7 @@ impl StatsDb {
         db: P,
         base: NetidxPath,
         stats_dir: Option<PathBuf>,
+        stats_jsonl: Option<PathBuf>,
         include: Option<Regex>,
         exclude: Option<Regex>,
     ) -> Result<Self> {
@@ -670,13 +698,16 @@ impl StatsDb {
             session: Tree::open(&db, "session")?,
             kills: Tree::open(&db, "kills")?,
             shared_kills: Tree::open(&db, "shared_kills")?,
+            kill_seen: Tree::open(&db, "kill_seen")?,
+            sortie_seen: Tree::open(&db, "sortie_seen")?,
+            deploy_seen: Tree::open(&db, "deploy_seen")?,
             units: Tree::open(&db, "units")?,
             groups: Tree::open(&db, "groups")?,
             detected: Tree::open(&db, "detected")?,
             objectives: Tree::open(&db, "objectives")?,
             equipment: Tree::open(&db, "equipment")?,
             liquids: Tree::open(&db, "liquids")?,
-            stats_jsonl: None,
+            stats_jsonl,
             auth_sessions: Tree::open(&db, "auth_sessions")?,
             auth_states: Tree::open(&db, "auth_states")?,
             trail_points: Tree::open(&db, "trail_points")?,
@@ -692,9 +723,24 @@ impl StatsDb {
             engine_log_history: Arc::new(StdMutex::new(VecDeque::new())),
             engine_error_history: Arc::new(StdMutex::new(VecDeque::new())),
             replay_cursor: Tree::open(&db, "replay_cursor")?,
+            jsonl_cursor: Tree::open(&db, "jsonl_cursor")?,
+            jsonl_reset: Arc::new(AtomicBool::new(false)),
+            health_cache: Arc::new(StdMutex::new(None)),
             current_sortie: Arc::new(StdMutex::new(None)),
         }));
-        t.seed_wiki_if_empty()?;
+        if t.0.stats_jsonl.is_some() {
+            info!(
+                "stats ingest: JSONL {}",
+                t.0.stats_jsonl.as_ref().unwrap().display()
+            );
+        } else if t.0.stats_dir.is_some() {
+            info!(
+                "stats ingest: netidx-archive {}",
+                t.0.stats_dir.as_ref().unwrap().display()
+            );
+        } else {
+            warn!("stats ingest: neither --stats-jsonl nor --stats-dir configured");
+        }        t.seed_wiki_if_empty()?;
         t.seed_wiki_images_if_empty()?;
         // A older bug fabricated a round named after the last segment of the
         // netidx base (e.g. "campaign" from "/local/fowl/campaign") whenever a
@@ -766,6 +812,9 @@ impl StatsDb {
             session: Tree::open(&db, "session")?,
             kills: Tree::open(&db, "kills")?,
             shared_kills: Tree::open(&db, "shared_kills")?,
+            kill_seen: Tree::open(&db, "kill_seen")?,
+            sortie_seen: Tree::open(&db, "sortie_seen")?,
+            deploy_seen: Tree::open(&db, "deploy_seen")?,
             units: Tree::open(&db, "units")?,
             groups: Tree::open(&db, "groups")?,
             detected: Tree::open(&db, "detected")?,
@@ -788,6 +837,9 @@ impl StatsDb {
             engine_log_history: Arc::new(StdMutex::new(VecDeque::new())),
             engine_error_history: Arc::new(StdMutex::new(VecDeque::new())),
             replay_cursor: Tree::open(&db, "replay_cursor")?,
+            jsonl_cursor: Tree::open(&db, "jsonl_cursor")?,
+            jsonl_reset: Arc::new(AtomicBool::new(false)),
+            health_cache: Arc::new(StdMutex::new(None)),
             current_sortie: Arc::new(StdMutex::new(None)),
         }));
         t.seed_wiki_if_empty()?;
@@ -1081,26 +1133,61 @@ impl StatsDb {
 
         let mut ctx = StatCtx::default();
         let mut timer = time::interval(Duration::from_secs(5));
-        let mut last_pos: u64 = 0;
+        let mut last_pos: u64 = self.0.jsonl_cursor.get(&0u8)?.unwrap_or(0);
 
-        info!("starting JSONL reader from {jsonl_path:?}");
+        // Resume round context after restart so stats before the next
+        // SessionStart are still attributed (cursor skipped NewRound).
+        if last_pos > 0 {
+            if let Ok(rounds) = self.latest_rounds() {
+                if let Some((sortie, round, _)) =
+                    rounds.into_iter().find(|(_, _, r)| r.end.is_none())
+                {
+                    if let Ok(Some(seq)) = self.seq.get(&(sortie.clone(), round)) {
+                        ctx.0 = Some(StatCtxInner { sortie, round, seq });
+                    }
+                }
+            }
+        }
+
+        info!("starting JSONL reader from {jsonl_path:?} at offset {last_pos}");
 
         loop {
             timer.tick().await;
-            let read_result = task::block_in_place(|| -> Result<(u64, Vec<(DateTime<Utc>, Stat)>)> {
+
+            if self.0.jsonl_reset.swap(false, Ordering::SeqCst) {
+                warn!(
+                    "jsonl rebuild requested -- wiping derived stats and re-ingesting {jsonl_path:?} from offset 0"
+                );
+                if let Err(e) = task::block_in_place(|| self.wipe_stats_derived_trees()) {
+                    error!("jsonl rebuild: wipe failed ({e:?}) -- aborting, keeping current data");
+                } else {
+                    let _ = self.0.jsonl_cursor.insert(&0u8, &0u64);
+                    *self.0.current_sortie.lock().unwrap() = None;
+                    last_pos = 0;
+                    ctx = StatCtx::default();
+                }
+            }
+
+            let read_result = task::block_in_place(|| -> Result<(u64, Vec<(DateTime<Utc>, Stat)>, u64, Option<std::string::String>, u64, Option<std::string::String>)> {
                 let file = match std::fs::File::open(&jsonl_path) {
                     Ok(f) => f,
                     Err(e) => {
                         if e.kind() != std::io::ErrorKind::NotFound {
                             error!("failed to open JSONL file: {e:?}");
                         }
-                        return Ok((last_pos, vec![]));
+                        return Ok((last_pos, vec![], 0, None, 0, None));
                     }
                 };
                 let metadata = file.metadata()?;
                 let file_len = metadata.len();
+                if file_len < last_pos {
+                    warn!(
+                        "JSONL file shrank ({file_len} < {last_pos}) — resetting cursor to 0"
+                    );
+                    return Ok((0, vec![], 0, None, 0, None));
+                }
                 if file_len <= last_pos {
-                    return Ok((last_pos, vec![]));
+                    return Ok((last_pos, vec![], 0, None, 0, None));
                 }
                 use std::io::Seek;
                 let mut reader = std::io::BufReader::new(file);
@@ -1108,6 +1195,10 @@ impl StatsDb {
                 let mut line = std::string::String::new();
                 let mut new_pos = last_pos;
                 let mut stats = Vec::new();
+                let mut unparsed = 0u64;
+                let mut first_unparsed: Option<std::string::String> = None;
+                let mut undecodable = 0u64;
+                let mut first_undecodable: Option<std::string::String> = None;
                 while reader.read_line(&mut line)? > 0 {
                     new_pos = reader.stream_position()?;
                     let trimmed = line.trim();
@@ -1123,20 +1214,42 @@ impl StatsDb {
                                 match serde_json::from_value::<Stat>(stat_val.clone()) {
                                     Ok(st) => stats.push((ts, st)),
                                     Err(e) => {
-                                        let preview: std::string::String = trimmed.chars().take(200).collect();
-                                        error!("failed to deserialize stat from JSONL: {e}, raw: {preview}");
+                                        undecodable += 1;
+                                        if first_undecodable.is_none() {
+                                            let preview: std::string::String =
+                                                trimmed.chars().take(120).collect();
+                                            first_undecodable =
+                                                Some(format!("{e}; raw: {preview}"));
+                                        }
                                     }
                                 }
                             }
                         }
-                        Err(e) => error!("failed to parse JSONL line: {e}"),
+                        Err(e) => {
+                            unparsed += 1;
+                            if first_unparsed.is_none() {
+                                first_unparsed = Some(e.to_string());
+                            }
+                        }
                     }
                     line.clear();
                 }
-                Ok((new_pos, stats))
+                Ok((new_pos, stats, unparsed, first_unparsed, undecodable, first_undecodable))
             });
             match read_result {
-                Ok((pos, stats)) => {
+                Ok((pos, stats, unparsed, first_unparsed, undecodable, first_undecodable)) => {
+                    if unparsed > 0 {
+                        error!(
+                            "skipped {unparsed} unparsable JSONL line(s); first: {}",
+                            first_unparsed.as_deref().unwrap_or("?")
+                        );
+                    }
+                    if undecodable > 0 {
+                        error!(
+                            "skipped {undecodable} undecodable JSONL stat(s); first: {}",
+                            first_undecodable.as_deref().unwrap_or("?")
+                        );
+                    }
                     if !stats.is_empty() {
                         let count = stats.len();
                         for (ts, st) in stats {
@@ -1147,6 +1260,9 @@ impl StatsDb {
                         info!("processed {count} stats from JSONL (pos {last_pos} -> {pos})");
                     }
                     last_pos = pos;
+                    if let Err(e) = self.0.jsonl_cursor.insert(&0u8, &pos) {
+                        error!("failed to save JSONL cursor: {e:?}");
+                    }
                 }
                 Err(e) => error!("JSONL read error: {e:?}"),
             }
@@ -1256,7 +1372,19 @@ impl StatsDb {
     }
 
     fn record_kill(&self, ctx: &mut StatCtxInner, dead: Dead) -> Result<()> {
+        // Idempotency: one real kill = one (round, victim, death-time) triple.
+        // Redelivery (JSONL re-read after restart, archive replay) would otherwise
+        // mint a second KillId and inflate A/A / A/G victories.
+        let victim_enid = match &dead.victim {
+            Who::Player { ucid, .. } => EnId::Player(*ucid),
+            Who::AI { uid, .. } => EnId::Unit(*uid),
+        };
+        let dedup_key = (ctx.round, victim_enid, dead.time.timestamp_millis());
+        if self.kill_seen.get(&dedup_key)?.is_some() {
+            return Ok(());
+        }
         let kid = KillId::new(&self.db)?;
+        self.kill_seen.insert(&dedup_key, &kid)?;
         let air = match &dead.victim {
             Who::Player { ucid, .. } => {
                 self.pilots.with_pilot_and_aggregates(
@@ -1391,6 +1519,29 @@ impl StatsDb {
                 Ok(entries)
             }
         }
+    }
+
+    /// Active-round side if registered, else most recent Blue/Red on record.
+    pub(crate) fn pilot_current_side(&self, ucid: &Ucid) -> Result<Option<Side>> {
+        let active = self
+            .latest_rounds()?
+            .into_iter()
+            .find(|(_, _, r)| r.end.is_none())
+            .map(|(_, rid, _)| rid);
+        let mut best: Option<(DateTime<Utc>, Side)> = None;
+        for r in self.pilots.round_info.scan_prefix(ucid)? {
+            let ((_, rid), ri) = r?;
+            if !matches!(ri.side.1, Side::Blue | Side::Red) {
+                continue;
+            }
+            if Some(rid) == active {
+                return Ok(Some(ri.side.1));
+            }
+            if best.map_or(true, |(t, _)| ri.side.0 > t) {
+                best = Some(ri.side);
+            }
+        }
+        Ok(best.map(|(_, s)| s))
     }
 
     /// Get all pilot UCIDs and their most recent names (all-time, for name resolution)
@@ -1890,28 +2041,31 @@ impl StatsDb {
             }
         }
         // If we see a SessionStart but have no round context, auto-create a round.
-        // This happens when reading archives where the NewRound is in a locked/missing file.
-        // Only do this when a real sortie can be derived from netidx_base --
-        // new_round() unconditionally overwrites the *live* current_sortie
-        // (used for real-time engine log/RPC subscriptions) as a side effect,
-        // so fabricating a placeholder name here would silently redirect
-        // live subscriptions onto a sortie that doesn't exist. Without a real
-        // sortie, just skip: the caller below already handles "no round
-        // context yet" by dropping the stat gracefully.
-        if let Stat::SessionStart { cfg, .. } = &stat {
+        // This happens on load-from-save (NewRound is only emitted for a fresh
+        // campaign) and when replaying JSONL/archives that lack NewRound.
+        // Prefer an explicit sortie on the stat (bflib always sends it). Do not
+        // invent a placeholder: new_round() also sets live current_sortie for
+        // netidx RPC/log paths.
+        if let Stat::SessionStart { cfg, sortie: start_sortie, .. } = &stat {
             if ctx.0.is_none() {
                 // Prefer the real sortie already primed from the open round in
                 // our DB (see the "resuming with active round" prime at startup).
                 // `netidx_base` is the BASE, not `base/sortie` -- its last path
                 // segment (e.g. "campaign" from "/local/fowl/campaign") is NOT a
-                // sortie, and new_round() would clobber the live current_sortie
-                // with it, silently redirecting RPC/log subscriptions to a path
-                // that doesn't exist. Only fall back to that guess with nothing.
+                // sortie; only use it as a last-resort offline guess.
                 let sortie = self
                     .current_sortie
                     .lock()
                     .unwrap()
                     .clone()
+                    .or_else(|| {
+                        let s = start_sortie.trim();
+                        if s.is_empty() {
+                            None
+                        } else {
+                            Some(String::from(s))
+                        }
+                    })
                     .or_else(|| {
                         cfg.netidx_base.as_ref().map(|p| {
                             let s = format!("{p}");
@@ -1962,7 +2116,7 @@ impl StatsDb {
         };
         match stat {
             Stat::NewRound { .. } | Stat::RoundEnd { .. } => unreachable!(),
-            Stat::SessionStart { stop, cfg } => {
+            Stat::SessionStart { stop, cfg, .. } => {
                 self.session.insert(
                     &(ctx.round, time),
                     &Session {
@@ -1971,6 +2125,27 @@ impl StatsDb {
                         end: None,
                     },
                 )?;
+                // Fresh DCS session — clear connected left from abrupt shutdowns
+                // (no Disconnect). Bootstrap Connect stats follow SessionStart.
+                let stale: Vec<Ucid> = self
+                    .pilots
+                    .round_info
+                    .iter()
+                    .filter_map(|r| r.ok())
+                    .filter(|((_, rid), ri)| *rid == ctx.round && ri.connected.is_some())
+                    .map(|((ucid, _), _)| ucid)
+                    .collect();
+                if !stale.is_empty() {
+                    info!(
+                        "SessionStart: clearing {} stale connected flag(s) in round {:?}",
+                        stale.len(),
+                        ctx.round
+                    );
+                }
+                for ucid in stale {
+                    self.pilots
+                        .with_pilot_round_info(ucid, ctx.round, |ri| ri.connected = None)?;
+                }
             }
             Stat::SessionEnd {
                 api_perf,
@@ -2008,9 +2183,17 @@ impl StatsDb {
                 // a fresh ObjectiveHealth only follows when those values change,
                 // so clobbering here left the tactical map stuck at 100%.
                 let prev = self.objectives.get(&(ctx.round, id))?;
-                let (health, logi, supply, fuel, last_change) = match &prev {
-                    Some(o) => (o.health, o.logi, o.supply, o.fuel, o.last_change),
-                    None => (100, 100, 100, 100, time),
+                let (health, logi, supply, fuel, last_change, production, threatened) = match &prev {
+                    Some(o) => (
+                        o.health,
+                        o.logi,
+                        o.supply,
+                        o.fuel,
+                        o.last_change,
+                        o.production,
+                        o.threatened,
+                    ),
+                    None => (100, 100, 100, 100, time, 100, false),
                 };
                 self.objectives.insert(
                     &(ctx.round, id),
@@ -2025,6 +2208,8 @@ impl StatsDb {
                         logi,
                         supply,
                         fuel,
+                        production,
+                        threatened,
                     },
                 )?;
             }
@@ -2036,11 +2221,19 @@ impl StatsDb {
                 last_change,
                 health,
                 logi,
+                production,
+                threatened,
             } => {
                 self.with_objective((ctx.round, id), |o| {
                     o.last_change = last_change;
                     o.health = health;
-                    o.logi = logi
+                    o.logi = logi;
+                    if let Some(p) = production {
+                        o.production = p;
+                    }
+                    if let Some(t) = threatened {
+                        o.threatened = t;
+                    }
                 })?;
             }
             Stat::ObjectiveSupply { id, supply, fuel } => {
@@ -2142,6 +2335,9 @@ impl StatsDb {
                 aircraft,
                 method,
             } => {
+                if self.deploy_seen.get(&(ctx.round, gid))?.is_some() {
+                    return Ok(());
+                }
                 self.pilots.with_pilot_and_aggregates(
                     by,
                     ctx.round,
@@ -2159,6 +2355,7 @@ impl StatsDb {
                     debug!("DeployGroup: group {gid:?} not tracked yet ({e})");
                 }
                 let did = DeployId::new(&self.db)?;
+                self.deploy_seen.insert(&(ctx.round, gid), &did)?;
                 self.deploys.insert(
                     &(by, ctx.round, did),
                     &DeployRecord {
@@ -2282,6 +2479,10 @@ impl StatsDb {
                 })?;
             }
             Stat::Takeoff { id } => {
+                let dedup_key = (ctx.round, id, time.timestamp_millis());
+                if self.sortie_seen.get(&dedup_key)?.is_some() {
+                    return Ok(());
+                }
                 let sid = SortieId::new(&self.db)?;
                 let mut vehicle = None;
                 self.pilots.with_pilot_round_info(id, ctx.round, |ri| {
@@ -2291,6 +2492,9 @@ impl StatsDb {
                     }
                 })?;
                 let vehicle = vehicle.ok_or_else(|| anyhow!("{id} takeoff without slotting"))?;
+                // Commit only after slotting succeeds so a premature Takeoff
+                // ahead of Stat::Slot stays retryable.
+                self.sortie_seen.insert(&dedup_key, &sid)?;
                 // Track sortie count per aircraft type
                 let ac_key = (ctx.round, vehicle.to_string());
                 let (prev_cnt, prev_hrs) = self.aircraft_sorties.get(&ac_key)?.unwrap_or((0, 0.0));
@@ -2311,7 +2515,18 @@ impl StatsDb {
                         sid = sl.sortie.take();
                     }
                 })?;
-                let sid = sid.ok_or_else(|| anyhow!("{id} landed without taking off"))?;
+                let Some(sid) = sid else {
+                    debug!("{id} landed with no active sortie -- orphan or replay, ignoring");
+                    return Ok(());
+                };
+                if self
+                    .pilots
+                    .sortie
+                    .get(&(id, ctx.round, sid))?
+                    .is_some_and(|s| s.land.is_some())
+                {
+                    return Ok(());
+                }
                 // Add flight hours to aircraft sortie totals
                 let mut vehicle_str: Option<std::string::String> = None;
                 self.pilots.with_sortie((id, ctx.round, sid), |s| {
@@ -2524,6 +2739,9 @@ impl StatsDb {
         // Combat trees
         self.kills.clear()?;
         self.shared_kills.clear()?;
+        self.kill_seen.clear()?;
+        self.sortie_seen.clear()?;
+        self.deploy_seen.clear()?;
         self.units.clear()?;
         self.groups.clear()?;
         self.detected.clear()?;
@@ -2533,11 +2751,72 @@ impl StatsDb {
         self.liquids.clear()?;
         // Captures & sorties
         self.objective_captures.clear()?;
+        self.captures.clear()?;
+        self.deploys.clear()?;
         self.aircraft_sorties.clear()?;
         // Trails & weather
         self.trail_points.clear()?;
         if let Ok(mut w) = self.latest_weather.write() { *w = None; }
+        // Resume JSONL from current EOF so wiped counters are not refilled
+        // from historical Kill lines still in the log file.
+        if let Some(path) = &self.stats_jsonl {
+            let end = std::fs::metadata(path).map(|m| m.len()).unwrap_or(0);
+            self.jsonl_cursor.insert(&0u8, &end)?;
+        } else {
+            self.jsonl_cursor.clear()?;
+        }
         // auth_sessions, auth_states → preserved
+        Ok(())
+    }
+
+    /// Wipe derived stats trees and rewind cursors so the next start (or the
+    /// live JSONL loop) re-ingests from the top with idempotency guards.
+    pub(crate) fn rebuild_stats_from_archive(&self) -> Result<()> {
+        self.wipe_stats_derived_trees()?;
+        self.replay_cursor.clear()?;
+        self.jsonl_cursor.clear()?;
+        *self.current_sortie.lock().unwrap() = None;
+        Ok(())
+    }
+
+    fn wipe_stats_derived_trees(&self) -> Result<()> {
+        self.pilots.pilots.clear()?;
+        self.pilots.aggregates.clear()?;
+        self.pilots.by_name.clear()?;
+        self.pilots.sortie.clear()?;
+        self.pilots.round_info.clear()?;
+        self.seq.clear()?;
+        self.round.clear()?;
+        self.session.clear()?;
+        self.kills.clear()?;
+        self.shared_kills.clear()?;
+        self.kill_seen.clear()?;
+        self.sortie_seen.clear()?;
+        self.deploy_seen.clear()?;
+        self.units.clear()?;
+        self.groups.clear()?;
+        self.detected.clear()?;
+        self.objectives.clear()?;
+        self.equipment.clear()?;
+        self.liquids.clear()?;
+        self.objective_captures.clear()?;
+        self.captures.clear()?;
+        self.deploys.clear()?;
+        self.aircraft_sorties.clear()?;
+        self.trail_points.clear()?;
+        if let Ok(mut w) = self.latest_weather.write() {
+            *w = None;
+        }
+        Ok(())
+    }
+
+    /// Queue in-process JSONL rebuild (next jsonl_loop tick).
+    pub(crate) fn request_jsonl_rebuild(&self) -> Result<()> {
+        if self.stats_jsonl.is_none() {
+            bail!("no stats.jsonl configured -- use --rebuild-stats with --stats-jsonl offline");
+        }
+        self.jsonl_cursor.insert(&0u8, &0u64)?;
+        self.0.jsonl_reset.store(true, Ordering::SeqCst);
         Ok(())
     }
 }

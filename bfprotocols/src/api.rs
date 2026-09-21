@@ -14,6 +14,9 @@ type String = std::string::String;
 pub struct ObjectiveInfo {
     pub id: ObjectiveId,
     pub name: String,
+    /// `SETTINGS-aliases` label from bflib; equals `name` when unset. Live RPC only.
+    #[serde(default)]
+    pub display_name: Option<String>,
     pub kind: String,
     pub owner: Side,
     /// Position as (x, z) in DCS coordinates
@@ -26,6 +29,9 @@ pub struct ObjectiveInfo {
     pub supply: u8,
     /// Fuel level (0-100)
     pub fuel: u8,
+    /// OPR / hub production capacity (0-100). Missing on older payloads.
+    #[serde(default)]
+    pub production: Option<u8>,
     /// Whether the objective is currently threatened
     pub threatened: bool,
     /// Whether the objective can be captured right now (health low enough and

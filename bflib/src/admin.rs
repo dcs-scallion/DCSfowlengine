@@ -29,6 +29,9 @@ use crate::{
 };
 use anyhow::{Context as AnyhowContext, Result, anyhow, bail};
 use bfprotocols::{
+    api::{
+        Briefing, CampaignState, ObjectiveDetails, ObjectiveInfo,
+    },
     cfg::{Cfg, DeployableKind},
     db::{group::GroupId, objective::ObjectiveId},
     perf::Perf,
@@ -59,6 +62,7 @@ use regex::{Regex, RegexBuilder};
 use serde_json::{Value as JsonValue, json};
 use smallvec::{SmallVec, smallvec};
 use std::{
+    collections::HashMap,
     mem,
     path::{Path, PathBuf},
     str::FromStr,
@@ -170,6 +174,16 @@ pub enum AdminCommand {
     Shutdown,
     AirbaseExport,
     ScanWater,
+    // Dashboard / bfdb live query API (netidx)
+    QueryObjectives,
+    QueryObjective {
+        name: String,
+    },
+    QueryCampaignState,
+    QueryPerf,
+    QueryBriefing {
+        side: Side,
+    },
 }
 
 impl AdminCommand {
@@ -1275,6 +1289,142 @@ fn export_runtime_airbases(ctx: &Context, lua: MizLua) -> Result<PathBuf> {
     Ok(out)
 }
 
+// ── Dashboard / bfdb live query API (netidx) ─────────────────────────────────
+
+pub(crate) fn query_objectives(ctx: &Context) -> Vec<ObjectiveInfo> {
+    ctx.db
+        .objectives()
+        .map(|(_, obj)| {
+            let mut group_count = HashMap::new();
+            for (side, groups) in obj.groups() {
+                group_count.insert(format!("{:?}", side), groups.len());
+            }
+            ObjectiveInfo {
+                id: obj.id,
+                name: obj.name.to_string(),
+                display_name: Some(ctx.db.objective_display_name(obj)),
+                kind: obj.kind().name().to_string(),
+                owner: obj.owner,
+                pos: (obj.zone().pos().x, obj.zone().pos().y),
+                health: obj.health(),
+                logi: obj.logi(),
+                supply: obj.supply(),
+                fuel: obj.fuel(),
+                production: Some(obj.production()),
+                threatened: obj.threatened(),
+                captureable: obj.captureable(),
+                group_count,
+                priority: false,
+            }
+        })
+        .collect()
+}
+
+pub(crate) fn query_objective_details(ctx: &Context, name: &str) -> Result<ObjectiveDetails> {
+    let oid = get_airbase(&ctx.db, name)?;
+    let obj = ctx
+        .db
+        .persisted
+        .objectives
+        .get(&oid)
+        .ok_or_else(|| anyhow!("no such objective {oid}"))?;
+
+    let mut group_count = HashMap::new();
+    for (side, groups) in obj.groups() {
+        group_count.insert(format!("{:?}", side), groups.len());
+    }
+
+    let mut equipment = HashMap::new();
+    for (item, inv) in obj.warehouse().equipment() {
+        equipment.insert(item.to_string(), inv.stored);
+    }
+
+    let mut liquids = HashMap::new();
+    for (liquid_type, inv) in obj.warehouse().liquids() {
+        liquids.insert(format!("{:?}", liquid_type), inv.stored);
+    }
+
+    let pos = obj.zone().pos();
+    Ok(ObjectiveDetails {
+        info: ObjectiveInfo {
+            id: obj.id,
+            name: obj.name.to_string(),
+            display_name: Some(ctx.db.objective_display_name(obj)),
+            kind: obj.kind().name().to_string(),
+            owner: obj.owner,
+            pos: (pos.x, pos.y),
+            health: obj.health(),
+            logi: obj.logi(),
+            supply: obj.supply(),
+            fuel: obj.fuel(),
+            production: Some(obj.production()),
+            threatened: obj.threatened(),
+            captureable: obj.captureable(),
+            group_count,
+            priority: false,
+        },
+        equipment,
+        liquids,
+        points: obj.points(),
+    })
+}
+
+pub(crate) fn query_campaign_state(ctx: &Context) -> CampaignState {
+    let mut objectives_by_side: HashMap<std::string::String, usize> = HashMap::new();
+    let mut players_by_side: HashMap<std::string::String, usize> = HashMap::new();
+    let mut points_by_side: HashMap<std::string::String, i64> = HashMap::new();
+
+    for (_, obj) in ctx.db.objectives() {
+        *objectives_by_side
+            .entry(format!("{:?}", obj.owner))
+            .or_insert(0) += 1;
+    }
+
+    for (_, player) in ctx.db.persisted.players() {
+        *players_by_side
+            .entry(format!("{:?}", player.side))
+            .or_insert(0) += 1;
+        *points_by_side
+            .entry(format!("{:?}", player.side))
+            .or_insert(0) += player.points as i64;
+    }
+
+    CampaignState {
+        objectives_by_side,
+        players_by_side,
+        points_by_side,
+    }
+}
+
+/// Live session perf snapshot for bfdb admin (same shape as SessionEnd fields).
+pub(crate) fn query_perf() -> serde_json::Value {
+    let perf = unsafe { Perf::get_mut() };
+    let api_perf = unsafe { ApiPerf::get_mut() };
+    let engine = (*perf.inner).clone();
+    let frame = (*perf.frame).clone();
+    let api = (*api_perf.0).clone();
+    serde_json::json!({
+        "time": Utc::now(),
+        "frame": frame,
+        "api": api,
+        "engine": engine,
+    })
+}
+
+/// Kneeboard briefing stub — Fowl does not yet persist Vector-style navaids;
+/// returns an empty briefing so bfdb RPC does not time out.
+pub(crate) fn query_briefing(_ctx: &Context, _lua: MizLua, side: Side) -> Briefing {
+    Briefing {
+        side,
+        generated: Utc::now().to_rfc3339(),
+        navaids: vec![],
+        radios: vec![],
+        artillery: vec![],
+        deployables: vec![],
+        threats: vec![],
+    }
+}
+
 #[derive(Debug)]
 pub(super) enum Caller {
     Player(PlayerId),
@@ -1505,6 +1655,38 @@ pub(super) fn run_admin_commands(ctx: &mut Context, lua: MizLua) -> Result<Admin
                 }
                 Err(e) => reply_err!("the state could not be reset {e:?}"),
             },
+            AdminCommand::QueryObjectives => {
+                let objectives = query_objectives(ctx);
+                match serde_json::to_string(&objectives) {
+                    Ok(json) => replies.push(NetIdxValue::from(json)),
+                    Err(e) => reply_err!("failed to serialize objectives: {e:?}"),
+                }
+            }
+            AdminCommand::QueryObjective { name } => match query_objective_details(ctx, &name) {
+                Ok(details) => match serde_json::to_string(&details) {
+                    Ok(json) => replies.push(NetIdxValue::from(json)),
+                    Err(e) => reply_err!("failed to serialize objective: {e:?}"),
+                },
+                Err(e) => reply_err!("failed to query objective: {e:?}"),
+            },
+            AdminCommand::QueryCampaignState => {
+                let state = query_campaign_state(ctx);
+                match serde_json::to_string(&state) {
+                    Ok(json) => replies.push(NetIdxValue::from(json)),
+                    Err(e) => reply_err!("failed to serialize campaign state: {e:?}"),
+                }
+            }
+            AdminCommand::QueryPerf => match serde_json::to_string(&query_perf()) {
+                Ok(json) => replies.push(NetIdxValue::from(json)),
+                Err(e) => reply_err!("failed to serialize perf: {e:?}"),
+            },
+            AdminCommand::QueryBriefing { side } => {
+                let briefing = query_briefing(ctx, lua, side);
+                match serde_json::to_string(&briefing) {
+                    Ok(json) => replies.push(NetIdxValue::from(json)),
+                    Err(e) => reply_err!("failed to serialize briefing: {e:?}"),
+                }
+            }
         }
         match caller {
             Caller::Player(_) => (),

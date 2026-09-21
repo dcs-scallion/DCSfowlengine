@@ -19,3 +19,14 @@ $discordClientSecret = ""
 # with $dcsServerBotUrl in bfsystem.ps1 -- both must be set for Discord
 # account linking (dashboard "My Profile", cockpit UI) to work.
 $dcsServerBotApiKey = ""
+
+# Ciribob DCS-SRS HTTP API key — must match HTTP_SERVER_API_KEY in
+# Saved Games\...\Config\SRS.cfg for the instance bfdb proxies ($srsUrl).
+# bfdb sends it as the X-API-KEY header on GET {srsUrl}/clients.
+# Leave blank only if that SRS.cfg key is also blank (header is still sent).
+$srsApiKey = ""
+
+# Optional: override $netidxBase from bfsystem.ps1 (must match CFG netidx_base).
+# Leave unset to keep the default "/local/fowl/campaign". Set to "" only if
+# you intentionally want bfdb without --base.
+# $netidxBase = "/local/fowl/campaign"
