@@ -170,6 +170,40 @@ pub(crate) struct Aggregates {
     pub(crate) deaths: u32,
     pub(crate) hours: f32,
     pub(crate) donated_points: u32,
+    /// Ship (A/S) kills. Skipped in bincode so existing `aggregates` / `Pilot.total`
+    /// rows stay readable; persisted in `agg_ship_kills` / `pilot_ship_kills`.
+    #[serde(skip)]
+    pub(crate) ship_kills: u32,
+    /// CSAR rescues (pilots delivered). Side tables `agg_csar` / `pilot_csar`.
+    #[serde(skip)]
+    pub(crate) csar: u32,
+}
+
+fn total_kills(a: &Aggregates) -> u32 {
+    a.air_kills
+        .saturating_add(a.ground_kills)
+        .saturating_add(a.ship_kills)
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum KillTarget {
+    Air,
+    Ground,
+    Ship,
+}
+
+fn kill_target_from_tags(tags: &UnitTags) -> KillTarget {
+    if tags.contains(UnitTag::Aircraft) || tags.contains(UnitTag::Helicopter) {
+        KillTarget::Air
+    } else if tags.contains(UnitTag::ShipCarrier)
+        || tags.contains(UnitTag::ShipWithHeliport)
+        || tags.contains(UnitTag::ShipNoHeliport)
+        || tags.contains(UnitTag::Boat)
+    {
+        KillTarget::Ship
+    } else {
+        KillTarget::Ground
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -204,6 +238,7 @@ impl Default for PilotRoundInfo {
 pub(crate) struct Sortie {
     pub(crate) vehicle: Vehicle,
     pub(crate) takeoff: DateTime<Utc>,
+    /// End of sortie (landing or death / mid-air deslot).
     pub(crate) land: Option<DateTime<Utc>>,
 }
 
@@ -254,6 +289,17 @@ struct Pilots {
     by_name: Tree<String, ArrayVec<Ucid, 8>>,
     by_token: Tree<Uuid, Ucid>,
     sortie: Tree<(Ucid, RoundId, SortieId), Sortie>,
+    /// Side table: true = closed as Lost (death / mid-air deslot). Kept separate so
+    /// existing bincode `sortie` rows stay readable (no schema change on Sortie).
+    sortie_crashed: Tree<(Ucid, RoundId, SortieId), bool>,
+    /// Per-vehicle/round ship kills (parallel to `aggregates.ground_kills` path).
+    agg_ship_kills: Tree<(Ucid, Vehicle, RoundId), u32>,
+    /// Career ship kills (parallel to `Pilot.total`).
+    pilot_ship_kills: Tree<Ucid, u32>,
+    /// Per-vehicle/round CSAR rescues.
+    agg_csar: Tree<(Ucid, Vehicle, RoundId), u32>,
+    /// Career CSAR rescues.
+    pilot_csar: Tree<Ucid, u32>,
     round_info: Tree<(Ucid, RoundId), PilotRoundInfo>,
 }
 
@@ -265,8 +311,53 @@ impl Pilots {
             by_name: Tree::open(db, "by_name")?,
             by_token: Tree::open(db, "by_token")?,
             sortie: Tree::open(db, "sortie")?,
+            sortie_crashed: Tree::open(db, "sortie_crashed")?,
+            agg_ship_kills: Tree::open(db, "agg_ship_kills")?,
+            pilot_ship_kills: Tree::open(db, "pilot_ship_kills")?,
+            agg_csar: Tree::open(db, "agg_csar")?,
+            pilot_csar: Tree::open(db, "pilot_csar")?,
             round_info: Tree::open(db, "pilot_round_info")?,
         })
+    }
+
+    fn bump_ship_kill(&self, ucid: Ucid, round: RoundId) -> Result<()> {
+        self.pilot_ship_kills
+            .fetch_and_update(&ucid, |n| Some(n.unwrap_or(0).saturating_add(1)))?;
+        let vehicle = self
+            .round_info
+            .get(&(ucid, round))?
+            .and_then(|ri| ri.slot.and_then(|s| s.vehicle));
+        if let Some(vehicle) = vehicle {
+            self.agg_ship_kills
+                .fetch_and_update(&(ucid, vehicle, round), |n| {
+                    Some(n.unwrap_or(0).saturating_add(1))
+                })?;
+        }
+        Ok(())
+    }
+
+    fn bump_csar(&self, ucid: Ucid, round: RoundId) -> Result<()> {
+        self.pilot_csar
+            .fetch_and_update(&ucid, |n| Some(n.unwrap_or(0).saturating_add(1)))?;
+        let vehicle = self
+            .round_info
+            .get(&(ucid, round))?
+            .and_then(|ri| ri.slot.and_then(|s| s.vehicle));
+        if let Some(vehicle) = vehicle {
+            self.agg_csar
+                .fetch_and_update(&(ucid, vehicle, round), |n| {
+                    Some(n.unwrap_or(0).saturating_add(1))
+                })?;
+        }
+        Ok(())
+    }
+
+    fn career_ship_kills(&self, ucid: &Ucid) -> Result<u32> {
+        Ok(self.pilot_ship_kills.get(ucid)?.unwrap_or(0))
+    }
+
+    fn career_csar(&self, ucid: &Ucid) -> Result<u32> {
+        Ok(self.pilot_csar.get(ucid)?.unwrap_or(0))
     }
 
     fn with_pilot<F: FnMut(&mut Pilot)>(&self, k: Ucid, mut f: F) -> Result<()> {
@@ -496,6 +587,9 @@ pub(crate) struct StatsDbInner {
     deploys: Tree<(Ucid, RoundId, DeployId), DeployRecord>,
     // Aircraft sortie counts per round: (RoundId, vehicle_type) -> (sortie_count, total_hours_f32)
     aircraft_sorties: Tree<(RoundId, std::string::String), (u32, f32)>,
+    /// Last known activity per pilot/round (Takeoff/Land/Position/Disconnect/Deslot).
+    /// Used to close orphan In-flight sorties on Connect without crediting days of hours.
+    pilot_last_activity: Tree<(Ucid, RoundId), DateTime<Utc>>,
     // Admin-managed ban list (bfdb-native, separate from bflib's cfg.banned)
     admin_bans: Tree<Ucid, BanRecord>,
     // bfwiki content, keyed by page slug (e.g. "gameplay/objectives")
@@ -525,7 +619,7 @@ pub(crate) struct StatsDbInner {
     replay_cursor: Tree<u8, DateTime<Utc>>,
     /// Byte offset into stats.jsonl last fully ingested. Without this, every
     /// bfdb restart re-reads the file from 0 and re-applies every Stat::Kill
-    /// (inflating A/A and A/G victories). Key 0u8 — single-server layout.
+    /// (inflating A/A, A/G and A/S victories). Key 0u8 — single-server layout.
     jsonl_cursor: Tree<u8, u64>,
     /// Set by POST /api/admin/rebuild-stats; jsonl_loop wipes derived trees
     /// and re-ingests from offset 0 on the next tick.
@@ -621,6 +715,8 @@ fn stat_variant_name(s: &Stat) -> &'static str {
         Stat::Capture { .. } => "Capture",
         Stat::Repair { .. } => "Repair",
         Stat::SupplyTransfer { .. } => "SupplyTransfer",
+        Stat::DynamicCargoDelivery { .. } => "DynamicCargoDelivery",
+        Stat::CsarRescue { .. } => "CsarRescue",
         Stat::Kill(_) => "Kill",
         Stat::Unit { .. } => "Unit",
         Stat::Position { .. } => "Position",
@@ -716,6 +812,7 @@ impl StatsDb {
             captures: Tree::open(&db, "captures")?,
             deploys: Tree::open(&db, "deploys")?,
             aircraft_sorties: Tree::open(&db, "aircraft_sorties")?,
+            pilot_last_activity: Tree::open(&db, "pilot_last_activity")?,
             admin_bans: Tree::open(&db, "admin_bans")?,
             wiki_pages: Tree::open(&db, "wiki_pages")?,
             wiki_images: Tree::open(&db, "wiki_images")?,
@@ -830,6 +927,7 @@ impl StatsDb {
             captures: Tree::open(&db, "captures")?,
             deploys: Tree::open(&db, "deploys")?,
             aircraft_sorties: Tree::open(&db, "aircraft_sorties")?,
+            pilot_last_activity: Tree::open(&db, "pilot_last_activity")?,
             admin_bans: Tree::open(&db, "admin_bans")?,
             wiki_pages: Tree::open(&db, "wiki_pages")?,
             wiki_images: Tree::open(&db, "wiki_images")?,
@@ -1371,10 +1469,137 @@ impl StatsDb {
         Ok(())
     }
 
+    /// Close an open sortie at `end`, credit flight hours once. `crashed` marks
+    /// death / mid-air deslot (Flight Log shows Lost, not Landed).
+    fn finalize_sortie(
+        &self,
+        ucid: Ucid,
+        round: RoundId,
+        sid: SortieId,
+        end: DateTime<Utc>,
+        crashed: bool,
+    ) -> Result<()> {
+        let key = (ucid, round, sid);
+        let Some(s) = self.pilots.sortie.get(&key)? else {
+            return Ok(());
+        };
+        if s.land.is_some() {
+            return Ok(());
+        }
+        let takeoff = s.takeoff;
+        let vehicle = s.vehicle.to_string();
+        // Guard clock skew / bad event order — never stamp End before Takeoff.
+        let end = if end < takeoff { takeoff } else { end };
+        self.pilots.with_sortie(key, |s| {
+            s.land = Some(end);
+        })?;
+        self.pilots.sortie_crashed.insert(&key, &crashed)?;
+        let hours = ((end - takeoff).num_seconds().max(0) as f32) / 3600.0;
+        if hours > 0.0 {
+            let ac_key = (round, vehicle);
+            let (cnt, prev_hrs) = self.aircraft_sorties.get(&ac_key)?.unwrap_or((0, 0.0));
+            self.aircraft_sorties
+                .insert(&ac_key, &(cnt, prev_hrs + hours))?;
+            self.pilots.with_pilot_and_aggregates(
+                ucid,
+                round,
+                |p| p.total.hours += hours,
+                |a| a.hours += hours,
+            )?;
+        }
+        Ok(())
+    }
+
+    fn touch_pilot_activity(&self, ucid: Ucid, round: RoundId, time: DateTime<Utc>) -> Result<()> {
+        self.pilot_last_activity
+            .fetch_and_update(&(ucid, round), |prev| {
+                let t = prev.map(|p| if time > p { time } else { p }).unwrap_or(time);
+                Some(t)
+            })?;
+        Ok(())
+    }
+
+    /// Close the pilot's current open sortie (Lost / mid-air end).
+    /// Only the active slot sortie — never sweep every historical `land: None`
+    /// row in the round (that stamped death time onto old open legs and made
+    /// End / Duration nonsense).
+    fn finalize_open_sorties(
+        &self,
+        ucid: Ucid,
+        round: RoundId,
+        end: DateTime<Utc>,
+        crashed: bool,
+    ) -> Result<()> {
+        let mut sid: Option<SortieId> = None;
+        self.pilots.with_pilot_round_info(ucid, round, |ri| {
+            if let Some(sl) = ri.slot.as_mut() {
+                sid = sl.sortie.take();
+            }
+        })?;
+        if sid.is_none() {
+            // Slot already cleared (e.g. Kill after Deslot ordering); newest open only.
+            let mut best: Option<(SortieId, DateTime<Utc>)> = None;
+            for r in self.pilots.sortie.scan_prefix(&(ucid, round))? {
+                let ((_, _, id), s) = r?;
+                if s.land.is_none() {
+                    let take = best.map(|(_, t)| t);
+                    if take.map(|t| s.takeoff > t).unwrap_or(true) {
+                        best = Some((id, s.takeoff));
+                    }
+                }
+            }
+            sid = best.map(|(id, _)| id);
+        }
+        if let Some(sid) = sid {
+            self.finalize_sortie(ucid, round, sid, end, crashed)?;
+        }
+        Ok(())
+    }
+
+    /// Close every still-open Flight Log leg for this pilot (all rounds).
+    /// End time = last activity in that round when known, else takeoff (0 h) —
+    /// never Connect "now", so a late reconnect cannot credit days of air time.
+    fn finalize_orphan_sorties_on_connect(
+        &self,
+        ucid: Ucid,
+        connect_time: DateTime<Utc>,
+    ) -> Result<()> {
+        let mut open: Vec<(RoundId, SortieId, DateTime<Utc>)> = Vec::new();
+        for r in self.pilots.sortie.scan_prefix(&ucid)? {
+            let ((_, round, sid), s) = r?;
+            if s.land.is_none() {
+                open.push((round, sid, s.takeoff));
+            }
+        }
+        if open.is_empty() {
+            return Ok(());
+        }
+        for (round, sid, takeoff) in open {
+            let activity = self.pilot_last_activity.get(&(ucid, round))?;
+            let end = activity
+                .filter(|t| *t >= takeoff)
+                .unwrap_or(takeoff)
+                .min(connect_time);
+            // Clear slot pointer if it still names this orphan.
+            self.pilots.with_pilot_round_info(ucid, round, |ri| {
+                if let Some(sl) = ri.slot.as_mut() {
+                    if sl.sortie == Some(sid) {
+                        sl.sortie = None;
+                    }
+                }
+            })?;
+            self.finalize_sortie(ucid, round, sid, end, true)?;
+            debug!(
+                "Connect: closed orphan sortie {sid:?} ucid={ucid:?} round={round:?} takeoff={takeoff} end={end}"
+            );
+        }
+        Ok(())
+    }
+
     fn record_kill(&self, ctx: &mut StatCtxInner, dead: Dead) -> Result<()> {
         // Idempotency: one real kill = one (round, victim, death-time) triple.
         // Redelivery (JSONL re-read after restart, archive replay) would otherwise
-        // mint a second KillId and inflate A/A / A/G victories.
+        // mint a second KillId and inflate A/A / A/G / A/S victories.
         let victim_enid = match &dead.victim {
             Who::Player { ucid, .. } => EnId::Player(*ucid),
             Who::AI { uid, .. } => EnId::Unit(*uid),
@@ -1385,7 +1610,8 @@ impl StatsDb {
         }
         let kid = KillId::new(&self.db)?;
         self.kill_seen.insert(&dedup_key, &kid)?;
-        let air = match &dead.victim {
+        let kind = self.classify_kill_target(ctx.round, &dead)?;
+        match &dead.victim {
             Who::Player { ucid, .. } => {
                 self.pilots.with_pilot_and_aggregates(
                     *ucid,
@@ -1393,63 +1619,58 @@ impl StatsDb {
                     |p| p.total.deaths += 1,
                     |a| a.deaths += 1,
                 )?;
-                true
+                // End open flight on death: End time + duration + hours (Lost, not Landed).
+                self.finalize_open_sorties(*ucid, ctx.round, dead.time, true)?;
             }
-            Who::AI { uid, .. } => {
-                let tags = self
-                    .units
-                    .get(&(ctx.round, EnId::Unit(*uid)))?
-                    .map(|u| u.tags)
-                    .unwrap_or_default();
-                tags.contains(UnitTag::Aircraft) || tags.contains(UnitTag::Helicopter)
-            }
-        };
-        let any_hit = dead.shots.iter().any(|s| s.hit);
-        let up = |a: &mut Aggregates| {
-            if air {
-                a.air_kills += 1
-            } else {
-                a.ground_kills += 1
-            }
-        };
-        // A single kill can carry many qualifying shots (e.g. every round in a
-        // cannon burst, or several missiles that all register as hits) — credit
-        // each shooter's air/ground kill count at most once per kill, not once
-        // per shot, or one kill inflates the stat by the shot count.
-        let mut credited: SmallVec<[EnId; 2]> = SmallVec::new();
-        for shot in dead.shots.iter() {
-            if any_hit && !shot.hit {
-                continue;
-            }
-            let enid = match &shot.shooter {
-                Who::AI {
-                    ucid: None, uid, ..
-                } => EnId::Unit(*uid),
-                Who::Player { ucid, .. }
-                | Who::AI {
-                    ucid: Some(ucid), ..
-                } => {
-                    if !credited.contains(&EnId::Player(*ucid)) {
-                        self.pilots.with_pilot_and_aggregates(
-                            *ucid,
-                            ctx.round,
-                            |p| up(&mut p.total),
-                            |a| up(a),
-                        )?;
-                    }
-                    EnId::Player(*ucid)
-                }
-            };
-            if !credited.contains(&enid) {
-                credited.push(enid);
-            }
-            self.kills.insert(&(enid, ctx.round, kid), &dead)?;
-            self.with_shared_kills(kid, |sk| {
-                if !sk.contains(&enid) {
-                    sk.push(enid)
-                }
-            })?;
+            Who::AI { .. } => {}
         }
+        let any_hit = dead.shots.iter().any(|s| s.hit);
+        let up = |a: &mut Aggregates| match kind {
+            KillTarget::Air => a.air_kills += 1,
+            KillTarget::Ground => a.ground_kills += 1,
+            KillTarget::Ship => {}
+        };
+        // Dashboard / Kill Feed: one kill → one credit = finishing blow (latest hit).
+        // Prefer a non-self shot when DCS also logged initiator==target hits.
+        let finishing = if any_hit {
+            dead.shots
+                .iter()
+                .filter(|s| s.hit && s.shooter.unit() != dead.victim.unit())
+                .max_by_key(|s| s.time)
+                .or_else(|| dead.shots.iter().filter(|s| s.hit).max_by_key(|s| s.time))
+        } else {
+            dead.shots.iter().max_by_key(|s| s.time)
+        };
+        let Some(shot) = finishing else {
+            return Ok(());
+        };
+        let enid = match &shot.shooter {
+            Who::AI {
+                ucid: None, uid, ..
+            } => EnId::Unit(*uid),
+            Who::Player { ucid, .. }
+            | Who::AI {
+                ucid: Some(ucid), ..
+            } => {
+                if kind == KillTarget::Ship {
+                    self.pilots.bump_ship_kill(*ucid, ctx.round)?;
+                } else {
+                    self.pilots.with_pilot_and_aggregates(
+                        *ucid,
+                        ctx.round,
+                        |p| up(&mut p.total),
+                        |a| up(a),
+                    )?;
+                }
+                EnId::Player(*ucid)
+            }
+        };
+        self.kills.insert(&(enid, ctx.round, kid), &dead)?;
+        self.with_shared_kills(kid, |sk| {
+            if !sk.contains(&enid) {
+                sk.push(enid)
+            }
+        })?;
         Ok(())
     }
 
@@ -1476,10 +1697,13 @@ impl StatsDb {
                 for r in self.pilots.pilots.iter() {
                     let (ucid, pilot) = r?;
                     let name = pilot.name.last().map(|s| s.clone()).unwrap_or_default();
-                    entries.push((ucid, name, pilot.total));
+                    let mut total = pilot.total;
+                    total.ship_kills = self.pilots.career_ship_kills(&ucid)?;
+                    total.csar = self.pilots.career_csar(&ucid)?;
+                    entries.push((ucid, name, total));
                 }
                 entries.sort_by(|a, b| {
-                    (b.2.air_kills + b.2.ground_kills).cmp(&(a.2.air_kills + a.2.ground_kills))
+                    total_kills(&b.2).cmp(&total_kills(&a.2))
                 });
                 Ok(entries)
             }
@@ -1503,6 +1727,18 @@ impl StatsDb {
                     e.hours           += agg.hours;
                     e.donated_points  += agg.donated_points;
                 }
+                for r in self.pilots.agg_ship_kills.iter() {
+                    let ((ucid, _vehicle, round_id), n) = r?;
+                    if round_id != rid { continue; }
+                    let e = map.entry(ucid).or_insert_with(Aggregates::default);
+                    e.ship_kills = e.ship_kills.saturating_add(n);
+                }
+                for r in self.pilots.agg_csar.iter() {
+                    let ((ucid, _vehicle, round_id), n) = r?;
+                    if round_id != rid { continue; }
+                    let e = map.entry(ucid).or_insert_with(Aggregates::default);
+                    e.csar = e.csar.saturating_add(n);
+                }
                 let mut entries: Vec<(Ucid, String, Aggregates)> = map
                     .into_iter()
                     .map(|(ucid, agg)| {
@@ -1514,7 +1750,7 @@ impl StatsDb {
                     })
                     .collect();
                 entries.sort_by(|a, b| {
-                    (b.2.air_kills + b.2.ground_kills).cmp(&(a.2.air_kills + a.2.ground_kills))
+                    total_kills(&b.2).cmp(&total_kills(&a.2))
                 });
                 Ok(entries)
             }
@@ -1614,15 +1850,52 @@ impl StatsDb {
         Ok(result)
     }
 
-    /// Aircraft usage stats for a round, sorted by sortie count desc
-    pub(crate) fn aircraft_usage(&self, round: RoundId) -> Result<Vec<(std::string::String, u32, f32)>> {
-        // Returns Vec<(vehicle_type, sortie_count, total_hours)>
-        let mut result = Vec::new();
-        for r in self.aircraft_sorties.scan_prefix(&round)? {
-            let ((_, vehicle), (count, hours)) = r?;
-            result.push((vehicle, count, hours));
+    /// Aircraft usage for a round, optionally filtered by Blue/Red.
+    /// Built from pilot sorties + round side (not the unscoped aircraft_sorties tree).
+    pub(crate) fn aircraft_usage(
+        &self,
+        round: RoundId,
+        side_filter: Option<Side>,
+    ) -> Result<Vec<(std::string::String, u32, f32)>> {
+        use std::collections::HashMap;
+        let mut map: HashMap<std::string::String, (u32, f32)> = HashMap::new();
+        for r in self.pilots.round_info.iter() {
+            let ((ucid, rid), ri) = r?;
+            if rid != round {
+                continue;
+            }
+            let side = match ri.side.1 {
+                Side::Blue | Side::Red => ri.side.1,
+                _ => self.pilot_current_side(&ucid)?.unwrap_or(Side::Neutral),
+            };
+            if let Some(want) = side_filter {
+                if side != want {
+                    continue;
+                }
+            }
+            for sr in self.pilots.sortie.scan_prefix(&(ucid, round))? {
+                let ((_, _, _), s) = sr?;
+                let hours = match s.land {
+                    Some(land) => {
+                        let end = if land < s.takeoff { s.takeoff } else { land };
+                        ((end - s.takeoff).num_seconds().max(0) as f32) / 3600.0
+                    }
+                    None => 0.0,
+                };
+                let e = map.entry(s.vehicle.to_string()).or_insert((0, 0.0));
+                e.0 += 1;
+                e.1 += hours;
+            }
         }
-        result.sort_by(|a, b| b.1.cmp(&a.1));
+        let mut result: Vec<_> = map
+            .into_iter()
+            .map(|(vehicle, (count, hours))| (vehicle, count, hours))
+            .collect();
+        result.sort_by(|a, b| {
+            b.2.partial_cmp(&a.2)
+                .unwrap_or(std::cmp::Ordering::Equal)
+                .then(b.1.cmp(&a.1))
+        });
         Ok(result)
     }
 
@@ -1630,6 +1903,7 @@ impl StatsDb {
     pub(crate) fn connected_pilots(&self, round: RoundId) -> Result<Vec<(std::string::String, std::string::String, Side, Option<std::string::String>)>> {
         // Returns Vec<(ucid, name, side, aircraft_type)> for currently connected pilots
         let mut result = Vec::new();
+        let mut heal: SmallVec<[(Ucid, Side); 8]> = SmallVec::new();
         for r in self.pilots.round_info.iter() {
             let ((ucid, rid), ri) = r?;
             if rid != round { continue; }
@@ -1638,7 +1912,26 @@ impl StatsDb {
                 .and_then(|p| p.name.last().map(|s| s.to_string()))
                 .unwrap_or_default();
             let aircraft = ri.slot.and_then(|s| s.vehicle).map(|v| format!("{}", v));
-            result.push((ucid.to_string(), name, ri.side.1, aircraft));
+            // Register fires only once per campaign; later rounds often have Neutral
+            // until Sideswitch — fall back to last known Blue/Red and persist it.
+            let side = match ri.side.1 {
+                Side::Blue | Side::Red => ri.side.1,
+                _ => {
+                    let s = self.pilot_current_side(&ucid)?.unwrap_or(Side::Neutral);
+                    if matches!(s, Side::Blue | Side::Red) {
+                        heal.push((ucid, s));
+                    }
+                    s
+                }
+            };
+            result.push((ucid.to_string(), name, side, aircraft));
+        }
+        for (ucid, side) in heal {
+            let _ = self.pilots.with_pilot_round_info(ucid, round, |ri| {
+                if matches!(ri.side.1, Side::Neutral) {
+                    ri.side = (Utc::now(), side);
+                }
+            });
         }
         result.sort_by(|a, b| a.2.cmp(&b.2).then(a.1.cmp(&b.1)));
         Ok(result)
@@ -1652,9 +1945,13 @@ impl StatsDb {
         let mut blue_online = 0u32;
         let mut red_online  = 0u32;
         for r in self.pilots.round_info.iter() {
-            let ((_, rid), ri) = r?;
+            let ((ucid, rid), ri) = r?;
             if rid != round { continue; }
-            match ri.side.1 {
+            let side = match ri.side.1 {
+                Side::Blue | Side::Red => ri.side.1,
+                _ => self.pilot_current_side(&ucid)?.unwrap_or(Side::Neutral),
+            };
+            match side {
                 Side::Blue => {
                     blue_reg += 1;
                     if ri.connected.is_some() { blue_online += 1; }
@@ -1887,17 +2184,26 @@ impl StatsDb {
             None => Ok(None),
             Some(pilot) => {
                 let name = pilot.name.last().cloned().unwrap_or_default();
-                Ok(Some((name, pilot.total)))
+                let mut total = pilot.total;
+                total.ship_kills = self.pilots.career_ship_kills(ucid)?;
+                total.csar = self.pilots.career_csar(ucid)?;
+                Ok(Some((name, total)))
             }
         }
     }
 
-    /// All sorties for a pilot across all rounds, sorted chronologically
-    pub(crate) fn pilot_sorties(&self, ucid: &Ucid) -> Result<Vec<(RoundId, SortieId, Sortie)>> {
+    /// All sorties for a pilot across all rounds, sorted chronologically.
+    /// Last bool is crashed/Lost (death or mid-air deslot).
+    pub(crate) fn pilot_sorties(&self, ucid: &Ucid) -> Result<Vec<(RoundId, SortieId, Sortie, bool)>> {
         let mut result = Vec::new();
         for r in self.pilots.sortie.scan_prefix(ucid)? {
             let ((_, round_id, sortie_id), sortie) = r?;
-            result.push((round_id, sortie_id, sortie));
+            let crashed = self
+                .pilots
+                .sortie_crashed
+                .get(&(*ucid, round_id, sortie_id))?
+                .unwrap_or(false);
+            result.push((round_id, sortie_id, sortie, crashed));
         }
         // Sort chronologically
         result.sort_by(|a, b| a.2.takeoff.cmp(&b.2.takeoff));
@@ -1930,6 +2236,18 @@ impl StatsDb {
             e.deaths           += agg.deaths;
             e.hours            += agg.hours;
             e.donated_points   += agg.donated_points;
+        }
+        for r in self.pilots.agg_ship_kills.iter() {
+            let ((u, _vehicle, round_id), n) = r?;
+            if u != *ucid { continue; }
+            let e = map.entry(round_id).or_insert_with(Aggregates::default);
+            e.ship_kills = e.ship_kills.saturating_add(n);
+        }
+        for r in self.pilots.agg_csar.iter() {
+            let ((u, _vehicle, round_id), n) = r?;
+            if u != *ucid { continue; }
+            let e = map.entry(round_id).or_insert_with(Aggregates::default);
+            e.csar = e.csar.saturating_add(n);
         }
         let mut result: Vec<(Scenario, RoundId, Aggregates)> = map
             .into_iter()
@@ -1986,24 +2304,82 @@ impl StatsDb {
         Ok(kills)
     }
 
-    /// Same classification record_kill uses for air_kills vs ground_kills:
+    /// Unique kill events (one Dead / KillId) in a round — not per-hit and not
+    /// summed pilot credits (shared kills would otherwise inflate the total).
+    pub(crate) fn round_kill_count(&self, round: RoundId) -> Result<u32> {
+        let mut seen: std::collections::HashSet<KillId> = std::collections::HashSet::new();
+        for r in self.kills.iter() {
+            let ((_, rid, kid), _) = r?;
+            if rid == round {
+                seen.insert(kid);
+            }
+        }
+        Ok(seen.len() as u32)
+    }
+
+    /// Same classification record_kill uses for air_kills vs ground/ship:
     /// a player death always counts as air (players are always in aircraft),
     /// an AI death counts as air only if the unit is tagged Aircraft or
     /// Helicopter. Exposed separately so API consumers (e.g. the Discord
     /// kill-streak/achievement poller) can filter on the same definition
     /// instead of guessing from the raw DCS unit-type string.
     pub(crate) fn victim_is_air(&self, round: RoundId, victim: &Who) -> Result<bool> {
-        Ok(match victim {
-            Who::Player { .. } => true,
+        Ok(self.classify_victim_tags(round, victim, None)?.0 == KillTarget::Air)
+    }
+
+    pub(crate) fn victim_is_ship(&self, round: RoundId, victim: &Who, dead: Option<&Dead>) -> Result<bool> {
+        Ok(self.classify_victim_tags(round, victim, dead)?.0 == KillTarget::Ship)
+    }
+
+    fn classify_kill_target(&self, round: RoundId, dead: &Dead) -> Result<KillTarget> {
+        Ok(self.classify_victim_tags(round, &dead.victim, Some(dead))?.0)
+    }
+
+    /// Returns (kind, tags used). Same ship tags as Discord live-map Top10 A2S.
+    fn classify_victim_tags(
+        &self,
+        round: RoundId,
+        victim: &Who,
+        dead: Option<&Dead>,
+    ) -> Result<(KillTarget, UnitTags)> {
+        match victim {
+            Who::Player { .. } => Ok((KillTarget::Air, UnitTags::default())),
             Who::AI { uid, .. } => {
-                let tags = self
+                let mut tags = self
                     .units
                     .get(&(round, EnId::Unit(*uid)))?
                     .map(|u| u.tags)
                     .unwrap_or_default();
-                tags.contains(UnitTag::Aircraft) || tags.contains(UnitTag::Helicopter)
+                if tags.is_empty() {
+                    if let Some(dead) = dead {
+                        if let Some(typ) = dead
+                            .shots
+                            .iter()
+                            .find(|s| !s.target_typ.trim().is_empty())
+                            .map(|s| s.target_typ.as_str())
+                        {
+                            if let Some(cfg_tags) = self.unit_tags_from_session_cfg(round, typ)? {
+                                tags = cfg_tags;
+                            }
+                        }
+                    }
+                }
+                Ok((kill_target_from_tags(&tags), tags))
             }
-        })
+        }
+    }
+
+    fn unit_tags_from_session_cfg(&self, round: RoundId, typ: &str) -> Result<Option<UnitTags>> {
+        let mut best: Option<(DateTime<Utc>, UnitTags)> = None;
+        for r in self.session.scan_prefix(&round)? {
+            let ((_, ts), session) = r?;
+            if let Some(tags) = session.cfg.unit_classification.get(&Vehicle::from(typ)) {
+                if best.map_or(true, |(t, _)| ts >= t) {
+                    best = Some((ts, *tags));
+                }
+            }
+        }
+        Ok(best.map(|(_, t)| t))
     }
 
     fn add_stat(&self, ctx: &mut StatCtx, time: DateTime<Utc>, stat: Stat) -> Result<()> {
@@ -2285,6 +2661,12 @@ impl StatsDb {
                     |agg| agg.supply_transfers += 1,
                 )?;
             }
+            Stat::DynamicCargoDelivery { .. } => {
+                // Reserved for a future dashboard counter (Supply Runs uses SupplyTransfer).
+            }
+            Stat::CsarRescue { by, enemy: _ } => {
+                self.pilots.bump_csar(by, ctx.round)?;
+            }
             Stat::EquipmentInventory { id, item, amount } => {
                 self.equipment
                     .fetch_and_update(&(ctx.round, id, item), |_| Some(amount))?;
@@ -2396,27 +2778,47 @@ impl StatsDb {
                 self.pilots
                     .with_pilot_round_info(id, ctx.round, |ri| ri.side = (time, side))?;
             }
-            Stat::Connect { id, addr, name } => {
+            Stat::Connect { id, addr, name, side } => {
                 self.pilots.saw_pilot(id, name)?;
+                // Orphan In-flight legs (missed Disconnect/Deslot after client kick).
+                self.finalize_orphan_sorties_on_connect(id, time)?;
+                // Prefer side from the engine (registered player). Fall back to
+                // last known Blue/Red — Register is once-per-campaign so new
+                // rounds often start Neutral until Sideswitch/Slot.
+                let inherit = side
+                    .filter(|s| matches!(s, Side::Blue | Side::Red))
+                    .or_else(|| self.pilot_current_side(&id).ok().flatten());
                 self.pilots.with_pilot_round_info(id, ctx.round, |ri| {
-                    ri.connected = Some((time, addr.clone()))
+                    ri.connected = Some((time, addr.clone()));
+                    if let Some(side) = inherit.filter(|s| matches!(s, Side::Blue | Side::Red)) {
+                        ri.side = (time, side);
+                    }
                 })?;
             }
             Stat::Disconnect { id } => {
+                self.touch_pilot_activity(id, ctx.round, time)?;
+                // Same as Deslot: close open Flight Log (belt+suspenders if Deslot is lost).
+                self.finalize_open_sorties(id, ctx.round, time, true)?;
                 self.pilots
                     .with_pilot_round_info(id, ctx.round, |ri| ri.connected = None)?;
             }
-            Stat::Slot { id, slot, typ } => {
+            Stat::Slot { id, slot, typ, side } => {
                 self.pilots.with_pilot_round_info(id, ctx.round, |ri| {
                     ri.slot = Some(Slot {
                         time,
                         id: slot,
                         vehicle: typ.as_ref().map(|u| u.typ.clone()),
                         sortie: None,
-                    })
+                    });
+                    if let Some(side) = side.filter(|s| matches!(s, Side::Blue | Side::Red)) {
+                        ri.side = (time, side);
+                    }
                 })?;
             }
             Stat::Deslot { id } => {
+                self.touch_pilot_activity(id, ctx.round, time)?;
+                // Mid-air quit / death deslot with no Land yet — still credit air time.
+                self.finalize_open_sorties(id, ctx.round, time, true)?;
                 self.pilots
                     .with_pilot_round_info(id, ctx.round, |ri| ri.slot = None)?;
                 self.units.remove(&(ctx.round, EnId::Player(id)))?;
@@ -2451,6 +2853,9 @@ impl StatsDb {
             }
             Stat::Position { id, pos } => {
                 self.with_unit((ctx.round, id), |u| u.pos = pos)?;
+                if let EnId::Player(ucid) = id {
+                    self.touch_pilot_activity(ucid, ctx.round, time)?;
+                }
             }
             Stat::GroupDeleted { id } => {
                 if let Some(group) = self.groups.remove(&(ctx.round, id))? {
@@ -2507,6 +2912,7 @@ impl StatsDb {
                         vehicle,
                     },
                 )?;
+                self.touch_pilot_activity(id, ctx.round, time)?;
             }
             Stat::Land { id } => {
                 let mut sid: Option<SortieId> = None;
@@ -2519,35 +2925,8 @@ impl StatsDb {
                     debug!("{id} landed with no active sortie -- orphan or replay, ignoring");
                     return Ok(());
                 };
-                if self
-                    .pilots
-                    .sortie
-                    .get(&(id, ctx.round, sid))?
-                    .is_some_and(|s| s.land.is_some())
-                {
-                    return Ok(());
-                }
-                // Add flight hours to aircraft sortie totals
-                let mut vehicle_str: Option<std::string::String> = None;
-                self.pilots.with_sortie((id, ctx.round, sid), |s| {
-                    s.land = Some(time);
-                    vehicle_str = Some(s.vehicle.to_string());
-                })?;
-                if let Some(v) = vehicle_str {
-                    let hours = (time - self.pilots.sortie.get(&(id, ctx.round, sid))?
-                        .map(|s| s.takeoff).unwrap_or(time))
-                        .num_seconds() as f32 / 3600.0;
-                    let ac_key = (ctx.round, v);
-                    let (cnt, prev_hrs) = self.aircraft_sorties.get(&ac_key)?.unwrap_or((0, 0.0));
-                    self.aircraft_sorties.insert(&ac_key, &(cnt, prev_hrs + hours))?;
-                    // Also credit hours to pilot total and per-round aggregates
-                    self.pilots.with_pilot_and_aggregates(
-                        id,
-                        ctx.round,
-                        |p| p.total.hours += hours,
-                        |a| a.hours += hours,
-                    )?;
-                }
+                self.finalize_sortie(id, ctx.round, sid, time, false)?;
+                self.touch_pilot_activity(id, ctx.round, time)?;
             }
             Stat::Life { id, lives } => {
                 self.pilots.with_pilot_round_info(id, ctx.round, |ri| {
@@ -2731,6 +3110,11 @@ impl StatsDb {
         self.pilots.aggregates.clear()?;
         self.pilots.by_name.clear()?;
         self.pilots.sortie.clear()?;
+        self.pilots.sortie_crashed.clear()?;
+        self.pilots.agg_ship_kills.clear()?;
+        self.pilots.pilot_ship_kills.clear()?;
+        self.pilots.agg_csar.clear()?;
+        self.pilots.pilot_csar.clear()?;
         self.pilots.round_info.clear()?;
         // Round / mission trees
         self.seq.clear()?;
@@ -2754,6 +3138,7 @@ impl StatsDb {
         self.captures.clear()?;
         self.deploys.clear()?;
         self.aircraft_sorties.clear()?;
+        self.pilot_last_activity.clear()?;
         // Trails & weather
         self.trail_points.clear()?;
         if let Ok(mut w) = self.latest_weather.write() { *w = None; }
@@ -2784,6 +3169,11 @@ impl StatsDb {
         self.pilots.aggregates.clear()?;
         self.pilots.by_name.clear()?;
         self.pilots.sortie.clear()?;
+        self.pilots.sortie_crashed.clear()?;
+        self.pilots.agg_ship_kills.clear()?;
+        self.pilots.pilot_ship_kills.clear()?;
+        self.pilots.agg_csar.clear()?;
+        self.pilots.pilot_csar.clear()?;
         self.pilots.round_info.clear()?;
         self.seq.clear()?;
         self.round.clear()?;
@@ -2803,6 +3193,7 @@ impl StatsDb {
         self.captures.clear()?;
         self.deploys.clear()?;
         self.aircraft_sorties.clear()?;
+        self.pilot_last_activity.clear()?;
         self.trail_points.clear()?;
         if let Ok(mut w) = self.latest_weather.write() {
             *w = None;

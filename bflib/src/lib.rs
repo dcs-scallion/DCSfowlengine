@@ -535,7 +535,8 @@ fn on_player_try_connect(
         return Ok(Some(String::from(format_compact!("{e}"))));
     }
     ctx.db.player_connected(ucid, name.clone());
-    ctx.do_bg_task(Task::Stat(Stat::Connect { id: ucid, addr, name }));
+    let side = ctx.db.player(&ucid).map(|p| p.side).filter(|s| matches!(s, Side::Blue | Side::Red));
+    ctx.do_bg_task(Task::Stat(Stat::Connect { id: ucid, addr, name, side }));
     record_perf(&mut Arc::make_mut(&mut unsafe { Perf::get_mut() }.inner).dcs_hooks, ts);
     Ok(None)
 }
@@ -614,14 +615,6 @@ fn process_slot_rejection(ctx: &mut Context, id: PlayerId, ucid: Ucid, rej: Slot
             };
             ctx.db.ephemeral.msgs().send(MsgTyp::Chat(Some(id)), msg);
         }
-        SlotAuth::ParkingOccupied => {
-            ctx.db.ephemeral.msgs().send(
-                MsgTyp::Chat(Some(id)),
-                format_compact!(
-                    "Parking occupied — spawn cancelled, no life taken. Try again."
-                ),
-            );
-        }
         SlotAuth::NotRegistered(_) => warn!("unexpected NotRegistered"),
         SlotAuth::Yes(_) => warn!("slot was not rejected!"),
     }
@@ -656,6 +649,7 @@ fn try_occupy_slot(
             process_slot_rejection(ctx, id, ifo.ucid, rej);
             return Ok(false);
         }
+        // Sound must play here: LeaveUnit is after the player left the aircraft.
         ctx.db.play_life_return_while_in_aircraft(miz, &ifo.ucid);
     }
     match ctx.db.try_occupy_slot(miz, now, side, slot, &ifo.ucid) {
@@ -685,7 +679,17 @@ fn try_occupy_slot(
         SlotAuth::Yes(typ) => {
             ctx.db.ephemeral.cancel_force_to_spectators(&ifo.ucid);
             ctx.subscribed_jtac_menus.remove(&slot);
-            ctx.do_bg_task(Task::Stat(Stat::Slot { id: ifo.ucid, slot, typ }));
+            let side = ctx
+                .db
+                .player(&ifo.ucid)
+                .map(|p| p.side)
+                .filter(|s| matches!(s, Side::Blue | Side::Red));
+            ctx.do_bg_task(Task::Stat(Stat::Slot {
+                id: ifo.ucid,
+                slot,
+                typ,
+                side,
+            }));
             Ok(true)
         }
         rej => {
@@ -890,6 +894,78 @@ fn process_pending_airborne_deslot_penalties(ctx: &mut Context, now: DateTime<Ut
 fn finish_airborne_exit(ctx: &mut Context, ucid: Ucid, unit_id: &DcsOid<ClassUnit>) {
     ctx.airborne.remove(unit_id);
     clear_stale_airborne_session(ctx, ucid);
+}
+
+/// Nearest airborne enemy player within `radius` m (slot-leave kill credit).
+fn nearest_enemy_player_in_air(
+    db: &Db,
+    my_side: Side,
+    my_pos: na::Vector2<f64>,
+    radius: f64,
+) -> Option<DcsOid<ClassUnit>> {
+    let mut best: Option<(DcsOid<ClassUnit>, f64)> = None;
+    for (_ucid, p, inst) in db.instanced_players() {
+        if p.side == my_side || !inst.in_air {
+            continue;
+        }
+        let Some((slot, _)) = p.current_slot.as_ref() else {
+            continue;
+        };
+        let Some(oid) = db.ephemeral.get_object_id_by_slot(slot) else {
+            continue;
+        };
+        let epos = na::Vector2::new(inst.position.p.x, inst.position.p.z);
+        let d = na::distance(&my_pos.into(), &epos.into());
+        if d <= radius && best.as_ref().map(|(_, bd)| d < *bd).unwrap_or(true) {
+            best = Some((oid.clone(), d));
+        }
+    }
+    best.map(|(oid, _)| oid)
+}
+
+/// Synthetic kill when bailing a slot under threat (Vector `slot_leave_kill_radius_m`).
+fn credit_slot_leave_under_threat(
+    ctx: &mut Context,
+    target_oid: &DcsOid<ClassUnit>,
+    my_side: Side,
+    my_pos: na::Vector2<f64>,
+    now: DateTime<Utc>,
+) {
+    let radius = ctx.db.ephemeral.cfg.slot_leave_kill_radius_m;
+    if radius <= 0.0 {
+        return;
+    }
+    let Some(enemy_oid) = nearest_enemy_player_in_air(&ctx.db, my_side, my_pos, radius) else {
+        return;
+    };
+    let shooter = shots::who(&ctx.db, enemy_oid.clone());
+    let target = shots::who(&ctx.db, target_oid.clone());
+    let s_typ = ctx
+        .db
+        .ephemeral
+        .get_slot_by_object_id(&enemy_oid)
+        .and_then(|sl| ctx.db.ephemeral.get_slot_info(sl))
+        .map(|si| String::from(si.typ.as_str()));
+    let t_typ = ctx
+        .db
+        .ephemeral
+        .get_slot_by_object_id(target_oid)
+        .and_then(|sl| ctx.db.ephemeral.get_slot_info(sl))
+        .map(|si| String::from(si.typ.as_str()))
+        .unwrap_or_else(|| String::from("aircraft"));
+    if let (Some(shooter), Some(target)) = (shooter, target) {
+        info!(
+            "slot leave under threat: crediting kill on {target_oid:?} to {enemy_oid:?} (r={radius}m)"
+        );
+        ctx.shots_out.abandoned_under_threat(
+            target_oid.clone(),
+            shooter,
+            target,
+            s_typ,
+            t_typ,
+            now,
+        );
+    }
 }
 
 fn mark_airborne_voluntary_eject(ctx: &mut Context, ucid: Ucid) {
@@ -1440,6 +1516,23 @@ fn on_event(lua: MizLua, ev: Event) -> Result<()> {
                         if ctx.airborne_voluntary_eject.contains(&ucid) {
                             ctx.pending_airborne_death_on_penalty.insert(ucid);
                         }
+                        let leave = ctx.db.player(&ucid).and_then(|p| {
+                            p.current_slot
+                                .as_ref()
+                                .and_then(|(_, i)| i.as_ref())
+                                .map(|inst| {
+                                    (
+                                        p.side,
+                                        na::Vector2::new(inst.position.p.x, inst.position.p.z),
+                                    )
+                                })
+                        });
+                        if let Some((side, pos)) = leave {
+                            ctx.shots_out.dead(initiator.clone(), start_ts);
+                            credit_slot_leave_under_threat(
+                                ctx, &initiator, side, pos, start_ts,
+                            );
+                        }
                         ctx.db
                             .campaign_record_player_airframe_loss(&ucid, &initiator);
                         schedule_airborne_deslot_penalty(ctx, ucid, start_ts);
@@ -1449,12 +1542,21 @@ fn on_event(lua: MizLua, ev: Event) -> Result<()> {
                     }
                 }
                 if let Some(ucid) = ctx.db.player_in_unit(false, &initiator) {
-                    if let Some(player) = ctx.db.player(&ucid) {
-                        if let Some((_, Some(inst))) = player.current_slot.as_ref() {
-                            if inst.landed_at_objective.is_none() {
-                                ctx.shots_out.dead(initiator.clone(), start_ts)
-                            }
-                        }
+                    let leave = ctx.db.player(&ucid).and_then(|p| {
+                        p.current_slot
+                            .as_ref()
+                            .and_then(|(_, i)| i.as_ref())
+                            .filter(|inst| inst.landed_at_objective.is_none())
+                            .map(|inst| {
+                                (
+                                    p.side,
+                                    na::Vector2::new(inst.position.p.x, inst.position.p.z),
+                                )
+                            })
+                    });
+                    if let Some((side, pos)) = leave {
+                        ctx.shots_out.dead(initiator.clone(), start_ts);
+                        credit_slot_leave_under_threat(ctx, &initiator, side, pos, start_ts);
                     }
                 }
                 let ca_oid = initiator.clone();
@@ -1506,8 +1608,21 @@ fn on_event(lua: MizLua, ev: Event) -> Result<()> {
                                 }
                             }
                         }
+                        // Prefer sound already played at TryChangeSlot while occupied.
                         if !ctx.db.life_return_sound_already_played(&ucid) {
-                            ctx.db.play_sound_player(lua, "life_return", &slot);
+                            let unit_id = Unit::get_instance(lua, &initiator)
+                                .ok()
+                                .and_then(|u| u.id().ok());
+                            if let Some(unit_id) = unit_id {
+                                ctx.db.play_sound_unit(lua, "life_return", unit_id);
+                            } else if let Some(miz_gid) = ctx
+                                .db
+                                .ephemeral
+                                .get_slot_info(&slot)
+                                .map(|sifo| sifo.miz_gid)
+                            {
+                                ctx.db.play_sound_group(lua, "life_return", miz_gid);
+                            }
                         }
                         if let Some((ucid, slot)) = deslot {
                             ctx.db.player_deslot_slot(&ucid, &slot);
@@ -1539,12 +1654,15 @@ fn on_event(lua: MizLua, ev: Event) -> Result<()> {
                 if let Some(shooter) =
                     crate::shots::who_from_initiator(&ctx.db, e.initiator.as_ref())
                 {
+                    let shooter_typ =
+                        crate::shots::shooter_typ_from_initiator(e.initiator.as_ref());
                     if let Err(e) = ctx.shots_out.hit_by_who(
                         &ctx.db,
                         start_ts,
                         dead,
                         &target,
                         shooter,
+                        shooter_typ,
                         e.weapon_name.clone(),
                     ) {
                         error!("error processing hit event {:?}", e)
@@ -1747,8 +1865,9 @@ fn on_event(lua: MizLua, ev: Event) -> Result<()> {
                     let _ = ctx.airborne.remove(&id);
                 } else if !ctx.recently_born.contains_key(&id)
                     && ctx.airborne.insert(id.clone())
-                    && ctx.recently_landed.remove(&id).is_none()
                 {
+                    // Clear land debounce so hop-ups after touchdown still open a sortie.
+                    let _ = ctx.recently_landed.remove(&id);
                     let slot = unit.slot()?;
                     let position = unit.get_ground_position()?.0;
                     match ctx.db.takeoff(Utc::now(), slot, &unit, position) {
@@ -1792,6 +1911,10 @@ fn on_event(lua: MizLua, ev: Event) -> Result<()> {
                 if !ctx.recently_born.contains_key(&id) {
                     let _ = ctx.airborne.remove(&id);
                     ctx.recently_landed.insert(id, Utc::now());
+                    // Flight hours: close sortie immediately (do not wait for life-return delay).
+                    if let Ok(slot) = unit.slot() {
+                        ctx.db.record_sortie_land(slot);
+                    }
                 }
                 if let Some(place) = e.place.as_ref() {
                     if let Ok(slot) = unit.slot() {
@@ -2353,8 +2476,21 @@ fn handle_player_leave_unit_no_initiator(
                         }
                     }
                 }
+                // Prefer sound already played at TryChangeSlot while occupied.
                 if !ctx.db.life_return_sound_already_played(&ucid) {
-                    ctx.db.play_sound_player(lua, "life_return", &slot);
+                    let unit_id = Unit::get_instance(lua, &objid)
+                        .ok()
+                        .and_then(|u| u.id().ok());
+                    if let Some(unit_id) = unit_id {
+                        ctx.db.play_sound_unit(lua, "life_return", unit_id);
+                    } else if let Some(miz_gid) = ctx
+                        .db
+                        .ephemeral
+                        .get_slot_info(&slot)
+                        .map(|sifo| sifo.miz_gid)
+                    {
+                        ctx.db.play_sound_group(lua, "life_return", miz_gid);
+                    }
                 }
                 if let Some((ucid, slot)) = deslot {
                     ctx.db.player_deslot_slot(&ucid, &slot);
@@ -2885,10 +3021,11 @@ fn delayed_init_miz(lua: MizLua) -> Result<()> {
         crate::db::server_maintenance::run(&writedir, &cfg.server_maintenance);
     }
     info!(
-        "campaign cfg: airborne_deslot_block={} airborne_deslot_penalty_secs={} airborne_deslot_penalty_points={} csar={} virtual_resupply={} virtual_resupply_threatened_without_deliveries={}",
+        "campaign cfg: airborne_deslot_block={} airborne_deslot_penalty_secs={} airborne_deslot_penalty_points={} slot_leave_kill_radius_m={} csar={} virtual_resupply={} virtual_resupply_threatened_without_deliveries={}",
         cfg.airborne_deslot_block,
         cfg.airborne_deslot_penalty_secs,
         cfg.airborne_deslot_penalty_points,
+        cfg.slot_leave_kill_radius_m,
         cfg.csar.enabled,
         cfg.virtual_resupply,
         cfg.virtual_resupply_threatened_without_deliveries,
@@ -3015,10 +3152,12 @@ fn delayed_init_miz(lua: MizLua) -> Result<()> {
         ctx.db.player_connected(ucid, name.clone());
         // Same as onPlayerTryConnect — without this, /api/online stays empty
         // for anyone who was already on the server when the mission loaded.
+        let side = ctx.db.player(&ucid).map(|p| p.side).filter(|s| matches!(s, Side::Blue | Side::Red));
         ctx.do_bg_task(Task::Stat(Stat::Connect {
             id: ucid,
             addr: addr.unwrap_or_default(),
             name: name.clone(),
+            side,
         }));
         let welcome = if let Some(player) = ctx.db.player(&ucid) {
             format_compact!(

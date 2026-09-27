@@ -2254,7 +2254,23 @@ impl Db {
                     *pos /= *n as f64
                 }
             }
-            let spawnloc = if pos_by_typ.is_empty() {
+            const MIN_COMPONENT_SPREAD_M: f64 = 50.0;
+            let use_template = if pos_by_typ.len() > 1 {
+                let positions: Vec<Vector2> = pos_by_typ.values().copied().collect();
+                let mut max_dist_sq = 0.0;
+                for (i, a) in positions.iter().enumerate() {
+                    for b in positions.iter().skip(i + 1) {
+                        let dist_sq = na::distance_squared(&(*a).into(), &(*b).into());
+                        if dist_sq > max_dist_sq {
+                            max_dist_sq = dist_sq;
+                        }
+                    }
+                }
+                max_dist_sq < MIN_COMPONENT_SPREAD_M.powi(2)
+            } else {
+                pos_by_typ.is_empty()
+            };
+            let spawnloc = if use_template {
                 SpawnLoc::AtPos {
                     pos: centroid,
                     offset_direction: Vector2::default(),
@@ -2698,12 +2714,21 @@ impl Db {
                                 for cr in have.values().flat_map(|c| c.iter()) {
                                     self.delete_group(&cr.group)?
                                 }
+                                let aircraft = self
+                                    .ephemeral
+                                    .get_slot_info(slot)
+                                    .map(|s| String::from(s.typ.as_str()));
+                                let method = Some(String::from(if st.in_air {
+                                    "AirDrop"
+                                } else {
+                                    "ManualUnpack"
+                                }));
                                 self.ephemeral.stat(Stat::DeployGroup {
                                     gid,
                                     by: st.ucid,
                                     deployable: dep.clone(),
-                                    aircraft: None,
-                                    method: None,
+                                    aircraft,
+                                    method,
                                 });
                                 let invest = deployable_invest_bucket(template, &self.ephemeral.cfg);
                                 let frac = self.charge_for_item(

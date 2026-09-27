@@ -30,7 +30,7 @@ use smallvec::SmallVec;
 const CSAR_EXTRACT_WALK_REISSUE: chrono::Duration = chrono::Duration::seconds(5);
 
 impl Db {
-    pub(super) fn clear_csar_extract(&mut self, gid: &GroupId) {
+    pub(crate) fn clear_csar_extract(&mut self, gid: &GroupId) {
         self.ephemeral.csar_extracting.remove(gid);
         self.ephemeral.csar_extract_walk_at.remove(gid);
     }
@@ -41,6 +41,20 @@ impl Db {
         let Some(ucid) = self.csar_owner_of_group(gid) else {
             return;
         };
+        {
+            let Some(player) = self.persisted.players.get_mut_cow(&ucid) else {
+                return;
+            };
+            if let Some(idx) = player
+                .csar_downed
+                .iter()
+                .position(|c| c.group_id.as_ref() == Some(gid))
+            {
+                if let Some(csar) = player.csar_downed.get_mut(idx) {
+                    delete_csar_marks(self.ephemeral.msgs(), csar);
+                }
+            }
+        }
         let Some(player) = self.persisted.players.get_mut_cow(&ucid) else {
             return;
         };
@@ -49,8 +63,7 @@ impl Db {
             .iter()
             .position(|c| c.group_id.as_ref() == Some(gid))
         {
-            let mut csar = player.csar_downed.remove(idx);
-            delete_csar_marks(self.ephemeral.msgs(), &mut csar);
+            let csar = player.csar_downed.remove(idx);
             self.ephemeral.csar_pilot_unit.remove(&csar.pilot_unit);
             self.ephemeral.dirty();
             info!("csar: downed group {gid} destroyed for {ucid:?}");
@@ -350,6 +363,10 @@ impl Db {
                     );
                 }
             }
+            self.ephemeral.stat(Stat::CsarRescue {
+                by: ucid,
+                enemy: pilot.enemy,
+            });
         }
         Ok(format_compact!(
             "delivered {n_friendly} coalition and {n_enemy} enemy pilot(s)"
@@ -422,6 +439,14 @@ impl Db {
                 let Some(idx) = doomed else {
                     break;
                 };
+                {
+                    let Some(player) = self.persisted.players.get_mut_cow(&ucid) else {
+                        break;
+                    };
+                    if let Some(csar) = player.csar_downed.get_mut(idx) {
+                        delete_csar_marks(self.ephemeral.msgs(), csar);
+                    }
+                }
                 let Some(csar) = self
                     .persisted
                     .players
@@ -746,7 +771,7 @@ impl Db {
                 .action()?
                 .set_unit_internal_cargo(unit_name, mass);
         }
-        let csar = {
+        {
             let player = self
                 .persisted
                 .players
@@ -755,6 +780,16 @@ impl Db {
             if idx >= player.csar_downed.len() {
                 bail!("no csar entry")
             }
+            if let Some(csar) = player.csar_downed.get_mut(idx) {
+                delete_csar_marks(self.ephemeral.msgs(), csar);
+            }
+        }
+        let csar = {
+            let player = self
+                .persisted
+                .players
+                .get_mut_cow(&pucid)
+                .ok_or_else(|| anyhow!("no player"))?;
             player.csar_downed.remove(idx)
         };
         self.remove_csar_entry(&csar);
@@ -809,7 +844,7 @@ impl Db {
                 .action()?
                 .set_unit_internal_cargo(unit_name, mass);
         }
-        let csar = {
+        {
             let player = self
                 .persisted
                 .players
@@ -818,6 +853,16 @@ impl Db {
             if idx >= player.csar_downed.len() {
                 bail!("no csar entry")
             }
+            if let Some(csar) = player.csar_downed.get_mut(idx) {
+                delete_csar_marks(self.ephemeral.msgs(), csar);
+            }
+        }
+        let csar = {
+            let player = self
+                .persisted
+                .players
+                .get_mut_cow(&pucid)
+                .ok_or_else(|| anyhow!("no player"))?;
             player.csar_downed.remove(idx)
         };
         self.remove_csar_entry(&csar);

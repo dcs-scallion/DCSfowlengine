@@ -807,12 +807,35 @@ fn status_vs_with_ratio_html(blue: u32, red: u32) -> String {
     )
 }
 
+/// Per-side 0–100 scale (production % or factory count): fixed halves, fill
+/// anchored at center, remainder black. No center seam.
+fn status_half_fill_bar_html(blue: u8, red: u8) -> String {
+    let b = blue.min(100) as u32;
+    let r = red.min(100) as u32;
+    format!(
+        r#"<div class="stat-prod" aria-hidden="true"><span class="stat-prod-half"><span class="stat-prod-empty" style="width:{b_empty}%"></span><span class="stat-prod-b" style="width:{b}%"></span></span><span class="stat-prod-half"><span class="stat-prod-r" style="width:{r}%"></span><span class="stat-prod-empty" style="width:{r_empty}%"></span></span></div>"#,
+        b_empty = 100 - b,
+        b = b,
+        r = r,
+        r_empty = 100 - r,
+    )
+}
+
+fn status_vs_with_half_bar_html(blue: u32, red: u32) -> String {
+    format!(
+        "{vs}{bar}",
+        vs = status_vs_html(blue, red),
+        bar = status_half_fill_bar_html(blue.min(100) as u8, red.min(100) as u8),
+    )
+}
+
 fn status_production_html(blue: Option<u8>, red: Option<u8>) -> String {
     let blue_s = blue.map(|v| v.to_string()).unwrap_or_else(|| "—".into());
     let red_s = red.map(|v| v.to_string()).unwrap_or_else(|| "—".into());
-    let bar = match (blue, red) {
-        (Some(b), Some(r)) => status_ratio_bar_html(b as f64, r as f64),
-        _ => String::new(),
+    let bar = if blue.is_some() || red.is_some() {
+        status_half_fill_bar_html(blue.unwrap_or(0), red.unwrap_or(0))
+    } else {
+        String::new()
     };
     format!(
         r#"<span class="stat-vs"><span class="stat-blue">{blue_s}</span> vs <span class="stat-red">{red_s}</span></span>{bar}"#
@@ -989,7 +1012,7 @@ fn stats_row_html(bar: &DiscordMapStatusBar, top: bool) -> String {
             restart_cls = restart_cls,
             ground = status_vs_with_ratio_html(bar.ground_blue, bar.ground_red),
             carrier = status_vs_with_ratio_html(bar.carrier_blue, bar.carrier_red),
-            factories = status_vs_with_ratio_html(bar.factories_blue, bar.factories_red),
+            factories = status_vs_with_half_bar_html(bar.factories_blue, bar.factories_red),
             production = status_production_html(bar.production_blue, bar.production_red),
             balancing = status_balancing_html(bar.balancing_blue, bar.balancing_red),
             online_hours = online_hours,
@@ -1309,6 +1332,12 @@ body{{margin:0;background:#000;color:#686a6e;font-family:"Roboto Condensed",Robo
 .stat-ratio-b,.stat-ratio-r{{display:block;height:100%;flex:0 0 auto}}
 .stat-ratio-b{{background:#2E5AAC}}
 .stat-ratio-r{{background:#C43838}}
+.stat-prod{{display:flex;flex-direction:row;flex-wrap:nowrap;width:100%;height:5px;margin-top:4px;overflow:hidden;box-sizing:border-box;background:#000}}
+.stat-prod-half{{display:flex;flex-direction:row;flex-wrap:nowrap;width:50%;height:100%;min-width:0}}
+.stat-prod-b,.stat-prod-r,.stat-prod-empty{{display:block;height:100%;flex:0 0 auto}}
+.stat-prod-b{{background:#2E5AAC}}
+.stat-prod-r{{background:#C43838}}
+.stat-prod-empty{{background:#000}}
 .stat-plain{{color:#686a6e}}
 .stat-red{{color:#C43838}}
 .stat-blue{{color:#2E5AAC}}

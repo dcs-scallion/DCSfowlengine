@@ -854,6 +854,27 @@ impl Db {
             for gid in &self.persisted.troops {
                 self.ephemeral.push_spawn(*gid);
             }
+            for gid in &self.persisted.csar_pilots {
+                let template_ok = self.persisted.groups.get(gid).is_some_and(|g| {
+                    let name = g.template_name.as_str();
+                    self.ephemeral
+                        .cfg
+                        .csar
+                        .pilot_template_red
+                        .as_ref()
+                        .is_some_and(|t| t.as_str() == name)
+                        || self
+                            .ephemeral
+                            .cfg
+                            .csar
+                            .pilot_template_blue
+                            .as_ref()
+                            .is_some_and(|t| t.as_str() == name)
+                });
+                if template_ok {
+                    self.ephemeral.push_spawn(*gid);
+                }
+            }
             let actions: SmallVec<[GroupId; 16]> =
                 SmallVec::from_iter(self.persisted.actions.into_iter().map(|g| *g));
             debug!("respawn actions");

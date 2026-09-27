@@ -14,13 +14,14 @@ FITNESS FOR A PARTICULAR PURPOSE. See the GNU Affero Public License
 for more details.
 */
 
-use super::{Db, player::InstancedPlayer};
+use super::{group::DeployKind, player::InstancedPlayer, Db};
 use crate::{
     msgq::MsgQ,
-    spawnctx::{SpawnCtx, Spawned},
+    spawnctx::{SpawnCtx, SpawnLoc, Spawned},
 };
 use anyhow::{Context, Result, bail};
-use bfprotocols::cfg::{LifeType, Vehicle};
+use bfprotocols::cfg::{LifeType, UnitTag, Vehicle};
+use enumflags2::BitFlags;
 use bfprotocols::db::group::{GroupId, UnitId};
 use bfprotocols::stats::EnId;
 use chrono::prelude::*;
@@ -80,8 +81,6 @@ pub fn life_type_map_abbrev(lt: LifeType) -> &'static str {
 }
 
 const CSAR_LANDED_CIRCLE_RADIUS_M: f64 = 500.;
-/// Drop airborne CSAR when DCS chute OID stays missing this long (no LandingAfterEjection).
-const CSAR_AIRBORNE_CHUTE_MISSING_GRACE: chrono::Duration = chrono::Duration::seconds(45);
 
 /// Downed pilot awaiting CSAR (persisted; future pickup/rescue hooks).
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -157,20 +156,20 @@ fn csar_life_type_mark_label(base: &str) -> String {
     }
 }
 
-fn csar_pilot_mark_label(player_name: &str, life_type_label: &str) -> String {
-    format!(
-        "downed pilot {player_name} ({})",
-        csar_life_type_mark_label(life_type_label)
-    )
-    .into()
+fn csar_pilot_mark_label(
+    player_name: &str,
+    life_type_label: &str,
+    gid: Option<GroupId>,
+) -> String {
+    let life = csar_life_type_mark_label(life_type_label);
+    match gid {
+        Some(gid) => format!("downed pilot {player_name} ({life}) {gid}").into(),
+        None => format!("downed pilot {player_name} ({life})").into(),
+    }
 }
 
 fn csar_pilot_mark_message(player_name: &str, life_type_label: &str) -> String {
     format!("{player_name} ({life_type_label})").into()
-}
-
-fn csar_pilot_circle_popup(player_name: &str, life_type_label: &str) -> String {
-    csar_pilot_mark_label(player_name, life_type_label)
 }
 
 pub(super) fn delete_csar_marks(msgs: &mut MsgQ, csar: &mut CsarDowned) {
@@ -408,8 +407,6 @@ enum CsarPilotMissingAction {
     Rebound,
     Killed,
     AwaitRebind,
-    /// Airborne chute gone long enough — stop CSAR tracking.
-    Cancelled,
 }
 
 fn sync_csar_pilot_mark(
@@ -429,7 +426,7 @@ fn sync_csar_pilot_mark(
         return;
     }
     let pos = LuaVec3(csar.inst.position.p.0);
-    let label = csar_pilot_mark_label(player_name, life_type_label);
+    let label = csar_pilot_mark_label(player_name, life_type_label, csar.group_id);
     let mark_body = csar_pilot_mark_message(player_name, life_type_label);
     let circle_id = MarkId::new();
     let spec = CircleSpec {
@@ -444,7 +441,11 @@ fn sync_csar_pilot_mark(
         side,
         circle_id,
         spec,
-        Some(csar_pilot_circle_popup(player_name, life_type_label)),
+        Some(csar_pilot_mark_label(
+            player_name,
+            life_type_label,
+            csar.group_id,
+        )),
     );
     let point_id = MarkId::new();
     msgs.coalition_point_mark(
@@ -480,6 +481,168 @@ impl Db {
                 .or(cfg.pilot_template_red.as_ref())
                 .map(|s| s.as_str()),
         }
+    }
+
+    fn queue_landed_csar_pilot(
+        &mut self,
+        lua: MizLua,
+        ucid: &Ucid,
+        side: Side,
+        idx: usize,
+        csar: &CsarDowned,
+    ) -> Result<()> {
+        let template = self
+            .csar_pilot_template_name(side)
+            .map(|s| s.to_string())
+            .ok_or_else(|| anyhow::anyhow!("csar pilot template is not configured for {side:?}"))?;
+        if let Some(gid) = csar.group_id {
+            let template_ok = self.persisted.groups.get(&gid).is_some_and(|g| {
+                g.template_name.as_str() == template.as_str()
+            });
+            if template_ok {
+                return Ok(());
+            }
+            if self.persisted.groups.get(&gid).is_some() {
+                if let Err(e) = self.delete_group(&gid) {
+                    warn!("csar: replace non-template group {gid} failed: {e:?}");
+                }
+            }
+        }
+        let pos = csar.inst.position.p.0;
+        let spawnpos = SpawnLoc::AtPos {
+            pos: Vector2::new(pos.x, pos.z),
+            offset_direction: Vector2::new(1., 0.),
+            group_heading: 0.,
+        };
+        let origin = DeployKind::CsarPilot {
+            ucid: *ucid,
+            life_type: csar.life_type,
+            captured: csar.captured,
+            captured_by: csar.captured_by,
+        };
+        let (group_name, unit_name) = csar_spawn_names(ucid, csar.ejected_at);
+        let idx_miz = self.ephemeral.miz_idx.clone();
+        let spctx = SpawnCtx::new(lua)?;
+        let gid = self.add_and_queue_group(
+            &spctx,
+            &idx_miz,
+            side,
+            spawnpos,
+            template.as_str(),
+            origin,
+            BitFlags::<UnitTag>::empty(),
+            None,
+            Some(group_name.as_str()),
+            None,
+        )?;
+        self.rename_csar_spawn_unit(gid, unit_name.as_str());
+        if let Some(player) = self.persisted.players.get_mut_cow(ucid) {
+            if let Some(c) = player.csar_downed.get_mut(idx) {
+                c.group_id = Some(gid);
+            }
+        }
+        info!(
+            "csar: queued troop spawn {gid} from {template} for {ucid:?} ({})",
+            csar.life_type
+        );
+        Ok(())
+    }
+
+    fn rename_csar_spawn_unit(&mut self, gid: GroupId, unit_name: &str) {
+        let uid = self
+            .persisted
+            .groups
+            .get(&gid)
+            .and_then(|g| g.units.into_iter().next().copied());
+        let Some(uid) = uid else {
+            return;
+        };
+        let old = {
+            let Some(unit) = self.persisted.units.get_mut_cow(&uid) else {
+                return;
+            };
+            if unit.name.as_str() == unit_name {
+                return;
+            }
+            let old = unit.name.clone();
+            unit.name = String::from(unit_name);
+            old
+        };
+        self.persisted.units_by_name.remove_cow(&old);
+        self.persisted
+            .units_by_name
+            .insert_cow(String::from(unit_name), uid);
+    }
+
+    pub(super) fn note_csar_pilot_unit_born(&mut self, unit: &Unit, uid: UnitId) {
+        let Some(gid) = self.persisted.units.get(&uid).map(|u| u.group) else {
+            return;
+        };
+        let Some(ucid) = self.persisted.groups.get(&gid).and_then(|g| match &g.origin {
+            DeployKind::CsarPilot { ucid, .. } => Some(*ucid),
+            _ => None,
+        }) else {
+            return;
+        };
+        let Ok(id) = unit.object_id() else {
+            return;
+        };
+        prepare_csar_pilot_unit(unit, true);
+        let old = {
+            let Some(player) = self.persisted.players.get_mut_cow(&ucid) else {
+                return;
+            };
+            let Some(c) = player
+                .csar_downed
+                .iter_mut()
+                .find(|c| c.group_id == Some(gid))
+            else {
+                return;
+            };
+            let old = c.pilot_unit.clone();
+            c.pilot_unit = id.clone();
+            c.pilot_unit_stale = false;
+            c.landed = true;
+            old
+        };
+        if old != id {
+            self.ephemeral.csar_pilot_unit.remove(&old);
+        }
+        self.ephemeral.csar_pilot_unit.insert(id, ucid);
+        self.ephemeral.units_able_to_move.insert(uid);
+    }
+
+    pub(super) fn follow_csar_group_mark(&mut self, gid: &GroupId, pos: na::Vector2<f64>) {
+        let Some(ucid) = self.persisted.groups.get(gid).and_then(|g| match &g.origin {
+            DeployKind::CsarPilot { ucid, .. } => Some(*ucid),
+            _ => None,
+        }) else {
+            return;
+        };
+        let alt = self.persisted.groups.get(gid).and_then(|g| {
+            g.units.into_iter().next().and_then(|uid| {
+                self.persisted.units.get(uid).map(|u| u.position.p.y)
+            })
+        });
+        {
+            let Some(player) = self.persisted.players.get_mut_cow(&ucid) else {
+                return;
+            };
+            let Some(csar) = player
+                .csar_downed
+                .iter_mut()
+                .find(|c| c.group_id.as_ref() == Some(gid))
+            else {
+                return;
+            };
+            csar.inst.position.p.x = pos.x;
+            csar.inst.position.p.z = pos.y;
+            if let Some(y) = alt {
+                csar.inst.position.p.y = y;
+            }
+            delete_csar_marks(self.ephemeral.msgs(), csar);
+        }
+        self.sync_csar_marks_for_ucid(&ucid);
     }
 
     fn spawn_csar_pilot_unit(
@@ -630,6 +793,16 @@ impl Db {
         old_id: &DcsOid<ClassUnit>,
         csar: &CsarDowned,
     ) -> Result<Option<DcsOid<ClassUnit>>> {
+        if csar.landed {
+            if let Some(idx) = self.persisted.players.get(ucid).and_then(|p| {
+                p.csar_downed
+                    .iter()
+                    .position(|c| c.pilot_unit == *old_id || c.ejected_at == csar.ejected_at)
+            }) {
+                self.queue_landed_csar_pilot(lua, ucid, side, idx, csar)?;
+            }
+            return Ok(None);
+        }
         let Some(new_id) = self.spawn_csar_pilot_unit(lua, ucid, side, csar)? else {
             warn!(
                 "csar: respawn failed for {ucid:?} ({})",
@@ -655,17 +828,9 @@ impl Db {
         now: DateTime<Utc>,
     ) -> Result<CsarPilotMissingAction> {
         if !csar.landed {
-            let since = self
-                .ephemeral
-                .csar_chute_missing_since
-                .entry(pilot_unit.clone())
-                .or_insert(now);
-            if now - *since >= CSAR_AIRBORNE_CHUTE_MISSING_GRACE {
-                return Ok(CsarPilotMissingAction::Cancelled);
-            }
+            // Wait for LandingAfterEjection / capture_timer — DCS chute OID is unstable.
             return Ok(CsarPilotMissingAction::AwaitRebind);
         }
-        self.ephemeral.csar_chute_missing_since.remove(pilot_unit);
         if let Some(new_id) = lookup_csar_pilot_unit(lua, ucid, csar)? {
             if new_id != *pilot_unit {
                 if self.apply_csar_pilot_rebind(ucid, pilot_unit, new_id.clone()) {
@@ -692,30 +857,22 @@ impl Db {
         Ok(CsarPilotMissingAction::AwaitRebind)
     }
 
-    fn cancel_airborne_csar(&mut self, ucid: &Ucid, pilot_unit: &DcsOid<ClassUnit>) {
-        let Some(player) = self.persisted.players.get_mut_cow(ucid) else {
-            return;
-        };
-        let Some(idx) = player
-            .csar_downed
-            .iter()
-            .position(|c| c.pilot_unit == *pilot_unit && !c.landed)
-        else {
-            return;
-        };
-        let csar = player.csar_downed.remove(idx);
-        self.ephemeral.csar_chute_missing_since.remove(pilot_unit);
-        self.remove_csar_entry(&csar);
-        self.ephemeral.dirty();
-        info!(
-            "csar: cancelled airborne track for {ucid:?} ({}) — chute OID {:?} gone before land (grace {}s)",
-            csar.life_type,
-            pilot_unit,
-            CSAR_AIRBORNE_CHUTE_MISSING_GRACE.num_seconds()
-        );
-    }
-
     pub fn on_csar_pilot_killed(&mut self, pilot_unit: &DcsOid<ClassUnit>, ucid: &Ucid) {
+        {
+            let Some(player) = self.persisted.players.get_mut_cow(ucid) else {
+                return;
+            };
+            let Some(idx) = player
+                .csar_downed
+                .iter()
+                .position(|c| c.pilot_unit == *pilot_unit)
+            else {
+                return;
+            };
+            if let Some(csar) = player.csar_downed.get_mut(idx) {
+                delete_csar_marks(self.ephemeral.msgs(), csar);
+            }
+        }
         let Some(player) = self.persisted.players.get_mut_cow(ucid) else {
             return;
         };
@@ -726,10 +883,8 @@ impl Db {
         else {
             return;
         };
-        let mut csar = player.csar_downed.remove(idx);
-        delete_csar_marks(self.ephemeral.msgs(), &mut csar);
+        let csar = player.csar_downed.remove(idx);
         self.ephemeral.csar_pilot_unit.remove(pilot_unit);
-        self.ephemeral.csar_chute_missing_since.remove(pilot_unit);
         self.ephemeral.dirty();
         info!(
             "csar: downed pilot unit killed for {ucid:?} ({})",
@@ -756,7 +911,6 @@ impl Db {
             return;
         }
         self.ephemeral.csar_pilot_unit.clear();
-        self.ephemeral.csar_chute_missing_since.clear();
         for ucid in self.csar_downed_ucids() {
             let Some(side) = self.persisted.players.get(&ucid).map(|p| p.side) else {
                 continue;
@@ -840,6 +994,28 @@ impl Db {
                 return;
             }
             Self::destroy_csar_pilot_unit(lua, &csar_snap.pilot_unit);
+        }
+        if csar_snap.landed {
+            match self.queue_landed_csar_pilot(lua, ucid, side, idx, &csar_snap) {
+                Ok(()) => {
+                    info!(
+                        "csar: restored downed pilot for {ucid:?} ({}) after load",
+                        csar_snap.life_type
+                    );
+                }
+                Err(e) => {
+                    if let Some(player) = self.persisted.players.get_mut_cow(ucid) {
+                        if let Some(csar) = player.csar_downed.get_mut(idx) {
+                            csar.pilot_unit_stale = true;
+                        }
+                    }
+                    warn!(
+                        "csar: troop spawn failed for {ucid:?} ({}): {e:?}",
+                        csar_snap.life_type
+                    );
+                }
+            }
+            return;
         }
         match self.spawn_csar_pilot_unit(lua, ucid, side, &csar_snap) {
             Ok(Some(new_id)) if !claimed.contains(&new_id) => {
@@ -942,41 +1118,22 @@ impl Db {
         csar_snap.inst.position = landing_pos;
         csar_snap.inst.in_air = false;
         csar_snap.inst.moved = Some(now);
-        let Some(new_id) = self.spawn_csar_pilot_unit(lua, &ucid, side, &csar_snap)? else {
+        if let Err(e) = self.queue_landed_csar_pilot(lua, &ucid, side, idx, &csar_snap) {
             warn!(
-                "csar: landing respawn failed for {ucid:?} ({})",
+                "csar: landing troop spawn failed for {ucid:?} ({}): {e:?}",
                 csar_snap.life_type
             );
-            if let Some(player) = self.persisted.players.get_mut_cow(&ucid) {
-                if let Some(c) = player.csar_downed.get_mut(idx) {
-                    c.inst.position = landing_pos;
-                    c.inst.in_air = false;
-                    c.inst.moved = Some(now);
-                    c.pilot_unit_stale = true;
-                    set_csar_pilot_landed(c, now, &ucid);
-                }
-            }
-            self.sync_csar_marks_for_ucid(&ucid);
-            self.ephemeral.dirty();
-            return Ok(true);
-        };
+        }
         if let Some(player) = self.persisted.players.get_mut_cow(&ucid) {
             if let Some(c) = player.csar_downed.get_mut(idx) {
-                c.pilot_unit = new_id.clone();
-                c.inst = csar_snap.inst;
-                c.pilot_unit_stale = false;
+                c.inst = csar_snap.inst.clone();
+                c.pilot_unit_stale = c.group_id.is_none();
                 set_csar_pilot_landed(c, now, &ucid);
             }
         }
-        self.ephemeral
-            .csar_pilot_unit
-            .insert(new_id.clone(), ucid);
-        if let Some(leftover) = leftover.filter(|id| *id != new_id) {
+        if let Some(leftover) = leftover {
             self.ephemeral.csar_pilot_unit.remove(&leftover);
             Self::destroy_csar_pilot_unit(lua, &leftover);
-        }
-        if let Ok(unit) = Unit::get_instance(lua, &new_id) {
-            prepare_csar_pilot_unit(&unit, true);
         }
         self.sync_csar_marks_for_ucid(&ucid);
         self.maybe_adopt_landed_csar_groups(lua, &ucid);
@@ -1064,7 +1221,6 @@ impl Db {
         let mut csar = csar.clone();
         delete_csar_marks(self.ephemeral.msgs(), &mut csar);
         self.ephemeral.csar_pilot_unit.remove(&csar.pilot_unit);
-        self.ephemeral.csar_chute_missing_since.remove(&csar.pilot_unit);
         // Adopted CSAR groups have no object_id_by_gid, so delete_group never despawns
         // them; the pilot units must be destroyed explicitly.
         let mut doomed: SmallVec<[DcsOid<ClassUnit>; 2]> = SmallVec::new();
@@ -1397,22 +1553,16 @@ impl Db {
                 }
             };
             let Some(instance) = instance.filter(|u| u.is_exist().unwrap_or(false)) else {
-                match self.handle_csar_pilot_unit_missing(
+                let _ = self.handle_csar_pilot_unit_missing(
                     lua,
                     ucid,
                     side,
                     &pilot_unit,
                     &csar,
                     now,
-                )? {
-                    CsarPilotMissingAction::Cancelled => {
-                        self.cancel_airborne_csar(ucid, &pilot_unit);
-                    }
-                    _ => {}
-                }
+                )?;
                 continue;
             };
-            self.ephemeral.csar_chute_missing_since.remove(&pilot_unit);
             if csar.landed {
                 prepare_csar_pilot_unit(&instance, true);
             }

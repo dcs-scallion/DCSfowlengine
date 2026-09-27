@@ -22,7 +22,7 @@ use dcso3::{
     trigger::Trigger,
     MizLua,
 };
-use log::{debug, warn};
+use log::{debug, info, warn};
 use std::sync::Arc;
 
 pub fn play_unit(export: &FowlMizExport, lua: MizLua, key: &str, unit: UnitId) {
@@ -40,36 +40,94 @@ pub fn play_unit(export: &FowlMizExport, lua: MizLua, key: &str, unit: UnitId) {
     }
 }
 
-/// Hooks have no `trigger.action`; play via mission `dostring_in` while the player still occupies.
-pub fn play_unit_from_hooks(export: &FowlMizExport, lua: MizLua, key: &str, unit: UnitId) -> bool {
-    let Some(path) = export.sounds_player.get(key) else {
-        warn!("sound {key} missing from fowl export");
-        return false;
-    };
-    if let Ok(trigger) = Trigger::singleton(lua) {
-        if let Ok(action) = trigger.action() {
-            if action.out_sound_for_unit(unit, path.clone().into()).is_ok() {
-                return true;
-            }
-        }
-    }
-    if path.contains('"') || path.contains('\n') {
-        return false;
-    }
-    let chunk = format_compact!(
-        "trigger.action.outSoundForUnit({}, \"{}\")",
-        unit.inner(),
-        path
-    );
+fn sound_path_safe(path: &str) -> bool {
+    !path.contains('"') && !path.contains('\n') && !path.contains('\\')
+}
+
+fn dostring_mission(lua: MizLua, chunk: &str) -> bool {
     match Net::singleton(lua).and_then(|n| {
-        n.dostring_in(DcsLuaEnvironment::Mission, chunk.clone().into())
+        n.dostring_in(DcsLuaEnvironment::Mission, chunk.into())
     }) {
-        Ok(_) => true,
+        Ok(ret) => {
+            let ret_s = ret.as_str();
+            if !ret_s.is_empty() && ret_s != "nil" {
+                info!("mission dostring returned: {ret_s}");
+            }
+            true
+        }
         Err(e) => {
-            debug!("sound {key} mission bridge skipped: {e:?}");
+            warn!("mission dostring failed: {e:?}");
             false
         }
     }
+}
+
+/// Hooks have no `trigger.action`. Play while the player still occupies (TryChangeSlot).
+/// Prefer runtime UnitId from object_id, not SlotId::as_unit_id (wrong for some DS).
+pub fn play_life_return_from_hooks(
+    export: &FowlMizExport,
+    lua: MizLua,
+    unit: Option<UnitId>,
+    group: Option<GroupId>,
+) -> bool {
+    let Some(path) = export.sounds_player.get("life_return") else {
+        warn!("life_return missing from fowl export sounds_player");
+        return false;
+    };
+    if !sound_path_safe(path) {
+        warn!("life_return path rejected: {path}");
+        return false;
+    }
+    if let Ok(trigger) = Trigger::singleton(lua) {
+        if let Ok(action) = trigger.action() {
+            if let Some(unit) = unit {
+                if action
+                    .out_sound_for_unit(unit, path.clone().into())
+                    .is_ok()
+                {
+                    return true;
+                }
+            }
+            if let Some(group) = group {
+                if action
+                    .out_sound_for_group(group, path.clone().into())
+                    .is_ok()
+                {
+                    return true;
+                }
+            }
+        }
+    }
+    let mut ok = false;
+    if let Some(unit) = unit {
+        let chunk = format_compact!(
+            "trigger.action.outSoundForUnit({}, \"{}\")",
+            unit.inner(),
+            path
+        );
+        if dostring_mission(lua, &chunk) {
+            info!(
+                "life_return outSoundForUnit({}) via mission bridge",
+                unit.inner()
+            );
+            ok = true;
+        }
+    }
+    if let Some(group) = group {
+        let chunk = format_compact!(
+            "trigger.action.outSoundForGroup({}, \"{}\")",
+            group.inner(),
+            path
+        );
+        if dostring_mission(lua, &chunk) {
+            info!(
+                "life_return outSoundForGroup({}) via mission bridge",
+                group.inner()
+            );
+            ok = true;
+        }
+    }
+    ok
 }
 
 pub fn play_player(export: &FowlMizExport, lua: MizLua, key: &str, slot: &SlotId) {

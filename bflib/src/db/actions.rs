@@ -1397,6 +1397,14 @@ impl Db {
         penalty: u32,
         args: WithPosAndGroup<MoveCfg>,
     ) -> Result<Option<GroupId>> {
+        if self
+            .persisted
+            .groups
+            .get(&args.group)
+            .is_some_and(|g| matches!(g.origin, DeployKind::CsarPilot { .. }))
+        {
+            self.clear_csar_extract(&args.group);
+        }
         let pos = self.group_center(&args.group)?;
         let group = group_mut!(self, args.group)?;
         if group.side != side {
@@ -2987,8 +2995,14 @@ impl Db {
                     gid,
                     deployable: dep,
                     by: ucid,
-                    aircraft: None,
-                    method: None,
+                    aircraft: self
+                        .persisted
+                        .players
+                        .get(&ucid)
+                        .and_then(|p| p.current_slot.as_ref())
+                        .and_then(|(sl, _)| self.ephemeral.get_slot_info(sl))
+                        .map(|s| String::from(s.typ.as_str())),
+                    method: Some(String::from("Action")),
                 });
                 Ok(())
             }
@@ -3212,6 +3226,8 @@ impl Db {
                                     );
                                     if (pos - *dst).magnitude() > 100. {
                                         true
+                                    } else if self.persisted.csar_pilots.contains(gid) {
+                                        false
                                     } else {
                                         for uid in &group.units {
                                             match self.persisted.units.get(uid) {

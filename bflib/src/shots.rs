@@ -18,6 +18,7 @@ for more details.
 use crate::db::{Db, group::DeployKind};
 use anyhow::Result;
 use bfprotocols::{
+    cfg::UnitTag,
     db::group::GroupId,
     shots::{Dead, Shot, Who},
 };
@@ -27,7 +28,7 @@ use dcso3::{
     event::Shot as ShotEvent,
     net::SlotId,
     object::{DcsObject, DcsOid, Object},
-    unit::{ClassUnit, Unit},
+    unit::{ClassUnit, Unit, UnitCategory},
 };
 use fxhash::FxHashMap;
 use std::collections::hash_map::Entry;
@@ -118,6 +119,20 @@ pub(crate) fn who_from_initiator(db: &Db, initiator: Option<&Object>) -> Option<
         })
 }
 
+/// Unit type of shooter; Hit/Kill often has Weapon as initiator — use launcher.
+pub(crate) fn shooter_typ_from_initiator(initiator: Option<&Object>) -> Option<String> {
+    initiator
+        .and_then(|o| o.as_unit().ok())
+        .and_then(|u| u.get_type_name().ok())
+        .or_else(|| {
+            initiator
+                .and_then(|o| o.as_weapon().ok())
+                .and_then(|w| w.get_launcher().ok())
+                .and_then(|u| u.get_type_name().ok())
+        })
+        .map(|s| String::from(s.as_str()))
+}
+
 impl ShotDb {
     pub fn unit_recently_engaged(
         &self,
@@ -149,9 +164,58 @@ impl ShotDb {
         }
     }
 
+    /// Bail mid-fight: credit nearest enemy if no shot was already recorded.
+    pub fn abandoned_under_threat(
+        &mut self,
+        target_oid: DcsOid<ClassUnit>,
+        shooter: Who,
+        target: Who,
+        shooter_typ: Option<String>,
+        target_typ: String,
+        time: DateTime<Utc>,
+    ) {
+        if self.recently_dead.contains_key(&target_oid) {
+            return;
+        }
+        let entry = self.by_target.entry(target_oid.clone()).or_default();
+        if entry.is_empty() {
+            entry.push(Shot {
+                weapon_name: Some(String::from("left slot under threat")),
+                weapon: None,
+                shooter,
+                shooter_typ,
+                target,
+                target_typ,
+                time,
+                hit: true,
+            });
+        }
+        self.dead.entry(target_oid).or_insert(time);
+    }
+
     pub fn shot(&mut self, db: &Db, now: DateTime<Utc>, e: &ShotEvent) -> Result<()> {
-        if db.ephemeral.cfg.weapon_target_exclusions.contains(&e.weapon_name) {
-            return Ok(())
+        if let Some(name) = e.weapon_name.as_ref() {
+            if db.ephemeral.cfg.weapon_target_exclusions.contains(name) {
+                return Ok(());
+            }
+        }
+        // weapon.get_target() on ground-point weapons hard-crashes DCS
+        // (wAmmunitionGuided::Target_ID). Allow-list air only; skip before call.
+        let category = ok!(e.initiator.get_category_ex());
+        if category != UnitCategory::Airplane && category != UnitCategory::Helicopter {
+            return Ok(());
+        }
+        let initiator_oid = ok!(e.initiator.object_id());
+        // CAP/modded SSM sometimes report Airplane; tags catch Artillery / non-SAM Launcher.
+        // Player slots often have no persisted uid — category gate is enough for them.
+        if let Some(uid) = db.ephemeral.get_uid_by_object_id(&initiator_oid) {
+            let initiator_unit = ok!(db.unit(uid));
+            let itags = &initiator_unit.tags.0;
+            if itags.contains(UnitTag::Artillery)
+                || (itags.contains(UnitTag::Launcher) && !itags.contains(UnitTag::SAM))
+            {
+                return Ok(());
+            }
         }
         let target = ok!(some!(e.weapon.get_target()?).as_unit());
         let target_oid = target.object_id()?;
@@ -167,7 +231,7 @@ impl ShotDb {
             .ok()
             .map(|s| dcso3::String::from(s.as_str()));
         self.by_target.entry(target_oid).or_default().push(Shot {
-            weapon_name: Some(e.weapon_name.clone()),
+            weapon_name: e.weapon_name.clone(),
             weapon: Some(e.weapon.object_id()?),
             shooter,
             shooter_typ,
@@ -186,7 +250,7 @@ impl ShotDb {
         dead: bool,
         target: &Unit,
         shooter: &Unit,
-        weapon_name: String,
+        weapon_name: Option<String>,
     ) -> Result<()> {
         let shooter_typ = shooter
             .get_type_name()
@@ -203,9 +267,10 @@ impl ShotDb {
         dead: bool,
         target: &Unit,
         shooter: Who,
-        weapon_name: String,
+        shooter_typ: Option<String>,
+        weapon_name: Option<String>,
     ) -> Result<()> {
-        self.record_hit(db, now, dead, target, shooter, None, weapon_name)
+        self.record_hit(db, now, dead, target, shooter, shooter_typ, weapon_name)
     }
 
     fn record_hit(
@@ -216,7 +281,7 @@ impl ShotDb {
         target: &Unit,
         shooter: Who,
         shooter_typ: Option<dcso3::String>,
-        weapon_name: String,
+        weapon_name: Option<String>,
     ) -> Result<()> {
         let target_oid = target.object_id()?;
         if self.dead.contains_key(&target_oid) || self.recently_dead.contains_key(&target_oid) {
@@ -224,11 +289,29 @@ impl ShotDb {
         }
         let target_typ = target.get_type_name()?;
         let target = some!(who(db, target_oid.clone()));
+        // DCS IR/proximity self-hit (initiator == target); keep death mark, drop shot credit
+        if shooter.unit() == target.unit() {
+            if dead {
+                self.dead.insert(target_oid, now);
+            }
+            return Ok(());
+        }
+        let shooter_typ = shooter_typ.or_else(|| {
+            self.by_target.get(&target_oid).and_then(|shots| {
+                shots.iter().rev().find_map(|s| {
+                    if s.shooter.unit() == shooter.unit() {
+                        s.shooter_typ.clone()
+                    } else {
+                        None
+                    }
+                })
+            })
+        });
         self.by_target
             .entry(target_oid.clone())
             .or_default()
             .push(Shot {
-                weapon_name: Some(weapon_name),
+                weapon_name,
                 weapon: None,
                 shooter,
                 shooter_typ,

@@ -22,6 +22,7 @@ use super::{
 use anyhow::{anyhow, bail, Context, Result};
 use bfprotocols::cfg::DynamicCargoDeliveryCfg;
 use bfprotocols::db::objective::{ObjectiveId, ObjectiveKind};
+use bfprotocols::stats::Stat;
 use chrono::prelude::*;
 use compact_str::format_compact;
 use dcso3::{
@@ -1022,6 +1023,22 @@ impl Db {
             {
                 continue;
             }
+            // Orphan check: source objective changed sides → prune immediately
+            if let Some(entry) = self.persisted.dynamic_cargo_crates.get(&name) {
+                let source_owner = self
+                    .persisted
+                    .objectives
+                    .get(&entry.source)
+                    .map(|o| o.owner);
+                if source_owner != Some(entry.side) {
+                    info!(
+                        "dynamic cargo orphan prune {} (source {:?} now {:?}, was {:?})",
+                        name, entry.source, source_owner, entry.side
+                    );
+                    gone.push(name);
+                    continue;
+                }
+            }
             // Still in an ED bay — F8 load hides/moves the world static.
             if self.dynamic_cargo_name_on_any_board(lua, name.as_str()) {
                 self.ephemeral.dynamic_cargo_miss_count.remove(&name);
@@ -1221,6 +1238,17 @@ impl Db {
                                 entry.last_weight_kg,
                                 1,
                             );
+                            self.ephemeral.stat(Stat::SupplyTransfer {
+                                from: entry.source,
+                                to: pad,
+                                by: deliverer,
+                            });
+                            self.ephemeral.stat(Stat::DynamicCargoDelivery {
+                                from: entry.source,
+                                to: pad,
+                                by: deliverer,
+                                weight_kg: entry.last_weight_kg,
+                            });
                             info!(
                                 "dynamic cargo DCS absorb delivery: {} -> {:?} tons={:.2} deliverer={:?} spawner={:?} carrier={:?} weight_kg={:.0}",
                                 entry.name,
@@ -1362,6 +1390,22 @@ impl Db {
             .map(|(_, c)| c.clone())
             .collect();
         for entry in entries {
+            // Orphan check: source objective changed sides → purge instead of respawn
+            let source_owner = self
+                .persisted
+                .objectives
+                .get(&entry.source)
+                .map(|o| o.owner);
+            if source_owner != Some(entry.side) {
+                info!(
+                    "dynamic cargo orphan {} (source {:?} now {:?}, was {:?}) - removing",
+                    entry.name, entry.source, source_owner, entry.side
+                );
+                self.persisted.dynamic_cargo_crates.remove_cow(&entry.name);
+                self.clamp_dynamic_cargo_checkout(entry.source);
+                self.ephemeral.dirty();
+                continue;
+            }
             match StaticObject::get_by_name(lua, entry.name.as_str()) {
                 Ok(Static::Static(_)) => continue,
                 _ => {}
@@ -1788,6 +1832,7 @@ impl Db {
         let mut skipped_loaded = 0u32;
         let mut rejected_same_objective = 0u32;
         let mut delivered_weight_kg = 0f64;
+        let mut delivery_from: Option<ObjectiveId> = None;
         for name in names {
             if self.dynamic_cargo_name_on_any_board(lua, name.as_str()) {
                 skipped_loaded += 1;
@@ -1861,6 +1906,9 @@ impl Db {
             self.persisted.dynamic_cargo_crates.remove_cow(&name);
             delivered_weight_kg += weight_kg.max(0.);
             result.crates += 1;
+            if delivery_from.is_none() {
+                delivery_from = Some(entry.source);
+            }
         }
         if result.crates == 0 {
             if rejected_same_objective > 0 && skipped_loaded == 0 {
@@ -1887,6 +1935,19 @@ impl Db {
             .map(|o| o.owner)
             .unwrap_or(Side::Neutral);
         self.campaign_on_dynamic_cargo_delivery(dest_side, delivered_weight_kg, 1);
+        if let Some(from) = delivery_from {
+            self.ephemeral.stat(Stat::SupplyTransfer {
+                from,
+                to: dest_oid,
+                by: *deliverer,
+            });
+            self.ephemeral.stat(Stat::DynamicCargoDelivery {
+                from,
+                to: dest_oid,
+                by: *deliverer,
+                weight_kg: delivered_weight_kg,
+            });
+        }
         self.sync_objective_to_warehouse(lua, dest_oid, false)
             .context("syncing destination warehouse after To stock")?;
         self.update_supply_status()

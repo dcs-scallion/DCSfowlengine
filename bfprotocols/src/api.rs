@@ -260,4 +260,14 @@ pub struct CampaignState {
     pub players_by_side: HashMap<String, usize>,
     /// Total points available per side
     pub points_by_side: HashMap<String, i64>,
+    /// Living factory units in OPR zones (Discord map "Factories").
+    #[serde(default)]
+    pub factories_blue: u32,
+    #[serde(default)]
+    pub factories_red: u32,
+    /// Avg logistics-hub production % per side (Discord map "Production %").
+    #[serde(default)]
+    pub production_blue: Option<u8>,
+    #[serde(default)]
+    pub production_red: Option<u8>,
 }

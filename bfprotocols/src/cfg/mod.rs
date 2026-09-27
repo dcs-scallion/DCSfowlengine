@@ -1155,6 +1155,10 @@ fn default_airborne_deslot_penalty_points() -> u32 {
     0
 }
 
+fn default_slot_leave_kill_radius_m() -> f64 {
+    15000.0
+}
+
 fn default_discord_map_width() -> u32 {
     1280
 }
@@ -2101,6 +2105,12 @@ pub struct Cfg {
     /// Points deducted when an airborne deslot penalty is applied. 0 disables.
     #[serde(default = "default_airborne_deslot_penalty_points")]
     pub airborne_deslot_penalty_points: u32,
+    /// If a player leaves their slot while not landed at a friendly objective and an
+    /// enemy player aircraft is within this many metres, credit that enemy with the
+    /// kill (`left slot under threat`). Complements airborne deslot penalty. 0 disables.
+    /// Default 15000.
+    #[serde(default = "default_slot_leave_kill_radius_m")]
+    pub slot_leave_kill_radius_m: f64,
     #[serde(default)]
     pub csar: CsarCfg,
     #[serde(default)]

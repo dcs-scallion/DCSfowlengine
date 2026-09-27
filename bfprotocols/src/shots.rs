@@ -49,6 +49,12 @@ impl Who {
         }
     }
 
+    pub fn unit(&self) -> &DcsOid<ClassUnit> {
+        match self {
+            Self::AI { unit, .. } | Self::Player { unit, .. } => unit,
+        }
+    }
+
     pub fn uid(&self) -> Option<UnitId> {
         match self {
             Self::AI { uid, .. } => Some(*uid),

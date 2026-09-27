@@ -667,7 +667,7 @@ return m.date.Year or 1970, m.date.Month or 1, m.date.Day or 1, st"#,
     })
 }
 
-fn live_factory_count(db: &Db, obj: &Objective) -> u32 {
+pub(crate) fn live_factory_count(db: &Db, obj: &Objective) -> u32 {
     let Some(groups) = obj.groups.get(&obj.owner) else {
         return 0;
     };
@@ -690,7 +690,7 @@ fn live_factory_count(db: &Db, obj: &Objective) -> u32 {
     n
 }
 
-fn factory_counts(db: &Db) -> (u32, u32) {
+pub(crate) fn factory_counts(db: &Db) -> (u32, u32) {
     let mut red = 0u32;
     let mut blue = 0u32;
     for (_, obj) in db.persisted.objectives.into_iter() {
@@ -707,7 +707,7 @@ fn factory_counts(db: &Db) -> (u32, u32) {
     (red, blue)
 }
 
-fn avg_logistics_production(db: &Db, side: Side) -> Option<u8> {
+pub(crate) fn avg_logistics_production(db: &Db, side: Side) -> Option<u8> {
     let cfg = &db.ephemeral.cfg;
     let mut sum = 0u32;
     let mut n = 0u32;

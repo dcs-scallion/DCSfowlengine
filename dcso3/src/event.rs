@@ -38,7 +38,7 @@ pub struct Shot<'lua> {
     pub time: Time,
     pub initiator: Unit<'lua>,
     pub weapon: Weapon<'lua>,
-    pub weapon_name: String,
+    pub weapon_name: Option<String>,
 }
 
 impl<'lua> FromLua<'lua> for Shot<'lua> {
@@ -48,7 +48,7 @@ impl<'lua> FromLua<'lua> for Shot<'lua> {
             time: tbl.raw_get("time")?,
             initiator: tbl.raw_get("initiator")?,
             weapon: tbl.raw_get("weapon")?,
-            weapon_name: tbl.raw_get("weapon_name")?,
+            weapon_name: opt_weapon_name(&tbl)?,
         })
     }
 }
@@ -57,7 +57,7 @@ impl<'lua> FromLua<'lua> for Shot<'lua> {
 pub struct ShootingEnd<'lua> {
     pub time: Time,
     pub initiator: Unit<'lua>,
-    pub weapon_name: String,
+    pub weapon_name: Option<String>,
 }
 
 impl<'lua> FromLua<'lua> for ShootingEnd<'lua> {
@@ -66,9 +66,16 @@ impl<'lua> FromLua<'lua> for ShootingEnd<'lua> {
         Ok(Self {
             time: tbl.raw_get("time")?,
             initiator: tbl.raw_get("initiator")?,
-            weapon_name: tbl.raw_get("weapon_name")?,
+            weapon_name: opt_weapon_name(&tbl)?,
         })
     }
+}
+
+/// DCS leaves `weapon_name` nil on some hits; `String` FromLua used to store `"nil"`.
+fn opt_weapon_name(tbl: &mlua::Table) -> LuaResult<Option<String>> {
+    Ok(tbl
+        .raw_get::<_, Option<String>>("weapon_name")?
+        .filter(|s| !s.as_str().is_empty()))
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -76,7 +83,7 @@ pub struct WeaponUse<'lua> {
     pub time: Time,
     pub initiator: Option<Object<'lua>>,
     pub target: Option<Object<'lua>>,
-    pub weapon_name: String,
+    pub weapon_name: Option<String>,
 }
 
 impl<'lua> FromLua<'lua> for WeaponUse<'lua> {
@@ -86,7 +93,7 @@ impl<'lua> FromLua<'lua> for WeaponUse<'lua> {
             time: tbl.raw_get("time")?,
             initiator: optional_event_object(lua, tbl.raw_get("initiator")?)?,
             target: optional_event_object(lua, tbl.raw_get("target")?)?,
-            weapon_name: tbl.raw_get("weapon_name")?,
+            weapon_name: opt_weapon_name(&tbl)?,
         })
     }
 }
@@ -207,7 +214,7 @@ impl<'lua> FromLua<'lua> for AtPlace<'lua> {
 pub struct WeaponAdd<'lua> {
     pub time: Time,
     pub initiator: Object<'lua>,
-    pub weapon_name: String,
+    pub weapon_name: Option<String>,
 }
 
 impl<'lua> FromLua<'lua> for WeaponAdd<'lua> {
@@ -216,7 +223,7 @@ impl<'lua> FromLua<'lua> for WeaponAdd<'lua> {
         Ok(Self {
             time: tbl.raw_get("time")?,
             initiator: tbl.raw_get("initiator")?,
-            weapon_name: tbl.raw_get("weapon_name")?,
+            weapon_name: opt_weapon_name(&tbl)?,
         })
     }
 }

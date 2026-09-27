@@ -402,6 +402,34 @@ fn json_response(data: String) -> impl warp::Reply {
     )
 }
 
+/// Filter empty / literal `"nil"` weapon names from historical stats rows.
+/// DCS leaves Lua nil on some hits; older dcso3 stringified that as `"nil"`.
+fn display_weapon<S: std::fmt::Display>(name: Option<&S>) -> Option<std::string::String> {
+    name.map(|w| w.to_string())
+        .filter(|w| !w.is_empty() && w != "nil")
+}
+
+/// Airframe for a shot; Hit path used to omit `shooter_typ` — fall back to
+/// another shot by the same player that still has a type name.
+fn shot_airframe(
+    dead: &bfprotocols::shots::Dead,
+    shot: &bfprotocols::shots::Shot,
+) -> Option<std::string::String> {
+    if let Some(t) = shot.shooter_typ.as_ref() {
+        return Some(t.to_string());
+    }
+    let Some(ucid) = shot.shooter.ucid() else {
+        return None;
+    };
+    dead.shots.iter().rev().find_map(|s| {
+        if s.shooter.ucid() == Some(ucid) {
+            s.shooter_typ.as_ref().map(|t| t.to_string())
+        } else {
+            None
+        }
+    })
+}
+
 // ── Campaign config handler ──────────────────────────────────────────
 
 async fn api_config(cfg_json: Arc<String>) -> impl warp::Reply {
@@ -454,6 +482,8 @@ async fn api_leaderboard(db: StatsDb) -> std::result::Result<impl warp::Reply, E
                     "side": side,
                     "air_kills": agg.air_kills,
                     "ground_kills": agg.ground_kills,
+                    "ship_kills": agg.ship_kills,
+                    "csar": agg.csar,
                     "captures": agg.captures,
                     "repairs": agg.repairs,
                     "supply_transfers": agg.supply_transfers,
@@ -659,12 +689,18 @@ async fn api_frontline(
         };
         let objs = db.objectives_for_round(rid)?;
 
-        // Owned, on-the-ground objectives (SAM sites included, carriers not) —
-        // the same set bflib feeds the overlay.
+        // Owned capturable ground only — no dynamic FARPs, no OPR (Production).
+        // Fowl F10/Discord front_line is a separate path and is not filtered here.
         let ll: Vec<(f64, f64, dcso3::coalition::Side)> = objs
             .iter()
             .filter(|(_, o)| matches!(o.owner, dcso3::coalition::Side::Blue | dcso3::coalition::Side::Red))
-            .filter(|(_, o)| !o.kind.is_carrier_group())
+            .filter(|(_, o)| {
+                !matches!(
+                    o.kind,
+                    ObjectiveKind::Farp { .. } | ObjectiveKind::Production
+                )
+            })
+            .filter(|(_, o)| o.pos.latitude != 0.0 || o.pos.longitude != 0.0)
             .map(|(_, o)| (o.pos.latitude, o.pos.longitude, o.owner))
             .collect();
         if ll.len() < 4 {
@@ -689,7 +725,71 @@ async fn api_frontline(
             })
             .collect();
 
-        let fl = bfprotocols::frontline::compute(&pts, &bfprotocols::frontline::Params::default());
+        // Default Params use σ up to 95 km; after dropping OPR/FARP the median
+        // spacing grows and the field becomes a smooth arc that can leave an
+        // isolated OFO on the wrong side of the opposite-colour ribbon.
+        // Tight σ + higher edge_level pulls coloured lines onto own ground.
+        let params = bfprotocols::frontline::Params {
+            sigma_mult: 1.15,
+            sigma_min: 8_000.0,
+            sigma_max: 25_000.0,
+            contested_mult: 2.2,
+            edge_level: 0.28,
+            ..bfprotocols::frontline::Params::default()
+        };
+        let fl = bfprotocols::frontline::compute(&pts, &params);
+
+        // Trim tails that leave the objective belt. Use *any* side: the coloured
+        // ribbon sits in the contested band between red and blue, so same-side-only
+        // either deleted real front (frac filter) or kept everything (closed-only).
+        const ORPHAN_MAX_M: f64 = 100_000.0;
+        const MIN_RUN_VERTS: usize = 3;
+        let near_any = |p: &[f64; 2]| -> bool {
+            let max2 = ORPHAN_MAX_M * ORPHAN_MAX_M;
+            pts.iter().any(|&(x, y, _)| {
+                let dx = p[0] - x;
+                let dy = p[1] - y;
+                dx * dx + dy * dy <= max2
+            })
+        };
+        let trim_line = |line: &[[f64; 2]]| -> Vec<Vec<[f64; 2]>> {
+            let mut out = Vec::new();
+            let mut run: Vec<[f64; 2]> = Vec::new();
+            let flush = |run: &mut Vec<[f64; 2]>, out: &mut Vec<Vec<[f64; 2]>>| {
+                if run.len() >= MIN_RUN_VERTS {
+                    out.push(std::mem::take(run));
+                } else {
+                    run.clear();
+                }
+            };
+            for p in line {
+                if near_any(p) {
+                    run.push(*p);
+                } else {
+                    flush(&mut run, &mut out);
+                }
+            }
+            flush(&mut run, &mut out);
+            out
+        };
+        let mut blue = Vec::new();
+        for l in &fl.blue {
+            blue.extend(trim_line(l));
+        }
+        let mut red = Vec::new();
+        for l in &fl.red {
+            red.extend(trim_line(l));
+        }
+        if fl.blue.len() != blue.len() || fl.red.len() != red.len() {
+            log::info!(
+                "api_frontline: trimmed ribbons (blue {}→{} runs, red {}→{} runs)",
+                fl.blue.len(),
+                blue.len(),
+                fl.red.len(),
+                red.len()
+            );
+        }
+
         let cvt = |lines: &[Vec<[f64; 2]>]| -> Vec<Vec<[f64; 2]>> {
             lines
                 .iter()
@@ -697,9 +797,10 @@ async fn api_frontline(
                 .collect()
         };
         let out = serde_json::json!({
-            "mid": cvt(&fl.mid),
-            "blue": cvt(&fl.blue),
-            "red": cvt(&fl.red),
+            // Dashboard SITREP does not draw the white F=0 ribbon; keep key for API shape.
+            "mid": [],
+            "blue": cvt(&blue),
+            "red": cvt(&red),
         });
         Ok(serde_json::to_string(&out)?)
     })?;
@@ -767,16 +868,23 @@ async fn api_kills(
                 // specifically instead of guessing from target_type's raw DCS
                 // unit-type string.
                 let is_air = db.victim_is_air(rid, &dead.victim).unwrap_or(false);
+                let is_ship = db
+                    .victim_is_ship(rid, &dead.victim, Some(dead))
+                    .unwrap_or(false);
+                // Last non-self hit = finishing blow (ignore DCS self-hit noise).
                 let killer = dead
                     .shots
                     .iter()
-                    .find(|s| s.hit)
+                    .filter(|s| s.hit && s.shooter.unit() != dead.victim.unit())
+                    .max_by_key(|s| s.time)
+                    .or_else(|| dead.shots.iter().filter(|s| s.hit).max_by_key(|s| s.time))
+                    .or_else(|| dead.shots.last())
                     .map(|s| {
                         serde_json::json!({
                             "ucid": s.shooter.ucid().map(|u| u.to_string()),
                             "side": format!("{:?}", s.shooter.side()),
-                            "weapon": s.weapon_name.as_ref().map(|w| w.to_string()),
-                            "airframe": s.shooter_typ.as_deref(),
+                            "weapon": display_weapon(s.weapon_name.as_ref()),
+                            "airframe": shot_airframe(dead, s),
                         })
                     });
                 serde_json::json!({
@@ -788,6 +896,7 @@ async fn api_kills(
                     "killer": killer,
                     "target_type": dead.shots.first().map(|s| s.target_typ.to_string()),
                     "is_air": is_air,
+                    "is_ship": is_ship,
                 })
             })
             .collect();
@@ -809,6 +918,8 @@ async fn api_pilot(
                 "name": name.to_string(),
                 "air_kills": agg.air_kills,
                 "ground_kills": agg.ground_kills,
+                "ship_kills": agg.ship_kills,
+                "csar": agg.csar,
                 "captures": agg.captures,
                 "repairs": agg.repairs,
                 "supply_transfers": agg.supply_transfers,
@@ -833,9 +944,9 @@ async fn api_pilot_sorties(
     let data = task::block_in_place(|| -> Result<String> {
         let ucid: dcso3::net::Ucid = ucid.parse().map_err(|e| anyhow::anyhow!("{e:?}"))?;
         let sorties = db.pilot_sorties(&ucid)?;
-        let entries: Vec<_> = sorties.iter().rev().map(|(round_id, _sortie_id, s)| {
+        let entries: Vec<_> = sorties.iter().rev().map(|(round_id, _sortie_id, s, crashed)| {
             let duration_secs = s.land
-                .map(|l| (l - s.takeoff).num_seconds())
+                .map(|l| (l - s.takeoff).num_seconds().max(0))
                 .unwrap_or(0);
             serde_json::json!({
                 "round_id": round_id.0,
@@ -843,7 +954,7 @@ async fn api_pilot_sorties(
                 "takeoff": s.takeoff.to_rfc3339(),
                 "land": s.land.map(|l| l.to_rfc3339()),
                 "duration_secs": duration_secs,
-                "landed": s.land.is_some(),
+                "landed": s.land.is_some() && !*crashed,
             })
         }).collect();
         Ok(serde_json::to_string(&entries)?)
@@ -864,6 +975,8 @@ async fn api_pilot_breakdown(
             "scenario": scenario,
             "air_kills": agg.air_kills,
             "ground_kills": agg.ground_kills,
+            "ship_kills": agg.ship_kills,
+            "csar": agg.csar,
             "captures": agg.captures,
             "repairs": agg.repairs,
             "supply_transfers": agg.supply_transfers,
@@ -888,9 +1001,16 @@ async fn api_pilot_kills(
         let ucid: dcso3::net::Ucid = ucid.parse().map_err(|e| anyhow::anyhow!("{e:?}"))?;
         let kills = db.pilot_kills_for(&ucid)?;
         let entries: Vec<_> = kills.iter().map(|(round_id, dead)| {
-            let shot = dead.shots.iter().find(|s| s.hit || dead.shots.len() == 1);
-            let weapon = shot.and_then(|s| s.weapon_name.as_ref().map(|w| w.to_string()));
-            let airframe = shot.and_then(|s| s.shooter_typ.as_deref().map(|t| t.to_string()));
+            // Same as Kill Feed: finishing blow (latest non-self hit).
+            let shot = dead
+                .shots
+                .iter()
+                .filter(|s| s.hit && s.shooter.unit() != dead.victim.unit())
+                .max_by_key(|s| s.time)
+                .or_else(|| dead.shots.iter().filter(|s| s.hit).max_by_key(|s| s.time))
+                .or_else(|| dead.shots.last());
+            let weapon = shot.and_then(|s| display_weapon(s.weapon_name.as_ref()));
+            let airframe = shot.and_then(|s| shot_airframe(dead, s));
             let target_type = shot.map(|s| s.target_typ.to_string());
             let victim_ucid = dead.victim.ucid().map(|u| u.to_string());
             let victim_side = format!("{:?}", dead.victim.side());
@@ -951,7 +1071,12 @@ async fn api_stats(
         } else {
             0
         };
-        let total_kills: u32 = pilots.iter().map(|(_, _, a)| a.air_kills + a.ground_kills).sum();
+        // Unique kill events in the open round (0 if none). Do not sum pilot
+        // air/ground credits (shared kills inflate) or fall back to all-time.
+        let total_kills: u32 = match active_rid {
+            Some(rid) => db.round_kill_count(rid)?,
+            None => 0,
+        };
         // Fallback only -- bflib's own session stop_time, used when
         // DCSServerBot isn't configured/reachable (see below, api_stats
         // prefers the bot's own scheduler restart time when available,
@@ -1058,6 +1183,27 @@ async fn api_stats(
         .await;
     }
 
+    // Live factory counts + hub Production % (same math as Discord HTML map).
+    if value["active_round"].is_object() {
+        match tokio::time::timeout(
+            std::time::Duration::from_secs(8),
+            call_engine_rpc_str(&db, "query-campaign-state", vec![]),
+        )
+        .await
+        {
+            Ok(Ok(json)) => {
+                if let Ok(cs) = serde_json::from_str::<bfprotocols::api::CampaignState>(&json) {
+                    value["factories_blue"] = serde_json::json!(cs.factories_blue);
+                    value["factories_red"] = serde_json::json!(cs.factories_red);
+                    value["production_blue"] = serde_json::json!(cs.production_blue);
+                    value["production_red"] = serde_json::json!(cs.production_red);
+                }
+            }
+            Ok(Err(e)) => log::warn!("api_stats: query-campaign-state failed: {}", e.0),
+            Err(_) => log::warn!("api_stats: query-campaign-state timed out after 8s"),
+        }
+    }
+
     Ok(json_response(serde_json::to_string(&value).map_err(anyhow::Error::from)?))
 }
 
@@ -1134,14 +1280,22 @@ async fn api_capture_events(
     Ok(json_response(data))
 }
 
-async fn api_aircraft_usage(db: StatsDb) -> std::result::Result<impl warp::Reply, Error> {
+async fn api_aircraft_usage(
+    db: StatsDb,
+    q: std::collections::HashMap<std::string::String, std::string::String>,
+) -> std::result::Result<impl warp::Reply, Error> {
     let data = task::block_in_place(|| -> Result<String> {
         let rounds = db.latest_rounds()?;
         let rid = match rounds.iter().find(|(_, _, r)| r.end.is_none()) {
             Some((_, rid, _)) => *rid,
             None => return Ok("[]".to_string()),
         };
-        let entries = db.aircraft_usage(rid)?;
+        let side_filter = match q.get("side").map(|s| s.as_str()) {
+            Some("Blue") | Some("blue") => Some(dcso3::coalition::Side::Blue),
+            Some("Red") | Some("red") => Some(dcso3::coalition::Side::Red),
+            _ => None,
+        };
+        let entries = db.aircraft_usage(rid, side_filter)?;
         let json: Vec<_> = entries.iter().map(|(vehicle, count, hours)| serde_json::json!({
             "vehicle": vehicle, "sorties": count, "hours": (hours * 10.0).round() / 10.0,
         })).collect();
@@ -3154,6 +3308,7 @@ async fn main() -> Result<()> {
 
     let aircraft_usage = warp::path!("api" / "aircraft-usage")
         .and(with_db(db.clone()))
+        .and(warp::query::<std::collections::HashMap<std::string::String, std::string::String>>())
         .then(api_aircraft_usage);
 
     // ── Live unit WebSocket ────────────────────────────────────────────

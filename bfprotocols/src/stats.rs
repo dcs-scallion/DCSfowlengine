@@ -101,6 +101,20 @@ pub enum Stat {
         to: ObjectiveId,
         by: Ucid,
     },
+    /// Successful player dynamic-cargo delivery (absorb / To stock). Dashboard wiring later;
+    /// Supply Runs also receive a paired `SupplyTransfer` on the same event.
+    DynamicCargoDelivery {
+        from: ObjectiveId,
+        to: ObjectiveId,
+        by: Ucid,
+        #[serde(default)]
+        weight_kg: f64,
+    },
+    /// One downed pilot delivered to a friendly base (coalition or POW).
+    CsarRescue {
+        by: Ucid,
+        enemy: bool,
+    },
     EquipmentInventory {
         id: ObjectiveId,
         item: String,
@@ -169,6 +183,9 @@ pub enum Stat {
         id: Ucid,
         addr: String,
         name: String,
+        /// Player coalition when already registered (lobby/slot). Older JSONL omit this.
+        #[serde(default)]
+        side: Option<Side>,
     },
     Disconnect {
         id: Ucid,
@@ -177,6 +194,9 @@ pub enum Stat {
         id: Ucid,
         slot: SlotId,
         typ: Option<Unit>,
+        /// Occupying player's coalition. Older JSONL omit this.
+        #[serde(default)]
+        side: Option<Side>,
     },
     Deslot {
         id: Ucid,

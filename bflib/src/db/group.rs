@@ -552,8 +552,12 @@ impl Db {
             }
             DeployKind::CsarPilot { .. } => None,
         };
+        let follow_csar = matches!(group!(self, gid).map(|g| &g.origin), Ok(DeployKind::CsarPilot { .. }));
         if let Some(id) = id {
             self.ephemeral.group_marks.insert(*gid, id);
+        }
+        if follow_csar {
+            self.follow_csar_group_mark(gid, group_center);
         }
         Ok(())
     }
@@ -1176,32 +1180,33 @@ impl Db {
             .flatten()
             .and_then(|n| connected.get_by_name(&n));
         if player_in_unit.is_none() {
-            if is_fowl_csar_unit_unit(unit) {
-                return Ok(BirthRes::None);
-            }
-            if let Some(uid) = self.persisted.units_by_name.get(name.as_str()) {
-                let unit = unit!(self, uid)?;
-                self.ephemeral.uid_by_object_id.insert(id.clone(), *uid);
-                self.ephemeral.object_id_by_uid.insert(*uid, id.clone());
-                self.ephemeral.units_potentially_close_to_enemies.insert(*uid);
-                if unit.tags.contains(UnitTag::Driveable) {
-                    self.ephemeral.units_able_to_move.insert(*uid);
+            if let Some(uid) = self.persisted.units_by_name.get(name.as_str()).copied() {
+                let spawned = unit!(self, uid)?;
+                self.ephemeral.uid_by_object_id.insert(id.clone(), uid);
+                self.ephemeral.object_id_by_uid.insert(uid, id.clone());
+                self.ephemeral.units_potentially_close_to_enemies.insert(uid);
+                if spawned.tags.contains(UnitTag::Driveable) {
+                    self.ephemeral.units_able_to_move.insert(uid);
                 }
                 self.ephemeral.stat(Stat::Unit {
-                    id: EnId::Unit(*uid),
-                    gid: Some(unit.group),
-                    owner: unit.side,
-                    typ: stats::Unit { typ: unit.typ.clone(), tags: unit.tags },
+                    id: EnId::Unit(uid),
+                    gid: Some(spawned.group),
+                    owner: spawned.side,
+                    typ: stats::Unit { typ: spawned.typ.clone(), tags: spawned.tags },
                     pos: stats::Pos {
                         pos: Coord::singleton(lua)?
-                            .lo_to_ll(LuaVec3(Vector3::new(unit.pos.x, 0., unit.pos.y)))?,
-                        velocity: unit.airborne_velocity.unwrap_or_default(),
+                            .lo_to_ll(LuaVec3(Vector3::new(spawned.pos.x, 0., spawned.pos.y)))?,
+                        velocity: spawned.airborne_velocity.unwrap_or_default(),
                     },
                 });
-                let gid = unit.group;
+                let gid = spawned.group;
                 if group_health!(self, gid)?.0 == 1 {
                     self.mark_group(lua, &gid)?
                 }
+                self.note_csar_pilot_unit_born(unit, uid);
+                return Ok(BirthRes::None);
+            }
+            if is_fowl_csar_unit_unit(unit) {
                 return Ok(BirthRes::None);
             }
         }
@@ -1259,7 +1264,12 @@ impl Db {
         if deferred_validate {
             match self.try_occupy_slot_deferred(lua, Utc::now(), &ucid, slot) {
                 SlotAuth::Yes(typ) => {
-                    self.ephemeral.stat(Stat::Slot { id: ucid, slot, typ });
+                    self.ephemeral.stat(Stat::Slot {
+                        id: ucid,
+                        slot,
+                        typ,
+                        side: Some(side).filter(|s| matches!(s, Side::Blue | Side::Red)),
+                    });
                 }
                 a => {
                     unit.clone().destroy()?;
@@ -1267,24 +1277,8 @@ impl Db {
                 }
             }
         }
-        if !unit.in_air().unwrap_or(false) {
-            if let Ok(pos) = unit.get_ground_position() {
-                if self.ground_spawn_parking_occupied(
-                    &slot,
-                    &ucid,
-                    objective,
-                    parking_subplace,
-                    pos.0,
-                    &id,
-                ) {
-                    info!(
-                        "player {ucid} spawn blocked: parking occupied subplace {parking_subplace:?} at {objective}"
-                    );
-                    unit.clone().destroy()?;
-                    return Ok(BirthRes::DynamicSlotDenied(ucid, SlotAuth::ParkingOccupied));
-                }
-            }
-        }
+        // Player-vs-player Birth parking guard disabled: false positives kicked
+        // the next player on the same airfield/FOB even without same-pad race.
         self.ephemeral.stat(Stat::Unit {
             id: EnId::Player(ucid),
             gid: None,

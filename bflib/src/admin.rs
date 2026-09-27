@@ -1389,10 +1389,18 @@ pub(crate) fn query_campaign_state(ctx: &Context) -> CampaignState {
             .or_insert(0) += player.points as i64;
     }
 
+    let (factories_red, factories_blue) = crate::db::discord_map::factory_counts(&ctx.db);
+    let production_blue = crate::db::discord_map::avg_logistics_production(&ctx.db, Side::Blue);
+    let production_red = crate::db::discord_map::avg_logistics_production(&ctx.db, Side::Red);
+
     CampaignState {
         objectives_by_side,
         players_by_side,
         points_by_side,
+        factories_blue,
+        factories_red,
+        production_blue,
+        production_red,
     }
 }
 

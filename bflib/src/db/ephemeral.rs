@@ -171,8 +171,6 @@ pub struct Ephemeral {
     force_to_spectators: BTreeMap<DateTime<Utc>, SmallVec<[Ucid; 1]>>,
     /// Ejected pilot DCS unit id -> owning player (CSAR).
     pub(super) csar_pilot_unit: FxHashMap<DcsOid<ClassUnit>, Ucid>,
-    /// Airborne CSAR chute first seen missing (grace before cancel).
-    pub(super) csar_chute_missing_since: FxHashMap<DcsOid<ClassUnit>, DateTime<Utc>>,
     /// Pilot units to destroy on next CSAR tick (life reset without MizLua).
     pub(super) pending_csar_pilot_destroy: Vec<DcsOid<ClassUnit>>,
     /// Friendly extract in progress: downed group -> rescuing slot.
@@ -332,7 +330,6 @@ impl Default for Ephemeral {
             global_pad_templates: FxHashSet::default(),
             force_to_spectators: BTreeMap::default(),
             csar_pilot_unit: FxHashMap::default(),
-            csar_chute_missing_since: FxHashMap::default(),
             pending_csar_pilot_destroy: Vec::default(),
             csar_extracting: FxHashMap::default(),
             csar_extract_walk_at: FxHashMap::default(),

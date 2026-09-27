@@ -70,16 +70,9 @@ pub enum SlotAuth {
     NotRegistered(Side),
     VehicleNotAvailable(Vehicle),
     Denied,
-    ParkingOccupied,
     AirborneDeslotBlocked {
         remaining_secs: u32,
     },
-}
-
-fn spawn_pos_overlap2(a: Vector2, b: Vector2, overlap2: f64) -> bool {
-    let dx = a.x - b.x;
-    let dy = a.y - b.y;
-    dx * dx + dy * dy < overlap2
 }
 
 pub enum RegErr {
@@ -701,6 +694,15 @@ impl Db {
         None
     }
 
+    /// Close the active sortie for flight-hours stats (immediate on DCS Land).
+    /// Life return / refunds stay on the delayed `land()` path.
+    pub fn record_sortie_land(&mut self, slot: SlotId) {
+        let Some(ucid) = self.ephemeral.players_by_slot.get(&slot).copied() else {
+            return;
+        };
+        self.ephemeral.stat(Stat::Land { id: ucid });
+    }
+
     pub fn land(&mut self, lua: MizLua, slot: SlotId, position: Vector2, unit: &Unit) -> bool {
         let sifo = match self.ephemeral.slot_info.get(&slot) {
             Some(sifo) => sifo,
@@ -720,7 +722,6 @@ impl Db {
             return false;
         };
         let owned_objective = self.resolve_friendly_land_objective(lua, side, position);
-        self.ephemeral.stat(Stat::Land { id: ucid });
         let Some(oid) = owned_objective else {
             debug!(
                 "land() not armed slot={slot:?} side={side:?} pos=({:.0},{:.0}) — outside friendly objective zone",
@@ -848,21 +849,21 @@ impl Db {
     }
 
     /// TryChangeSlot runs before LeaveUnit; play while the player still occupies the aircraft.
+    /// Uses runtime Unit.id() from object_id (not SlotId::as_unit_id — unreliable for DS).
     pub(crate) fn play_life_return_while_in_aircraft(&mut self, lua: MizLua, ucid: &Ucid) {
-        let Some(slot) = self.aircraft_life_return_sound_slot(lua, ucid) else {
+        let Some((unit_id, group_id)) = self.aircraft_life_return_sound_targets(lua, ucid) else {
             return;
         };
-        let Some(unit) = slot.as_unit_id() else {
-            return;
-        };
-        if crate::sounds::play_unit_from_hooks(
+        if crate::sounds::play_life_return_from_hooks(
             &self.ephemeral.fowl_miz_export,
             lua,
-            "life_return",
-            unit,
+            Some(unit_id),
+            group_id,
         ) {
             self.ephemeral.life_return_sound_played.insert(*ucid);
-            info!("life_return sound played for {ucid} (still in aircraft)");
+            info!("life_return sound played for {ucid} (still in aircraft, unit {unit_id:?})");
+        } else {
+            warn!("life_return sound failed for {ucid} while still in aircraft");
         }
     }
 
@@ -870,7 +871,12 @@ impl Db {
         self.ephemeral.life_return_sound_played.remove(ucid)
     }
 
-    fn aircraft_life_return_sound_slot(&self, lua: MizLua, ucid: &Ucid) -> Option<SlotId> {
+    /// Same refund window as `player_left_unit`, while Unit/MultiCrew is still occupied.
+    fn aircraft_life_return_sound_targets(
+        &self,
+        lua: MizLua,
+        ucid: &Ucid,
+    ) -> Option<(dcso3::env::miz::UnitId, Option<dcso3::env::miz::GroupId>)> {
         if !self.ephemeral.cfg.limited_lives {
             return None;
         }
@@ -883,18 +889,11 @@ impl Db {
         };
         let life_type = *self.ephemeral.cfg.life_types.get(&inst.typ)?;
         player.lives.get(&life_type)?;
-        let objid = self.ephemeral.object_id_by_slot.get(&slot).cloned();
-        let unit = objid
-            .as_ref()
-            .and_then(|id| Unit::get_instance(lua, id).ok());
-        let on_ground = unit
-            .as_ref()
-            .map(|u| u.is_exist().unwrap_or(false) && !u.in_air().unwrap_or(true))
-            .unwrap_or(!inst.in_air);
-        let pos = unit
-            .as_ref()
-            .and_then(|u| u.get_ground_position().ok())
-            .map(|p| p.0);
+        let oid = self.ephemeral.object_id_by_slot.get(&slot)?;
+        let unit = Unit::get_instance(lua, oid).ok()?;
+        let unit_id = unit.id().ok()?;
+        let on_ground = unit.is_exist().unwrap_or(false) && !unit.in_air().unwrap_or(true);
+        let pos = unit.get_ground_position().ok().map(|p| p.0);
         let land_oid = if on_ground {
             pos.and_then(|p| self.resolve_friendly_land_objective(lua, player.side, p))
                 .or(inst.landed_at_objective)
@@ -903,7 +902,12 @@ impl Db {
         } else {
             None
         };
-        land_oid.map(|_| slot)
+        land_oid?;
+        let group_id = self
+            .ephemeral
+            .get_slot_info(&slot)
+            .map(|sifo| sifo.miz_gid);
+        Some((unit_id, group_id))
     }
 
     pub fn try_occupy_slot(
@@ -1318,73 +1322,6 @@ impl Db {
         } else {
             Ok((0, vec![]))
         }
-    }
-
-    /// Same DCS pad or fuselage overlap. Not the 120 m AI hub radius.
-    const PLAYER_SPAWN_OVERLAP_M: f64 = 12.;
-
-    pub(crate) fn ground_spawn_parking_occupied(
-        &self,
-        slot: &SlotId,
-        ucid: &Ucid,
-        oid: ObjectiveId,
-        parking_subplace: Option<i64>,
-        pos: Vector2,
-        unit_id: &DcsOid<ClassUnit>,
-    ) -> bool {
-        if let Some(existing) = self.ephemeral.slot_by_object_id.get(unit_id) {
-            if existing != slot {
-                return false;
-            }
-        }
-        if let Some(sub) = parking_subplace {
-            if self.spawn_subplace_held_by_other(slot, oid, sub) {
-                return true;
-            }
-        }
-        let overlap2 = Self::PLAYER_SPAWN_OVERLAP_M * Self::PLAYER_SPAWN_OVERLAP_M;
-        for (other_slot, (other_oid, other_pos)) in &self.ephemeral.player_hub_blocker_positions {
-            if other_slot == slot || *other_oid != oid {
-                continue;
-            }
-            if spawn_pos_overlap2(*other_pos, pos, overlap2) {
-                return true;
-            }
-        }
-        for (other_slot, other_ucid) in &self.ephemeral.players_by_slot {
-            if other_slot == slot || other_ucid == ucid {
-                continue;
-            }
-            let Some(player) = self.persisted.players.get(other_ucid) else {
-                continue;
-            };
-            let Some((_, Some(inst))) = player.current_slot.as_ref() else {
-                continue;
-            };
-            if inst.in_air {
-                continue;
-            }
-            if inst.landed_at_objective.is_some_and(|o| o != oid) {
-                continue;
-            }
-            let other_pos = Vector2::new(inst.position.p.x, inst.position.p.z);
-            if spawn_pos_overlap2(other_pos, pos, overlap2) {
-                return true;
-            }
-        }
-        false
-    }
-
-    fn spawn_subplace_held_by_other(&self, slot: &SlotId, oid: ObjectiveId, sub: i64) -> bool {
-        let key = (oid, sub);
-        if !self.ephemeral.player_hub_subplaces.contains(&key) {
-            return false;
-        }
-        !self
-            .ephemeral
-            .player_hub_subplace_by_slot
-            .get(slot)
-            .is_some_and(|k| *k == key)
     }
 
     pub fn player_entered_slot(

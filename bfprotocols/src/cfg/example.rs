@@ -2162,6 +2162,7 @@ impl Default for Cfg {
             airborne_deslot_block: true,
             airborne_deslot_penalty_secs: 300,
             airborne_deslot_penalty_points: 0,
+            slot_leave_kill_radius_m: 15000.0,
             csar: CsarCfg::default(),
             dynamic_cargo_delivery: DynamicCargoDeliveryCfg::default(),
             acmi_sanitize: AcmiSanitizeCfg::default(),
