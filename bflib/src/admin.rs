@@ -780,24 +780,40 @@ pub(super) fn admin_shutdown(
         let new_campaign = reset.is_some();
         match crate::db::discord_map::resolve_mission_miz_path(lua, &ctx.cfg_base_path) {
             Ok(miz_path) => {
-                let cfg = &ctx.db.ephemeral.cfg;
-                let args = crate::setmissionstartdatetime::SpawnArgs {
-                    cfg: &cfg.setmissionstartdatetime,
-                    campaign_stats_enabled: cfg.discord_map.campaign_stats,
+                let weather_index = ctx.db.persisted.setmission_weather_index;
+                let args = crate::setmission::SpawnArgs {
+                    cfg: &ctx.db.ephemeral.cfg.setmission,
+                    campaign_stats_enabled: ctx.db.ephemeral.cfg.discord_map.campaign_stats,
                     campaign_rounds: ctx.db.persisted.campaign_stats.campaign_rounds,
-                    rounds_per_day: cfg.discord_map.rounds_per_day,
+                    rounds_per_day: ctx.db.ephemeral.cfg.discord_map.rounds_per_day,
                     miz_path: &miz_path,
                     new_campaign,
+                    weather_index,
                 };
-                if let Err(e) = crate::setmissionstartdatetime::maybe_spawn(args) {
-                    error!("setmissionstartdatetime: {e:?}");
+                match crate::setmission::maybe_spawn(args) {
+                    Ok(Some(outcome)) => {
+                        if let Some(idx) = outcome.weather_index {
+                            ctx.db.persisted.setmission_weather_index = Some(idx);
+                            ctx.db.ephemeral.dirty();
+                        } else if new_campaign {
+                            ctx.db.persisted.setmission_weather_index = None;
+                            ctx.db.ephemeral.dirty();
+                        }
+                    }
+                    Ok(None) => {
+                        if new_campaign && ctx.db.persisted.setmission_weather_index.is_some() {
+                            ctx.db.persisted.setmission_weather_index = None;
+                            ctx.db.ephemeral.dirty();
+                        }
+                    }
+                    Err(e) => error!("setmission: {e:?}"),
                 }
             }
-            Err(e) => error!("setmissionstartdatetime: resolve miz path failed: {e:?}"),
+            Err(e) => error!("setmission: resolve miz path failed: {e:?}"),
         }
     } else {
         warn!(
-            "shutdown: campaign not initialized; skipping persist, ACMI, and mission datetime spawn"
+            "shutdown: campaign not initialized; skipping persist, ACMI, and setmission spawn"
         );
     }
     let wait = Arc::new((Mutex::new(false), Condvar::new()));
@@ -821,6 +837,9 @@ pub(super) fn admin_shutdown(
         }
     } else if ctx.db_ready {
         return_lives(lua, ctx, DateTime::<Utc>::MAX_UTC);
+        if let Err(e) = ctx.db.flush_positions_for_shutdown(lua) {
+            error!("shutdown position flush: {e}");
+        }
         ctx.do_bg_task(Task::SaveState(
             ctx.miz_state_path.clone(),
             ctx.db.persisted.clone(),
@@ -1393,6 +1412,24 @@ pub(crate) fn query_campaign_state(ctx: &Context) -> CampaignState {
     let production_blue = crate::db::discord_map::avg_logistics_production(&ctx.db, Side::Blue);
     let production_red = crate::db::discord_map::avg_logistics_production(&ctx.db, Side::Red);
 
+    let (weather_preset_count, weather_preset_index) = {
+        let wx = &ctx.db.ephemeral.cfg.setmission.setmissionweather;
+        if wx.enabled && !wx.profiles.is_empty() {
+            let n = wx.profiles.len();
+            let start = wx.weather_start_index.min(n.saturating_sub(1));
+            let idx = ctx
+                .db
+                .persisted
+                .setmission_weather_index
+                .map(|i| i as usize)
+                .filter(|&i| i < n)
+                .unwrap_or(start);
+            (Some(n as u32), Some(idx as u32))
+        } else {
+            (None, None)
+        }
+    };
+
     CampaignState {
         objectives_by_side,
         players_by_side,
@@ -1401,6 +1438,8 @@ pub(crate) fn query_campaign_state(ctx: &Context) -> CampaignState {
         factories_red,
         production_blue,
         production_red,
+        weather_preset_count,
+        weather_preset_index,
     }
 }
 

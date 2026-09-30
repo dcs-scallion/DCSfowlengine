@@ -839,6 +839,7 @@ impl StatsDb {
             warn!("stats ingest: neither --stats-jsonl nor --stats-dir configured");
         }        t.seed_wiki_if_empty()?;
         t.seed_wiki_images_if_empty()?;
+        t.reconcile_flight_hours_from_sorties_once()?;
         // A older bug fabricated a round named after the last segment of the
         // netidx base (e.g. "campaign" from "/local/fowl/campaign") whenever a
         // SessionStart was replayed without a NewRound. Those bogus rounds are
@@ -942,6 +943,7 @@ impl StatsDb {
         }));
         t.seed_wiki_if_empty()?;
         t.seed_wiki_images_if_empty()?;
+        t.reconcile_flight_hours_from_sorties_once()?;
         let _t = t.clone();
         task::spawn(async move {
             if let Err(e) = _t.background_loop().await {
@@ -1487,7 +1489,7 @@ impl StatsDb {
             return Ok(());
         }
         let takeoff = s.takeoff;
-        let vehicle = s.vehicle.to_string();
+        let vehicle = s.vehicle.clone();
         // Guard clock skew / bad event order — never stamp End before Takeoff.
         let end = if end < takeoff { takeoff } else { end };
         self.pilots.with_sortie(key, |s| {
@@ -1496,16 +1498,15 @@ impl StatsDb {
         self.pilots.sortie_crashed.insert(&key, &crashed)?;
         let hours = ((end - takeoff).num_seconds().max(0) as f32) / 3600.0;
         if hours > 0.0 {
-            let ac_key = (round, vehicle);
+            let ac_key = (round, vehicle.to_string());
             let (cnt, prev_hrs) = self.aircraft_sorties.get(&ac_key)?.unwrap_or((0, 0.0));
             self.aircraft_sorties
                 .insert(&ac_key, &(cnt, prev_hrs + hours))?;
-            self.pilots.with_pilot_and_aggregates(
-                ucid,
-                round,
-                |p| p.total.hours += hours,
-                |a| a.hours += hours,
-            )?;
+            // Credit from Sortie.vehicle — not current slot (often cleared on
+            // Deslot/kick/orphan Connect before finalize runs).
+            self.pilots.with_pilot(ucid, |p| p.total.hours += hours)?;
+            self.pilots
+                .with_aggregates((ucid, vehicle, round), |a| a.hours += hours)?;
         }
         Ok(())
     }
@@ -2091,6 +2092,85 @@ impl StatsDb {
     }
 
     fn seed_wiki_images_if_empty(&self) -> Result<()> {
+        Ok(())
+    }
+
+    /// One-shot: set Career / Theater / aircraft_sorties hours from closed Flight Log
+    /// legs. Fixes drift when finalize credited `Pilot.total` but skipped round
+    /// aggregates (no slot vehicle after kick / Deslot race).
+    fn reconcile_flight_hours_from_sorties_once(&self) -> Result<()> {
+        const FLAG: &[u8] = b"reconcile_flight_hours_v1";
+        if self.db.get(FLAG)?.is_some() {
+            return Ok(());
+        }
+        info!("reconciling flight hours from closed sorties (once)");
+
+        use std::collections::HashMap;
+        let mut by_agg: HashMap<(Ucid, Vehicle, RoundId), f32> = HashMap::new();
+        let mut by_pilot: HashMap<Ucid, f32> = HashMap::new();
+        let mut by_ac: HashMap<(RoundId, std::string::String), f32> = HashMap::new();
+
+        for r in self.pilots.sortie.iter() {
+            let ((ucid, round, _), s) = r?;
+            let Some(land) = s.land else {
+                continue;
+            };
+            let end = if land < s.takeoff { s.takeoff } else { land };
+            let hours = ((end - s.takeoff).num_seconds().max(0) as f32) / 3600.0;
+            if hours <= 0.0 {
+                continue;
+            }
+            *by_agg
+                .entry((ucid, s.vehicle.clone(), round))
+                .or_default() += hours;
+            *by_pilot.entry(ucid).or_default() += hours;
+            *by_ac
+                .entry((round, s.vehicle.to_string()))
+                .or_default() += hours;
+        }
+
+        let agg_keys: Vec<_> = self
+            .pilots
+            .aggregates
+            .iter()
+            .filter_map(|r| r.ok().map(|(k, _)| k))
+            .collect();
+        for k in agg_keys {
+            self.pilots.with_aggregates(k, |a| a.hours = 0.0)?;
+        }
+        for (k, hours) in by_agg {
+            self.pilots.with_aggregates(k, |a| a.hours = hours)?;
+        }
+
+        let pilot_ids: Vec<_> = self
+            .pilots
+            .pilots
+            .iter()
+            .filter_map(|r| r.ok().map(|(u, _)| u))
+            .collect();
+        for ucid in &pilot_ids {
+            self.pilots.with_pilot(*ucid, |p| p.total.hours = 0.0)?;
+        }
+        for (ucid, hours) in by_pilot {
+            self.pilots.with_pilot(ucid, |p| p.total.hours = hours)?;
+        }
+
+        let ac_rows: Vec<_> = self
+            .aircraft_sorties
+            .iter()
+            .filter_map(|r| r.ok().map(|(k, (cnt, _))| (k, cnt)))
+            .collect();
+        for (k, cnt) in ac_rows {
+            let hrs = by_ac.remove(&k).unwrap_or(0.0);
+            self.aircraft_sorties.insert(&k, &(cnt, hrs))?;
+        }
+        for (k, hrs) in by_ac {
+            let (cnt, _) = self.aircraft_sorties.get(&k)?.unwrap_or((0, 0.0));
+            self.aircraft_sorties.insert(&k, &(cnt, hrs))?;
+        }
+
+        self.db.insert(FLAG, b"1")?;
+        info!("flight hours reconciliation complete");
         Ok(())
     }
 

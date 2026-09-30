@@ -1185,7 +1185,10 @@ impl Db {
                 self.ephemeral.uid_by_object_id.insert(id.clone(), uid);
                 self.ephemeral.object_id_by_uid.insert(uid, id.clone());
                 self.ephemeral.units_potentially_close_to_enemies.insert(uid);
-                if spawned.tags.contains(UnitTag::Driveable) {
+                let is_player_placed = self.persisted.groups.get(&spawned.group).is_some_and(|g| {
+                    matches!(g.origin, DeployKind::Deployed { .. } | DeployKind::Troop { .. })
+                });
+                if spawned.tags.contains(UnitTag::Driveable) || is_player_placed {
                     self.ephemeral.units_able_to_move.insert(uid);
                 }
                 self.ephemeral.stat(Stat::Unit {
@@ -2889,6 +2892,16 @@ impl Db {
             })
             .collect::<SmallVec<[(GroupId, i32); 8]>>();
         calcm
+    }
+
+    /// One-shot position flush for all tracked units; called at graceful shutdown before SaveState.
+    pub fn flush_positions_for_shutdown(&mut self, lua: MizLua) -> Result<()> {
+        let uids: SmallVec<[UnitId; 64]> =
+            self.ephemeral.units_able_to_move.iter().copied().collect();
+        if !uids.is_empty() {
+            self.update_unit_positions(lua, Utc::now(), &uids)?;
+        }
+        Ok(())
     }
 
     pub fn update_unit_positions_incremental(

@@ -346,6 +346,47 @@ impl Db {
             .any(|(_, c)| c.source == oid && c.source_checked_out)
     }
 
+    /// Equipment / liquid qty still checked out in crates from `oid` (for item-scoped SyncTo forbid).
+    pub(super) fn dynamic_cargo_open_checkout_reserved(
+        &self,
+        oid: ObjectiveId,
+    ) -> (FxHashMap<String, u32>, FxHashMap<LiquidType, u32>) {
+        let mut eq: FxHashMap<String, u32> = FxHashMap::default();
+        let mut liq: FxHashMap<LiquidType, u32> = FxHashMap::default();
+        let liquids_tons = self
+            .persisted
+            .objectives
+            .get(&oid)
+            .map(|obj| {
+                objective_liquids_stored_as_tons(self.ephemeral.fowl_miz_export.as_ref(), obj)
+            })
+            .unwrap_or(false);
+        for (_, c) in &self.persisted.dynamic_cargo_crates {
+            if c.source != oid || !c.source_checked_out {
+                continue;
+            }
+            for (name, qty) in &c.equipment {
+                if *qty > 0 {
+                    let e = eq.entry(name.clone()).or_default();
+                    *e = e.saturating_add(*qty);
+                }
+            }
+            for (l, qty_kg) in &c.liquids {
+                if *qty_kg == 0 {
+                    continue;
+                }
+                let sub = if liquids_tons {
+                    dcs_liquid_kg_to_fowl_tons(*qty_kg).max(1)
+                } else {
+                    *qty_kg
+                };
+                let e = liq.entry(*l).or_default();
+                *e = e.saturating_add(sub);
+            }
+        }
+        (eq, liq)
+    }
+
     fn resolve_dynamic_cargo_spawner_and_source(
         &self,
         _lua: MizLua,
@@ -1171,7 +1212,7 @@ impl Db {
             let dest = self.resolve_dynamic_cargo_absorb_dest(&entry);
             if dest.is_none() && entry.air_dropped {
                 info!(
-                    "dynamic cargo lost after airdrop (checkout kept, no restore): {} source={:?} pos=({:.0},{:.0}) carrier={:?} weight_kg={:.0}",
+                    "dynamic cargo lost after airdrop (no stock restore, checkout released): {} source={:?} pos=({:.0},{:.0}) carrier={:?} weight_kg={:.0}",
                     entry.name,
                     entry.source,
                     entry.x,
@@ -1264,7 +1305,7 @@ impl Db {
                 }
                 None => {
                     info!(
-                        "dynamic cargo lost (checkout kept, no restore): {} source={:?} pos=({:.0},{:.0}) carrier={:?} weight_kg={:.0}",
+                        "dynamic cargo lost (no stock restore, checkout released): {} source={:?} pos=({:.0},{:.0}) carrier={:?} weight_kg={:.0}",
                         entry.name,
                         entry.source,
                         entry.x,
@@ -1318,7 +1359,7 @@ impl Db {
             return false;
         };
         info!(
-            "dynamic cargo destroyed (checkout kept, no restore): {} source={:?} air_dropped={} weight_kg={:.0}",
+            "dynamic cargo destroyed (no stock restore, checkout released): {} source={:?} air_dropped={} weight_kg={:.0}",
             entry.name, entry.source, entry.air_dropped, entry.last_weight_kg
         );
         self.remove_dynamic_cargo_registry_entry(name);
@@ -1390,7 +1431,7 @@ impl Db {
             .map(|(_, c)| c.clone())
             .collect();
         for entry in entries {
-            // Orphan check: source objective changed sides → purge instead of respawn
+            // Orphan: source objective changed sides → purge instead of respawn
             let source_owner = self
                 .persisted
                 .objectives
@@ -1400,6 +1441,17 @@ impl Db {
                 info!(
                     "dynamic cargo orphan {} (source {:?} now {:?}, was {:?}) - removing",
                     entry.name, entry.source, source_owner, entry.side
+                );
+                self.persisted.dynamic_cargo_crates.remove_cow(&entry.name);
+                self.clamp_dynamic_cargo_checkout(entry.source);
+                self.ephemeral.dirty();
+                continue;
+            }
+            // Mid-air airdrop state cannot survive mission restart (no chute / carrier).
+            if entry.air_dropped && !entry.airdrop_rehooked {
+                info!(
+                    "dynamic cargo mid-air airdrop ghost on load {} source={:?} - removing (checkout released)",
+                    entry.name, entry.source
                 );
                 self.persisted.dynamic_cargo_crates.remove_cow(&entry.name);
                 self.clamp_dynamic_cargo_checkout(entry.source);
@@ -1416,6 +1468,7 @@ impl Db {
                     entry.name
                 );
                 self.persisted.dynamic_cargo_crates.remove_cow(&entry.name);
+                self.clamp_dynamic_cargo_checkout(entry.source);
                 self.ephemeral.dirty();
             }
         }

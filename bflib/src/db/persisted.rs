@@ -73,6 +73,9 @@ pub struct Persisted {
     pub dynamic_cargo_crates: MapM<String, DynamicCargoCrate>,
     #[serde(default)]
     pub dynamic_cargo_next_index: MapS<Side, u64>,
+    /// Last `setmission.setmissionweather` profile index (None = use CFG `weather_start_index`).
+    #[serde(default)]
+    pub setmission_weather_index: Option<u32>,
 }
 
 impl Persisted {

@@ -1227,9 +1227,13 @@ pub struct DiscordMapCfg {
     #[serde(default = "default_discord_map_http_port")]
     pub http_port: u16,
     /// Public HTTPS URL for Discord / player links (e.g. `https://fowl-ta.duckdns.org/map`).
-    /// Empty: fall back to `http://{bind_address}:{http_port}/map`. One URL per DCS server.
+    /// Empty: fall back to `http://{dcs_public_host}:{http_port}/map`. One URL per DCS server.
     #[serde(default)]
     pub public_map_url: String,
+    /// Public DCS join host (IPv4/hostname) for interactive map header `DCS server IP`.
+    /// Independent of `serverSettings.lua` bind_address (which may be LAN-only).
+    #[serde(default)]
+    pub dcs_public_host: String,
     /// Draw campaign front line on interactive `/map` HTML (SVG only, not Discord PNG).
     /// Requires `front_line: true` in CFG root; validated at mission start.
     #[serde(default)]
@@ -1305,6 +1309,7 @@ impl Default for DiscordMapCfg {
             padding: 0,
             http_port: default_discord_map_http_port(),
             public_map_url: Default::default(),
+            dcs_public_host: Default::default(),
             front_line_in_map: false,
             dowload_acmi: false,
             dowload_acmi_url: Default::default(),
@@ -1334,7 +1339,22 @@ impl Default for DiscordMapCfg {
     }
 }
 
-/// Discord / player HTTPS URL. Empty string means use `http://{bind_address}:{http_port}/map`.
+/// Public join host for map header / fallback map URL. Rejects empty, wildcard, loopback.
+pub fn normalize_discord_map_dcs_public_host(raw: &str) -> Result<std::string::String> {
+    let host = raw.trim();
+    if host.is_empty() {
+        bail!("discord_map.dcs_public_host is required when discord_map is enabled");
+    }
+    if matches!(
+        host,
+        "0.0.0.0" | "::" | "[::]" | "127.0.0.1" | "::1" | "localhost"
+    ) {
+        bail!("discord_map.dcs_public_host must be a routable server address, not {host}");
+    }
+    Ok(host.to_string())
+}
+
+/// Discord / player HTTPS URL. Empty string means use `http://{dcs_public_host}:{http_port}/map`.
 pub fn normalize_discord_map_public_url(raw: &str) -> Result<Option<std::string::String>> {
     let t = raw.trim();
     if t.is_empty() {
@@ -1409,6 +1429,7 @@ impl DiscordMapCfg {
             bail!("discord_map.http_port must be > 0 when discord_map.enabled");
         }
         normalize_discord_map_public_url(&self.public_map_url)?;
+        normalize_discord_map_dcs_public_host(&self.dcs_public_host)?;
         if self.campaign_stats && self.rounds_per_day == 0 {
             bail!("discord_map.rounds_per_day must be >= 1 when discord_map.campaign_stats is true");
         }
@@ -1523,7 +1544,7 @@ pub struct ServerMaintenanceCfg {
     pub logs_multiplayer_retain_days: Option<u32>,
 }
 
-fn default_mission_datetime_post_round_delay_secs() -> u32 {
+fn default_setmission_post_round_delay_secs() -> u32 {
     15
 }
 
@@ -1531,7 +1552,7 @@ fn default_mission_date_on_new_campaign() -> MissionDateOnNewCampaign {
     MissionDateOnNewCampaign::Reset
 }
 
-/// ME calendar when a new campaign starts (`setmissionstartdatetime`).
+/// ME calendar when a new campaign starts (`setmission.setmissionstartdatetime`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum MissionDateOnNewCampaign {
@@ -1541,14 +1562,12 @@ pub enum MissionDateOnNewCampaign {
     Continue,
 }
 
-/// Cycle ME mission start time (and optionally date) after each round via external script.
+/// Cycle ME mission start time (and optionally date) after each round.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct SetMissionStartDatetimeCfg {
     #[serde(default)]
     pub enabled: bool,
-    /// Absolute path to `setmissionstartdatetime.BAT` (or `.py`).
-    #[serde(default, alias = "script_path")]
-    pub skript_path: Option<String>,
     /// Wall-clock start times of day to rotate, e.g. `["06:00", "15:00"]`.
     #[serde(default)]
     pub mission_start_time_cycle: Vec<String>,
@@ -1558,20 +1577,15 @@ pub struct SetMissionStartDatetimeCfg {
     pub mission_date_base: Option<String>,
     #[serde(default = "default_mission_date_on_new_campaign")]
     pub mission_date_on_new_campaign: MissionDateOnNewCampaign,
-    /// Wait after MissionEnd before rewriting the `.miz` (DCS file lock). 1..=1800.
-    #[serde(default = "default_mission_datetime_post_round_delay_secs")]
-    pub post_round_delay_secs: u32,
 }
 
 impl Default for SetMissionStartDatetimeCfg {
     fn default() -> Self {
         Self {
             enabled: false,
-            skript_path: None,
             mission_start_time_cycle: Vec::new(),
             mission_date_base: None,
             mission_date_on_new_campaign: default_mission_date_on_new_campaign(),
-            post_round_delay_secs: default_mission_datetime_post_round_delay_secs(),
         }
     }
 }
@@ -1581,20 +1595,15 @@ impl SetMissionStartDatetimeCfg {
         if !self.enabled {
             return Ok(());
         }
-        let path = self
-            .skript_path
-            .as_ref()
-            .map(|s| s.trim())
-            .filter(|s| !s.is_empty())
-            .ok_or_else(|| anyhow!("setmissionstartdatetime.skript_path is required when enabled"))?;
-        let _ = path;
         if self.mission_start_time_cycle.is_empty() {
-            bail!("setmissionstartdatetime.mission_start_time_cycle must not be empty when enabled");
+            bail!(
+                "setmission.setmissionstartdatetime.mission_start_time_cycle must not be empty when enabled"
+            );
         }
         for t in &self.mission_start_time_cycle {
             parse_hh_mm(t).map_err(|_| {
                 anyhow!(
-                    "setmissionstartdatetime.mission_start_time_cycle entry {:?} is invalid (use HH:MM)",
+                    "setmission.setmissionstartdatetime.mission_start_time_cycle entry {:?} is invalid (use HH:MM)",
                     t
                 )
             })?;
@@ -1602,14 +1611,222 @@ impl SetMissionStartDatetimeCfg {
         if let Some(ref d) = self.mission_date_base {
             NaiveDate::parse_from_str(d.trim(), "%Y-%m-%d").map_err(|_| {
                 anyhow!(
-                    "setmissionstartdatetime.mission_date_base {:?} is invalid (use YYYY-MM-DD)",
+                    "setmission.setmissionstartdatetime.mission_date_base {:?} is invalid (use YYYY-MM-DD)",
                     d
                 )
             })?;
         }
+        Ok(())
+    }
+}
+
+/// Inclusive numeric range; inject value is uniform in `[min, max]` then rounded to `10^round`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct WeatherValueRange {
+    pub min: f64,
+    pub max: f64,
+    /// Round to nearest `10^round` (0=ones, 1=tens, 2=hundreds).
+    pub round: u8,
+}
+
+impl WeatherValueRange {
+    pub fn validate(&self, field: &str) -> Result<()> {
+        if self.min > self.max {
+            bail!("{field}: min {} > max {}", self.min, self.max);
+        }
+        if self.round > 3 {
+            bail!("{field}: round {} out of range 0-3", self.round);
+        }
+        Ok(())
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct WeatherWindLayerCfg {
+    pub speed_ms: WeatherValueRange,
+    pub dir_deg: WeatherValueRange,
+}
+
+impl WeatherWindLayerCfg {
+    pub fn validate(&self, field: &str) -> Result<()> {
+        self.speed_ms.validate(&format!("{field}.speed_ms"))?;
+        self.dir_deg.validate(&format!("{field}.dir_deg"))?;
+        if self.speed_ms.min < 0.0 {
+            bail!("{field}.speed_ms.min must be >= 0");
+        }
+        Ok(())
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct WeatherWindCfg {
+    #[serde(rename = "atGround")]
+    pub at_ground: WeatherWindLayerCfg,
+    #[serde(rename = "at2000")]
+    pub at_2000: WeatherWindLayerCfg,
+    #[serde(rename = "at8000")]
+    pub at_8000: WeatherWindLayerCfg,
+}
+
+impl WeatherWindCfg {
+    pub fn validate(&self) -> Result<()> {
+        self.at_ground.validate("wind.atGround")?;
+        self.at_2000.validate("wind.at2000")?;
+        self.at_8000.validate("wind.at8000")?;
+        Ok(())
+    }
+}
+
+/// One static-weather rung (CFG order = better → worse).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct WeatherProfileCfg {
+    /// Optional editor label (not written into the .miz).
+    #[serde(default)]
+    pub id: Option<String>,
+    /// DCS cloud preset id, e.g. `Preset2`, `RainyPreset1`.
+    pub preset: String,
+    /// Fixed selection weight vs neighbours (> 0).
+    pub weight: f64,
+    pub base_m: WeatherValueRange,
+    pub temperature_c: WeatherValueRange,
+    pub qnh_mmhg: WeatherValueRange,
+    pub wind: WeatherWindCfg,
+}
+
+impl WeatherProfileCfg {
+    pub fn validate(&self, index: usize) -> Result<()> {
+        let label = self
+            .id
+            .as_deref()
+            .filter(|s| !s.is_empty())
+            .map(|s| format!("profiles[{index}] ({s})"))
+            .unwrap_or_else(|| format!("profiles[{index}]"));
+        if self.preset.trim().is_empty() {
+            bail!("{label}.preset must not be empty");
+        }
+        if !(self.weight > 0.0) {
+            bail!("{label}.weight must be > 0");
+        }
+        self.base_m.validate(&format!("{label}.base_m"))?;
+        self.temperature_c
+            .validate(&format!("{label}.temperature_c"))?;
+        self.qnh_mmhg.validate(&format!("{label}.qnh_mmhg"))?;
+        self.wind
+            .validate()
+            .with_context(|| format!("{label}.wind"))?;
+        Ok(())
+    }
+}
+
+/// Static weather cycle for the on-disk `.miz` (injected in the same pass as datetime).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SetMissionWeatherCfg {
+    #[serde(default)]
+    pub enabled: bool,
+    /// Index of the first-round profile (editor aligns to `base.miz`).
+    #[serde(default)]
+    pub weather_start_index: usize,
+    /// Ordered better → worse; length must be >= 3 when enabled (or when profiles non-empty).
+    #[serde(default)]
+    pub profiles: Vec<WeatherProfileCfg>,
+}
+
+impl Default for SetMissionWeatherCfg {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            weather_start_index: 0,
+            profiles: Vec::new(),
+        }
+    }
+}
+
+impl SetMissionWeatherCfg {
+    pub fn validate(&self) -> Result<()> {
+        if !self.profiles.is_empty() {
+            if self.profiles.len() < 3 {
+                bail!(
+                    "setmission.setmissionweather.profiles must have at least 3 entries (got {})",
+                    self.profiles.len()
+                );
+            }
+            if self.weather_start_index >= self.profiles.len() {
+                bail!(
+                    "setmission.setmissionweather.weather_start_index {} out of range 0..{}",
+                    self.weather_start_index,
+                    self.profiles.len()
+                );
+            }
+            for (i, p) in self.profiles.iter().enumerate() {
+                p.validate(i).with_context(|| {
+                    format!("setmission.setmissionweather.profiles[{i}]")
+                })?;
+            }
+        }
+        if self.enabled && self.profiles.len() < 3 {
+            bail!(
+                "setmission.setmissionweather.profiles must have at least 3 entries when enabled"
+            );
+        }
+        Ok(())
+    }
+}
+
+/// Single post-round `.miz` rewrite: datetime and/or static weather in one unpack/inject/repack.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SetMissionCfg {
+    /// Absolute path to the inject script (BAT/py). Required when any child is enabled.
+    #[serde(default, alias = "script_path")]
+    pub skript_path: Option<String>,
+    /// Wait after MissionEnd before rewriting the `.miz` (DCS file lock). 1..=1800.
+    #[serde(default = "default_setmission_post_round_delay_secs")]
+    pub post_round_delay_secs: u32,
+    #[serde(default)]
+    pub setmissionstartdatetime: SetMissionStartDatetimeCfg,
+    #[serde(default)]
+    pub setmissionweather: SetMissionWeatherCfg,
+}
+
+impl Default for SetMissionCfg {
+    fn default() -> Self {
+        Self {
+            skript_path: None,
+            post_round_delay_secs: default_setmission_post_round_delay_secs(),
+            setmissionstartdatetime: SetMissionStartDatetimeCfg::default(),
+            setmissionweather: SetMissionWeatherCfg::default(),
+        }
+    }
+}
+
+impl SetMissionCfg {
+    pub fn any_enabled(&self) -> bool {
+        self.setmissionstartdatetime.enabled || self.setmissionweather.enabled
+    }
+
+    pub fn validate(&self) -> Result<()> {
+        self.setmissionstartdatetime.validate()?;
+        self.setmissionweather.validate()?;
+        if !self.any_enabled() {
+            return Ok(());
+        }
+        let path = self
+            .skript_path
+            .as_ref()
+            .map(|s| s.trim())
+            .filter(|s| !s.is_empty())
+            .ok_or_else(|| {
+                anyhow!("setmission.skript_path is required when datetime or weather is enabled")
+            })?;
+        let _ = path;
         if !(1..=1800).contains(&self.post_round_delay_secs) {
             bail!(
-                "setmissionstartdatetime.post_round_delay_secs {} out of range 1-1800",
+                "setmission.post_round_delay_secs {} out of range 1-1800",
                 self.post_round_delay_secs
             );
         }
@@ -2117,9 +2334,9 @@ pub struct Cfg {
     pub dynamic_cargo_delivery: DynamicCargoDeliveryCfg,
     #[serde(default)]
     pub acmi_sanitize: AcmiSanitizeCfg,
-    /// After each round, rewrite ME start time (and optionally date) in the on-disk `.miz`.
+    /// After each round, one unpack/inject/repack of the on-disk `.miz` (datetime and/or weather).
     #[serde(default)]
-    pub setmissionstartdatetime: SetMissionStartDatetimeCfg,
+    pub setmission: SetMissionCfg,
     /// Writedir housekeeping at mission start (tracks, future similar ops).
     #[serde(default)]
     pub server_maintenance: ServerMaintenanceCfg,
@@ -2266,7 +2483,7 @@ impl Cfg {
         }
         cfg.validate_jtac_default_codes()?;
         cfg.acmi_sanitize.validate()?;
-        cfg.setmissionstartdatetime.validate()?;
+        cfg.setmission.validate()?;
         cfg.discord_map.validate_campaign_top10_sizes()?;
         if let Some(ref s) = cfg.dcsserver_bot_scheduled_restart {
             s.validate()?;
@@ -2408,5 +2625,56 @@ mod discord_map_public_url_tests {
     #[test]
     fn http_rejected() {
         assert!(normalize_discord_map_public_url("http://fowl-ta.duckdns.org/map").is_err());
+    }
+}
+
+#[cfg(test)]
+mod discord_map_dcs_public_host_tests {
+    use super::normalize_discord_map_dcs_public_host;
+
+    #[test]
+    fn rejects_empty_and_loopback() {
+        assert!(normalize_discord_map_dcs_public_host("").is_err());
+        assert!(normalize_discord_map_dcs_public_host("0.0.0.0").is_err());
+        assert!(normalize_discord_map_dcs_public_host("127.0.0.1").is_err());
+    }
+
+    #[test]
+    fn accepts_public_ipv4() {
+        assert_eq!(
+            normalize_discord_map_dcs_public_host("78.80.144.178").unwrap(),
+            "78.80.144.178"
+        );
+    }
+}
+
+#[cfg(test)]
+mod setmissionweather_cfg_tests {
+    use super::{Cfg, SetMissionCfg};
+    use std::fs::File;
+    use std::path::PathBuf;
+
+    #[test]
+    fn caucasus1985_sarh_weather_block_loads() {
+        let mut path = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+        path.pop();
+        path.push("miz/Scenarios/80s/Caucasus1985-SARH/Caucasus1985-SARH_CFG");
+        let file = File::open(&path).unwrap_or_else(|e| panic!("open {:?}: {e}", path));
+        let cfg: Cfg = serde_json::from_reader(file).unwrap_or_else(|e| panic!("decode: {e}"));
+        cfg.setmission
+            .validate()
+            .unwrap_or_else(|e| panic!("validate: {e:#}"));
+        assert!(!cfg.setmission.setmissionweather.enabled);
+        assert_eq!(cfg.setmission.setmissionweather.weather_start_index, 1);
+        assert_eq!(cfg.setmission.setmissionweather.profiles.len(), 6);
+        assert_eq!(
+            cfg.setmission.setmissionweather.profiles[1].preset.as_str(),
+            "Preset5"
+        );
+    }
+
+    #[test]
+    fn default_setmission_cfg_validates() {
+        SetMissionCfg::default().validate().unwrap();
     }
 }

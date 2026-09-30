@@ -24,7 +24,7 @@ mod jtac;
 mod landcache;
 mod menu;
 mod msgq;
-mod setmissionstartdatetime;
+mod setmission;
 mod shots;
 mod sounds;
 mod spawnctx;
@@ -1136,26 +1136,42 @@ fn on_player_try_change_slot(
     res
 }
 
-fn spawn_setmissionstartdatetime(ctx: &Context, lua: MizLua, new_campaign: bool) {
+fn spawn_setmission(ctx: &mut Context, lua: MizLua, new_campaign: bool) {
     let miz_path = match crate::db::discord_map::resolve_mission_miz_path(lua, &ctx.cfg_base_path)
     {
         Ok(p) => p,
         Err(e) => {
-            error!("setmissionstartdatetime: resolve miz path failed: {e:?}");
+            error!("setmission: resolve miz path failed: {e:?}");
             return;
         }
     };
-    let cfg = &ctx.db.ephemeral.cfg;
-    let args = crate::setmissionstartdatetime::SpawnArgs {
-        cfg: &cfg.setmissionstartdatetime,
-        campaign_stats_enabled: cfg.discord_map.campaign_stats,
+    let weather_index = ctx.db.persisted.setmission_weather_index;
+    let args = crate::setmission::SpawnArgs {
+        cfg: &ctx.db.ephemeral.cfg.setmission,
+        campaign_stats_enabled: ctx.db.ephemeral.cfg.discord_map.campaign_stats,
         campaign_rounds: ctx.db.persisted.campaign_stats.campaign_rounds,
-        rounds_per_day: cfg.discord_map.rounds_per_day,
+        rounds_per_day: ctx.db.ephemeral.cfg.discord_map.rounds_per_day,
         miz_path: &miz_path,
         new_campaign,
+        weather_index,
     };
-    if let Err(e) = crate::setmissionstartdatetime::maybe_spawn(args) {
-        error!("setmissionstartdatetime: {e:?}");
+    match crate::setmission::maybe_spawn(args) {
+        Ok(Some(outcome)) => {
+            if let Some(idx) = outcome.weather_index {
+                ctx.db.persisted.setmission_weather_index = Some(idx);
+                ctx.db.ephemeral.dirty();
+            } else if new_campaign {
+                ctx.db.persisted.setmission_weather_index = None;
+                ctx.db.ephemeral.dirty();
+            }
+        }
+        Ok(None) => {
+            if new_campaign && ctx.db.persisted.setmission_weather_index.is_some() {
+                ctx.db.persisted.setmission_weather_index = None;
+                ctx.db.ephemeral.dirty();
+            }
+        }
+        Err(e) => error!("setmission: {e:?}"),
     }
 }
 
@@ -1609,13 +1625,9 @@ fn on_event(lua: MizLua, ev: Event) -> Result<()> {
                             }
                         }
                         // Prefer sound already played at TryChangeSlot while occupied.
+                        // Fallback: outSoundForGroup(miz_gid) — unit is AI-controlled here.
                         if !ctx.db.life_return_sound_already_played(&ucid) {
-                            let unit_id = Unit::get_instance(lua, &initiator)
-                                .ok()
-                                .and_then(|u| u.id().ok());
-                            if let Some(unit_id) = unit_id {
-                                ctx.db.play_sound_unit(lua, "life_return", unit_id);
-                            } else if let Some(miz_gid) = ctx
+                            if let Some(miz_gid) = ctx
                                 .db
                                 .ephemeral
                                 .get_slot_info(&slot)
@@ -1952,7 +1964,7 @@ fn on_event(lua: MizLua, ev: Event) -> Result<()> {
             if let Err(e) = crate::acmi_sanitize::maybe_spawn(&ctx.db.ephemeral.cfg.acmi_sanitize) {
                 error!("acmi_sanitize: {e:?}");
             }
-            spawn_setmissionstartdatetime(ctx, lua, false);
+            spawn_setmission(ctx, lua, false);
             Context::reset();
             Perf::reset();
             Context::get_mut().init_async_bg(lua.inner())?;
@@ -2477,13 +2489,9 @@ fn handle_player_leave_unit_no_initiator(
                     }
                 }
                 // Prefer sound already played at TryChangeSlot while occupied.
+                // Fallback: outSoundForGroup(miz_gid) — unit is AI-controlled here.
                 if !ctx.db.life_return_sound_already_played(&ucid) {
-                    let unit_id = Unit::get_instance(lua, &objid)
-                        .ok()
-                        .and_then(|u| u.id().ok());
-                    if let Some(unit_id) = unit_id {
-                        ctx.db.play_sound_unit(lua, "life_return", unit_id);
-                    } else if let Some(miz_gid) = ctx
+                    if let Some(miz_gid) = ctx
                         .db
                         .ephemeral
                         .get_slot_info(&slot)
@@ -3182,7 +3190,7 @@ fn delayed_init_miz(lua: MizLua) -> Result<()> {
 
 fn on_mission_load_end(_lua: HooksLua) -> Result<()> {
     crate::acmi_sanitize::reset_spawn_state();
-    crate::setmissionstartdatetime::reset_spawn_state();
+    crate::setmission::reset_spawn_state();
     unsafe {
         Context::get_mut().load_state = LoadState::MissionLoaded { time: Utc::now() }
     };

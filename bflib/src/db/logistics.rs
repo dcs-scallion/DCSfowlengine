@@ -580,8 +580,9 @@ fn sync_obj_to_warehouse(
         &mut FxHashMap<(ObjectiveId, String), u32>,
         &mut FxHashMap<(ObjectiveId, LiquidType), u32>,
     )>,
-    // Open checkout: never push DCS stock back up (OLO unload/reload exploit).
-    forbid_dcs_restore: bool,
+    // Open checkout: do not push DCS stock back up for reserved items only (OLO exploit).
+    checkout_eq_reserved: &FxHashMap<String, u32>,
+    checkout_liq_reserved: &FxHashMap<LiquidType, u32>,
     snapshot: &WarehouseSnapshot,
 ) -> Result<()> {
     let perf = unsafe { Perf::get_mut() };
@@ -594,10 +595,10 @@ fn sync_obj_to_warehouse(
             .item_count_or_fetch(warehouse, item)
             .with_context(|| format_compact!("getting item count for {item}"))?;
         if current < inv.stored {
-            if forbid_dcs_restore {
+            if checkout_eq_reserved.get(item).copied().unwrap_or(0) > 0 {
                 if eq_deltas < 12 {
                     wh_diag(format_compact!(
-                        "sync-to {} eq:{item} skip restore DCS {current} virtual {} (open checkout)",
+                        "sync-to {} eq:{item} skip restore DCS {current} virtual {} (open checkout item)",
                         obj.name,
                         inv.stored
                     ));
@@ -667,10 +668,10 @@ fn sync_obj_to_warehouse(
             current
         };
         if current_virtual < inv.stored {
-            if forbid_dcs_restore {
+            if checkout_liq_reserved.get(name).copied().unwrap_or(0) > 0 {
                 if liq_deltas < 8 {
                     wh_diag(format_compact!(
-                        "sync-to {} liq:{name:?} skip restore DCS {current_virtual} virtual {} (open checkout)",
+                        "sync-to {} liq:{name:?} skip restore DCS {current_virtual} virtual {} (open checkout item)",
                         obj.name,
                         inv.stored
                     ));
@@ -1909,26 +1910,73 @@ fn equipment_is_airframe(
         .unwrap_or(false)
 }
 
+/// Hub auto-fill / template-zero Supply %: owner's export `objective_stock` with `baseline > 0`.
+/// No usable profile → unrestricted (legacy). Enemy / missing SKU → false.
+fn equipment_autofill_allowed_by_owner_template(
+    export: Option<&FowlMizExport>,
+    obj: &Objective,
+    name: &str,
+    resource_meta: Option<&FxHashMap<String, WarehouseResourceMeta>>,
+) -> bool {
+    let Some(export) = export.filter(|e| export_has_objective_stock(e)) else {
+        return true;
+    };
+    let Some(profile) = objective_coalition_stock_for_objective(export, obj) else {
+        return true;
+    };
+    if !profile.equipment.values().any(|i| i.baseline > 0) {
+        return true;
+    }
+    let empty = FxHashMap::default();
+    let meta = resource_meta.unwrap_or(&empty);
+    profile_export_equipment_item(profile, name, meta).is_some_and(|i| i.baseline > 0)
+}
+
+/// Supply % row: DCS-tracked (incl. ferried), or untracked friendly-template row (qty-0 omitted by DCS).
+fn equipment_included_in_supply_pct(
+    name: &str,
+    inv: &Inventory,
+    dcs_tracked: Option<&FxHashSet<String>>,
+    export: Option<&FowlMizExport>,
+    obj: &Objective,
+    resource_meta: Option<&FxHashMap<String, WarehouseResourceMeta>>,
+) -> bool {
+    if inv.capacity == 0 || !equipment_counts_toward_supply_pct(inv) {
+        return false;
+    }
+    let tracked = match dcs_tracked {
+        None => true,
+        Some(t) => t.contains(name),
+    };
+    if tracked {
+        return true;
+    }
+    let Some(export) = export.filter(|e| export_has_objective_stock(e)) else {
+        return false;
+    };
+    equipment_autofill_allowed_by_owner_template(Some(export), obj, name, resource_meta)
+}
+
 /// Average Supply % for airframe or non-airframe rows (same filters as `update_supply_status`).
 /// `None` when the bucket has no countable rows.
 fn equipment_bucket_supply_pct(
     obj: &Objective,
     dcs_tracked: Option<&FxHashSet<String>>,
+    export: Option<&FowlMizExport>,
     resource_meta: Option<&FxHashMap<String, WarehouseResourceMeta>>,
     airframes: bool,
 ) -> Option<u8> {
     let mut n = 0u32;
     let mut sum = 0u32;
     for (name, inv) in &obj.warehouse.equipment {
-        if inv.capacity == 0 {
-            continue;
-        }
-        if let Some(tracked) = dcs_tracked {
-            if !tracked.contains(name.as_str()) {
-                continue;
-            }
-        }
-        if !equipment_counts_toward_supply_pct(inv) {
+        if !equipment_included_in_supply_pct(
+            name.as_str(),
+            inv,
+            dcs_tracked,
+            export,
+            obj,
+            resource_meta,
+        ) {
             continue;
         }
         if equipment_is_airframe(name.as_str(), resource_meta) != airframes {
@@ -1950,10 +1998,11 @@ fn equipment_bucket_supply_pct(
 fn equipment_airframe_bucket_skip_reason(
     obj: &Objective,
     dcs_tracked: Option<&FxHashSet<String>>,
+    export: Option<&FowlMizExport>,
     resource_meta: Option<&FxHashMap<String, WarehouseResourceMeta>>,
     min_ac: u8,
 ) -> CompactString {
-    let pct = equipment_bucket_supply_pct(obj, dcs_tracked, resource_meta, true);
+    let pct = equipment_bucket_supply_pct(obj, dcs_tracked, export, resource_meta, true);
     let mut virtual_ac = 0u32;
     let mut tracked_ac = 0u32;
     let mut counted_ac = 0u32;
@@ -1970,7 +2019,14 @@ fn equipment_airframe_bucket_skip_reason(
         if in_tracked {
             tracked_ac += 1;
         }
-        let counts = in_tracked && equipment_counts_toward_supply_pct(inv);
+        let counts = equipment_included_in_supply_pct(
+            name.as_str(),
+            inv,
+            dcs_tracked,
+            export,
+            obj,
+            resource_meta,
+        );
         if counts {
             counted_ac += 1;
         }
@@ -1980,12 +2036,12 @@ fn equipment_airframe_bucket_skip_reason(
         if !samples.is_empty() {
             samples.push_str("; ");
         }
-        let tag = if !in_tracked {
-            " !tracked"
-        } else if !counts {
-            " !counted"
-        } else {
+        let tag = if counts {
             ""
+        } else if !in_tracked {
+            " !tracked"
+        } else {
+            " !counted"
         };
         samples.push_str(&format_compact!(
             "{name} {}/{}={}%{tag}",
@@ -4638,6 +4694,7 @@ impl Db {
             .context("updating supply status")?;
         let cfg = &self.ephemeral.cfg;
         let wh = cfg.warehouse.as_ref();
+        let export = Arc::clone(&self.ephemeral.fowl_miz_export);
         let resource_meta = self.ephemeral.warehouse_resource_meta.clone();
         let resource_meta = resource_meta.as_deref();
         let thresholds_for = |obj: &Objective| -> (u8, u8) {
@@ -4660,6 +4717,7 @@ impl Db {
             equipment_bucket_supply_pct(
                 obj,
                 self.ephemeral.warehouse_dcs_equipment_names.get(oid),
+                Some(export.as_ref()),
                 resource_meta,
                 airframes,
             )
@@ -4723,6 +4781,7 @@ impl Db {
                     equipment_airframe_bucket_skip_reason(
                         obj,
                         self.ephemeral.warehouse_dcs_equipment_names.get(oid),
+                        Some(export.as_ref()),
                         resource_meta,
                         min_ac,
                     ),
@@ -4863,8 +4922,16 @@ impl Db {
                         for n in &mut $needed {
                             let inv = n.obj.$get(name);
                             let reserved = self.$reserved_fn(*n.oid, name);
-                            let demanded =
-                                Db::dynamic_cargo_demand_room(inv.stored, inv.capacity, reserved);
+                            let demanded = if equipment_autofill_allowed_by_owner_template(
+                                Some(export.as_ref()),
+                                n.obj,
+                                name.as_str(),
+                                resource_meta,
+                            ) {
+                                Db::dynamic_cargo_demand_room(inv.stored, inv.capacity, reserved)
+                            } else {
+                                0
+                            };
                             total_demanded += demanded;
                             n.demanded = demanded;
                             n.allocated = 0;
@@ -4974,6 +5041,7 @@ impl Db {
                     equipment_airframe_bucket_skip_reason(
                         obj,
                         self.ephemeral.warehouse_dcs_equipment_names.get(oid),
+                        Some(export.as_ref()),
                         resource_meta,
                         min_ac,
                     ),
@@ -5119,8 +5187,16 @@ impl Db {
                         for n in &mut $needed {
                             let inv = n.obj.$get(name);
                             let reserved = self.$reserved_fn(*n.oid, name);
-                            let demanded =
-                                Db::dynamic_cargo_demand_room(inv.stored, inv.capacity, reserved);
+                            let demanded = if equipment_autofill_allowed_by_owner_template(
+                                Some(export.as_ref()),
+                                n.obj,
+                                name.as_str(),
+                                resource_meta,
+                            ) {
+                                Db::dynamic_cargo_demand_room(inv.stored, inv.capacity, reserved)
+                            } else {
+                                0
+                            };
                             total_demanded += demanded;
                             n.demanded = demanded;
                             n.allocated = 0;
@@ -5291,6 +5367,9 @@ impl Db {
     }
 
     pub(crate) fn update_supply_status(&mut self) -> Result<()> {
+        let export = Arc::clone(&self.ephemeral.fowl_miz_export);
+        let resource_meta = self.ephemeral.warehouse_resource_meta.clone();
+        let resource_meta = resource_meta.as_deref();
         for (id, obj) in self.persisted.objectives.iter_mut_cow() {
             let current_supply = obj.supply;
             let current_fuel = obj.fuel;
@@ -5298,15 +5377,14 @@ impl Db {
             let mut n = 0;
             let mut sum: u32 = 0;
             for (name, inv) in &obj.warehouse.equipment {
-                if inv.capacity == 0 {
-                    continue;
-                }
-                if let Some(tracked) = dcs_tracked {
-                    if !tracked.contains(name.as_str()) {
-                        continue;
-                    }
-                }
-                if !equipment_counts_toward_supply_pct(inv) {
+                if !equipment_included_in_supply_pct(
+                    name.as_str(),
+                    inv,
+                    dcs_tracked,
+                    Some(export.as_ref()),
+                    obj,
+                    resource_meta,
+                ) {
                     continue;
                 }
                 if let Some(pct) = inv.percent() {
@@ -5519,8 +5597,11 @@ impl Db {
         let resource_meta = self
             .warehouse_resource_meta_cache(lua)
             .context("warehouse resource meta for prune")?;
-        let forbid_dcs_restore = self.ephemeral.cfg.dynamic_cargo_delivery.enabled
-            && self.objective_has_open_dynamic_cargo_checkout(oid);
+        let (checkout_eq, checkout_liq) = if self.ephemeral.cfg.dynamic_cargo_delivery.enabled {
+            self.dynamic_cargo_open_checkout_reserved(oid)
+        } else {
+            (FxHashMap::default(), FxHashMap::default())
+        };
         let obj = objective_mut!(self, oid)?;
         if matches!(obj.kind, ObjectiveKind::Production) {
             debug!(
@@ -5583,7 +5664,8 @@ impl Db {
                 &warehouse,
                 liquids_tons,
                 credits,
-                forbid_dcs_restore,
+                &checkout_eq,
+                &checkout_liq,
                 &snapshot,
             )
             .context("syncing warehouse to objective")?;
@@ -5824,10 +5906,16 @@ impl Db {
         let export = Arc::clone(&self.ephemeral.fowl_miz_export);
         let from_tons = objective_liquids_stored_as_tons(export.as_ref(), objective!(self, from)?);
         let to_tons = objective_liquids_stored_as_tons(export.as_ref(), objective!(self, to)?);
-        let from_forbid = self.ephemeral.cfg.dynamic_cargo_delivery.enabled
-            && self.objective_has_open_dynamic_cargo_checkout(from);
-        let to_forbid = self.ephemeral.cfg.dynamic_cargo_delivery.enabled
-            && self.objective_has_open_dynamic_cargo_checkout(to);
+        let (from_eq, from_liq) = if self.ephemeral.cfg.dynamic_cargo_delivery.enabled {
+            self.dynamic_cargo_open_checkout_reserved(from)
+        } else {
+            (FxHashMap::default(), FxHashMap::default())
+        };
+        let (to_eq, to_liq) = if self.ephemeral.cfg.dynamic_cargo_delivery.enabled {
+            self.dynamic_cargo_open_checkout_reserved(to)
+        } else {
+            (FxHashMap::default(), FxHashMap::default())
+        };
         let from_snapshot = read_warehouse_snapshot(&from_wh)
             .context("warehouse snapshot for transfer_supplies from")?;
         let to_snapshot = read_warehouse_snapshot(&to_wh)
@@ -5850,7 +5938,8 @@ impl Db {
                     &mut ephemeral.sync_to_equipment_credit,
                     &mut ephemeral.sync_to_liquid_credit,
                 )),
-                from_forbid,
+                &from_eq,
+                &from_liq,
                 &from_snapshot,
             )?;
             sync_obj_to_warehouse(
@@ -5865,7 +5954,8 @@ impl Db {
                     &mut ephemeral.sync_to_equipment_credit,
                     &mut ephemeral.sync_to_liquid_credit,
                 )),
-                to_forbid,
+                &to_eq,
+                &to_liq,
                 &to_snapshot,
             )?;
         }
@@ -5911,7 +6001,16 @@ impl Db {
         }
         let snapshot = read_warehouse_snapshot(&warehouse)
             .context("warehouse snapshot for admin_reduce_inventory SyncTo")?;
-        sync_obj_to_warehouse(oid, obj, &warehouse, liquids_tons, None, false, &snapshot)
+        sync_obj_to_warehouse(
+            oid,
+            obj,
+            &warehouse,
+            liquids_tons,
+            None,
+            &FxHashMap::default(),
+            &FxHashMap::default(),
+            &snapshot,
+        )
             .context("syncing from warehouse")?;
         self.update_supply_status()
             .context("updating supply status")?;

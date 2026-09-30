@@ -849,21 +849,20 @@ impl Db {
     }
 
     /// TryChangeSlot runs before LeaveUnit; play while the player still occupies the aircraft.
-    /// Uses runtime Unit.id() from object_id (not SlotId::as_unit_id — unreliable for DS).
+    /// Hooks env has no Unit.getInstance — use only persisted state + dostring_in.
     pub(crate) fn play_life_return_while_in_aircraft(&mut self, lua: MizLua, ucid: &Ucid) {
-        let Some((unit_id, group_id)) = self.aircraft_life_return_sound_targets(lua, ucid) else {
+        let Some(group_id) = self.aircraft_life_return_sound_group(ucid) else {
             return;
         };
         if crate::sounds::play_life_return_from_hooks(
             &self.ephemeral.fowl_miz_export,
             lua,
-            Some(unit_id),
             group_id,
         ) {
             self.ephemeral.life_return_sound_played.insert(*ucid);
-            info!("life_return sound played for {ucid} (still in aircraft, unit {unit_id:?})");
+            info!("life_return sound played for {ucid} (TryChangeSlot, group {group_id:?})");
         } else {
-            warn!("life_return sound failed for {ucid} while still in aircraft");
+            warn!("life_return sound failed for {ucid} at TryChangeSlot");
         }
     }
 
@@ -871,12 +870,9 @@ impl Db {
         self.ephemeral.life_return_sound_played.remove(ucid)
     }
 
-    /// Same refund window as `player_left_unit`, while Unit/MultiCrew is still occupied.
-    fn aircraft_life_return_sound_targets(
-        &self,
-        lua: MizLua,
-        ucid: &Ucid,
-    ) -> Option<(dcso3::env::miz::UnitId, Option<dcso3::env::miz::GroupId>)> {
+    /// Returns miz_gid when the player is eligible for a life refund on deslot.
+    /// Uses only persisted state — safe to call from hooks env (no Unit.getInstance).
+    fn aircraft_life_return_sound_group(&self, ucid: &Ucid) -> Option<dcso3::env::miz::GroupId> {
         if !self.ephemeral.cfg.limited_lives {
             return None;
         }
@@ -889,25 +885,15 @@ impl Db {
         };
         let life_type = *self.ephemeral.cfg.life_types.get(&inst.typ)?;
         player.lives.get(&life_type)?;
-        let oid = self.ephemeral.object_id_by_slot.get(&slot)?;
-        let unit = Unit::get_instance(lua, oid).ok()?;
-        let unit_id = unit.id().ok()?;
-        let on_ground = unit.is_exist().unwrap_or(false) && !unit.in_air().unwrap_or(true);
-        let pos = unit.get_ground_position().ok().map(|p| p.0);
-        let land_oid = if on_ground {
-            pos.and_then(|p| self.resolve_friendly_land_objective(lua, player.side, p))
-                .or(inst.landed_at_objective)
-        } else if inst.landed_at_objective.is_some() && inst.stopped_at_objective {
-            inst.landed_at_objective
-        } else {
-            None
-        };
-        land_oid?;
-        let group_id = self
-            .ephemeral
+        // Mirror the refund condition from player_left_unit (stopped_at_objective covers
+        // the case where the unit position is no longer queryable from hooks).
+        let refund_eligible = inst.landed_at_objective.is_some();
+        if !refund_eligible {
+            return None;
+        }
+        self.ephemeral
             .get_slot_info(&slot)
-            .map(|sifo| sifo.miz_gid);
-        Some((unit_id, group_id))
+            .map(|sifo| sifo.miz_gid)
     }
 
     pub fn try_occupy_slot(
@@ -1831,7 +1817,13 @@ impl Db {
                 Ok(v) => dead = v,
                 Err(e) => error!("could not sync final CA unit position {e}"),
             }
-            self.ephemeral.units_able_to_move.swap_remove(&uid);
+            // Keep player-placed deployables in periodic tracking after CA leave
+            let is_player_placed = self.persisted.units.get(&uid)
+                .and_then(|u| self.persisted.groups.get(&u.group))
+                .is_some_and(|g| matches!(g.origin, DeployKind::Deployed { .. } | DeployKind::Troop { .. }));
+            if !is_player_placed {
+                self.ephemeral.units_able_to_move.swap_remove(&uid);
+            }
         }
         if let Some(slot) = self.ephemeral.slot_by_object_id.get(&objid) {
             if let Some(ucid) = self.ephemeral.player_in_slot(slot) {

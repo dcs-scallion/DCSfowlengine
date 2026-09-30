@@ -1197,6 +1197,16 @@ async fn api_stats(
                     value["factories_red"] = serde_json::json!(cs.factories_red);
                     value["production_blue"] = serde_json::json!(cs.production_blue);
                     value["production_red"] = serde_json::json!(cs.production_red);
+                    if let (Some(count), Some(index)) =
+                        (cs.weather_preset_count, cs.weather_preset_index)
+                    {
+                        if count > 0 {
+                            value["weather_preset"] = serde_json::json!({
+                                "count": count,
+                                "index": index,
+                            });
+                        }
+                    }
                 }
             }
             Ok(Err(e)) => log::warn!("api_stats: query-campaign-state failed: {}", e.0),

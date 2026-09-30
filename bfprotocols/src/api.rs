@@ -270,4 +270,10 @@ pub struct CampaignState {
     pub production_blue: Option<u8>,
     #[serde(default)]
     pub production_red: Option<u8>,
+    /// `setmission.setmissionweather` profile count when enabled; else omitted.
+    #[serde(default)]
+    pub weather_preset_count: Option<u32>,
+    /// Effective weather profile index (0 = best). Omitted when weather cycle off.
+    #[serde(default)]
+    pub weather_preset_index: Option<u32>,
 }

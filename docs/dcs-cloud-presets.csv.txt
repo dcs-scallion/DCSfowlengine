@@ -1,0 +1,35 @@
+kód;krátký název ME;METAR / popis
+Preset1;Light Scattered 1;Few Scattered Clouds — FEW/SCT 7/8
+Preset2;Light Scattered 2;Two Layers Few and Scattered — FEW/SCT 8/10 SCT 23/24
+Preset3;High Scattered 1;Two Layer Scattered — SCT 8/9 FEW 21
+Preset4;High Scattered 2;Two Layer Scattered — SCT 8/10 FEW/SCT 24/26
+Preset5;Scattered 1;Three Layer High altitude Scattered — SCT 14/17 FEW 27/29 BKN 40
+Preset6;Scattered 2;One Layer Scattered/Broken — SCT/BKN 8/10 FEW 40
+Preset7;Scattered 3;Two Layer Scattered/Broken — BKN 7.5/12 SCT/BKN 21/23 SCT 40
+Preset8;High Scattered 3;Two Layer Scattered/Broken High Altitude — SCT/BKN 18/20 FEW 36/38 FEW 40
+Preset9;Scattered 4;Two Layer Broken/Scattered — BKN 7.5/10 SCT 20/22 FEW 41
+Preset10;Scattered 5;Two Layers Scattered Large Thick Clouds — SCT/BKN 18/20 FEW 36/38 FEW 40
+Preset11;Scattered 6;Two Layers Scattered Large Clouds High Ceiling — BKN 18/20 BKN 32/33 FEW 41
+Preset12;Scattered 7;Two Layers Scattered Large Clouds High Ceiling — BKN 12/14 SCT 22/23 FEW 41
+Preset13;Broken 1;Two Layers Broken Clouds — BKN 12/14 BKN 26/28 FEW 41
+Preset14;Broken 2;Broken Thick Low Layer with Few High Layer — BKN LYR 7/16 FEW 41
+Preset15;Broken 3;Two Layers Broken Large Clouds — SCT/BKN 14/18 BKN 24/27 FEW 40
+Preset16;Broken 4;Two Layers Broken Large Clouds — BKN 14/18 BKN 28/30 FEW 40
+Preset17;Broken 5;Three Layers Broken/Overcast — BKN/OVC LYR 7/13 20/22 32/34
+Preset18;Broken 6;Three Layers Broken/Overcast — BKN/OVC LYR 13/15 25/29 38/41
+Preset19;Broken 7;Three Layers Overcast At Low Level — OVC 9/16 BKN/OVC LYR 23/24 31/33
+Preset20;Broken 8;Three Layers Overcast Low Level — BKN/OVC 13/18 BKN 28/30 SCT FEW 38
+Preset21;Overcast 1;Overcast low level — BKN/OVC LYR 7/8 17/19
+Preset22;Overcast 2;Overcast low Level — BKN LYR 7/10 17/20
+Preset23;Overcast 3;Three Layer Broken Low Level Scattered High — BKN LYR 11/14 18/25 SCT 32/35
+Preset24;Overcast 4;Three Layer Overcast — BKN/OVC 3/7 17/22 BKN 34
+Preset25;Overcast 5;Three Layer Overcast — OVC LYR 12/14 22/25 40/42
+Preset26;Overcast 6;Three Layer Overcast — OVC 9/15 BKN 23/25 SCT 32
+Preset27;Overcast 7;Three Layer Overcast — OVC 8/15 SCT/BKN 25/26 34/36
+RainyPreset1;Overcast And Rain 1;Overcast with Rain — VIS 3-5KM RA OVC 3/15 28/30 FEW 40
+RainyPreset2;Overcast And Rain 2;Overcast with Rain — VIS 1-5KM RA BKN/OVC 3/11 SCT 18/29 FEW 40
+RainyPreset3;Overcast And Rain 3;Overcast with Rain — VIS 3-5KM RA OVC LYR 6/18 19/21 SCT 34
+RainyPreset4;Light Rain 1;Two Layers Scattered Large Thick Clouds — SCT/BKN 18/20 FEW 36/38 FEW 40
+RainyPreset5;Light Rain 2;Three Layers Broken/Overcast — BKN/OVC LYR 7/13 20/22 32/34
+RainyPreset6;Light Rain 3;Three Layers Overcast At Low Level — OVC 9/16 BKN/OVC LYR 23/24 31/33
+NEWRAINPRESET4;Light Rain 4;Two Layers Overcast At Low Level — METAR: --

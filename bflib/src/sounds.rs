@@ -62,13 +62,12 @@ fn dostring_mission(lua: MizLua, chunk: &str) -> bool {
     }
 }
 
-/// Hooks have no `trigger.action`. Play while the player still occupies (TryChangeSlot).
-/// Prefer runtime UnitId from object_id, not SlotId::as_unit_id (wrong for some DS).
+/// Hooks have no `trigger.action`. Use dostring_in("mission") while player still occupies.
+/// outSoundForGroup with the player's own miz_gid is reliable; outSoundForUnit is broken in MP.
 pub fn play_life_return_from_hooks(
     export: &FowlMizExport,
     lua: MizLua,
-    unit: Option<UnitId>,
-    group: Option<GroupId>,
+    group: GroupId,
 ) -> bool {
     let Some(path) = export.sounds_player.get("life_return") else {
         warn!("life_return missing from fowl export sounds_player");
@@ -78,54 +77,16 @@ pub fn play_life_return_from_hooks(
         warn!("life_return path rejected: {path}");
         return false;
     }
-    if let Ok(trigger) = Trigger::singleton(lua) {
-        if let Ok(action) = trigger.action() {
-            if let Some(unit) = unit {
-                if action
-                    .out_sound_for_unit(unit, path.clone().into())
-                    .is_ok()
-                {
-                    return true;
-                }
-            }
-            if let Some(group) = group {
-                if action
-                    .out_sound_for_group(group, path.clone().into())
-                    .is_ok()
-                {
-                    return true;
-                }
-            }
-        }
-    }
-    let mut ok = false;
-    if let Some(unit) = unit {
-        let chunk = format_compact!(
-            "trigger.action.outSoundForUnit({}, \"{}\")",
-            unit.inner(),
-            path
-        );
-        if dostring_mission(lua, &chunk) {
-            info!(
-                "life_return outSoundForUnit({}) via mission bridge",
-                unit.inner()
-            );
-            ok = true;
-        }
-    }
-    if let Some(group) = group {
-        let chunk = format_compact!(
-            "trigger.action.outSoundForGroup({}, \"{}\")",
-            group.inner(),
-            path
-        );
-        if dostring_mission(lua, &chunk) {
-            info!(
-                "life_return outSoundForGroup({}) via mission bridge",
-                group.inner()
-            );
-            ok = true;
-        }
+    let chunk = format_compact!(
+        "trigger.action.outSoundForGroup({}, \"{}\")",
+        group.inner(),
+        path
+    );
+    let ok = dostring_mission(lua, &chunk);
+    if ok {
+        info!("life_return outSoundForGroup({}) via mission bridge", group.inner());
+    } else {
+        warn!("life_return dostring_in failed for group {}", group.inner());
     }
     ok
 }

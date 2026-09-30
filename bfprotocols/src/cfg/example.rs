@@ -2166,7 +2166,7 @@ impl Default for Cfg {
             csar: CsarCfg::default(),
             dynamic_cargo_delivery: DynamicCargoDeliveryCfg::default(),
             acmi_sanitize: AcmiSanitizeCfg::default(),
-            setmissionstartdatetime: SetMissionStartDatetimeCfg::default(),
+            setmission: SetMissionCfg::default(),
             server_maintenance: ServerMaintenanceCfg::default(),
             side_switches: Some(1),
             max_crates: Some(4),

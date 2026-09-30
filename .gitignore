@@ -150,4 +150,6 @@ bfsystem.local.ps1
 # Per-scenario copies (machine paths / local overrides) — not for GitHub
 miz/Scenarios/**/bfsystem.ps1
 miz/Scenarios/**/bfsystem.local.ps1
+# Companion setmission inject tools (separate license from Fowl) — local / Saved Games only
+/scripts/setmission/
 
