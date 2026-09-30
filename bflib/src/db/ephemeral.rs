@@ -137,7 +137,8 @@ pub struct Ephemeral {
     pub(super) ai_air_dcs_oids: FxHashMap<GroupId, SmallVec<[DcsOid<ClassGroup>; 4]>>,
     pub(super) gid_by_object_id: FxHashMap<DcsOid<ClassGroup>, GroupId>,
     pub(super) uid_by_static: FxHashMap<DcsOid<ClassStatic>, UnitId>,
-    pub(super) static_last_hit: FxHashMap<DcsOid<ClassStatic>, bfprotocols::shots::Who>,
+    pub(super) static_last_hit:
+        FxHashMap<DcsOid<ClassStatic>, (bfprotocols::shots::Who, Option<String>)>,
     pub(super) slot_by_miz_gid: FxHashMap<miz::GroupId, SlotId>,
     pub(super) airbase_by_oid: FxHashMap<ObjectiveId, DcsOid<ClassAirbase>>,
     pub(super) airbases_by_oid: FxHashMap<ObjectiveId, SmallVec<[DcsOid<ClassAirbase>; 2]>>,
@@ -431,11 +432,19 @@ impl Ephemeral {
             .and_then(|sl| self.slot_info.get(sl).map(|s| (*sl, s)))
     }
 
-    pub(super) fn note_static_hit(&mut self, id: DcsOid<ClassStatic>, who: bfprotocols::shots::Who) {
-        self.static_last_hit.insert(id, who);
+    pub(super) fn note_static_hit(
+        &mut self,
+        id: DcsOid<ClassStatic>,
+        who: bfprotocols::shots::Who,
+        weapon_name: Option<String>,
+    ) {
+        self.static_last_hit.insert(id, (who, weapon_name));
     }
 
-    pub(super) fn take_static_hit(&mut self, id: &DcsOid<ClassStatic>) -> Option<bfprotocols::shots::Who> {
+    pub(super) fn take_static_hit(
+        &mut self,
+        id: &DcsOid<ClassStatic>,
+    ) -> Option<(bfprotocols::shots::Who, Option<String>)> {
         self.static_last_hit.remove(id)
     }
 

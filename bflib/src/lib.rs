@@ -1679,7 +1679,13 @@ fn on_event(lua: MizLua, ev: Event) -> Result<()> {
                     ) {
                         error!("error processing hit event {:?}", e)
                     }
-                } else if let Some(shooter) = e.initiator.and_then(|u| u.as_unit().ok()) {
+                } else if let Some(shooter) = e.initiator.as_ref().and_then(|u| {
+                    // Scenery mis-resolved as Unit: as_unit() can succeed but Unit API AVs.
+                    match u.get_category() {
+                        Ok(dcso3::object::ObjectCategory::Unit) => u.as_unit().ok(),
+                        _ => None,
+                    }
+                }) {
                     if let Err(e) = ctx.shots_out.hit(
                         &ctx.db,
                         start_ts,
@@ -1700,10 +1706,12 @@ fn on_event(lua: MizLua, ev: Event) -> Result<()> {
                 e.target.as_ref().and_then(|t| t.as_static().ok())
             {
                 let static_id = target.object_id()?;
+                let weapon_name = e.weapon_name.clone();
                 if let Some(who) =
                     crate::shots::who_from_initiator(&ctx.db, e.initiator.as_ref())
                 {
-                    ctx.db.note_static_hit(static_id.clone(), who);
+                    ctx.db
+                        .note_static_hit(static_id.clone(), who, weapon_name.clone());
                 }
                 if target.get_life()? < 1 {
                     if let Ok(name) = target.get_name() {
@@ -1712,16 +1720,22 @@ fn on_event(lua: MizLua, ev: Event) -> Result<()> {
                             return Ok(());
                         }
                     }
-                    let killer = crate::shots::who_from_initiator(
+                    let (killer, hit_weapon) = match crate::shots::who_from_initiator(
                         &ctx.db,
                         e.initiator.as_ref(),
-                    )
-                    .or_else(|| ctx.db.take_static_hit(&static_id));
+                    ) {
+                        Some(who) => (Some(who), weapon_name),
+                        None => match ctx.db.take_static_hit(&static_id) {
+                            Some((who, wpn)) => (Some(who), wpn),
+                            None => (None, None),
+                        },
+                    };
                     if let Err(e) = ctx.db.static_dead(
                         lua,
                         &static_id,
                         start_ts,
                         killer.as_ref(),
+                        hit_weapon,
                     ) {
                         error!("static dead failed {e:?}")
                     } else {
@@ -1767,8 +1781,14 @@ fn on_event(lua: MizLua, ev: Event) -> Result<()> {
                     }
                 }
                 let id = st.object_id()?;
-                let killer = ctx.db.take_static_hit(&id);
-                if let Err(e) = ctx.db.static_dead(lua, &id, start_ts, killer.as_ref()) {
+                let (killer, weapon) = match ctx.db.take_static_hit(&id) {
+                    Some((who, wpn)) => (Some(who), wpn),
+                    None => (None, None),
+                };
+                if let Err(e) =
+                    ctx.db
+                        .static_dead(lua, &id, start_ts, killer.as_ref(), weapon)
+                {
                     error!("static killed failed {e:?}")
                 } else {
                     flush_markup_if_pending(ctx, lua);

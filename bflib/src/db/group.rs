@@ -1633,14 +1633,15 @@ impl Db {
         &mut self,
         id: DcsOid<ClassStatic>,
         who: bfprotocols::shots::Who,
+        weapon_name: Option<String>,
     ) {
-        self.ephemeral.note_static_hit(id, who);
+        self.ephemeral.note_static_hit(id, who, weapon_name);
     }
 
     pub(crate) fn take_static_hit(
         &mut self,
         id: &DcsOid<ClassStatic>,
-    ) -> Option<bfprotocols::shots::Who> {
+    ) -> Option<(bfprotocols::shots::Who, Option<String>)> {
         self.ephemeral.take_static_hit(id)
     }
 
@@ -1773,6 +1774,7 @@ impl Db {
         id: &DcsOid<ClassStatic>,
         now: DateTime<Utc>,
         killer: Option<&bfprotocols::shots::Who>,
+        weapon_name: Option<String>,
     ) -> Result<()> {
         let uid = match self.ephemeral.uid_by_static.remove(id) {
             Some(uid) => Some(uid),
@@ -1844,8 +1846,11 @@ impl Db {
             let group = group!(self, gid)?;
             if group.class == super::objective::ObjGroupClass::Production {
                 let obj = objective!(self, oid)?;
+                let obj_name = obj.name.clone();
+                let obj_owner = obj.owner;
+                let mut awarded = 0i32;
                 if let Some(killer) = killer {
-                    if *killer.side() != obj.owner {
+                    if *killer.side() != obj_owner {
                         if let Some(pts) = self.ephemeral.cfg.points.as_ref() {
                             let award = pts.production_kill as i32;
                             if award > 0 {
@@ -1855,19 +1860,35 @@ impl Db {
                                         award,
                                         &format_compact!(
                                             "for destroying factory at {}",
-                                            obj.name
+                                            obj_name
                                         ),
                                     );
+                                    awarded = award;
                                 }
                             }
                         }
+                        self.emit_static_kill_stat(
+                            killer,
+                            &unit_type,
+                            obj_name.as_str(),
+                            oid,
+                            obj_owner,
+                            uid,
+                            bfprotocols::stats::StaticKillKind::Production,
+                            awarded,
+                            now,
+                            weapon_name.clone(),
+                        );
                     }
                 }
                 self.refresh_production_objective_after_factory_change(oid, now)?;
             } else if group.class == super::objective::ObjGroupClass::ObjectiveStatic {
                 let obj = objective!(self, oid)?;
+                let obj_name = obj.name.clone();
+                let obj_owner = obj.owner;
+                let mut awarded = 0i32;
                 if let Some(killer) = killer {
-                    if *killer.side() != obj.owner {
+                    if *killer.side() != obj_owner {
                         let award = self
                             .ephemeral
                             .cfg
@@ -1883,11 +1904,24 @@ impl Db {
                                     &format_compact!(
                                         "for destroying {} at {}",
                                         unit_type.as_str(),
-                                        obj.name
+                                        obj_name
                                     ),
                                 );
+                                awarded = award;
                             }
                         }
+                        self.emit_static_kill_stat(
+                            killer,
+                            &unit_type,
+                            obj_name.as_str(),
+                            oid,
+                            obj_owner,
+                            uid,
+                            bfprotocols::stats::StaticKillKind::ObjectiveStatic,
+                            awarded,
+                            now,
+                            weapon_name.clone(),
+                        );
                     }
                 }
                 self.refresh_objective_after_static_change(oid, now)?;
@@ -1939,6 +1973,45 @@ impl Db {
             }
         }
         Ok(())
+    }
+
+    fn emit_static_kill_stat(
+        &mut self,
+        killer: &bfprotocols::shots::Who,
+        unit_type: &Vehicle,
+        objective_name: &str,
+        objective_id: ObjectiveId,
+        owner: Side,
+        unit_id: UnitId,
+        kind: bfprotocols::stats::StaticKillKind,
+        points: i32,
+        time: DateTime<Utc>,
+        weapon_name: Option<String>,
+    ) {
+        let Some(ucid) = killer.ucid().copied() else {
+            return;
+        };
+        let shooter_typ = self
+            .persisted
+            .players
+            .get(&ucid)
+            .and_then(|p| p.current_slot.as_ref())
+            .and_then(|(sl, _)| self.ephemeral.get_slot_info(sl))
+            .map(|si| String::from(si.typ.as_str()));
+        self.ephemeral.stat(Stat::StaticKill {
+            by: ucid,
+            side: *killer.side(),
+            shooter_typ,
+            weapon_name,
+            target_typ: String::from(unit_type.as_str()),
+            objective: String::from(objective_name),
+            objective_id,
+            kind,
+            points,
+            time,
+            owner,
+            unit_id,
+        });
     }
 
     /// True if adding one more Fowl crate would exceed CFG `cargo` for this shared-ED carrier.

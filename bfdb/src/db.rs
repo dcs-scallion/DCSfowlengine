@@ -4,12 +4,12 @@ use arrayvec::ArrayVec;
 use bfprotocols::{
     cfg::{Cfg, LifeType, UnitTag, UnitTags, Vehicle},
     db::{
-        group::GroupId,
+        group::{GroupId, UnitId},
         objective::{ObjectiveId, ObjectiveKind},
     },
     perf::PerfInner,
     shots::{Dead, Who},
-    stats::{DetectionSource, EnId, Pos, Stat},
+    stats::{DetectionSource, EnId, Pos, Stat, StaticKillKind},
 };
 use chrono::prelude::*;
 use dcso3::{
@@ -69,6 +69,23 @@ pub(crate) struct CaptureRecord {
 /// known), and by which method (air drop vs. manual unpack). Distinct from
 /// the plain `deploys` counter on Aggregates, which has no attribution or
 /// timeline; backs the pilot profile's deploy log.
+/// Player destruction of an ME objective static / OPR factory (`Stat::StaticKill`).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub(crate) struct StaticKillRecord {
+    pub(crate) time: DateTime<Utc>,
+    pub(crate) by: Ucid,
+    pub(crate) side: Side,
+    pub(crate) shooter_typ: Option<std::string::String>,
+    pub(crate) weapon_name: Option<std::string::String>,
+    pub(crate) target_typ: std::string::String,
+    pub(crate) objective: std::string::String,
+    pub(crate) objective_id: ObjectiveId,
+    pub(crate) kind: StaticKillKind,
+    pub(crate) points: i32,
+    pub(crate) owner: Side,
+    pub(crate) unit_id: UnitId,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub(crate) struct DeployRecord {
     pub(crate) time: DateTime<Utc>,
@@ -585,6 +602,10 @@ pub(crate) struct StatsDbInner {
     // Deploy events, keyed pilot-first (unlike captures) for efficient
     // per-pilot scans -- see DeployRecord and pilot_deploys_for.
     deploys: Tree<(Ucid, RoundId, DeployId), DeployRecord>,
+    /// ME objective static / OPR factory kills (`Stat::StaticKill`), pilot-first.
+    static_kills: Tree<(Ucid, RoundId, KillId), StaticKillRecord>,
+    /// Dedup StaticKill on JSONL replay: (round, unit, death millis).
+    static_kill_seen: Tree<(RoundId, UnitId, i64), KillId>,
     // Aircraft sortie counts per round: (RoundId, vehicle_type) -> (sortie_count, total_hours_f32)
     aircraft_sorties: Tree<(RoundId, std::string::String), (u32, f32)>,
     /// Last known activity per pilot/round (Takeoff/Land/Position/Disconnect/Deslot).
@@ -718,6 +739,7 @@ fn stat_variant_name(s: &Stat) -> &'static str {
         Stat::DynamicCargoDelivery { .. } => "DynamicCargoDelivery",
         Stat::CsarRescue { .. } => "CsarRescue",
         Stat::Kill(_) => "Kill",
+        Stat::StaticKill { .. } => "StaticKill",
         Stat::Unit { .. } => "Unit",
         Stat::Position { .. } => "Position",
         Stat::Detected { .. } => "Detected",
@@ -811,6 +833,8 @@ impl StatsDb {
             objective_captures: Tree::open(&db, "objective_captures")?,
             captures: Tree::open(&db, "captures")?,
             deploys: Tree::open(&db, "deploys")?,
+            static_kills: Tree::open(&db, "static_kills")?,
+            static_kill_seen: Tree::open(&db, "static_kill_seen")?,
             aircraft_sorties: Tree::open(&db, "aircraft_sorties")?,
             pilot_last_activity: Tree::open(&db, "pilot_last_activity")?,
             admin_bans: Tree::open(&db, "admin_bans")?,
@@ -927,6 +951,8 @@ impl StatsDb {
             objective_captures: Tree::open(&db, "objective_captures")?,
             captures: Tree::open(&db, "captures")?,
             deploys: Tree::open(&db, "deploys")?,
+            static_kills: Tree::open(&db, "static_kills")?,
+            static_kill_seen: Tree::open(&db, "static_kill_seen")?,
             aircraft_sorties: Tree::open(&db, "aircraft_sorties")?,
             pilot_last_activity: Tree::open(&db, "pilot_last_activity")?,
             admin_bans: Tree::open(&db, "admin_bans")?,
@@ -1675,6 +1701,24 @@ impl StatsDb {
         Ok(())
     }
 
+    fn record_static_kill(&self, ctx: &mut StatCtxInner, rec: StaticKillRecord) -> Result<()> {
+        let dedup_key = (ctx.round, rec.unit_id, rec.time.timestamp_millis());
+        if self.static_kill_seen.get(&dedup_key)?.is_some() {
+            return Ok(());
+        }
+        let kid = KillId::new(&self.db)?;
+        self.static_kill_seen.insert(&dedup_key, &kid)?;
+        self.pilots.with_pilot_and_aggregates(
+            rec.by,
+            ctx.round,
+            |p| p.total.ground_kills += 1,
+            |a| a.ground_kills += 1,
+        )?;
+        self.static_kills
+            .insert(&(rec.by, ctx.round, kid), &rec)?;
+        Ok(())
+    }
+
     #[allow(dead_code)]
     pub(crate) fn pilots(&self) -> impl Iterator<Item = Result<(Ucid, String)>> {
         self.pilots.pilots.iter().map(|r| {
@@ -2354,6 +2398,20 @@ impl StatsDb {
         Ok(result)
     }
 
+    /// ME static / OPR factory kills by pilot (newest first).
+    pub(crate) fn pilot_static_kills_for(
+        &self,
+        ucid: &Ucid,
+    ) -> Result<Vec<(RoundId, StaticKillRecord)>> {
+        let mut result = Vec::new();
+        for r in self.static_kills.scan_prefix(ucid)? {
+            let ((_, round_id, _), rec) = r?;
+            result.push((round_id, rec));
+        }
+        result.sort_by(|a, b| b.1.time.cmp(&a.1.time));
+        Ok(result)
+    }
+
     /// All deploys done by a specific pilot, all rounds, newest first.
     pub(crate) fn pilot_deploys_for(&self, ucid: &Ucid) -> Result<Vec<(RoundId, DeployRecord)>> {
         let mut result = Vec::new();
@@ -2384,11 +2442,35 @@ impl StatsDb {
         Ok(kills)
     }
 
+    /// Recent ME static / OPR factory kills in a round (newest first).
+    pub(crate) fn recent_static_kills(
+        &self,
+        round: RoundId,
+        limit: usize,
+    ) -> Result<Vec<StaticKillRecord>> {
+        let mut kills = Vec::new();
+        for r in self.static_kills.iter() {
+            let ((_, rid, _), rec) = r?;
+            if rid == round {
+                kills.push(rec);
+            }
+        }
+        kills.sort_by(|a, b| b.time.cmp(&a.time));
+        kills.truncate(limit);
+        Ok(kills)
+    }
+
     /// Unique kill events (one Dead / KillId) in a round — not per-hit and not
     /// summed pilot credits (shared kills would otherwise inflate the total).
     pub(crate) fn round_kill_count(&self, round: RoundId) -> Result<u32> {
         let mut seen: std::collections::HashSet<KillId> = std::collections::HashSet::new();
         for r in self.kills.iter() {
+            let ((_, rid, kid), _) = r?;
+            if rid == round {
+                seen.insert(kid);
+            }
+        }
+        for r in self.static_kills.iter() {
             let ((_, rid, kid), _) = r?;
             if rid == round {
                 seen.insert(kid);
@@ -3016,6 +3098,36 @@ impl StatsDb {
                 })?;
             }
             Stat::Kill(dead) => self.record_kill(ctx, dead)?,
+            Stat::StaticKill {
+                by,
+                side,
+                shooter_typ,
+                weapon_name,
+                target_typ,
+                objective,
+                objective_id,
+                kind,
+                points,
+                time,
+                owner,
+                unit_id,
+            } => self.record_static_kill(
+                ctx,
+                StaticKillRecord {
+                    time,
+                    by,
+                    side,
+                    shooter_typ: shooter_typ.map(|s| s.to_string()),
+                    weapon_name: weapon_name.map(|s| s.to_string()),
+                    target_typ: target_typ.to_string(),
+                    objective: objective.to_string(),
+                    objective_id,
+                    kind,
+                    points,
+                    owner,
+                    unit_id,
+                },
+            )?,
             Stat::Points {
                 id,
                 points,
@@ -3204,6 +3316,8 @@ impl StatsDb {
         self.kills.clear()?;
         self.shared_kills.clear()?;
         self.kill_seen.clear()?;
+        self.static_kills.clear()?;
+        self.static_kill_seen.clear()?;
         self.sortie_seen.clear()?;
         self.deploy_seen.clear()?;
         self.units.clear()?;
@@ -3261,6 +3375,8 @@ impl StatsDb {
         self.kills.clear()?;
         self.shared_kills.clear()?;
         self.kill_seen.clear()?;
+        self.static_kills.clear()?;
+        self.static_kill_seen.clear()?;
         self.sortie_seen.clear()?;
         self.deploy_seen.clear()?;
         self.units.clear()?;

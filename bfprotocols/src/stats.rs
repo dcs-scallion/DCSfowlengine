@@ -58,6 +58,13 @@ pub enum DetectionSource {
     Jtac,
 }
 
+/// Destroyed ME static credited via `static_dead` (not unit ShotDb / `Stat::Kill`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum StaticKillKind {
+    Production,
+    ObjectiveStatic,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum Stat {
     NewRound {
@@ -231,6 +238,24 @@ pub enum Stat {
         lives: MapS<LifeType, (DateTime<Utc>, u8)>,
     },
     Kill(Dead),
+    /// ME objective static or OPR factory destroyed by a player (not unit ShotDb).
+    StaticKill {
+        by: Ucid,
+        side: Side,
+        #[serde(default)]
+        shooter_typ: Option<String>,
+        #[serde(default)]
+        weapon_name: Option<String>,
+        target_typ: String,
+        objective: String,
+        objective_id: ObjectiveId,
+        kind: StaticKillKind,
+        #[serde(default)]
+        points: i32,
+        time: DateTime<Utc>,
+        owner: Side,
+        unit_id: UnitId,
+    },
     Points {
         id: Ucid,
         points: i32,

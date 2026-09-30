@@ -27,7 +27,7 @@ use dcso3::{
     String,
     event::Shot as ShotEvent,
     net::SlotId,
-    object::{DcsObject, DcsOid, Object},
+    object::{DcsObject, DcsOid, Object, ObjectCategory},
     unit::{ClassUnit, Unit, UnitCategory},
 };
 use fxhash::FxHashMap;
@@ -107,11 +107,13 @@ pub(crate) fn who(db: &Db, id: DcsOid<ClassUnit>) -> Option<Who> {
 
 pub(crate) fn who_from_initiator(db: &Db, initiator: Option<&Object>) -> Option<Who> {
     initiator
+        .filter(|o| matches!(o.get_category().ok(), Some(ObjectCategory::Unit)))
         .and_then(|i| i.as_unit().ok())
         .and_then(|u| u.object_id().ok())
         .and_then(|id| who(db, id))
         .or_else(|| {
             initiator
+                .filter(|o| matches!(o.get_category().ok(), Some(ObjectCategory::Weapon)))
                 .and_then(|i| i.as_weapon().ok())
                 .and_then(|w| w.get_launcher().ok())
                 .and_then(|u| u.object_id().ok())
@@ -122,10 +124,12 @@ pub(crate) fn who_from_initiator(db: &Db, initiator: Option<&Object>) -> Option<
 /// Unit type of shooter; Hit/Kill often has Weapon as initiator — use launcher.
 pub(crate) fn shooter_typ_from_initiator(initiator: Option<&Object>) -> Option<String> {
     initiator
+        .filter(|o| matches!(o.get_category().ok(), Some(ObjectCategory::Unit)))
         .and_then(|o| o.as_unit().ok())
         .and_then(|u| u.get_type_name().ok())
         .or_else(|| {
             initiator
+                .filter(|o| matches!(o.get_category().ok(), Some(ObjectCategory::Weapon)))
                 .and_then(|o| o.as_weapon().ok())
                 .and_then(|w| w.get_launcher().ok())
                 .and_then(|u| u.get_type_name().ok())

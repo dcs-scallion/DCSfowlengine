@@ -857,7 +857,8 @@ async fn api_kills(
             },
         };
         let kills = db.recent_kills(rid, limit.unwrap_or(50))?;
-        let entries: Vec<_> = kills
+        let static_kills = db.recent_static_kills(rid, limit.unwrap_or(50))?;
+        let mut entries: Vec<_> = kills
             .iter()
             .map(|dead| {
                 let victim_name = dead.victim.ucid().map(|u| u.to_string());
@@ -897,9 +898,38 @@ async fn api_kills(
                     "target_type": dead.shots.first().map(|s| s.target_typ.to_string()),
                     "is_air": is_air,
                     "is_ship": is_ship,
+                    "static_kill": false,
                 })
             })
             .collect();
+        for sk in &static_kills {
+            entries.push(serde_json::json!({
+                "time": sk.time.to_rfc3339(),
+                "victim": {
+                    "ucid": serde_json::Value::Null,
+                    "side": format!("{:?}", sk.owner),
+                },
+                "killer": {
+                    "ucid": sk.by.to_string(),
+                    "side": format!("{:?}", sk.side),
+                    "weapon": display_weapon(sk.weapon_name.as_ref()),
+                    "airframe": sk.shooter_typ,
+                },
+                "target_type": sk.target_typ,
+                "objective": sk.objective,
+                "static_kind": format!("{:?}", sk.kind),
+                "points": sk.points,
+                "is_air": false,
+                "is_ship": false,
+                "static_kill": true,
+            }));
+        }
+        entries.sort_by(|a, b| {
+            let ta = a.get("time").and_then(|v| v.as_str()).unwrap_or("");
+            let tb = b.get("time").and_then(|v| v.as_str()).unwrap_or("");
+            tb.cmp(ta)
+        });
+        entries.truncate(limit.unwrap_or(50));
         Ok(serde_json::to_string(&entries)?)
     })?;
     Ok(json_response(data))
@@ -1000,7 +1030,8 @@ async fn api_pilot_kills(
     let data = task::block_in_place(|| -> Result<String> {
         let ucid: dcso3::net::Ucid = ucid.parse().map_err(|e| anyhow::anyhow!("{e:?}"))?;
         let kills = db.pilot_kills_for(&ucid)?;
-        let entries: Vec<_> = kills.iter().map(|(round_id, dead)| {
+        let static_kills = db.pilot_static_kills_for(&ucid)?;
+        let mut entries: Vec<_> = kills.iter().map(|(round_id, dead)| {
             // Same as Kill Feed: finishing blow (latest non-self hit).
             let shot = dead
                 .shots
@@ -1022,8 +1053,29 @@ async fn api_pilot_kills(
                 "target_type": target_type,
                 "weapon": weapon,
                 "killer_airframe": airframe,
+                "static_kill": false,
             })
         }).collect();
+        for (round_id, sk) in &static_kills {
+            entries.push(serde_json::json!({
+                "round_id": round_id.0,
+                "time": sk.time.to_rfc3339(),
+                "victim_ucid": serde_json::Value::Null,
+                "victim_side": format!("{:?}", sk.owner),
+                "target_type": sk.target_typ,
+                "weapon": display_weapon(sk.weapon_name.as_ref()),
+                "killer_airframe": sk.shooter_typ,
+                "objective": sk.objective,
+                "static_kind": format!("{:?}", sk.kind),
+                "points": sk.points,
+                "static_kill": true,
+            }));
+        }
+        entries.sort_by(|a, b| {
+            let ta = a.get("time").and_then(|v| v.as_str()).unwrap_or("");
+            let tb = b.get("time").and_then(|v| v.as_str()).unwrap_or("");
+            tb.cmp(ta)
+        });
         Ok(serde_json::to_string(&entries)?)
     })?;
     Ok(json_response(data))

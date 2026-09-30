@@ -124,14 +124,50 @@ struct EventObjectDescriptor {
     coalition: Option<i64>,
 }
 
+fn is_likely_scenery_unit_type(ut: &str) -> bool {
+    let t = ut.trim();
+    if t.is_empty() {
+        return false;
+    }
+    // Hit descriptors for map scenery often use lowercase phrases ("civil building");
+    // real DCS unit types are usually CamelCase / underscore tokens without spaces.
+    let mostly_lower = {
+        let mut any = false;
+        let mut all_lower = true;
+        for c in t.chars().filter(|c| c.is_ascii_alphabetic()) {
+            any = true;
+            if !c.is_ascii_lowercase() {
+                all_lower = false;
+                break;
+            }
+        }
+        any && all_lower
+    };
+    if t.contains(' ') && mostly_lower {
+        return true;
+    }
+    let lower = t.to_ascii_lowercase();
+    lower.contains("building")
+        || lower.contains("house")
+        || lower.contains("tower")
+        || lower.contains("bridge")
+        || lower.contains("fence")
+        || lower.contains("wall")
+        || lower.contains("hangar")
+}
+
 fn event_object_class_candidates(desc: &EventObjectDescriptor) -> &'static [&'static str] {
     match desc.unit_type.as_deref() {
         Some(ut) if ut.starts_with("weapons.") => &["Weapon"],
         Some(ut) if ut.is_empty() && desc.coalition == Some(-1) => &["Weapon"],
         Some(ut) if ut.is_empty() => &["Unit", "Static", "Weapon"],
-        Some(_) => &["Static", "Unit", "Weapon", "Scenery"],
+        // Never try Unit: DCS isExist can succeed with a Unit metatable on scenery ids
+        // and later Unit API calls ACCESS_VIOLATION (airframe vs tower).
+        Some(ut) if is_likely_scenery_unit_type(ut) => &["Scenery", "Static"],
+        // Prefer Scenery before Unit when type is ambiguous.
+        Some(_) => &["Static", "Scenery", "Weapon", "Unit"],
         None if desc.coalition == Some(-1) => &["Weapon"],
-        None => &["Static", "Unit", "Weapon", "Scenery"],
+        None => &["Static", "Scenery", "Weapon", "Unit"],
     }
 }
 
