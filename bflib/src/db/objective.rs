@@ -2595,12 +2595,17 @@ impl Db {
                 if elapsed >= delay {
                     return Some(side);
                 } else {
+                    let side_name = match side {
+                        Side::Red => "Red coalition",
+                        Side::Blue => "Blue coalition",
+                        Side::Neutral => "Neutral",
+                    };
+                    let secs_left = (delay - elapsed).num_seconds().max(0);
                     self.ephemeral.msgs().panel_to_all(
                         10,
                         true,
                         format_compact!(
-                            "{side} has won. The server will reset in {}s",
-                            (delay - elapsed).as_seconds_f64()
+                            "{side_name} has won. The server will reset in {secs_left}s"
                         ),
                     );
                     return None;
@@ -2609,16 +2614,32 @@ impl Db {
             let VictoryCondition::MapOwned { fraction } = vc.condition;
             let (blue, red, neutral, total) = self.persisted.objectives.into_iter().fold(
                 (0., 0., 0., 0.),
-                |(blue, red, neutral, total), (_, obj)| match obj.owner {
-                    Side::Blue => (blue + 1., red, neutral, total + 1.),
-                    Side::Red => (blue, red + 1., neutral, total + 1.),
-                    Side::Neutral => (blue, red, neutral + 1., total + 1.),
+                |(blue, red, neutral, total), (_, obj)| {
+                    // OPR + ground DEP FARP excluded; naval FARP (mobile) counts.
+                    let counts = match &obj.kind {
+                        ObjectiveKind::Airbase
+                        | ObjectiveKind::Fob
+                        | ObjectiveKind::Logistics => true,
+                        ObjectiveKind::Farp { mobile: true, .. } => true,
+                        ObjectiveKind::Farp { mobile: false, .. }
+                        | ObjectiveKind::Production => false,
+                    };
+                    if !counts {
+                        return (blue, red, neutral, total);
+                    }
+                    match obj.owner {
+                        Side::Blue => (blue + 1., red, neutral, total + 1.),
+                        Side::Red => (blue, red + 1., neutral, total + 1.),
+                        Side::Neutral => (blue, red, neutral + 1., total + 1.),
+                    }
                 },
             );
-            if ((blue + neutral) / total) >= fraction {
-                self.ephemeral.victory = Some((now, Side::Blue));
-            } else if ((red + neutral) / total) >= fraction {
-                self.ephemeral.victory = Some((now, Side::Red));
+            if total > 0. {
+                if ((blue + neutral) / total) >= fraction {
+                    self.ephemeral.victory = Some((now, Side::Blue));
+                } else if ((red + neutral) / total) >= fraction {
+                    self.ephemeral.victory = Some((now, Side::Red));
+                }
             }
             None
         })

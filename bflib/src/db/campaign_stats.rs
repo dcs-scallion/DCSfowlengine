@@ -141,20 +141,20 @@ impl CampaignStats {
 
 fn format_campaign_date_short(d: NaiveDate) -> String {
     let month = match d.month() {
-        1 => "Jan.",
-        2 => "Feb.",
-        3 => "Mar.",
-        4 => "Apr.",
+        1 => "Jan",
+        2 => "Feb",
+        3 => "Mar",
+        4 => "Apr",
         5 => "May",
-        6 => "Jun.",
-        7 => "Jul.",
-        8 => "Aug.",
-        9 => "Sep.",
-        10 => "Oct.",
-        11 => "Nov.",
-        _ => "Dec.",
+        6 => "Jun",
+        7 => "Jul",
+        8 => "Aug",
+        9 => "Sep",
+        10 => "Oct",
+        11 => "Nov",
+        _ => "Dec",
     };
-    format!("{} {}", month, d.day())
+    format!("{} {} {}", d.year(), month, d.day())
 }
 
 fn html_escape(s: &str) -> String {
@@ -206,8 +206,8 @@ pub fn render_sidebar_html(view: &CampaignStatsView) -> String {
     out.push_str(r#"<div class="stat"><div class="stat-h">Campaign stats</div><div class="stat-body">"#);
     out.push_str(&kv_row("Theatre", &view.theatre, false));
     out.push_str(divider());
-    out.push_str(&kv_row("Campaign start", &view.start_date, false));
-    out.push_str(&kv_row("Campaign current", &view.current_date, false));
+    out.push_str(&kv_row("Campaign strt", &view.start_date, false));
+    out.push_str(&kv_row("Campaign curr", &view.current_date, false));
     out.push_str(divider());
     out.push_str(&section_hdr("Objectives taken"));
     out.push_str(&vs_row(

@@ -360,7 +360,8 @@ impl FromStr for AdminCommand {
                 objective: s.into(),
             })
         } else if let Some(s) = s.strip_prefix("reset") {
-            let winner = if s == "" {
+            let s = s.trim();
+            let winner = if s.is_empty() {
                 None
             } else {
                 Some(Side::from_str(s)?)
@@ -828,6 +829,31 @@ pub(super) fn admin_shutdown(
     };
     if let Some(winner) = reset {
         if ctx.db_ready {
+            match super::discord_map_live_ctx(lua, ctx) {
+                Ok(live) => ctx.db.queue_discord_map_campaign_end_archive(
+                    lua,
+                    &live,
+                    &ctx.cfg_base_path,
+                ),
+                Err(e) => {
+                    error!(
+                        "discord map: campaign-end live ctx failed ({e:?}); archiving existing HTML only"
+                    );
+                    ctx.db.queue_discord_map_campaign_end_archive(
+                        lua,
+                        &crate::db::discord_map::DiscordMapLiveCtx {
+                            generated_at: Utc::now(),
+                            shutdown_when: None,
+                            online_red: 0,
+                            online_blue: 0,
+                            blue_pilots: vec![],
+                            red_pilots: vec![],
+                            spectators: vec![],
+                        },
+                        &ctx.cfg_base_path,
+                    );
+                }
+            }
             ctx.do_bg_task(Task::ResetState(ctx.miz_state_path.clone()));
             ctx.do_bg_task(Task::Stat(se));
             ctx.do_bg_task(Task::Stat(Stat::RoundEnd { winner }));

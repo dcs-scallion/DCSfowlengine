@@ -23,7 +23,7 @@ $Labels = @(
     "broken",
     "overcast",
     "light_rain",
-    "heavy_rain"
+    "rain"
 )
 
 # Starting profile index (CFG weather_start_index / persisted weather_index)

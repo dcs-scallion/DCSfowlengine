@@ -290,6 +290,11 @@ pub(super) enum Task {
         post: Option<DiscordMapPostJob>,
     },
     DiscordMapPost(DiscordMapPostJob),
+    /// Final HTML snapshot (optional, no Discord webhook) then dated archive copy.
+    FinalizeDiscordMapCampaign {
+        post: Option<DiscordMapPostJob>,
+        html_path: PathBuf,
+    },
     StartDiscordMapHttp {
         port: u16,
         html_path: PathBuf,
@@ -707,6 +712,40 @@ async fn background_loop(write_dir: PathBuf, mut rx: UnboundedReceiver<Task>) {
                 .await
                 {
                     error!("discord map Discord post failed: {e:#}");
+                }
+            }
+            Task::FinalizeDiscordMapCampaign { post, html_path } => {
+                if let Some(job) = post {
+                    if let Err(e) = discord_map::publish_map_files(
+                        &job.base_png_path,
+                        &job.composited_png_path,
+                        &job.html_path,
+                        &job.map_version_path,
+                        &job.viewport,
+                        job.corner_nw,
+                        job.corner_se,
+                        &job.markers,
+                        &job.front_line,
+                        &job.icons,
+                        &job.mission_name,
+                        &job.status_utc,
+                        &job.status_bar,
+                    )
+                    .await
+                    {
+                        error!(
+                            "discord map: campaign-end snapshot failed ({e:#}); archiving existing HTML if present"
+                        );
+                    }
+                }
+                match discord_map::archive_html_with_date(&html_path, Utc::now()) {
+                    Ok(Some(dest)) => {
+                        log::info!("discord map: archived campaign HTML to {dest:?}")
+                    }
+                    Ok(None) => log::warn!(
+                        "discord map: no HTML to archive at {html_path:?}"
+                    ),
+                    Err(e) => error!("discord map: campaign HTML archive failed: {e:#}"),
                 }
             }
             Task::StartDiscordMapHttp {

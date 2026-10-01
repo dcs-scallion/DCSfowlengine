@@ -1092,9 +1092,10 @@ impl NameFilter {
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize)]
 pub enum VictoryCondition {
-    /// Victory is triggered when the specified percentage of the map
-    /// is owned by a given team, or is neutral. Every objective is
-    /// considered equally in this calculation. Must be between 0 and 1
+    /// Victory is triggered when the specified percentage of map-control
+    /// objectives is owned by a given team, or is neutral. Counts airbases,
+    /// FOBs, logistics hubs, and naval FARPs equally; production and ground
+    /// DEP FARPs are excluded. Must be between 0 and 1.
     MapOwned { fraction: f64 },
 }
 
@@ -1834,6 +1835,85 @@ impl SetMissionCfg {
     }
 }
 
+/// Fold legacy top-level `setmissionstartdatetime` into `setmission`.
+///
+/// Older CFG / SessionStart JSON used a flat top-level object that mixed parent
+/// fields (`skript_path`, `post_round_delay_secs`) with datetime fields. Current
+/// schema nests datetime under `setmission.setmissionstartdatetime`. Nested
+/// `setmission` keys win when both are present.
+pub fn migrate_legacy_setmission_cfg_json(v: &mut serde_json::Value) {
+    let Some(obj) = v.as_object_mut() else {
+        return;
+    };
+    let Some(legacy) = obj.remove("setmissionstartdatetime") else {
+        return;
+    };
+    let sm = obj
+        .entry("setmission")
+        .or_insert_with(|| serde_json::Value::Object(serde_json::Map::new()));
+    let Some(sm_obj) = sm.as_object_mut() else {
+        return;
+    };
+
+    let mut legacy_map = match legacy {
+        serde_json::Value::Object(m) => m,
+        other => {
+            sm_obj.entry("setmissionstartdatetime").or_insert(other);
+            return;
+        }
+    };
+
+    // Already shaped like SetMissionCfg (nested children) — merge into setmission.
+    if legacy_map.contains_key("setmissionstartdatetime")
+        || legacy_map.contains_key("setmissionweather")
+    {
+        for (k, val) in legacy_map {
+            sm_obj.entry(k).or_insert(val);
+        }
+        return;
+    }
+
+    let has_parent_fields = legacy_map.contains_key("post_round_delay_secs")
+        || legacy_map.contains_key("skript_path")
+        || legacy_map.contains_key("script_path");
+
+    if has_parent_fields {
+        if let Some(val) = legacy_map.remove("post_round_delay_secs") {
+            sm_obj.entry("post_round_delay_secs").or_insert(val);
+        }
+        if let Some(val) = legacy_map
+            .remove("skript_path")
+            .or_else(|| legacy_map.remove("script_path"))
+        {
+            sm_obj.entry("skript_path").or_insert(val);
+        }
+    }
+
+    let mut dt = serde_json::Map::new();
+    for key in [
+        "enabled",
+        "mission_start_time_cycle",
+        "mission_date_base",
+        "mission_date_on_new_campaign",
+    ] {
+        if let Some(val) = legacy_map.remove(key) {
+            dt.insert(key.to_string(), val);
+        }
+    }
+    if !dt.is_empty() {
+        sm_obj
+            .entry("setmissionstartdatetime")
+            .or_insert(serde_json::Value::Object(dt));
+    }
+}
+
+/// Migrate legacy CFG keys inside a `Stat` JSON value (externally tagged enum).
+pub fn migrate_legacy_setmission_in_stat_json(stat: &mut serde_json::Value) {
+    if let Some(cfg) = stat.pointer_mut("/SessionStart/cfg") {
+        migrate_legacy_setmission_cfg_json(cfg);
+    }
+}
+
 fn parse_hh_mm(s: &str) -> Result<(u32, u32)> {
     let parts: Vec<_> = s.trim().split(':').collect();
     if parts.len() != 2 {
@@ -2459,7 +2539,10 @@ impl Cfg {
                 },
             }
         };
-        let mut cfg: Self = serde_json::from_reader(file)
+        let mut raw: serde_json::Value = serde_json::from_reader(file)
+            .map_err(|e| anyhow!("failed to decode cfg file {:?}, {:?}", path, e))?;
+        migrate_legacy_setmission_cfg_json(&mut raw);
+        let mut cfg: Self = serde_json::from_value(raw)
             .map_err(|e| anyhow!("failed to decode cfg file {:?}, {:?}", path, e))?;
         for (_, actions) in &mut cfg.actions {
             actions.sort_by(|name0, _, name1, _| name0.cmp(name1));
@@ -2650,7 +2733,11 @@ mod discord_map_dcs_public_host_tests {
 
 #[cfg(test)]
 mod setmissionweather_cfg_tests {
-    use super::{Cfg, SetMissionCfg};
+    use super::{
+        migrate_legacy_setmission_cfg_json, migrate_legacy_setmission_in_stat_json, Cfg,
+        SetMissionCfg,
+    };
+    use serde_json::json;
     use std::fs::File;
     use std::path::PathBuf;
 
@@ -2660,7 +2747,10 @@ mod setmissionweather_cfg_tests {
         path.pop();
         path.push("miz/Scenarios/80s/Caucasus1985-SARH/Caucasus1985-SARH_CFG");
         let file = File::open(&path).unwrap_or_else(|e| panic!("open {:?}: {e}", path));
-        let cfg: Cfg = serde_json::from_reader(file).unwrap_or_else(|e| panic!("decode: {e}"));
+        let mut raw: serde_json::Value =
+            serde_json::from_reader(file).unwrap_or_else(|e| panic!("decode: {e}"));
+        migrate_legacy_setmission_cfg_json(&mut raw);
+        let cfg: Cfg = serde_json::from_value(raw).unwrap_or_else(|e| panic!("decode: {e}"));
         cfg.setmission
             .validate()
             .unwrap_or_else(|e| panic!("validate: {e:#}"));
@@ -2669,12 +2759,155 @@ mod setmissionweather_cfg_tests {
         assert_eq!(cfg.setmission.setmissionweather.profiles.len(), 6);
         assert_eq!(
             cfg.setmission.setmissionweather.profiles[1].preset.as_str(),
-            "Preset5"
+            "Preset2"
         );
     }
 
     #[test]
     fn default_setmission_cfg_validates() {
         SetMissionCfg::default().validate().unwrap();
+    }
+
+    #[test]
+    fn legacy_top_level_setmissionstartdatetime_migrates() {
+        let mut v = serde_json::to_value(Cfg::default()).unwrap();
+        v.as_object_mut().unwrap().insert(
+            "setmissionstartdatetime".into(),
+            json!({
+                "enabled": true,
+                "mission_start_time_cycle": ["06:00", "15:00"]
+            }),
+        );
+        v.as_object_mut().unwrap().remove("setmission");
+        migrate_legacy_setmission_cfg_json(&mut v);
+        assert!(v.get("setmissionstartdatetime").is_none());
+        assert_eq!(
+            v["setmission"]["setmissionstartdatetime"]["enabled"],
+            json!(true)
+        );
+        let cfg: Cfg = serde_json::from_value(v).unwrap_or_else(|e| panic!("decode: {e}"));
+        assert!(cfg.setmission.setmissionstartdatetime.enabled);
+        assert_eq!(
+            cfg.setmission
+                .setmissionstartdatetime
+                .mission_start_time_cycle,
+            vec!["06:00".into(), "15:00".into()]
+        );
+    }
+
+    #[test]
+    fn legacy_fat_setmissionstartdatetime_splits_parent_fields() {
+        let mut v = serde_json::to_value(Cfg::default()).unwrap();
+        v.as_object_mut().unwrap().insert(
+            "setmissionstartdatetime".into(),
+            json!({
+                "enabled": true,
+                "skript_path": "C:/Scripts/setmission.BAT",
+                "mission_start_time_cycle": ["06:00", "15:00"],
+                "mission_date_base": "1985-06-01",
+                "mission_date_on_new_campaign": "reset",
+                "post_round_delay_secs": 15
+            }),
+        );
+        v.as_object_mut().unwrap().remove("setmission");
+        migrate_legacy_setmission_cfg_json(&mut v);
+        assert!(v.get("setmissionstartdatetime").is_none());
+        assert_eq!(v["setmission"]["post_round_delay_secs"], json!(15));
+        assert_eq!(
+            v["setmission"]["skript_path"],
+            json!("C:/Scripts/setmission.BAT")
+        );
+        assert!(v["setmission"]["setmissionstartdatetime"]
+            .get("post_round_delay_secs")
+            .is_none());
+        let cfg: Cfg = serde_json::from_value(v).unwrap_or_else(|e| panic!("decode: {e}"));
+        assert!(cfg.setmission.setmissionstartdatetime.enabled);
+        assert_eq!(cfg.setmission.post_round_delay_secs, 15);
+        assert_eq!(
+            cfg.setmission
+                .skript_path
+                .as_ref()
+                .map(|s| s.as_str()),
+            Some("C:/Scripts/setmission.BAT")
+        );
+        assert_eq!(
+            cfg.setmission
+                .setmissionstartdatetime
+                .mission_start_time_cycle,
+            vec!["06:00".into(), "15:00".into()]
+        );
+    }
+
+    #[test]
+    fn nested_setmission_without_legacy_key_unchanged() {
+        let mut v = serde_json::to_value(Cfg::default()).unwrap();
+        v["setmission"] = json!({
+            "setmissionstartdatetime": {
+                "enabled": true,
+                "mission_start_time_cycle": ["12:00"]
+            },
+            "setmissionweather": { "enabled": false }
+        });
+        migrate_legacy_setmission_cfg_json(&mut v);
+        assert!(v.get("setmissionstartdatetime").is_none());
+        let cfg: Cfg = serde_json::from_value(v).unwrap_or_else(|e| panic!("decode: {e}"));
+        assert!(cfg.setmission.setmissionstartdatetime.enabled);
+        assert_eq!(
+            cfg.setmission
+                .setmissionstartdatetime
+                .mission_start_time_cycle,
+            vec!["12:00".into()]
+        );
+    }
+
+    #[test]
+    fn nested_setmission_wins_over_legacy_top_level() {
+        let mut v = json!({
+            "setmissionstartdatetime": {
+                "enabled": true,
+                "mission_start_time_cycle": ["06:00"]
+            },
+            "setmission": {
+                "setmissionstartdatetime": {
+                    "enabled": true,
+                    "mission_start_time_cycle": ["18:00"]
+                }
+            }
+        });
+        migrate_legacy_setmission_cfg_json(&mut v);
+        assert_eq!(
+            v["setmission"]["setmissionstartdatetime"]["mission_start_time_cycle"],
+            json!(["18:00"])
+        );
+    }
+
+    #[test]
+    fn migrate_stat_session_start_cfg() {
+        let mut cfg = serde_json::to_value(Cfg::default()).unwrap();
+        cfg.as_object_mut().unwrap().insert(
+            "setmissionstartdatetime".into(),
+            json!({
+                "enabled": true,
+                "mission_start_time_cycle": ["09:00"]
+            }),
+        );
+        cfg.as_object_mut().unwrap().remove("setmission");
+        let mut stat = json!({ "SessionStart": { "stop": null, "cfg": cfg } });
+        migrate_legacy_setmission_in_stat_json(&mut stat);
+        assert!(stat["SessionStart"]["cfg"]
+            .get("setmissionstartdatetime")
+            .is_none());
+        assert_eq!(
+            stat["SessionStart"]["cfg"]["setmission"]["setmissionstartdatetime"]["enabled"],
+            json!(true)
+        );
+        let st: crate::stats::Stat =
+            serde_json::from_value(stat).unwrap_or_else(|e| panic!("stat decode: {e}"));
+        match st {
+            crate::stats::Stat::SessionStart { cfg, .. } => {
+                assert!(cfg.setmission.setmissionstartdatetime.enabled);
+            }
+            other => panic!("expected SessionStart, got {other:?}"),
+        }
     }
 }

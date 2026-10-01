@@ -2,13 +2,13 @@ use crate::db_id;
 use anyhow::{anyhow, bail, Result};
 use arrayvec::ArrayVec;
 use bfprotocols::{
-    cfg::{Cfg, LifeType, UnitTag, UnitTags, Vehicle},
+    cfg::{migrate_legacy_setmission_in_stat_json, Cfg, LifeType, UnitTag, UnitTags, Vehicle},
     db::{
         group::{GroupId, UnitId},
         objective::{ObjectiveId, ObjectiveKind},
     },
     perf::PerfInner,
-    shots::{Dead, Who},
+    shots::{Dead, Shot, Who},
     stats::{DetectionSource, EnId, Pos, Stat, StaticKillKind},
 };
 use chrono::prelude::*;
@@ -187,10 +187,18 @@ pub(crate) struct Aggregates {
     pub(crate) deaths: u32,
     pub(crate) hours: f32,
     pub(crate) donated_points: u32,
-    /// Ship (A/S) kills. Skipped in bincode so existing `aggregates` / `Pilot.total`
+    /// Ship (A2S) kills. Skipped in bincode so existing `aggregates` / `Pilot.total`
     /// rows stay readable; persisted in `agg_ship_kills` / `pilot_ship_kills`.
     #[serde(skip)]
     pub(crate) ship_kills: u32,
+    /// Ground-to-air kills (G2A). Side tables `agg_ground_air_kills` / `pilot_ground_air_kills`.
+    /// `air_kills` is air-to-air only (shooter airframe).
+    #[serde(skip)]
+    pub(crate) ground_air_kills: u32,
+    /// Ground-to-ground kills (G2G). Side tables `agg_ground_ground_kills` / `pilot_ground_ground_kills`.
+    /// `ground_kills` is air-to-ground only (shooter airframe).
+    #[serde(skip)]
+    pub(crate) ground_ground_kills: u32,
     /// CSAR rescues (pilots delivered). Side tables `agg_csar` / `pilot_csar`.
     #[serde(skip)]
     pub(crate) csar: u32,
@@ -200,6 +208,8 @@ fn total_kills(a: &Aggregates) -> u32 {
     a.air_kills
         .saturating_add(a.ground_kills)
         .saturating_add(a.ship_kills)
+        .saturating_add(a.ground_air_kills)
+        .saturating_add(a.ground_ground_kills)
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -313,6 +323,14 @@ struct Pilots {
     agg_ship_kills: Tree<(Ucid, Vehicle, RoundId), u32>,
     /// Career ship kills (parallel to `Pilot.total`).
     pilot_ship_kills: Tree<Ucid, u32>,
+    /// Per-vehicle/round ground-to-air kills (G2A).
+    agg_ground_air_kills: Tree<(Ucid, Vehicle, RoundId), u32>,
+    /// Career G2A kills.
+    pilot_ground_air_kills: Tree<Ucid, u32>,
+    /// Per-vehicle/round ground-to-ground kills (G2G).
+    agg_ground_ground_kills: Tree<(Ucid, Vehicle, RoundId), u32>,
+    /// Career G2G kills.
+    pilot_ground_ground_kills: Tree<Ucid, u32>,
     /// Per-vehicle/round CSAR rescues.
     agg_csar: Tree<(Ucid, Vehicle, RoundId), u32>,
     /// Career CSAR rescues.
@@ -331,6 +349,10 @@ impl Pilots {
             sortie_crashed: Tree::open(db, "sortie_crashed")?,
             agg_ship_kills: Tree::open(db, "agg_ship_kills")?,
             pilot_ship_kills: Tree::open(db, "pilot_ship_kills")?,
+            agg_ground_air_kills: Tree::open(db, "agg_ground_air_kills")?,
+            pilot_ground_air_kills: Tree::open(db, "pilot_ground_air_kills")?,
+            agg_ground_ground_kills: Tree::open(db, "agg_ground_ground_kills")?,
+            pilot_ground_ground_kills: Tree::open(db, "pilot_ground_ground_kills")?,
             agg_csar: Tree::open(db, "agg_csar")?,
             pilot_csar: Tree::open(db, "pilot_csar")?,
             round_info: Tree::open(db, "pilot_round_info")?,
@@ -346,6 +368,62 @@ impl Pilots {
             .and_then(|ri| ri.slot.and_then(|s| s.vehicle));
         if let Some(vehicle) = vehicle {
             self.agg_ship_kills
+                .fetch_and_update(&(ucid, vehicle, round), |n| {
+                    Some(n.unwrap_or(0).saturating_add(1))
+                })?;
+        }
+        Ok(())
+    }
+
+    fn bump_ground_air_kill(
+        &self,
+        ucid: Ucid,
+        round: RoundId,
+        shooter_typ: Option<&str>,
+    ) -> Result<()> {
+        self.pilot_ground_air_kills
+            .fetch_and_update(&ucid, |n| Some(n.unwrap_or(0).saturating_add(1)))?;
+        let vehicle = shooter_typ
+            .map(|t| t.trim())
+            .filter(|t| !t.is_empty())
+            .map(Vehicle::from)
+            .or_else(|| {
+                self.round_info
+                    .get(&(ucid, round))
+                    .ok()
+                    .flatten()
+                    .and_then(|ri| ri.slot.and_then(|s| s.vehicle))
+            });
+        if let Some(vehicle) = vehicle {
+            self.agg_ground_air_kills
+                .fetch_and_update(&(ucid, vehicle, round), |n| {
+                    Some(n.unwrap_or(0).saturating_add(1))
+                })?;
+        }
+        Ok(())
+    }
+
+    fn bump_ground_ground_kill(
+        &self,
+        ucid: Ucid,
+        round: RoundId,
+        shooter_typ: Option<&str>,
+    ) -> Result<()> {
+        self.pilot_ground_ground_kills
+            .fetch_and_update(&ucid, |n| Some(n.unwrap_or(0).saturating_add(1)))?;
+        let vehicle = shooter_typ
+            .map(|t| t.trim())
+            .filter(|t| !t.is_empty())
+            .map(Vehicle::from)
+            .or_else(|| {
+                self.round_info
+                    .get(&(ucid, round))
+                    .ok()
+                    .flatten()
+                    .and_then(|ri| ri.slot.and_then(|s| s.vehicle))
+            });
+        if let Some(vehicle) = vehicle {
+            self.agg_ground_ground_kills
                 .fetch_and_update(&(ucid, vehicle, round), |n| {
                     Some(n.unwrap_or(0).saturating_add(1))
                 })?;
@@ -371,6 +449,14 @@ impl Pilots {
 
     fn career_ship_kills(&self, ucid: &Ucid) -> Result<u32> {
         Ok(self.pilot_ship_kills.get(ucid)?.unwrap_or(0))
+    }
+
+    fn career_ground_air_kills(&self, ucid: &Ucid) -> Result<u32> {
+        Ok(self.pilot_ground_air_kills.get(ucid)?.unwrap_or(0))
+    }
+
+    fn career_ground_ground_kills(&self, ucid: &Ucid) -> Result<u32> {
+        Ok(self.pilot_ground_ground_kills.get(ucid)?.unwrap_or(0))
     }
 
     fn career_csar(&self, ucid: &Ucid) -> Result<u32> {
@@ -864,6 +950,8 @@ impl StatsDb {
         }        t.seed_wiki_if_empty()?;
         t.seed_wiki_images_if_empty()?;
         t.reconcile_flight_hours_from_sorties_once()?;
+        t.reconcile_a2a_g2a_once()?;
+        t.reconcile_a2g_g2g_once()?;
         // A older bug fabricated a round named after the last segment of the
         // netidx base (e.g. "campaign" from "/local/fowl/campaign") whenever a
         // SessionStart was replayed without a NewRound. Those bogus rounds are
@@ -970,6 +1058,8 @@ impl StatsDb {
         t.seed_wiki_if_empty()?;
         t.seed_wiki_images_if_empty()?;
         t.reconcile_flight_hours_from_sorties_once()?;
+        t.reconcile_a2a_g2a_once()?;
+        t.reconcile_a2g_g2g_once()?;
         let _t = t.clone();
         task::spawn(async move {
             if let Err(e) = _t.background_loop().await {
@@ -1337,7 +1427,9 @@ impl StatsDb {
                             let ts_str = val.get("ts").and_then(|v| v.as_str()).unwrap_or("");
                             let ts = ts_str.parse::<DateTime<Utc>>().unwrap_or_else(|_| Utc::now());
                             if let Some(stat_val) = val.get("stat") {
-                                match serde_json::from_value::<Stat>(stat_val.clone()) {
+                                let mut stat_val = stat_val.clone();
+                                migrate_legacy_setmission_in_stat_json(&mut stat_val);
+                                match serde_json::from_value::<Stat>(stat_val) {
                                     Ok(st) => stats.push((ts, st)),
                                     Err(e) => {
                                         undecodable += 1;
@@ -1651,24 +1743,8 @@ impl StatsDb {
             }
             Who::AI { .. } => {}
         }
-        let any_hit = dead.shots.iter().any(|s| s.hit);
-        let up = |a: &mut Aggregates| match kind {
-            KillTarget::Air => a.air_kills += 1,
-            KillTarget::Ground => a.ground_kills += 1,
-            KillTarget::Ship => {}
-        };
         // Dashboard / Kill Feed: one kill → one credit = finishing blow (latest hit).
-        // Prefer a non-self shot when DCS also logged initiator==target hits.
-        let finishing = if any_hit {
-            dead.shots
-                .iter()
-                .filter(|s| s.hit && s.shooter.unit() != dead.victim.unit())
-                .max_by_key(|s| s.time)
-                .or_else(|| dead.shots.iter().filter(|s| s.hit).max_by_key(|s| s.time))
-        } else {
-            dead.shots.iter().max_by_key(|s| s.time)
-        };
-        let Some(shot) = finishing else {
+        let Some(shot) = self.finishing_shot(&dead) else {
             return Ok(());
         };
         let enid = match &shot.shooter {
@@ -1679,15 +1755,38 @@ impl StatsDb {
             | Who::AI {
                 ucid: Some(ucid), ..
             } => {
-                if kind == KillTarget::Ship {
-                    self.pilots.bump_ship_kill(*ucid, ctx.round)?;
-                } else {
-                    self.pilots.with_pilot_and_aggregates(
-                        *ucid,
-                        ctx.round,
-                        |p| up(&mut p.total),
-                        |a| up(a),
-                    )?;
+                match kind {
+                    KillTarget::Ship => {
+                        self.pilots.bump_ship_kill(*ucid, ctx.round)?;
+                    }
+                    KillTarget::Ground => {
+                        // A2G = airframe shooter; G2G = ground / CA / deploy.
+                        let typ = Self::resolve_shooter_typ(&dead, shot);
+                        if self.shooter_is_airframe(ctx.round, &shot.shooter, typ)? {
+                            self.pilots.with_pilot_and_aggregates(
+                                *ucid,
+                                ctx.round,
+                                |p| p.total.ground_kills += 1,
+                                |a| a.ground_kills += 1,
+                            )?;
+                        } else {
+                            self.pilots.bump_ground_ground_kill(*ucid, ctx.round, typ)?;
+                        }
+                    }
+                    KillTarget::Air => {
+                        // A2A = airframe shooter; G2A = ground / CA / deploy.
+                        let typ = Self::resolve_shooter_typ(&dead, shot);
+                        if self.shooter_is_airframe(ctx.round, &shot.shooter, typ)? {
+                            self.pilots.with_pilot_and_aggregates(
+                                *ucid,
+                                ctx.round,
+                                |p| p.total.air_kills += 1,
+                                |a| a.air_kills += 1,
+                            )?;
+                        } else {
+                            self.pilots.bump_ground_air_kill(*ucid, ctx.round, typ)?;
+                        }
+                    }
                 }
                 EnId::Player(*ucid)
             }
@@ -1708,12 +1807,18 @@ impl StatsDb {
         }
         let kid = KillId::new(&self.db)?;
         self.static_kill_seen.insert(&dedup_key, &kid)?;
-        self.pilots.with_pilot_and_aggregates(
-            rec.by,
-            ctx.round,
-            |p| p.total.ground_kills += 1,
-            |a| a.ground_kills += 1,
-        )?;
+        let typ = rec.shooter_typ.as_deref();
+        if self.ucid_shooter_is_airframe(ctx.round, rec.by, typ)? {
+            self.pilots.with_pilot_and_aggregates(
+                rec.by,
+                ctx.round,
+                |p| p.total.ground_kills += 1,
+                |a| a.ground_kills += 1,
+            )?;
+        } else {
+            self.pilots
+                .bump_ground_ground_kill(rec.by, ctx.round, typ)?;
+        }
         self.static_kills
             .insert(&(rec.by, ctx.round, kid), &rec)?;
         Ok(())
@@ -1744,6 +1849,8 @@ impl StatsDb {
                     let name = pilot.name.last().map(|s| s.clone()).unwrap_or_default();
                     let mut total = pilot.total;
                     total.ship_kills = self.pilots.career_ship_kills(&ucid)?;
+                    total.ground_air_kills = self.pilots.career_ground_air_kills(&ucid)?;
+                    total.ground_ground_kills = self.pilots.career_ground_ground_kills(&ucid)?;
                     total.csar = self.pilots.career_csar(&ucid)?;
                     entries.push((ucid, name, total));
                 }
@@ -1777,6 +1884,18 @@ impl StatsDb {
                     if round_id != rid { continue; }
                     let e = map.entry(ucid).or_insert_with(Aggregates::default);
                     e.ship_kills = e.ship_kills.saturating_add(n);
+                }
+                for r in self.pilots.agg_ground_air_kills.iter() {
+                    let ((ucid, _vehicle, round_id), n) = r?;
+                    if round_id != rid { continue; }
+                    let e = map.entry(ucid).or_insert_with(Aggregates::default);
+                    e.ground_air_kills = e.ground_air_kills.saturating_add(n);
+                }
+                for r in self.pilots.agg_ground_ground_kills.iter() {
+                    let ((ucid, _vehicle, round_id), n) = r?;
+                    if round_id != rid { continue; }
+                    let e = map.entry(ucid).or_insert_with(Aggregates::default);
+                    e.ground_ground_kills = e.ground_ground_kills.saturating_add(n);
                 }
                 for r in self.pilots.agg_csar.iter() {
                     let ((ucid, _vehicle, round_id), n) = r?;
@@ -2218,6 +2337,238 @@ impl StatsDb {
         Ok(())
     }
 
+    /// One-shot: split historical air_kills into A2A (airframe shooter) vs G2A
+    /// (ground / CA / deploy) from the kill log. Pure AI (ucid None) stays out.
+    /// v2: do not use stale Player slot/units (v1 mis-labeled almost all A2A as G2A).
+    fn reconcile_a2a_g2a_once(&self) -> Result<()> {
+        const FLAG: &[u8] = b"reconcile_a2a_g2a_v2";
+        if self.db.get(FLAG)?.is_some() {
+            return Ok(());
+        }
+        info!("reconciling A2A vs G2A from kill log (once, v2)");
+
+        use std::collections::HashMap;
+        let mut by_kid: HashMap<KillId, (RoundId, Dead)> = HashMap::new();
+        for r in self.kills.iter() {
+            let ((_enid, rid, kid), dead) = r?;
+            by_kid.entry(kid).or_insert((rid, dead));
+        }
+
+        let mut career_a2a: HashMap<Ucid, u32> = HashMap::new();
+        let mut career_g2a: HashMap<Ucid, u32> = HashMap::new();
+        let mut agg_a2a: HashMap<(Ucid, Vehicle, RoundId), u32> = HashMap::new();
+        let mut agg_g2a: HashMap<(Ucid, Vehicle, RoundId), u32> = HashMap::new();
+
+        for (rid, dead) in by_kid.into_values() {
+            if self.classify_kill_target(rid, &dead)? != KillTarget::Air {
+                continue;
+            }
+            let Some(shot) = self.finishing_shot(&dead) else {
+                continue;
+            };
+            let ucid = match &shot.shooter {
+                Who::Player { ucid, .. }
+                | Who::AI {
+                    ucid: Some(ucid), ..
+                } => *ucid,
+                Who::AI { ucid: None, .. } => continue,
+            };
+            let typ = Self::resolve_shooter_typ(&dead, shot);
+            let is_a2a = self.shooter_is_airframe(rid, &shot.shooter, typ)?;
+            let vehicle = typ
+                .map(str::trim)
+                .filter(|t| !t.is_empty())
+                .map(Vehicle::from)
+                .or_else(|| {
+                    self.pilots
+                        .round_info
+                        .get(&(ucid, rid))
+                        .ok()
+                        .flatten()
+                        .and_then(|ri| ri.slot.and_then(|s| s.vehicle))
+                });
+            if is_a2a {
+                *career_a2a.entry(ucid).or_default() += 1;
+                if let Some(v) = vehicle {
+                    *agg_a2a.entry((ucid, v, rid)).or_default() += 1;
+                }
+            } else {
+                *career_g2a.entry(ucid).or_default() += 1;
+                if let Some(v) = vehicle {
+                    *agg_g2a.entry((ucid, v, rid)).or_default() += 1;
+                }
+            }
+        }
+
+        let agg_keys: Vec<_> = self
+            .pilots
+            .aggregates
+            .iter()
+            .filter_map(|r| r.ok().map(|(k, _)| k))
+            .collect();
+        for k in &agg_keys {
+            self.pilots.with_aggregates(k.clone(), |a| a.air_kills = 0)?;
+        }
+        let pilot_ids: Vec<_> = self
+            .pilots
+            .pilots
+            .iter()
+            .filter_map(|r| r.ok().map(|(u, _)| u))
+            .collect();
+        for ucid in &pilot_ids {
+            self.pilots.with_pilot(*ucid, |p| p.total.air_kills = 0)?;
+        }
+        self.pilots.agg_ground_air_kills.clear()?;
+        self.pilots.pilot_ground_air_kills.clear()?;
+
+        for (ucid, n) in career_a2a {
+            self.pilots.with_pilot(ucid, |p| p.total.air_kills = n)?;
+        }
+        for (ucid, n) in career_g2a {
+            self.pilots.pilot_ground_air_kills.insert(&ucid, &n)?;
+        }
+        for (k, n) in agg_a2a {
+            self.pilots.with_aggregates(k, |a| a.air_kills = n)?;
+        }
+        for (k, n) in agg_g2a {
+            self.pilots.agg_ground_air_kills.insert(&k, &n)?;
+        }
+
+        self.db.insert(FLAG, b"1")?;
+        info!("A2A/G2A reconciliation complete (v2)");
+        Ok(())
+    }
+
+    /// One-shot: split historical ground_kills into A2G (airframe) vs G2G
+    /// (ground / CA / deploy) from unit + static kill logs.
+    /// v2: same stale-slot fix as A2A/G2A v2.
+    fn reconcile_a2g_g2g_once(&self) -> Result<()> {
+        const FLAG: &[u8] = b"reconcile_a2g_g2g_v2";
+        if self.db.get(FLAG)?.is_some() {
+            return Ok(());
+        }
+        info!("reconciling A2G vs G2G from kill log (once, v2)");
+
+        use std::collections::HashMap;
+        let mut career_a2g: HashMap<Ucid, u32> = HashMap::new();
+        let mut career_g2g: HashMap<Ucid, u32> = HashMap::new();
+        let mut agg_a2g: HashMap<(Ucid, Vehicle, RoundId), u32> = HashMap::new();
+        let mut agg_g2g: HashMap<(Ucid, Vehicle, RoundId), u32> = HashMap::new();
+
+        {
+            let mut credit = |ucid: Ucid,
+                              rid: RoundId,
+                              is_airframe: bool,
+                              vehicle: Option<Vehicle>| {
+                if is_airframe {
+                    *career_a2g.entry(ucid).or_default() += 1;
+                    if let Some(v) = vehicle {
+                        *agg_a2g.entry((ucid, v, rid)).or_default() += 1;
+                    }
+                } else {
+                    *career_g2g.entry(ucid).or_default() += 1;
+                    if let Some(v) = vehicle {
+                        *agg_g2g.entry((ucid, v, rid)).or_default() += 1;
+                    }
+                }
+            };
+
+            let mut by_kid: HashMap<KillId, (RoundId, Dead)> = HashMap::new();
+            for r in self.kills.iter() {
+                let ((_enid, rid, kid), dead) = r?;
+                by_kid.entry(kid).or_insert((rid, dead));
+            }
+            for (rid, dead) in by_kid.into_values() {
+                if self.classify_kill_target(rid, &dead)? != KillTarget::Ground {
+                    continue;
+                }
+                let Some(shot) = self.finishing_shot(&dead) else {
+                    continue;
+                };
+                let ucid = match &shot.shooter {
+                    Who::Player { ucid, .. }
+                    | Who::AI {
+                        ucid: Some(ucid), ..
+                    } => *ucid,
+                    Who::AI { ucid: None, .. } => continue,
+                };
+                let typ = Self::resolve_shooter_typ(&dead, shot);
+                let is_a2g = self.shooter_is_airframe(rid, &shot.shooter, typ)?;
+                let vehicle = typ
+                    .map(str::trim)
+                    .filter(|t| !t.is_empty())
+                    .map(Vehicle::from)
+                    .or_else(|| {
+                        self.pilots
+                            .round_info
+                            .get(&(ucid, rid))
+                            .ok()
+                            .flatten()
+                            .and_then(|ri| ri.slot.and_then(|s| s.vehicle))
+                    });
+                credit(ucid, rid, is_a2g, vehicle);
+            }
+
+            for r in self.static_kills.iter() {
+                let ((ucid, rid, _), rec) = r?;
+                let typ = rec.shooter_typ.as_deref();
+                let is_a2g = self.ucid_shooter_is_airframe(rid, ucid, typ)?;
+                let vehicle = typ
+                    .map(str::trim)
+                    .filter(|t| !t.is_empty())
+                    .map(Vehicle::from)
+                    .or_else(|| {
+                        self.pilots
+                            .round_info
+                            .get(&(ucid, rid))
+                            .ok()
+                            .flatten()
+                            .and_then(|ri| ri.slot.and_then(|s| s.vehicle))
+                    });
+                credit(ucid, rid, is_a2g, vehicle);
+            }
+        }
+
+        let agg_keys: Vec<_> = self
+            .pilots
+            .aggregates
+            .iter()
+            .filter_map(|r| r.ok().map(|(k, _)| k))
+            .collect();
+        for k in &agg_keys {
+            self.pilots
+                .with_aggregates(k.clone(), |a| a.ground_kills = 0)?;
+        }
+        let pilot_ids: Vec<_> = self
+            .pilots
+            .pilots
+            .iter()
+            .filter_map(|r| r.ok().map(|(u, _)| u))
+            .collect();
+        for ucid in &pilot_ids {
+            self.pilots.with_pilot(*ucid, |p| p.total.ground_kills = 0)?;
+        }
+        self.pilots.agg_ground_ground_kills.clear()?;
+        self.pilots.pilot_ground_ground_kills.clear()?;
+
+        for (ucid, n) in career_a2g {
+            self.pilots.with_pilot(ucid, |p| p.total.ground_kills = n)?;
+        }
+        for (ucid, n) in career_g2g {
+            self.pilots.pilot_ground_ground_kills.insert(&ucid, &n)?;
+        }
+        for (k, n) in agg_a2g {
+            self.pilots.with_aggregates(k, |a| a.ground_kills = n)?;
+        }
+        for (k, n) in agg_g2g {
+            self.pilots.agg_ground_ground_kills.insert(&k, &n)?;
+        }
+
+        self.db.insert(FLAG, b"1")?;
+        info!("A2G/G2G reconciliation complete (v2)");
+        Ok(())
+    }
+
     // ── Perf history ─────────────────────────────────────────────────────────
 
     pub(crate) fn session_perf_history(&self, limit: usize) -> Result<Vec<SessionEnd>> {
@@ -2310,6 +2661,8 @@ impl StatsDb {
                 let name = pilot.name.last().cloned().unwrap_or_default();
                 let mut total = pilot.total;
                 total.ship_kills = self.pilots.career_ship_kills(ucid)?;
+                total.ground_air_kills = self.pilots.career_ground_air_kills(ucid)?;
+                total.ground_ground_kills = self.pilots.career_ground_ground_kills(ucid)?;
                 total.csar = self.pilots.career_csar(ucid)?;
                 Ok(Some((name, total)))
             }
@@ -2366,6 +2719,18 @@ impl StatsDb {
             if u != *ucid { continue; }
             let e = map.entry(round_id).or_insert_with(Aggregates::default);
             e.ship_kills = e.ship_kills.saturating_add(n);
+        }
+        for r in self.pilots.agg_ground_air_kills.iter() {
+            let ((u, _vehicle, round_id), n) = r?;
+            if u != *ucid { continue; }
+            let e = map.entry(round_id).or_insert_with(Aggregates::default);
+            e.ground_air_kills = e.ground_air_kills.saturating_add(n);
+        }
+        for r in self.pilots.agg_ground_ground_kills.iter() {
+            let ((u, _vehicle, round_id), n) = r?;
+            if u != *ucid { continue; }
+            let e = map.entry(round_id).or_insert_with(Aggregates::default);
+            e.ground_ground_kills = e.ground_ground_kills.saturating_add(n);
         }
         for r in self.pilots.agg_csar.iter() {
             let ((u, _vehicle, round_id), n) = r?;
@@ -2542,6 +2907,100 @@ impl StatsDb {
             }
         }
         Ok(best.map(|(_, t)| t))
+    }
+
+    /// Prefer this shot's type; else another shot by the same UCID on the Dead
+    /// (Hit events often omit shooter_typ).
+    fn resolve_shooter_typ<'a>(dead: &'a Dead, shot: &'a Shot) -> Option<&'a str> {
+        if let Some(t) = shot
+            .shooter_typ
+            .as_ref()
+            .map(|s| s.as_str().trim())
+            .filter(|t| !t.is_empty())
+        {
+            return Some(t);
+        }
+        let ucid = shot.shooter.ucid()?;
+        dead.shots.iter().rev().find_map(|s| {
+            if s.shooter.ucid() == Some(ucid) {
+                s.shooter_typ
+                    .as_ref()
+                    .map(|t| t.as_str().trim())
+                    .filter(|t| !t.is_empty())
+            } else {
+                None
+            }
+        })
+    }
+
+    fn tags_are_airframe(tags: &UnitTags) -> bool {
+        tags.contains(UnitTag::Aircraft) || tags.contains(UnitTag::Helicopter)
+    }
+
+    /// A2A/A2G shooter = Aircraft/Helicopter. Else G2A/G2G (ground / CA / deploy).
+    ///
+    /// Do **not** use `EnId::Player` units or current `round_info.slot` when typ is
+    /// missing — those reflect the latest slot after full ingest and turn
+    /// historical air kills into false G2A/G2G on reconcile (CA / deslot).
+    fn shooter_is_airframe(
+        &self,
+        round: RoundId,
+        shooter: &Who,
+        shooter_typ: Option<&str>,
+    ) -> Result<bool> {
+        if let Some(typ) = shooter_typ.map(str::trim).filter(|t| !t.is_empty()) {
+            if let Some(tags) = self.unit_tags_from_session_cfg(round, typ)? {
+                return Ok(Self::tags_are_airframe(&tags));
+            }
+        }
+        match shooter {
+            Who::AI { uid, .. } => {
+                if let Some(unit) = self.units.get(&(round, EnId::Unit(*uid)))? {
+                    if !unit.tags.is_empty() {
+                        return Ok(Self::tags_are_airframe(&unit.tags));
+                    }
+                    if let Some(tags) =
+                        self.unit_tags_from_session_cfg(round, &unit.typ.to_string())?
+                    {
+                        return Ok(Self::tags_are_airframe(&tags));
+                    }
+                }
+                // Deployed / AI without classifiable typ → ground.
+                Ok(false)
+            }
+            Who::Player { .. } => {
+                // Unknown typ on a player slot → airframe (A2A / A2G).
+                Ok(true)
+            }
+        }
+    }
+
+    /// Static kills: typ from record, else airframe default (no stale slot).
+    fn ucid_shooter_is_airframe(
+        &self,
+        round: RoundId,
+        _ucid: Ucid,
+        shooter_typ: Option<&str>,
+    ) -> Result<bool> {
+        if let Some(typ) = shooter_typ.map(str::trim).filter(|t| !t.is_empty()) {
+            if let Some(tags) = self.unit_tags_from_session_cfg(round, typ)? {
+                return Ok(Self::tags_are_airframe(&tags));
+            }
+        }
+        Ok(true)
+    }
+
+    fn finishing_shot<'a>(&self, dead: &'a Dead) -> Option<&'a Shot> {
+        let any_hit = dead.shots.iter().any(|s| s.hit);
+        if any_hit {
+            dead.shots
+                .iter()
+                .filter(|s| s.hit && s.shooter.unit() != dead.victim.unit())
+                .max_by_key(|s| s.time)
+                .or_else(|| dead.shots.iter().filter(|s| s.hit).max_by_key(|s| s.time))
+        } else {
+            dead.shots.iter().max_by_key(|s| s.time)
+        }
     }
 
     fn add_stat(&self, ctx: &mut StatCtx, time: DateTime<Utc>, stat: Stat) -> Result<()> {
@@ -3305,6 +3764,10 @@ impl StatsDb {
         self.pilots.sortie_crashed.clear()?;
         self.pilots.agg_ship_kills.clear()?;
         self.pilots.pilot_ship_kills.clear()?;
+        self.pilots.agg_ground_air_kills.clear()?;
+        self.pilots.pilot_ground_air_kills.clear()?;
+        self.pilots.agg_ground_ground_kills.clear()?;
+        self.pilots.pilot_ground_ground_kills.clear()?;
         self.pilots.agg_csar.clear()?;
         self.pilots.pilot_csar.clear()?;
         self.pilots.round_info.clear()?;
@@ -3366,6 +3829,10 @@ impl StatsDb {
         self.pilots.sortie_crashed.clear()?;
         self.pilots.agg_ship_kills.clear()?;
         self.pilots.pilot_ship_kills.clear()?;
+        self.pilots.agg_ground_air_kills.clear()?;
+        self.pilots.pilot_ground_air_kills.clear()?;
+        self.pilots.agg_ground_ground_kills.clear()?;
+        self.pilots.pilot_ground_ground_kills.clear()?;
         self.pilots.agg_csar.clear()?;
         self.pilots.pilot_csar.clear()?;
         self.pilots.round_info.clear()?;

@@ -6,6 +6,7 @@ use anyhow::{bail, Context, Result};
 use base64::{engine::general_purpose::STANDARD as B64, Engine as _};
 use bfprotocols::discord_map_icon_manifest::DiscordMapIconManifestRuntime;
 use bfprotocols::discord_map_viewport::MapViewport;
+use chrono::prelude::*;
 use dcso3::coord::LLPos;
 use image::RgbaImage;
 use log::{info, warn};
@@ -334,9 +335,8 @@ fn bail_mapbox(status: u16, body: &str) -> Result<()> {
     anyhow::bail!("Mapbox static image failed HTTP {status}: {body}");
 }
 
-pub async fn publish_and_post(
-    webhook_url: &str,
-    webhook_message_path: &Path,
+/// Write composited PNG + interactive HTML + version stamp (no Discord webhook).
+pub async fn publish_map_files(
     base_png_path: &Path,
     composited_png_path: &Path,
     html_path: &Path,
@@ -347,7 +347,6 @@ pub async fn publish_and_post(
     markers: &[DiscordMapMarker],
     front_line: &[DiscordMapFrontLinePolygon],
     icons: &DiscordMapIconPackJob,
-    caption: &str,
     mission_name: &str,
     status_utc: &str,
     status_bar: &DiscordMapStatusBar,
@@ -385,7 +384,68 @@ pub async fn publish_and_post(
     fs::rename(&version_tmp, map_version_path)
         .await
         .with_context(|| format!("publish discord map version {:?}", map_version_path))?;
+    Ok(())
+}
+
+pub async fn publish_and_post(
+    webhook_url: &str,
+    webhook_message_path: &Path,
+    base_png_path: &Path,
+    composited_png_path: &Path,
+    html_path: &Path,
+    map_version_path: &Path,
+    viewport: &MapViewport,
+    corner_nw: LLPos,
+    corner_se: LLPos,
+    markers: &[DiscordMapMarker],
+    front_line: &[DiscordMapFrontLinePolygon],
+    icons: &DiscordMapIconPackJob,
+    caption: &str,
+    mission_name: &str,
+    status_utc: &str,
+    status_bar: &DiscordMapStatusBar,
+) -> Result<()> {
+    publish_map_files(
+        base_png_path,
+        composited_png_path,
+        html_path,
+        map_version_path,
+        viewport,
+        corner_nw,
+        corner_se,
+        markers,
+        front_line,
+        icons,
+        mission_name,
+        status_utc,
+        status_bar,
+    )
+    .await?;
     post_discord_map(webhook_url, webhook_message_path, caption).await
+}
+
+/// Dated backup next to live HTML: `….discord_map_YYYY-MM-DD.html`,
+/// or `….discord_map_YYYY-MM-DD_HHMMSS.html` if that date already exists.
+pub fn archive_html_with_date(html_path: &Path, now: DateTime<Utc>) -> Result<Option<PathBuf>> {
+    if !html_path.is_file() {
+        return Ok(None);
+    }
+    let parent = html_path.parent().unwrap_or_else(|| Path::new("."));
+    let stem = html_path
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .unwrap_or("discord_map");
+    let date = now.format("%Y-%m-%d");
+    let dated = parent.join(format!("{stem}_{date}.html"));
+    let dest = if !dated.exists() {
+        dated
+    } else {
+        let time = now.format("%H%M%S");
+        parent.join(format!("{stem}_{date}_{time}.html"))
+    };
+    std::fs::copy(html_path, &dest)
+        .with_context(|| format!("archive discord map HTML {:?} -> {:?}", html_path, dest))?;
+    Ok(Some(dest))
 }
 
 async fn post_discord_map(
@@ -830,15 +890,11 @@ fn status_vs_with_half_bar_html(blue: u32, red: u32) -> String {
 }
 
 fn status_production_html(blue: Option<u8>, red: Option<u8>) -> String {
-    let blue_s = blue.map(|v| v.to_string()).unwrap_or_else(|| "—".into());
-    let red_s = red.map(|v| v.to_string()).unwrap_or_else(|| "—".into());
-    let bar = if blue.is_some() || red.is_some() {
-        status_half_fill_bar_html(blue.unwrap_or(0), red.unwrap_or(0))
-    } else {
-        String::new()
-    };
+    let blue_v = blue.unwrap_or(0);
+    let red_v = red.unwrap_or(0);
     format!(
-        r#"<span class="stat-vs"><span class="stat-blue">{blue_s}</span> vs <span class="stat-red">{red_s}</span></span>{bar}"#
+        r#"<span class="stat-vs"><span class="stat-blue">{blue_v}</span> vs <span class="stat-red">{red_v}</span></span>{bar}"#,
+        bar = status_half_fill_bar_html(blue_v, red_v),
     )
 }
 

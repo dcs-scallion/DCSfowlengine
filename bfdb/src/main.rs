@@ -483,6 +483,8 @@ async fn api_leaderboard(db: StatsDb) -> std::result::Result<impl warp::Reply, E
                     "air_kills": agg.air_kills,
                     "ground_kills": agg.ground_kills,
                     "ship_kills": agg.ship_kills,
+                    "ground_air_kills": agg.ground_air_kills,
+                    "ground_ground_kills": agg.ground_ground_kills,
                     "csar": agg.csar,
                     "captures": agg.captures,
                     "repairs": agg.repairs,
@@ -949,6 +951,8 @@ async fn api_pilot(
                 "air_kills": agg.air_kills,
                 "ground_kills": agg.ground_kills,
                 "ship_kills": agg.ship_kills,
+                "ground_air_kills": agg.ground_air_kills,
+                "ground_ground_kills": agg.ground_ground_kills,
                 "csar": agg.csar,
                 "captures": agg.captures,
                 "repairs": agg.repairs,
@@ -1006,6 +1010,8 @@ async fn api_pilot_breakdown(
             "air_kills": agg.air_kills,
             "ground_kills": agg.ground_kills,
             "ship_kills": agg.ship_kills,
+            "ground_air_kills": agg.ground_air_kills,
+            "ground_ground_kills": agg.ground_ground_kills,
             "csar": agg.csar,
             "captures": agg.captures,
             "repairs": agg.repairs,
@@ -2106,9 +2112,11 @@ async fn api_admin_cfg_post(
         .as_ref()
         .clone()
         .ok_or_else(|| anyhow::anyhow!("engine config not configured (missing --engine-config)"))?;
-    let _validated: bfprotocols::cfg::Cfg = serde_json::from_value(body.cfg.clone())
+    let mut cfg_json = body.cfg.clone();
+    bfprotocols::cfg::migrate_legacy_setmission_cfg_json(&mut cfg_json);
+    let _validated: bfprotocols::cfg::Cfg = serde_json::from_value(cfg_json.clone())
         .map_err(|e| anyhow::anyhow!("config is invalid: {e}"))?;
-    let pretty = serde_json::to_string_pretty(&body.cfg)
+    let pretty = serde_json::to_string_pretty(&cfg_json)
         .map_err(|e| anyhow::anyhow!("serializing config: {e}"))?;
     task::block_in_place(|| -> Result<()> {
         if path.exists() {

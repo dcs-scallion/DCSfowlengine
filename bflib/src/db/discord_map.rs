@@ -1118,6 +1118,50 @@ impl Db {
         )?));
         Ok(())
     }
+
+    /// On campaign reset: optional final HTML snapshot (no Discord webhook), then dated archive.
+    pub fn queue_discord_map_campaign_end_archive(
+        &mut self,
+        lua: MizLua,
+        live: &DiscordMapLiveCtx,
+        cfg_base_path: &Path,
+    ) {
+        let html = self
+            .ephemeral
+            .discord_map
+            .as_ref()
+            .map(|r| r.html_path.clone())
+            .unwrap_or_else(|| html_path(cfg_base_path));
+        let post = (|| -> Result<Option<DiscordMapPostJob>> {
+            self.sync_front_line_for_discord_map();
+            let Some(runtime) = self.ephemeral.discord_map.as_ref() else {
+                return Ok(None);
+            };
+            if !runtime.base_png_path.is_file() {
+                warn!("discord map: campaign-end snapshot skipped — base PNG not ready");
+                return Ok(None);
+            }
+            let cfg = &self.ephemeral.cfg.discord_map;
+            let markers = collect_markers(lua, self)?;
+            Ok(Some(discord_map_post_job(
+                lua,
+                self,
+                runtime,
+                cfg,
+                markers,
+                icons_job(runtime.icons.as_ref()),
+                live,
+            )?))
+        })()
+        .unwrap_or_else(|e| {
+            warn!("discord map: campaign-end snapshot prepare failed: {e:#}");
+            None
+        });
+        self.ephemeral.do_bg(Task::FinalizeDiscordMapCampaign {
+            post,
+            html_path: html,
+        });
+    }
 }
 
 pub fn init_discord_map(
