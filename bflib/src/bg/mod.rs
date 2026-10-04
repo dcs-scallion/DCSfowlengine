@@ -244,6 +244,75 @@ fn rotate_log(path: &Path) {
     }
 }
 
+/// Rotate live stats.jsonl into a zstd-sealed segment when it exceeds this size.
+const STATS_JSONL_ROTATE_BYTES: u64 = 50 * 1024 * 1024;
+
+fn reopen_stats_jsonl(path: &Path) -> Option<std::fs::File> {
+    match std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(path)
+    {
+        Ok(f) => Some(f),
+        Err(e) => {
+            eprintln!("could not reopen stats JSONL at {path:?}: {e:?}");
+            None
+        }
+    }
+}
+
+fn compress_stats_jsonl_to_zst(plain: &Path, zst: &Path) -> Result<()> {
+    use std::io::{copy, BufReader, BufWriter};
+    let input = std::fs::File::open(plain)
+        .with_context(|| format!("open sealed stats {plain:?}"))?;
+    let output = std::fs::File::create(zst)
+        .with_context(|| format!("create zstd stats {zst:?}"))?;
+    let mut encoder = zstd::stream::write::Encoder::new(BufWriter::new(output), 3)
+        .context("zstd encoder")?;
+    copy(&mut BufReader::new(input), &mut encoder).context("zstd compress stats")?;
+    encoder.finish().context("zstd finish")?;
+    Ok(())
+}
+
+fn maybe_rotate_stats_jsonl(file: &mut Option<std::fs::File>, path: &Path) {
+    let Some(f) = file.as_ref() else {
+        return;
+    };
+    let Ok(meta) = f.metadata() else {
+        return;
+    };
+    if meta.len() < STATS_JSONL_ROTATE_BYTES {
+        return;
+    }
+    if let Some(mut f) = file.take() {
+        let _ = std::io::Write::flush(&mut f);
+        drop(f);
+    }
+    let stamp = Utc::now().format("%Y%m%dT%H%M%S");
+    let sealed_plain = path.with_file_name(format!("stats-{stamp}.jsonl"));
+    let sealed_zst = path.with_file_name(format!("stats-{stamp}.jsonl.zst"));
+    if let Err(e) = fs::rename(path, &sealed_plain) {
+        eprintln!("stats JSONL rotate rename failed: {e:?}");
+        *file = reopen_stats_jsonl(path);
+        return;
+    }
+    match compress_stats_jsonl_to_zst(&sealed_plain, &sealed_zst) {
+        Ok(()) => {
+            if let Err(e) = fs::remove_file(&sealed_plain) {
+                eprintln!("stats JSONL rotate remove plain failed: {e:?}");
+            } else {
+                eprintln!("stats JSONL rotated to {sealed_zst:?}");
+            }
+        }
+        Err(e) => {
+            eprintln!(
+                "stats JSONL zstd compress failed ({e:?}); left plain sealed at {sealed_plain:?}"
+            );
+        }
+    }
+    *file = reopen_stats_jsonl(path);
+}
+
 #[derive(Debug, Clone)]
 pub struct DiscordMapPostJob {
     pub webhook_url: String,
@@ -312,12 +381,14 @@ enum Logs {
         stats: Statspub,
         log: LogPublisher,
         stats_jsonl: Option<std::fs::File>,
+        stats_jsonl_path: PathBuf,
     },
     Files {
         log_path: PathBuf,
         log_file: Option<File>,
         stats_path: PathBuf,
         stats_jsonl: Option<std::fs::File>,
+        stats_jsonl_path: PathBuf,
     },
 }
 
@@ -380,6 +451,7 @@ impl Logs {
             log_path,
             stats_path,
             stats_jsonl,
+            stats_jsonl_path: jsonl_path,
         };
         t.open_files().await?;
         Ok(t)
@@ -421,10 +493,19 @@ impl Logs {
     }
 
     fn write_stat(&mut self, stat: &Stat) -> Result<()> {
-        let jsonl = match self {
-            Self::Files { stats_jsonl, .. } => stats_jsonl,
-            Self::Netidx { stats_jsonl, .. } => stats_jsonl,
+        let (jsonl, jsonl_path) = match self {
+            Self::Files {
+                stats_jsonl,
+                stats_jsonl_path,
+                ..
+            } => (stats_jsonl, stats_jsonl_path.clone()),
+            Self::Netidx {
+                stats_jsonl,
+                stats_jsonl_path,
+                ..
+            } => (stats_jsonl, stats_jsonl_path.clone()),
         };
+        maybe_rotate_stats_jsonl(jsonl, &jsonl_path);
         if let Some(f) = jsonl {
             use std::io::Write;
             let ts = Utc::now();
@@ -467,9 +548,11 @@ impl Logs {
                 log_file,
                 stats_path,
                 stats_jsonl,
+                stats_jsonl_path,
             } => {
                 drop(log_file.take());
                 let taken_jsonl = stats_jsonl.take();
+                let jsonl_path = stats_jsonl_path.clone();
                 let go = || async {
                     let perf = PubPerf::new(
                         &publisher,
@@ -499,6 +582,7 @@ impl Logs {
                             stats,
                             log,
                             stats_jsonl: taken_jsonl,
+                            stats_jsonl_path: jsonl_path,
                         };
                         Ok(())
                     }

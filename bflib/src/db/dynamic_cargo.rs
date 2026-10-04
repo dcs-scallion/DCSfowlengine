@@ -754,6 +754,105 @@ impl Db {
         false
     }
 
+    /// One `getCargosOnBoard` per occupied slot (names + count, incl. nameless ghosts).
+    fn scan_player_ed_bays(&self, lua: MizLua) -> EdBayScan {
+        let mut by_name: FxHashMap<String, Ucid> = FxHashMap::default();
+        let mut carriers: FxHashMap<Ucid, EdBayCarrier> = FxHashMap::default();
+        for (slot, ucid) in &self.ephemeral.players_by_slot {
+            let Some(player) = self.persisted.players.get(ucid) else {
+                continue;
+            };
+            let Some((_, Some(inst))) = player.current_slot.as_ref() else {
+                continue;
+            };
+            let typ = inst.typ.0.as_str();
+            let is_ed_transport = is_ed_cargo_transport(typ);
+            let inst_pos = (
+                inst.position.p.0.x,
+                inst.position.p.0.z,
+                inst.position.p.0.y,
+            );
+            let Ok(ac) = self.ephemeral.slot_instance_unit(lua, slot) else {
+                if is_ed_transport {
+                    carriers.insert(
+                        *ucid,
+                        EdBayCarrier {
+                            bay_count: 0,
+                            in_air: inst.in_air,
+                            is_ed_transport: true,
+                            pos: Some(inst_pos),
+                        },
+                    );
+                }
+                continue;
+            };
+            let in_air = ac.in_air().unwrap_or(inst.in_air);
+            let pos = ac
+                .get_point()
+                .ok()
+                .map(|p| (p.0.x, p.0.z, p.0.y))
+                .or(Some(inst_pos));
+            let (bay_count, names) = unit_bay_cargo_scan(&ac);
+            for n in names {
+                by_name.insert(n, *ucid);
+            }
+            if is_ed_transport || bay_count > 0 {
+                carriers.insert(
+                    *ucid,
+                    EdBayCarrier {
+                        bay_count,
+                        in_air,
+                        is_ed_transport,
+                        pos,
+                    },
+                );
+            }
+        }
+        EdBayScan { by_name, carriers }
+    }
+
+    /// Keep registry while cargo is plausibly in an ED bay (name miss / API gap).
+    fn bay_soft_hold_carrier(
+        scan: &EdBayScan,
+        last_carrier: Option<&Ucid>,
+        spawner: &Ucid,
+        air_dropped: bool,
+    ) -> Option<(Ucid, EdBayCarrier)> {
+        if air_dropped {
+            return None;
+        }
+        for ucid in last_carrier.copied().into_iter().chain(std::iter::once(*spawner)) {
+            let Some(c) = scan.carriers.get(&ucid) else {
+                continue;
+            };
+            if !c.is_ed_transport {
+                continue;
+            }
+            // L2: bay occupied (named or ghost). L3: airborne API gap with empty list.
+            if c.bay_count > 0 || c.in_air {
+                return Some((ucid, c.clone()));
+            }
+        }
+        None
+    }
+
+    fn apply_dynamic_cargo_bay_hold(
+        &mut self,
+        name: &String,
+        carrier: Ucid,
+        pos: Option<(f64, f64, f64)>,
+    ) {
+        if let Some(e) = self.persisted.dynamic_cargo_crates.get_mut_cow(name) {
+            e.last_carrier = Some(carrier);
+            if let Some((x, y, alt)) = pos {
+                e.x = x;
+                e.y = y;
+                e.alt = alt;
+            }
+        }
+        self.ephemeral.dynamic_cargo_miss_count.remove(name);
+    }
+
     fn player_carrier_in_air(&self, ucid: &Ucid) -> bool {
         self.persisted
             .players
@@ -1049,6 +1148,7 @@ impl Db {
         }
         const REGISTER_GRACE: chrono::Duration = chrono::Duration::seconds(90);
         let now = Utc::now();
+        let bay_scan = self.scan_player_ed_bays(lua);
         let mut gone: Vec<String> = Vec::new();
         let names: Vec<String> = self
             .persisted
@@ -1080,9 +1180,13 @@ impl Db {
                     continue;
                 }
             }
-            // Still in an ED bay — F8 load hides/moves the world static.
-            if self.dynamic_cargo_name_on_any_board(lua, name.as_str()) {
-                self.ephemeral.dynamic_cargo_miss_count.remove(&name);
+            // Still in an ED bay by name — F8 load hides/moves the world static.
+            if let Some(carrier) = bay_scan.by_name.get(name.as_str()).copied() {
+                let pos = bay_scan
+                    .carriers
+                    .get(&carrier)
+                    .and_then(|c| c.pos);
+                self.apply_dynamic_cargo_bay_hold(&name, carrier, pos);
                 continue;
             }
             let world_gone = match StaticObject::get_by_name(lua, name.as_str()) {
@@ -1099,6 +1203,16 @@ impl Db {
                 .get(&name)
                 .map(|e| (e.last_carrier.clone(), e.spawner, e.air_dropped))
                 .unwrap_or((None, Ucid::default(), false));
+            // Soft-hold: name miss but bay occupied (L2) or carrier airborne (L3).
+            if let Some((carrier, info)) = Self::bay_soft_hold_carrier(
+                &bay_scan,
+                carrier_ucid.as_ref(),
+                &spawner,
+                already_dropped,
+            ) {
+                self.apply_dynamic_cargo_bay_hold(&name, carrier, info.pos);
+                continue;
+            }
             let track_ucid = carrier_ucid.clone().unwrap_or(spawner);
             let carrier_air = self.player_carrier_in_air(&track_ucid);
             let carrier_pos = self.player_instance_world_pos(&track_ucid);
@@ -2279,6 +2393,41 @@ impl Db {
     }
 }
 
+#[derive(Clone)]
+struct EdBayCarrier {
+    bay_count: u32,
+    in_air: bool,
+    is_ed_transport: bool,
+    pos: Option<(f64, f64, f64)>,
+}
+
+struct EdBayScan {
+    by_name: FxHashMap<String, Ucid>,
+    carriers: FxHashMap<Ucid, EdBayCarrier>,
+}
+
+/// One bay read: count (incl. nameless) + named crate list.
+fn unit_bay_cargo_scan(ac: &Unit) -> (u32, Vec<String>) {
+    let Ok(Some(cargos)) = ac.get_cargos_on_board() else {
+        return (0, Vec::new());
+    };
+    let mut n = 0u32;
+    let mut names = Vec::new();
+    let _ = cargos.for_each(|c| {
+        let Ok(c) = c else {
+            return Ok(());
+        };
+        n = n.saturating_add(1);
+        if let Ok(name) = c.get_name() {
+            if !name.is_empty() {
+                names.push(name);
+            }
+        }
+        Ok(())
+    });
+    (n, names)
+}
+
 /// True if `Unit.getCargosOnBoard` still lists this crate name (F8 / ghost slots).
 pub(crate) fn unit_has_cargo_named(ac: &Unit, crate_name: &str) -> bool {
     let Ok(Some(cargos)) = ac.get_cargos_on_board() else {
@@ -2302,17 +2451,7 @@ pub(crate) fn unit_has_cargo_named(ac: &Unit, crate_name: &str) -> bool {
 
 /// Count all entries returned by `Unit.getCargosOnBoard` (including nameless ghosts).
 pub(crate) fn ed_bay_cargo_count(ac: &Unit) -> u32 {
-    let Ok(Some(cargos)) = ac.get_cargos_on_board() else {
-        return 0;
-    };
-    let mut n = 0u32;
-    let _ = cargos.for_each(|c| {
-        if c.is_ok() {
-            n += 1;
-        }
-        Ok(())
-    });
-    n
+    unit_bay_cargo_scan(ac).0
 }
 
 fn delivery_tons(weight_kg: f64) -> f64 {

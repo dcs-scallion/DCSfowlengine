@@ -24,6 +24,7 @@ use warp::{
 
 mod db;
 mod db_id;
+mod ucid_alias;
 
 /// Load stats and serve the Fowl Engine API
 #[derive(Parser, Debug)]
@@ -181,6 +182,10 @@ async fn resolve_ucid_via_bot(
     discord_id: &str,
 ) -> Option<dcso3::net::Ucid> {
     let cfg = bot_cfg.as_ref()?;
+    // Skip local-admin / non-snowflake ids — bot /getuser expects bigint.
+    if discord_id.starts_with("local:") || !discord_id.chars().all(|c| c.is_ascii_digit()) {
+        return None;
+    }
     let result: anyhow::Result<Option<dcso3::net::Ucid>> = async {
         let http = reqwest::Client::new();
         let users: Vec<BotUserEntry> = http
@@ -1683,7 +1688,88 @@ async fn require_admin(session_id: Option<Uuid>, db: StatsDb) -> std::result::Re
 async fn resolve_by_player_id(id: i64, db: &StatsDb) -> std::result::Result<dcso3::net::Ucid, Error> {
     use netidx::publisher::Value;
     let s = call_engine_rpc_str(db, "resolve-player-id", vec![("id", Value::from(id))]).await?;
-    s.parse::<dcso3::net::Ucid>().map_err(|e| anyhow::anyhow!("bad ucid from engine: {e:?}").into())
+    s.parse::<dcso3::net::Ucid>()
+        .map_err(|e| anyhow::anyhow!("bad ucid from engine: {e:?}").into())
+}
+
+/// GET /api/cockpit/jtac — friendly JTACs + filter/bomber options for the caller.
+async fn api_cockpit_jtac_list(
+    session_id: Option<Uuid>,
+    query: std::collections::HashMap<std::string::String, std::string::String>,
+    db: StatsDb,
+    bot_cfg: Arc<Option<BotLinkConfig>>,
+) -> std::result::Result<impl warp::Reply, Error> {
+    let ucid = require_linked_player(&query, session_id, db.clone(), &bot_cfg).await?;
+    use netidx::publisher::Value;
+    let json = call_engine_rpc_str(
+        &db,
+        "jtac-list",
+        vec![("ucid", Value::from(ucid.to_string()))],
+    )
+    .await?;
+    let data: serde_json::Value = serde_json::from_str(&json)
+        .map_err(|e| anyhow::anyhow!("bad jtac list from engine: {e:?}"))?;
+    Ok(warp::reply::json(&data))
+}
+
+#[derive(serde::Deserialize, serde::Serialize)]
+struct JtacActionBody {
+    jtac_id: std::string::String,
+    action: std::string::String,
+    #[serde(default)]
+    arty_id: Option<std::string::String>,
+    #[serde(default)]
+    rounds: Option<u8>,
+    #[serde(default)]
+    rounds_per_target: Option<u8>,
+    #[serde(default)]
+    num_targets: Option<u8>,
+    #[serde(default)]
+    code: Option<u16>,
+    #[serde(default)]
+    code_part: Option<u16>,
+    #[serde(default)]
+    filter_tag: Option<std::string::String>,
+    #[serde(default)]
+    bomber: Option<std::string::String>,
+    #[serde(default)]
+    calcm_n: Option<u8>,
+    #[serde(default)]
+    calcm_per: Option<u8>,
+}
+
+/// POST /api/cockpit/jtac/action — one F10-parity JTAC command.
+async fn api_cockpit_jtac_action(
+    session_id: Option<Uuid>,
+    query: std::collections::HashMap<std::string::String, std::string::String>,
+    body: JtacActionBody,
+    db: StatsDb,
+    bot_cfg: Arc<Option<BotLinkConfig>>,
+) -> std::result::Result<impl warp::Reply, Error> {
+    let ucid = require_linked_player(&query, session_id, db.clone(), &bot_cfg).await?;
+    let payload = serde_json::to_string(&body)
+        .map_err(|e| anyhow::anyhow!("serialize jtac action: {e}"))?;
+    use netidx::publisher::Value;
+    let message = call_engine_rpc_str(
+        &db,
+        "jtac-action",
+        vec![
+            ("ucid", Value::from(ucid.to_string())),
+            ("body", Value::from(payload)),
+        ],
+    )
+    .await?;
+    Ok(warp::reply::json(&serde_json::json!({ "message": message })))
+}
+
+/// GET /api/cockpit/plugin/download — Attrition Hooks overlay script.
+async fn api_cockpit_plugin_download() -> std::result::Result<impl warp::Reply, Error> {
+    const SCRIPT: &str = include_str!("../../bfcockpit/Scripts/Hooks/attrition_cockpit.lua");
+    Ok(warp::reply::with_header(
+        SCRIPT.to_string(),
+        "Content-Disposition",
+        "attachment; filename=\"attrition_cockpit.lua\"",
+    ))
 }
 
 async fn require_linked_player(
@@ -1892,6 +1978,76 @@ async fn api_admin_reset(
     Ok(warp::reply::json(&serde_json::json!({"ok": true})))
 }
 
+/// GET /api/admin/empty-rounds — ended rounds with no sorties/kills/aggregates
+async fn api_admin_empty_rounds(
+    session_id: Option<Uuid>,
+    db: StatsDb,
+) -> std::result::Result<impl warp::Reply, Error> {
+    require_admin(session_id, db.clone()).await?;
+    let data = task::block_in_place(|| -> Result<String> {
+        let rounds = db.list_empty_rounds()?;
+        let entries: Vec<_> = rounds
+            .iter()
+            .map(|(scenario, rid, round)| {
+                serde_json::json!({
+                    "id": rid.0,
+                    "scenario": scenario.to_string(),
+                    "start": round.start.to_rfc3339(),
+                    "end": round.end.map(|d| d.to_rfc3339()),
+                })
+            })
+            .collect();
+        Ok(serde_json::to_string(&entries)?)
+    })?;
+    Ok(json_response(data))
+}
+
+/// POST /api/admin/purge-empty-rounds — cascade-delete empty ended rounds
+async fn api_admin_purge_empty_rounds(
+    session_id: Option<Uuid>,
+    db: StatsDb,
+) -> std::result::Result<impl warp::Reply, Error> {
+    require_admin(session_id, db.clone()).await?;
+    let deleted = task::block_in_place(|| db.purge_empty_rounds())?;
+    log::info!(
+        "ADMIN: purged {} empty round(s): {:?}",
+        deleted.len(),
+        deleted.iter().map(|(_, r)| r.0).collect::<Vec<_>>()
+    );
+    Ok(warp::reply::json(&serde_json::json!({
+        "ok": true,
+        "deleted": deleted.iter().map(|(s, r)| serde_json::json!({
+            "id": r.0,
+            "scenario": s.to_string(),
+        })).collect::<Vec<_>>(),
+    })))
+}
+
+#[derive(serde::Deserialize)]
+struct DeleteRoundBody {
+    id: u64,
+}
+
+/// POST /api/admin/delete-round — cascade-delete one ended round by id
+async fn api_admin_delete_round(
+    session_id: Option<Uuid>,
+    body: DeleteRoundBody,
+    db: StatsDb,
+) -> std::result::Result<impl warp::Reply, Error> {
+    require_admin(session_id, db.clone()).await?;
+    let (scenario, rid) =
+        task::block_in_place(|| db.delete_round_by_id(db::RoundId(body.id)))?;
+    log::info!(
+        "ADMIN: deleted round id={} scenario={}",
+        rid.0,
+        scenario
+    );
+    Ok(warp::reply::json(&serde_json::json!({
+        "ok": true,
+        "deleted": { "id": rid.0, "scenario": scenario.to_string() },
+    })))
+}
+
 /// POST /api/admin/rebuild-stats — wipe derived stats and re-ingest JSONL from 0
 async fn api_admin_rebuild_stats(
     session_id: Option<Uuid>,
@@ -1903,6 +2059,78 @@ async fn api_admin_rebuild_stats(
     Ok(warp::reply::json(&serde_json::json!({
         "ok": true,
         "message": "rebuild queued — JSONL reader will wipe and re-ingest on its next tick",
+    })))
+}
+
+/// GET /api/admin/ucid-aliases — append-only merge/revoke log
+async fn api_admin_ucid_aliases(
+    session_id: Option<Uuid>,
+    db: StatsDb,
+) -> std::result::Result<impl warp::Reply, Error> {
+    require_admin(session_id, db.clone()).await?;
+    let records = task::block_in_place(|| db.list_ucid_aliases())?;
+    let entries: Vec<_> = records
+        .iter()
+        .map(|r| {
+            serde_json::json!({
+                "ts": r.ts.to_rfc3339(),
+                "op": match r.op {
+                    crate::ucid_alias::AliasOp::Merge => "merge",
+                    crate::ucid_alias::AliasOp::Revoke => "revoke",
+                },
+                "from": r.from,
+                "to": r.to,
+                "note": r.note,
+            })
+        })
+        .collect();
+    Ok(json_response(
+        serde_json::to_string(&entries).map_err(|e| Error(e.into()))?,
+    ))
+}
+
+#[derive(serde::Deserialize)]
+struct UcidMergeBody {
+    from: std::string::String,
+    to: std::string::String,
+    #[serde(default)]
+    note: std::string::String,
+}
+
+/// POST /api/admin/ucid-merge — alias from→to, ban from, queue rebuild
+async fn api_admin_ucid_merge(
+    session_id: Option<Uuid>,
+    body: UcidMergeBody,
+    db: StatsDb,
+) -> std::result::Result<impl warp::Reply, Error> {
+    require_admin(session_id, db.clone()).await?;
+    task::block_in_place(|| db.merge_ucid(&body.from, &body.to, &body.note))?;
+    log::info!("ADMIN: UCID merge {} -> {}", body.from, body.to);
+    Ok(warp::reply::json(&serde_json::json!({
+        "ok": true,
+        "message": "merge recorded, source banned, rebuild queued",
+    })))
+}
+
+#[derive(serde::Deserialize)]
+struct UcidRevokeBody {
+    from: std::string::String,
+    #[serde(default)]
+    note: std::string::String,
+}
+
+/// POST /api/admin/ucid-revoke — cut alias at now, unban from, queue rebuild
+async fn api_admin_ucid_revoke(
+    session_id: Option<Uuid>,
+    body: UcidRevokeBody,
+    db: StatsDb,
+) -> std::result::Result<impl warp::Reply, Error> {
+    require_admin(session_id, db.clone()).await?;
+    task::block_in_place(|| db.revoke_ucid_merge(&body.from, &body.note))?;
+    log::info!("ADMIN: UCID merge revoked for {}", body.from);
+    Ok(warp::reply::json(&serde_json::json!({
+        "ok": true,
+        "message": "revoke recorded, source unbanned, rebuild queued",
     })))
 }
 
@@ -3466,6 +3694,24 @@ async fn main() -> Result<()> {
         .and(with_db(db.clone()))
         .then(api_admin_reset);
 
+    let admin_empty_rounds = warp::path!("api" / "admin" / "empty-rounds")
+        .and(extract_session_cookie())
+        .and(with_db(db.clone()))
+        .then(api_admin_empty_rounds);
+
+    let admin_purge_empty_rounds = warp::path!("api" / "admin" / "purge-empty-rounds")
+        .and(warp::post())
+        .and(extract_session_cookie())
+        .and(with_db(db.clone()))
+        .then(api_admin_purge_empty_rounds);
+
+    let admin_delete_round = warp::path!("api" / "admin" / "delete-round")
+        .and(warp::post())
+        .and(extract_session_cookie())
+        .and(warp::body::json::<DeleteRoundBody>())
+        .and(with_db(db.clone()))
+        .then(api_admin_delete_round);
+
     let admin_rebuild_stats = warp::path!("api" / "admin" / "rebuild-stats")
         .and(warp::post())
         .and(extract_session_cookie())
@@ -3554,6 +3800,25 @@ async fn main() -> Result<()> {
         .and(with_db(db.clone()))
         .then(api_admin_unban2);
 
+    let admin_ucid_aliases = warp::path!("api" / "admin" / "ucid-aliases")
+        .and(extract_session_cookie())
+        .and(with_db(db.clone()))
+        .then(api_admin_ucid_aliases);
+
+    let admin_ucid_merge_route = warp::path!("api" / "admin" / "ucid-merge")
+        .and(warp::post())
+        .and(extract_session_cookie())
+        .and(warp::body::json::<UcidMergeBody>())
+        .and(with_db(db.clone()))
+        .then(api_admin_ucid_merge);
+
+    let admin_ucid_revoke_route = warp::path!("api" / "admin" / "ucid-revoke")
+        .and(warp::post())
+        .and(extract_session_cookie())
+        .and(warp::body::json::<UcidRevokeBody>())
+        .and(with_db(db.clone()))
+        .then(api_admin_ucid_revoke);
+
     let commander_spawn_route = warp::path!("api" / "commander" / "spawn")
         .and(warp::post())
         .and(extract_session_cookie())
@@ -3621,6 +3886,27 @@ async fn main() -> Result<()> {
         .and(with_db(db.clone()))
         .and(with_bot_link_cfg(bot_link_cfg.clone()))
         .then(api_cockpit_cargo_spawn);
+
+    let cockpit_jtac_list_route = warp::path!("api" / "cockpit" / "jtac")
+        .and(warp::get())
+        .and(extract_session_cookie())
+        .and(warp::query::<std::collections::HashMap<std::string::String, std::string::String>>())
+        .and(with_db(db.clone()))
+        .and(with_bot_link_cfg(bot_link_cfg.clone()))
+        .then(api_cockpit_jtac_list);
+
+    let cockpit_jtac_action_route = warp::path!("api" / "cockpit" / "jtac" / "action")
+        .and(warp::post())
+        .and(extract_session_cookie())
+        .and(warp::query::<std::collections::HashMap<std::string::String, std::string::String>>())
+        .and(warp::body::json::<JtacActionBody>())
+        .and(with_db(db.clone()))
+        .and(with_bot_link_cfg(bot_link_cfg.clone()))
+        .then(api_cockpit_jtac_action);
+
+    let cockpit_plugin_download_route = warp::path!("api" / "cockpit" / "plugin" / "download")
+        .and(warp::get())
+        .then(api_cockpit_plugin_download);
 
     let trails = warp::path!("api" / "trails")
         .and(with_db(db.clone()))
@@ -3733,6 +4019,8 @@ async fn main() -> Result<()> {
         .or(cockpit_ewr_intel_route)
         .or(cockpit_carp_solve_route)
         .or(cockpit_carp_solve_latlon_route)
+        .or(cockpit_jtac_list_route)
+        .or(cockpit_plugin_download_route)
         .or(wiki_list_route)
         .or(wiki_get_route)
         .or(wiki_get_image_route)
@@ -3747,6 +4035,7 @@ async fn main() -> Result<()> {
         .or(admin_perf)
         .or(admin_perf_history)
         .or(admin_banned)
+        .or(admin_ucid_aliases)
         .or(admin_engine_errors)
         .or(admin_bot_status)
         .or(admin_cfg_get_route)
@@ -3764,13 +4053,22 @@ async fn main() -> Result<()> {
         )
         .or(auth_local_login)
         .or(admin_reset)
+        .or(admin_empty_rounds)
+        .or(admin_purge_empty_rounds)
+        .or(admin_delete_round)
         .or(admin_rebuild_stats)
         .or(admin_ban_route)
         .or(admin_unban_route)
+        .or(admin_ucid_merge_route)
+        .or(admin_ucid_revoke_route)
         .or(admin_cfg_post_route)
         .or(commander_spawn_route)
         .or(admin_priority_route)
-        .or(cockpit_ewr_toggle_route.or(cockpit_ewr_units_route).or(cockpit_cargo_spawn_route).boxed())
+        .or(cockpit_ewr_toggle_route
+            .or(cockpit_ewr_units_route)
+            .or(cockpit_cargo_spawn_route)
+            .or(cockpit_jtac_action_route)
+            .boxed())
         .boxed()
         .or(wiki_save_route.or(wiki_delete_route).or(wiki_upload_image_route).boxed())
         .or(admin_bot_start

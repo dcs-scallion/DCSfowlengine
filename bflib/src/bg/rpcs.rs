@@ -4,7 +4,7 @@ use arcstr::ArcStr;
 use bfprotocols::db::group::GroupId;
 use chrono::prelude::*;
 use crossbeam::queue::SegQueue;
-use dcso3::coalition::Side;
+use dcso3::{coalition::Side, net::{PlayerId, Ucid}};
 use futures::{channel::mpsc, stream::StreamExt};
 use netidx::{
     chars::Chars,
@@ -51,6 +51,9 @@ pub struct Rpcs {
     _query_campaign_state: Proc,
     _query_perf: Proc,
     _query_briefing: Proc,
+    _resolve_player_id: Proc,
+    _jtac_list: Proc,
+    _jtac_action: Proc,
 }
 
 async fn wait_task(mut ch: mpsc::Receiver<(RpcCall, oneshot::Receiver<Value>)>) {
@@ -526,6 +529,70 @@ impl Rpcs {
             Some(wait.clone()),
             side: Chars = Value::Null; "The side (blue, red, neutral)"
         )?;
+        // Attrition cockpit UI (player-scoped)
+        let _q = Arc::clone(&q);
+        let resolve_player_id = define_rpc!(
+            publisher,
+            base.append("resolve-player-id"),
+            "Resolve a connected player's local DCS player id to their ucid",
+            |c: RpcCall, id: i64| {
+                let (tx, rx) = oneshot::channel();
+                _q.push((
+                    AdminCommand::ResolvePlayerId { id: PlayerId::from(id) },
+                    tx,
+                ));
+                Some((c, rx))
+            },
+            Some(wait.clone()),
+            id: i64 = Value::Null; "The player's local DCS player id"
+        )?;
+        let _q = Arc::clone(&q);
+        let jtac_list = define_rpc!(
+            publisher,
+            base.append("jtac-list"),
+            "List friendly JTACs and related options for the calling player (JSON)",
+            |mut c: RpcCall, ucid: Chars| {
+                let (tx, rx) = oneshot::channel();
+                let ucid = match Ucid::from_str(&ucid) {
+                    Ok(ucid) => ucid,
+                    Err(e) => {
+                        c.reply.send(Value::Error(format!("{e:?}").into()));
+                        return None
+                    }
+                };
+                _q.push((AdminCommand::JtacList { ucid }, tx));
+                Some((c, rx))
+            },
+            Some(wait.clone()),
+            ucid: Chars = Value::Null; "The calling player's ucid"
+        )?;
+        let _q = Arc::clone(&q);
+        let jtac_action = define_rpc!(
+            publisher,
+            base.append("jtac-action"),
+            "Run one F10-parity JTAC action for the calling player (JSON body)",
+            |mut c: RpcCall, ucid: Chars, body: Chars| {
+                let (tx, rx) = oneshot::channel();
+                let ucid = match Ucid::from_str(&ucid) {
+                    Ok(ucid) => ucid,
+                    Err(e) => {
+                        c.reply.send(Value::Error(format!("{e:?}").into()));
+                        return None
+                    }
+                };
+                _q.push((
+                    AdminCommand::JtacAction {
+                        ucid,
+                        body: body.as_ref().into(),
+                    },
+                    tx,
+                ));
+                Some((c, rx))
+            },
+            Some(wait.clone()),
+            ucid: Chars = Value::Null; "The calling player's ucid",
+            body: Chars = Value::Null; "JSON object with jtac_id, action, and action params"
+        )?;
         Ok(Self {
             _reduce_inventory: reduce_inventory,
             _transfer_supply: transfer_supply,
@@ -557,6 +624,9 @@ impl Rpcs {
             _query_campaign_state: query_campaign_state,
             _query_perf: query_perf,
             _query_briefing: query_briefing,
+            _resolve_player_id: resolve_player_id,
+            _jtac_list: jtac_list,
+            _jtac_action: jtac_action,
         })
     }
 }

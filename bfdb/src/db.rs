@@ -1,5 +1,5 @@
 use crate::db_id;
-use anyhow::{anyhow, bail, Result};
+use anyhow::{anyhow, bail, Context, Result};
 use arrayvec::ArrayVec;
 use bfprotocols::{
     cfg::{migrate_legacy_setmission_in_stat_json, Cfg, LifeType, UnitTag, UnitTags, Vehicle},
@@ -728,6 +728,8 @@ pub(crate) struct StatsDbInner {
     /// bfdb restart re-reads the file from 0 and re-applies every Stat::Kill
     /// (inflating A/A, A/G and A/S victories). Key 0u8 — single-server layout.
     jsonl_cursor: Tree<u8, u64>,
+    /// Sealed `stats-*.jsonl.zst` (or plain) segment names fully ingested.
+    jsonl_sealed: Tree<std::string::String, u8>,
     /// Set by POST /api/admin/rebuild-stats; jsonl_loop wipes derived trees
     /// and re-ingests from offset 0 on the next tick.
     jsonl_reset: Arc<AtomicBool>,
@@ -931,6 +933,7 @@ impl StatsDb {
             engine_error_history: Arc::new(StdMutex::new(VecDeque::new())),
             replay_cursor: Tree::open(&db, "replay_cursor")?,
             jsonl_cursor: Tree::open(&db, "jsonl_cursor")?,
+            jsonl_sealed: Tree::open(&db, "jsonl_sealed")?,
             jsonl_reset: Arc::new(AtomicBool::new(false)),
             health_cache: Arc::new(StdMutex::new(None)),
             current_sortie: Arc::new(StdMutex::new(None)),
@@ -1051,6 +1054,7 @@ impl StatsDb {
             engine_error_history: Arc::new(StdMutex::new(VecDeque::new())),
             replay_cursor: Tree::open(&db, "replay_cursor")?,
             jsonl_cursor: Tree::open(&db, "jsonl_cursor")?,
+            jsonl_sealed: Tree::open(&db, "jsonl_sealed")?,
             jsonl_reset: Arc::new(AtomicBool::new(false)),
             health_cache: Arc::new(StdMutex::new(None)),
             current_sortie: Arc::new(StdMutex::new(None)),
@@ -1344,7 +1348,6 @@ impl StatsDb {
 
     /// Read stats from a JSONL file (one JSON object per line)
     async fn jsonl_loop(self, jsonl_path: PathBuf) -> Result<()> {
-        use std::io::BufRead;
         use tokio::time;
 
         let mut ctx = StatCtx::default();
@@ -1384,75 +1387,25 @@ impl StatsDb {
                 }
             }
 
-            let read_result = task::block_in_place(|| -> Result<(u64, Vec<(DateTime<Utc>, Stat)>, u64, Option<std::string::String>, u64, Option<std::string::String>)> {
-                let file = match std::fs::File::open(&jsonl_path) {
-                    Ok(f) => f,
-                    Err(e) => {
-                        if e.kind() != std::io::ErrorKind::NotFound {
-                            error!("failed to open JSONL file: {e:?}");
-                        }
-                        return Ok((last_pos, vec![], 0, None, 0, None));
-                    }
-                };
-                let metadata = file.metadata()?;
-                let file_len = metadata.len();
-                if file_len < last_pos {
-                    warn!(
-                        "JSONL file shrank ({file_len} < {last_pos}) — resetting cursor to 0"
-                    );
-                    return Ok((0, vec![], 0, None, 0, None));
+            let aliases_path =
+                crate::ucid_alias::UcidAliasTable::aliases_path_for_jsonl(&jsonl_path);
+            let aliases = match crate::ucid_alias::UcidAliasTable::load(&aliases_path) {
+                Ok(t) => t,
+                Err(e) => {
+                    error!("failed to load UCID aliases: {e:?}");
+                    crate::ucid_alias::UcidAliasTable::default()
                 }
-                if file_len <= last_pos {
-                    return Ok((last_pos, vec![], 0, None, 0, None));
-                }
-                use std::io::Seek;
-                let mut reader = std::io::BufReader::new(file);
-                reader.seek(std::io::SeekFrom::Start(last_pos))?;
-                let mut line = std::string::String::new();
-                let mut new_pos = last_pos;
-                let mut stats = Vec::new();
-                let mut unparsed = 0u64;
-                let mut first_unparsed: Option<std::string::String> = None;
-                let mut undecodable = 0u64;
-                let mut first_undecodable: Option<std::string::String> = None;
-                while reader.read_line(&mut line)? > 0 {
-                    new_pos = reader.stream_position()?;
-                    let trimmed = line.trim();
-                    if trimmed.is_empty() {
-                        line.clear();
-                        continue;
-                    }
-                    match serde_json::from_str::<serde_json::Value>(trimmed) {
-                        Ok(val) => {
-                            let ts_str = val.get("ts").and_then(|v| v.as_str()).unwrap_or("");
-                            let ts = ts_str.parse::<DateTime<Utc>>().unwrap_or_else(|_| Utc::now());
-                            if let Some(stat_val) = val.get("stat") {
-                                let mut stat_val = stat_val.clone();
-                                migrate_legacy_setmission_in_stat_json(&mut stat_val);
-                                match serde_json::from_value::<Stat>(stat_val) {
-                                    Ok(st) => stats.push((ts, st)),
-                                    Err(e) => {
-                                        undecodable += 1;
-                                        if first_undecodable.is_none() {
-                                            let preview: std::string::String =
-                                                trimmed.chars().take(120).collect();
-                                            first_undecodable =
-                                                Some(format!("{e}; raw: {preview}"));
-                                        }
-                                    }
-                                }
-                            }
-                        }
-                        Err(e) => {
-                            unparsed += 1;
-                            if first_unparsed.is_none() {
-                                first_unparsed = Some(e.to_string());
-                            }
-                        }
-                    }
-                    line.clear();
-                }
-                Ok((new_pos, stats, unparsed, first_unparsed, undecodable, first_undecodable))
+            };
+
+            // Ingest sealed rotated segments not yet marked done (rotation or rebuild).
+            if let Err(e) = task::block_in_place(|| {
+                self.ingest_pending_sealed_segments(&jsonl_path, &aliases, &mut ctx)
+            }) {
+                error!("sealed JSONL ingest error: {e:?}");
+            }
+
+            let read_result = task::block_in_place(|| {
+                read_live_jsonl_stats(&jsonl_path, last_pos, &aliases)
             });
             match read_result {
                 Ok((pos, stats, unparsed, first_unparsed, undecodable, first_undecodable)) => {
@@ -1487,6 +1440,256 @@ impl StatsDb {
         }
     }
 
+    fn ingest_pending_sealed_segments(
+        &self,
+        live_path: &Path,
+        aliases: &crate::ucid_alias::UcidAliasTable,
+        ctx: &mut StatCtx,
+    ) -> Result<()> {
+        for (key, path) in list_sealed_stats_segments(live_path)? {
+            if self.jsonl_sealed.get(&key)?.is_some() {
+                continue;
+            }
+            info!("ingesting sealed stats segment {path:?}");
+            let (stats, unparsed, first_unparsed, undecodable, first_undecodable) =
+                read_stats_lines_from_path(&path, aliases)?;
+            if unparsed > 0 {
+                error!(
+                    "sealed {key}: skipped {unparsed} unparsable line(s); first: {}",
+                    first_unparsed.as_deref().unwrap_or("?")
+                );
+            }
+            if undecodable > 0 {
+                error!(
+                    "sealed {key}: skipped {undecodable} undecodable stat(s); first: {}",
+                    first_undecodable.as_deref().unwrap_or("?")
+                );
+            }
+            let count = stats.len();
+            for (ts, st) in stats {
+                if let Err(e) = self.add_stat(ctx, ts, st) {
+                    warn!("failed to add stat from sealed segment: {e:?}");
+                }
+            }
+            self.jsonl_sealed.insert(&key, &1u8)?;
+            info!("sealed segment {key}: ingested {count} stats");
+        }
+        Ok(())
+    }
+}
+
+/// Canonical sealed key is the `.jsonl` name so plain and `.zst` share one cursor entry.
+fn sealed_stats_key(file_name: &str) -> Option<std::string::String> {
+    if !file_name.starts_with("stats-") {
+        return None;
+    }
+    if let Some(stem) = file_name.strip_suffix(".jsonl.zst") {
+        return Some(format!("{stem}.jsonl"));
+    }
+    if file_name.ends_with(".jsonl") {
+        return Some(file_name.to_string());
+    }
+    None
+}
+
+fn list_sealed_stats_segments(live_path: &Path) -> Result<Vec<(std::string::String, PathBuf)>> {
+    let Some(dir) = live_path.parent() else {
+        return Ok(Vec::new());
+    };
+    if !dir.is_dir() {
+        return Ok(Vec::new());
+    }
+    // Prefer .zst over mid-rotate plain for the same stem.
+    let mut by_key: std::collections::BTreeMap<std::string::String, PathBuf> =
+        std::collections::BTreeMap::new();
+    for entry in std::fs::read_dir(dir)? {
+        let entry = entry?;
+        let name = entry.file_name();
+        let name = name.to_string_lossy();
+        let Some(key) = sealed_stats_key(&name) else {
+            continue;
+        };
+        let path = entry.path();
+        let is_zst = name.ends_with(".zst");
+        match by_key.get(&key) {
+            Some(_) if !is_zst => {}
+            _ => {
+                by_key.insert(key, path);
+            }
+        }
+    }
+    Ok(by_key.into_iter().collect())
+}
+
+fn open_stats_line_reader(path: &Path) -> Result<Box<dyn std::io::BufRead>> {
+    let file = std::fs::File::open(path).with_context(|| format!("open stats {path:?}"))?;
+    let is_zst = path
+        .file_name()
+        .and_then(|n| n.to_str())
+        .map(|n| n.ends_with(".zst"))
+        .unwrap_or(false);
+    if is_zst {
+        let decoder = zstd::stream::read::Decoder::new(file)
+            .with_context(|| format!("zstd decoder {path:?}"))?;
+        Ok(Box::new(std::io::BufReader::new(decoder)))
+    } else {
+        Ok(Box::new(std::io::BufReader::new(file)))
+    }
+}
+
+fn parse_stats_jsonl_line(
+    trimmed: &str,
+    aliases: &crate::ucid_alias::UcidAliasTable,
+    stats: &mut Vec<(DateTime<Utc>, Stat)>,
+    unparsed: &mut u64,
+    first_unparsed: &mut Option<std::string::String>,
+    undecodable: &mut u64,
+    first_undecodable: &mut Option<std::string::String>,
+) {
+    match serde_json::from_str::<serde_json::Value>(trimmed) {
+        Ok(val) => {
+            let ts_str = val.get("ts").and_then(|v| v.as_str()).unwrap_or("");
+            let ts = ts_str
+                .parse::<DateTime<Utc>>()
+                .unwrap_or_else(|_| Utc::now());
+            if let Some(stat_val) = val.get("stat") {
+                let mut stat_val = stat_val.clone();
+                migrate_legacy_setmission_in_stat_json(&mut stat_val);
+                match serde_json::from_value::<Stat>(stat_val) {
+                    Ok(mut st) => {
+                        crate::ucid_alias::apply_to_stat(&mut st, aliases, ts);
+                        stats.push((ts, st));
+                    }
+                    Err(e) => {
+                        *undecodable += 1;
+                        if first_undecodable.is_none() {
+                            let preview: std::string::String =
+                                trimmed.chars().take(120).collect();
+                            *first_undecodable = Some(format!("{e}; raw: {preview}"));
+                        }
+                    }
+                }
+            }
+        }
+        Err(e) => {
+            *unparsed += 1;
+            if first_unparsed.is_none() {
+                *first_unparsed = Some(e.to_string());
+            }
+        }
+    }
+}
+
+fn read_stats_lines_from_path(
+    path: &Path,
+    aliases: &crate::ucid_alias::UcidAliasTable,
+) -> Result<(
+    Vec<(DateTime<Utc>, Stat)>,
+    u64,
+    Option<std::string::String>,
+    u64,
+    Option<std::string::String>,
+)> {
+    use std::io::BufRead;
+    let mut reader = open_stats_line_reader(path)?;
+    let mut line = std::string::String::new();
+    let mut stats = Vec::new();
+    let mut unparsed = 0u64;
+    let mut first_unparsed: Option<std::string::String> = None;
+    let mut undecodable = 0u64;
+    let mut first_undecodable: Option<std::string::String> = None;
+    while reader.read_line(&mut line)? > 0 {
+        let trimmed = line.trim();
+        if !trimmed.is_empty() {
+            parse_stats_jsonl_line(
+                trimmed,
+                aliases,
+                &mut stats,
+                &mut unparsed,
+                &mut first_unparsed,
+                &mut undecodable,
+                &mut first_undecodable,
+            );
+        }
+        line.clear();
+    }
+    Ok((
+        stats,
+        unparsed,
+        first_unparsed,
+        undecodable,
+        first_undecodable,
+    ))
+}
+
+fn read_live_jsonl_stats(
+    jsonl_path: &Path,
+    last_pos: u64,
+    aliases: &crate::ucid_alias::UcidAliasTable,
+) -> Result<(
+    u64,
+    Vec<(DateTime<Utc>, Stat)>,
+    u64,
+    Option<std::string::String>,
+    u64,
+    Option<std::string::String>,
+)> {
+    use std::io::{BufRead, Seek};
+    let file = match std::fs::File::open(jsonl_path) {
+        Ok(f) => f,
+        Err(e) => {
+            if e.kind() != std::io::ErrorKind::NotFound {
+                error!("failed to open JSONL file: {e:?}");
+            }
+            return Ok((last_pos, vec![], 0, None, 0, None));
+        }
+    };
+    let metadata = file.metadata()?;
+    let file_len = metadata.len();
+    if file_len < last_pos {
+        // Live file rotated: sealed ingest handles the old bytes; resume new file.
+        warn!("JSONL file shrank ({file_len} < {last_pos}) — resetting live cursor to 0");
+        return Ok((0, vec![], 0, None, 0, None));
+    }
+    if file_len <= last_pos {
+        return Ok((last_pos, vec![], 0, None, 0, None));
+    }
+    let mut reader = std::io::BufReader::new(file);
+    reader.seek(std::io::SeekFrom::Start(last_pos))?;
+    let mut line = std::string::String::new();
+    let mut new_pos = last_pos;
+    let mut stats = Vec::new();
+    let mut unparsed = 0u64;
+    let mut first_unparsed: Option<std::string::String> = None;
+    let mut undecodable = 0u64;
+    let mut first_undecodable: Option<std::string::String> = None;
+    while reader.read_line(&mut line)? > 0 {
+        new_pos = reader.stream_position()?;
+        let trimmed = line.trim();
+        if !trimmed.is_empty() {
+            parse_stats_jsonl_line(
+                trimmed,
+                aliases,
+                &mut stats,
+                &mut unparsed,
+                &mut first_unparsed,
+                &mut undecodable,
+                &mut first_undecodable,
+            );
+        }
+        line.clear();
+    }
+    Ok((
+        new_pos,
+        stats,
+        unparsed,
+        first_unparsed,
+        undecodable,
+        first_undecodable,
+    ))
+}
+
+impl StatsDb {
     fn new_round(
         &self,
         ctx: &mut StatCtx,
@@ -1670,6 +1873,37 @@ impl StatsDb {
             sid = best.map(|(id, _)| id);
         }
         if let Some(sid) = sid {
+            self.finalize_sortie(ucid, round, sid, end, crashed)?;
+        }
+        Ok(())
+    }
+
+    /// Close every still-open Flight Log leg for this pilot in the round.
+    /// Used when Slot arrives without Deslot (death → respawn) or Takeoff
+    /// would orphan a prior `land: None` row.
+    fn finalize_all_open_sorties(
+        &self,
+        ucid: Ucid,
+        round: RoundId,
+        end: DateTime<Utc>,
+        crashed: bool,
+    ) -> Result<()> {
+        let mut open: Vec<SortieId> = Vec::new();
+        for r in self.pilots.sortie.scan_prefix(&(ucid, round))? {
+            let ((_, _, id), s) = r?;
+            if s.land.is_none() {
+                open.push(id);
+            }
+        }
+        if open.is_empty() {
+            return Ok(());
+        }
+        self.pilots.with_pilot_round_info(ucid, round, |ri| {
+            if let Some(sl) = ri.slot.as_mut() {
+                sl.sortie = None;
+            }
+        })?;
+        for sid in open {
             self.finalize_sortie(ucid, round, sid, end, crashed)?;
         }
         Ok(())
@@ -2623,6 +2857,214 @@ impl StatsDb {
         Ok(rounds)
     }
 
+    /// Ended rounds with no sorties, kills, or per-round aggregates.
+    pub(crate) fn list_empty_rounds(&self) -> Result<Vec<(Scenario, RoundId, Round)>> {
+        let mut out = Vec::new();
+        for (scenario, rid, round) in self.all_rounds()? {
+            if round.end.is_none() {
+                continue;
+            }
+            if self.round_is_empty(rid)? {
+                out.push((scenario, rid, round));
+            }
+        }
+        Ok(out)
+    }
+
+    /// Delete ended empty rounds (no sorties/kills/aggregates) and cascade data.
+    pub(crate) fn purge_empty_rounds(&self) -> Result<Vec<(Scenario, RoundId)>> {
+        let victims = self.list_empty_rounds()?;
+        let mut deleted = Vec::with_capacity(victims.len());
+        for (scenario, rid, _) in victims {
+            self.delete_round_cascade(&scenario, rid)?;
+            info!("purge_empty_rounds: deleted round id={rid:?} scenario={scenario:?}");
+            deleted.push((scenario, rid));
+        }
+        Ok(deleted)
+    }
+
+    /// Admin force-delete of one ended round (and cascade), even if not empty.
+    pub(crate) fn delete_round_by_id(&self, rid: RoundId) -> Result<(Scenario, RoundId)> {
+        let found = self
+            .all_rounds()?
+            .into_iter()
+            .find(|(_, id, _)| *id == rid)
+            .ok_or_else(|| anyhow!("round {rid:?} not found"))?;
+        let (scenario, _, round) = found;
+        if round.end.is_none() {
+            bail!("refusing to delete open/active round {rid:?}");
+        }
+        self.delete_round_cascade(&scenario, rid)?;
+        info!("delete_round_by_id: deleted round id={rid:?} scenario={scenario:?}");
+        Ok((scenario, rid))
+    }
+
+    fn round_is_empty(&self, rid: RoundId) -> Result<bool> {
+        for r in self.pilots.sortie.iter() {
+            let ((_u, round, _), _) = r?;
+            if round == rid {
+                return Ok(false);
+            }
+        }
+        for r in self.kills.iter() {
+            let ((_e, round, _), _) = r?;
+            if round == rid {
+                return Ok(false);
+            }
+        }
+        for r in self.static_kills.iter() {
+            let ((_u, round, _), _) = r?;
+            if round == rid {
+                return Ok(false);
+            }
+        }
+        for r in self.pilots.aggregates.iter() {
+            let ((_u, _v, round), _) = r?;
+            if round == rid {
+                return Ok(false);
+            }
+        }
+        for r in self.pilots.agg_ship_kills.iter() {
+            let ((_u, _v, round), _) = r?;
+            if round == rid {
+                return Ok(false);
+            }
+        }
+        for r in self.pilots.agg_ground_air_kills.iter() {
+            let ((_u, _v, round), _) = r?;
+            if round == rid {
+                return Ok(false);
+            }
+        }
+        for r in self.pilots.agg_ground_ground_kills.iter() {
+            let ((_u, _v, round), _) = r?;
+            if round == rid {
+                return Ok(false);
+            }
+        }
+        for r in self.pilots.agg_csar.iter() {
+            let ((_u, _v, round), _) = r?;
+            if round == rid {
+                return Ok(false);
+            }
+        }
+        Ok(true)
+    }
+
+    fn delete_round_cascade(&self, scenario: &Scenario, rid: RoundId) -> Result<()> {
+        self.round.remove(&(scenario.clone(), rid))?;
+        self.seq.remove(&(scenario.clone(), rid))?;
+
+        macro_rules! purge_prefix {
+            ($tree:expr) => {{
+                let keys: Vec<_> = $tree.scan_prefix(&rid)?.keys().collect::<Result<Vec<_>>>()?;
+                for k in keys {
+                    $tree.remove(&k)?;
+                }
+            }};
+        }
+        purge_prefix!(self.session);
+        purge_prefix!(self.objectives);
+        purge_prefix!(self.equipment);
+        purge_prefix!(self.liquids);
+        purge_prefix!(self.units);
+        purge_prefix!(self.groups);
+        purge_prefix!(self.detected);
+        purge_prefix!(self.objective_captures);
+        purge_prefix!(self.captures);
+        purge_prefix!(self.kill_seen);
+        purge_prefix!(self.sortie_seen);
+        purge_prefix!(self.deploy_seen);
+        purge_prefix!(self.static_kill_seen);
+        purge_prefix!(self.aircraft_sorties);
+        purge_prefix!(self.trail_points);
+
+        let mut kill_ids = Vec::new();
+        for r in self.kills.iter() {
+            let ((e, round, kid), _) = r?;
+            if round == rid {
+                kill_ids.push((e, kid));
+            }
+        }
+        for (e, kid) in kill_ids {
+            self.kills.remove(&(e, rid, kid))?;
+            let _ = self.shared_kills.remove(&kid)?;
+        }
+
+        let mut keys: Vec<(Ucid, RoundId, SortieId)> = Vec::new();
+        for r in self.pilots.sortie.iter() {
+            let ((u, round, sid), _) = r?;
+            if round == rid {
+                keys.push((u, round, sid));
+            }
+        }
+        for k in &keys {
+            self.pilots.sortie.remove(k)?;
+            let _ = self.pilots.sortie_crashed.remove(k)?;
+        }
+
+        let mut sk: Vec<(Ucid, RoundId, KillId)> = Vec::new();
+        for r in self.static_kills.iter() {
+            let ((u, round, kid), _) = r?;
+            if round == rid {
+                sk.push((u, round, kid));
+            }
+        }
+        for k in &sk {
+            self.static_kills.remove(k)?;
+        }
+
+        let mut dep: Vec<(Ucid, RoundId, DeployId)> = Vec::new();
+        for r in self.deploys.iter() {
+            let ((u, round, did), _) = r?;
+            if round == rid {
+                dep.push((u, round, did));
+            }
+        }
+        for k in &dep {
+            self.deploys.remove(k)?;
+        }
+
+        let mut agg: Vec<(Ucid, Vehicle, RoundId)> = Vec::new();
+        for r in self.pilots.aggregates.iter() {
+            let ((u, v, round), _) = r?;
+            if round == rid {
+                agg.push((u, v, round));
+            }
+        }
+        for k in &agg {
+            self.pilots.aggregates.remove(k)?;
+            let _ = self.pilots.agg_ship_kills.remove(k)?;
+            let _ = self.pilots.agg_ground_air_kills.remove(k)?;
+            let _ = self.pilots.agg_ground_ground_kills.remove(k)?;
+            let _ = self.pilots.agg_csar.remove(k)?;
+        }
+
+        let mut ri: Vec<(Ucid, RoundId)> = Vec::new();
+        for r in self.pilots.round_info.iter() {
+            let ((u, round), _) = r?;
+            if round == rid {
+                ri.push((u, round));
+            }
+        }
+        for k in &ri {
+            self.pilots.round_info.remove(k)?;
+        }
+
+        let mut act: Vec<(Ucid, RoundId)> = Vec::new();
+        for r in self.pilot_last_activity.iter() {
+            let ((u, round), _) = r?;
+            if round == rid {
+                act.push((u, round));
+            }
+        }
+        for k in &act {
+            self.pilot_last_activity.remove(k)?;
+        }
+
+        Ok(())
+    }
+
     /// Get objectives for a given round
     pub(crate) fn objectives_for_round(&self, round: RoundId) -> Result<Vec<(ObjectiveId, Objective)>> {
         let mut objs = Vec::new();
@@ -3424,6 +3866,12 @@ impl StatsDb {
                     .with_pilot_round_info(id, ctx.round, |ri| ri.connected = None)?;
             }
             Stat::Slot { id, slot, typ, side } => {
+                // Death/respawn often emits Slot without Deslot — close open legs
+                // before wiping the slot.sortie pointer.
+                self.finalize_all_open_sorties(id, ctx.round, time, true)?;
+                self.touch_pilot_activity(id, ctx.round, time)?;
+                // Mirror Deslot: drop previous Player unit row (ghost tracks).
+                self.units.remove(&(ctx.round, EnId::Player(id)))?;
                 self.pilots.with_pilot_round_info(id, ctx.round, |ri| {
                     ri.slot = Some(Slot {
                         time,
@@ -3509,6 +3957,8 @@ impl StatsDb {
                 if self.sortie_seen.get(&dedup_key)?.is_some() {
                     return Ok(());
                 }
+                // Prior open legs (missed Kill/Deslot) must not stay In flight.
+                self.finalize_all_open_sorties(id, ctx.round, time, true)?;
                 let sid = SortieId::new(&self.db)?;
                 let mut vehicle = None;
                 self.pilots.with_pilot_round_info(id, ctx.round, |ri| {
@@ -3858,6 +4308,7 @@ impl StatsDb {
         self.aircraft_sorties.clear()?;
         self.pilot_last_activity.clear()?;
         self.trail_points.clear()?;
+        self.jsonl_sealed.clear()?;
         if let Ok(mut w) = self.latest_weather.write() {
             *w = None;
         }
@@ -3871,6 +4322,83 @@ impl StatsDb {
         }
         self.jsonl_cursor.insert(&0u8, &0u64)?;
         self.0.jsonl_reset.store(true, Ordering::SeqCst);
+        Ok(())
+    }
+
+    fn aliases_path(&self) -> Option<PathBuf> {
+        self.stats_jsonl
+            .as_ref()
+            .map(|p| crate::ucid_alias::UcidAliasTable::aliases_path_for_jsonl(p))
+    }
+
+    pub(crate) fn list_ucid_aliases(&self) -> Result<Vec<crate::ucid_alias::AliasRecord>> {
+        let Some(path) = self.aliases_path() else {
+            return Ok(Vec::new());
+        };
+        Ok(crate::ucid_alias::UcidAliasTable::load(&path)?.records().to_vec())
+    }
+
+    /// Merge UCID `from` into `to`: alias file + ban `from` + queue JSONL rebuild.
+    pub(crate) fn merge_ucid(
+        &self,
+        from: &str,
+        to: &str,
+        note: &str,
+    ) -> Result<()> {
+        let path = self
+            .aliases_path()
+            .ok_or_else(|| anyhow!("no stats.jsonl configured"))?;
+        let (from_u, _to_u) = crate::ucid_alias::validate_distinct_ucids(from, to)?;
+        let table = crate::ucid_alias::UcidAliasTable::load(&path)?;
+        if table.active_target(&from_u).is_some() {
+            bail!("UCID {from} already has an open merge; revoke it first");
+        }
+        let rec = crate::ucid_alias::AliasRecord {
+            ts: Utc::now(),
+            op: crate::ucid_alias::AliasOp::Merge,
+            from: from.to_string(),
+            to: to.to_string(),
+            note: note.to_string(),
+        };
+        crate::ucid_alias::UcidAliasTable::append(&path, &rec)?;
+        let name = self
+            .pilot_name(&from_u)
+            .unwrap_or_else(|| from.to_string());
+        self.ban_player(
+            from_u,
+            BanRecord {
+                name,
+                banned_at: Utc::now(),
+                until: None,
+                reason: format!("merged into {to} / account migration."),
+            },
+        )?;
+        self.request_jsonl_rebuild()?;
+        Ok(())
+    }
+
+    /// Revoke open merge for `from`: alias until-cut + unban + queue rebuild.
+    pub(crate) fn revoke_ucid_merge(&self, from: &str, note: &str) -> Result<()> {
+        let path = self
+            .aliases_path()
+            .ok_or_else(|| anyhow!("no stats.jsonl configured"))?;
+        let from_u = from
+            .parse::<Ucid>()
+            .map_err(|e| anyhow!("invalid from ucid: {e}"))?;
+        let table = crate::ucid_alias::UcidAliasTable::load(&path)?;
+        let to_u = table
+            .active_target(&from_u)
+            .ok_or_else(|| anyhow!("no open merge for UCID {from}"))?;
+        let rec = crate::ucid_alias::AliasRecord {
+            ts: Utc::now(),
+            op: crate::ucid_alias::AliasOp::Revoke,
+            from: from.to_string(),
+            to: to_u.to_string(),
+            note: note.to_string(),
+        };
+        crate::ucid_alias::UcidAliasTable::append(&path, &rec)?;
+        let _ = self.unban_player(&from_u)?;
+        self.request_jsonl_rebuild()?;
         Ok(())
     }
 }

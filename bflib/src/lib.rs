@@ -18,6 +18,7 @@ mod acmi_sanitize;
 mod admin;
 mod bg;
 mod chatcmd;
+mod cockpit_jtac;
 mod db;
 mod ewr;
 mod jtac;

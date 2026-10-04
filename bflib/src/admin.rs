@@ -184,6 +184,19 @@ pub enum AdminCommand {
     QueryBriefing {
         side: Side,
     },
+    /// Attrition cockpit: DCS `net.get_my_player_id()` → UCID
+    ResolvePlayerId {
+        id: PlayerId,
+    },
+    /// Attrition cockpit: JSON list of friendly JTACs for a player
+    JtacList {
+        ucid: Ucid,
+    },
+    /// Attrition cockpit: run one F10-parity JTAC action (JSON body)
+    JtacAction {
+        ucid: Ucid,
+        body: std::string::String,
+    },
 }
 
 impl AdminCommand {
@@ -1758,6 +1771,21 @@ pub(super) fn run_admin_commands(ctx: &mut Context, lua: MizLua) -> Result<Admin
                 match serde_json::to_string(&briefing) {
                     Ok(json) => replies.push(NetIdxValue::from(json)),
                     Err(e) => reply_err!("failed to serialize briefing: {e:?}"),
+                }
+            }
+            AdminCommand::ResolvePlayerId { id } => match ctx.connected.get(&id) {
+                Some(ifo) => replies.push(NetIdxValue::from(format!("{}", ifo.ucid))),
+                None => reply_err!("player id {id} is not connected"),
+            },
+            AdminCommand::JtacList { ucid } => match crate::cockpit_jtac::list_jtacs_for_ucid(ctx, &ucid)
+            {
+                Ok(json) => replies.push(NetIdxValue::from(json)),
+                Err(e) => reply_err!("{e:#}"),
+            },
+            AdminCommand::JtacAction { ucid, body } => {
+                match crate::cockpit_jtac::run_jtac_action(ctx, lua, ucid, body.as_str()) {
+                    Ok(msg) => replies.push(NetIdxValue::from(msg)),
+                    Err(e) => reply_err!("{e:#}"),
                 }
             }
         }

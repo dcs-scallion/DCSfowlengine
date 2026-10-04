@@ -47,6 +47,7 @@ tokio = { workspace = true }
 uuid = { workspace = true }
 warp = { workspace = true }
 yats = { version = "2.0", path = "../yats" }
+zstd = { workspace = true }
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls", "blocking"] }
 urlencoding = "2"
 sysinfo = "0.32"
