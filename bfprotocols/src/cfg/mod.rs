@@ -18,7 +18,7 @@ use anyhow::{anyhow, bail, Context, Result};
 use chrono::prelude::*;
 use compact_str::format_compact;
 use dcso3::{coalition::Side, controller::AltType, net::Ucid, String};
-use enumflags2::{bitflags, BitFlags};
+use enumflags2::{bitflags, BitFlag, BitFlags};
 use fxhash::{FxBuildHasher, FxHashMap, FxHashSet};
 use indexmap::IndexMap;
 use netidx::path::Path as NetIdxPath;
@@ -179,6 +179,41 @@ pub enum UnitTag {
     Factory,
     /// Objective ME static (`objective_static_units`).
     Structure,
+}
+
+impl UnitTag {
+    /// Player-selectable JTAC contact filters (F10 / cockpit). Other tags remain
+    /// for `unit_classification` and `jtac_priority`.
+    pub fn is_jtac_filter_choice(self) -> bool {
+        !matches!(
+            self,
+            Self::Aircraft
+                | Self::ShipNoHeliport
+                | Self::ShipWithHeliport
+                | Self::ShipCarrier
+                | Self::AWACS
+                | Self::Link16
+                | Self::CALCM
+                | Self::NavalSpawnPoint
+                | Self::IRGuided
+                | Self::RadarGuided
+                | Self::OpticallyGuided
+                | Self::EngagesWeapons
+                | Self::Unguided
+                | Self::Launcher
+                | Self::LightCannon
+                | Self::HeavyCannon
+                | Self::RPG
+                | Self::SmallArms
+                | Self::Invincible
+                | Self::Driveable
+                | Self::Unarmed
+        )
+    }
+
+    pub fn jtac_filter_choices() -> impl Iterator<Item = Self> {
+        Self::all().iter().filter(|t| t.is_jtac_filter_choice())
+    }
 }
 
 #[derive(

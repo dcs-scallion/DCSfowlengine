@@ -21,9 +21,9 @@ Restart DCS. First run writes `Config\AttritionCockpit.lua`.
 
 ## Use
 
-- Open with your **Comms / radio-menu** key (default), or **Ctrl+Alt+J**
+- Open with your **Comms / radio-menu** key (default), or **Ctrl+Shift+J**
 - **Sleep / wake** (title bar only, WebView unloaded — no HTTP): double-click the
-  window title, or the sleep button in the UI; wake with double-click or Ctrl+Alt+J
+  window title, or the sleep button in the UI; wake with double-click or Ctrl+Shift+J
 - Resize: drag the window corner only (minimum size enforced)
 - Compact / restore size: header button in the cockpit UI
 - Panels: tab row at the top (currently **JTAC** only); only the active panel polls
@@ -33,6 +33,7 @@ Restart DCS. First run writes `Config\AttritionCockpit.lua`.
 
 ## License
 
-See `LICENSE` in this directory. Proprietary Attrition component (independent
-rewrite; not covered by the Vector-derived dashboard grant in `bfweb/LICENSE`).
-Companion UI: `bfweb/LICENSE.cockpit`. Not AGPL.
+See `LICENSE` in this directory. Proprietary — Copyright (c) 2026 Robo76
+(same terms as `acmi_sanitize`). Independent rewrite; not covered by the
+Vector-derived dashboard grant in `bfweb/LICENSE`. Companion UI:
+`bfweb/LICENSE.cockpit`. Not AGPL.

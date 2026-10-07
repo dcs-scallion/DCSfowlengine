@@ -4,8 +4,9 @@
 //! `{"ts":"...","op":"merge","from":"...","to":"...","note":"..."}`
 //! `{"ts":"...","op":"revoke","from":"...","to":"...","note":"..."}`
 //!
-//! For an event at time T: apply the latest merge for `from` whose start <= T
-//! and whose until is null or > T. Revoke sets until = revoke.ts.
+//! First merge for a source is **retroactive** (covers all history). A later
+//! merge after revoke starts at the merge `ts`. Revoke sets `until` on the
+//! open window. For event time T, pick the covering window with the latest start.
 
 use anyhow::{bail, Context, Result};
 use bfprotocols::{
@@ -113,9 +114,16 @@ impl UcidAliasTable {
         };
         match rec.op {
             AliasOp::Merge => {
+                // First merge for this source: cover entire history (Steam→Standalone).
+                // After a prior window exists (e.g. revoked), new merge starts at rec.ts.
+                let start = if self.by_from.get(&from).map(|w| !w.is_empty()).unwrap_or(false) {
+                    rec.ts
+                } else {
+                    DateTime::<Utc>::UNIX_EPOCH
+                };
                 self.by_from.entry(from).or_default().push(AliasWindow {
                     to,
-                    start: rec.ts,
+                    start,
                     until: None,
                 });
             }
@@ -152,9 +160,13 @@ impl UcidAliasTable {
             let Some(windows) = self.by_from.get(&cur) else {
                 break;
             };
-            let Some(w) = windows.iter().rev().find(|w| {
-                w.start <= event_ts && w.until.map(|u| event_ts < u).unwrap_or(true)
-            }) else {
+            let Some(w) = windows
+                .iter()
+                .filter(|w| {
+                    w.start <= event_ts && w.until.map(|u| event_ts < u).unwrap_or(true)
+                })
+                .max_by_key(|w| w.start)
+            else {
                 break;
             };
             if w.to == cur {
@@ -193,6 +205,20 @@ impl UcidAliasTable {
                 .find(|w| w.until.is_none())
                 .map(|w| w.to)
         })
+    }
+
+    /// Source UCIDs with an open merge (should not appear on leaderboards).
+    pub fn active_sources(&self) -> Vec<Ucid> {
+        self.by_from
+            .iter()
+            .filter_map(|(from, windows)| {
+                windows
+                    .iter()
+                    .rev()
+                    .find(|w| w.until.is_none())
+                    .map(|_| *from)
+            })
+            .collect()
     }
 }
 
@@ -293,4 +319,67 @@ pub fn validate_distinct_ucids(from: &str, to: &str) -> Result<(Ucid, Ucid)> {
         bail!("from and to UCID must differ");
     }
     Ok((from_u, to_u))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use chrono::TimeZone;
+
+    fn ucid(hex: &str) -> Ucid {
+        Ucid::from_str(hex).unwrap()
+    }
+
+    fn merge(ts: DateTime<Utc>, from: &str, to: &str) -> AliasRecord {
+        AliasRecord {
+            ts,
+            op: AliasOp::Merge,
+            from: from.to_string(),
+            to: to.to_string(),
+            note: String::new(),
+        }
+    }
+
+    fn revoke(ts: DateTime<Utc>, from: &str, to: &str) -> AliasRecord {
+        AliasRecord {
+            ts,
+            op: AliasOp::Revoke,
+            from: from.to_string(),
+            to: to.to_string(),
+            note: String::new(),
+        }
+    }
+
+    #[test]
+    fn first_merge_is_retroactive() {
+        let steam = "ac0b8f43c4577c7c1fcb5847aba23a1d";
+        let solo = "28a3cc9e08b78e7b2af9ee8306d2160f";
+        let mut t = UcidAliasTable::default();
+        let merge_at = Utc.with_ymd_and_hms(2026, 10, 5, 17, 43, 32).unwrap();
+        t.apply_record(merge(merge_at, steam, solo));
+        let old = Utc.with_ymd_and_hms(2025, 1, 1, 0, 0, 0).unwrap();
+        assert_eq!(t.resolve(ucid(steam), old), ucid(solo));
+        assert_eq!(t.resolve(ucid(steam), merge_at), ucid(solo));
+        assert_eq!(t.active_sources(), vec![ucid(steam)]);
+    }
+
+    #[test]
+    fn revoke_then_remerge_uses_window_start() {
+        let a = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+        let b = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+        let c = "cccccccccccccccccccccccccccccccc";
+        let mut t = UcidAliasTable::default();
+        let t0 = Utc.with_ymd_and_hms(2026, 1, 1, 0, 0, 0).unwrap();
+        let t1 = Utc.with_ymd_and_hms(2026, 6, 1, 0, 0, 0).unwrap();
+        let t2 = Utc.with_ymd_and_hms(2026, 9, 1, 0, 0, 0).unwrap();
+        t.apply_record(merge(t0, a, b));
+        t.apply_record(revoke(t1, a, b));
+        t.apply_record(merge(t2, a, c));
+        let before = Utc.with_ymd_and_hms(2026, 3, 1, 0, 0, 0).unwrap();
+        let gap = Utc.with_ymd_and_hms(2026, 7, 1, 0, 0, 0).unwrap();
+        let after = Utc.with_ymd_and_hms(2026, 10, 1, 0, 0, 0).unwrap();
+        assert_eq!(t.resolve(ucid(a), before), ucid(b));
+        assert_eq!(t.resolve(ucid(a), gap), ucid(a));
+        assert_eq!(t.resolve(ucid(a), after), ucid(c));
+    }
 }

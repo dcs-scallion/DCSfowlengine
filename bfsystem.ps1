@@ -108,6 +108,14 @@ $corsOrigins = @()
 # bfdb account and the DCS account (see netidx\netidx-client.json.example).
 $netidxBase = "/local/fowl/campaign"
 
+# Multi-instance (optional): path to instances.json (see instances.sample.json).
+# When set, bfdb is started with --instances and the flat --base / --stats-jsonl /
+# --stats-dir / --engine-config / --srs-url flags below are NOT passed (those
+# live inside the instances file instead). Leave blank for today's single-server
+# launch (one synthetic instance id "default").
+# $instancesPath = Join-Path $dcsWriteDir "instances.json"
+$instancesPath = ""
+
 # ==========================================================
 # Secrets: bfsystem.ps1 is tracked in git (public repo). $adminPassword lives
 # in bfsystem.local.ps1 instead, which is gitignored and never committed.
@@ -194,27 +202,35 @@ function Start-FowlStats {
         $argList = @(
             "--db",             $using:dbPath,
             "--config",         $using:configPath,
-            "--stats-jsonl",    $using:statsJsonl,
             "--listen-address", $using:listenAddress,
             "--admin-username", $using:adminUsername,
             "--admin-password", $using:adminPassword
         )
-        if ($using:srsUrl -ne "") {
-            $argList += "--srs-url", $using:srsUrl
+        $multi = $using:instancesPath -ne ""
+        if ($multi) {
+            $argList += "--instances", $using:instancesPath
+        } else {
+            $argList += "--stats-jsonl", $using:statsJsonl
+            if ($using:srsUrl -ne "") {
+                $argList += "--srs-url", $using:srsUrl
+            }
+            if ($using:netidxBase -ne "") {
+                $argList += "--base", $using:netidxBase
+            }
+            if ($using:engineConfigPath -ne "") {
+                $argList += "--engine-config", $using:engineConfigPath
+            }
+            if ($using:statsDir -ne "") {
+                $argList += "--stats-dir", $using:statsDir
+            }
+        }
+        # Shared whether single- or multi-instance (SRS API key is process-wide).
+        if ($using:srsUrl -ne "" -or $multi) {
             $argList += "--srs-api-key", $using:srsApiKey
         }
         if ($using:dcsServerBotUrl -ne "" -and $using:dcsServerBotApiKey -ne "") {
             $argList += "--dcsserverbot-url", $using:dcsServerBotUrl
             $argList += "--dcsserverbot-api-key", $using:dcsServerBotApiKey
-        }
-        if ($using:netidxBase -ne "") {
-            $argList += "--base", $using:netidxBase
-        }
-        if ($using:engineConfigPath -ne "") {
-            $argList += "--engine-config", $using:engineConfigPath
-        }
-        if ($using:statsDir -ne "") {
-            $argList += "--stats-dir", $using:statsDir
         }
         foreach ($origin in $using:corsOrigins) {
             $argList += "--cors-origin", $origin

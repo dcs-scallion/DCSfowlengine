@@ -1,4 +1,5 @@
 use crate::db_id;
+use crate::instance::{InstanceCfg, InstanceId, Registry, DEFAULT_INSTANCE};
 use anyhow::{anyhow, bail, Context, Result};
 use arrayvec::ArrayVec;
 use bfprotocols::{
@@ -32,7 +33,7 @@ use serde::{Deserialize, Serialize};
 use sled::{transaction::TransactionError, Db};
 use smallvec::SmallVec;
 use std::{
-    collections::{Bound, VecDeque},
+    collections::{Bound, HashMap, HashSet, VecDeque},
     io::{Read as IoRead, Write as IoWrite},
     ops::Deref,
     path::{Path, PathBuf},
@@ -199,6 +200,10 @@ pub(crate) struct Aggregates {
     /// `ground_kills` is air-to-ground only (shooter airframe).
     #[serde(skip)]
     pub(crate) ground_ground_kills: u32,
+    /// Ground-to-ship kills (G2S, e.g. Silkworm). Side tables
+    /// `agg_ground_ship_kills` / `pilot_ground_ship_kills`.
+    #[serde(skip)]
+    pub(crate) ground_ship_kills: u32,
     /// CSAR rescues (pilots delivered). Side tables `agg_csar` / `pilot_csar`.
     #[serde(skip)]
     pub(crate) csar: u32,
@@ -210,6 +215,7 @@ fn total_kills(a: &Aggregates) -> u32 {
         .saturating_add(a.ship_kills)
         .saturating_add(a.ground_air_kills)
         .saturating_add(a.ground_ground_kills)
+        .saturating_add(a.ground_ship_kills)
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -331,6 +337,10 @@ struct Pilots {
     agg_ground_ground_kills: Tree<(Ucid, Vehicle, RoundId), u32>,
     /// Career G2G kills.
     pilot_ground_ground_kills: Tree<Ucid, u32>,
+    /// Per-vehicle/round ground-to-ship kills (G2S).
+    agg_ground_ship_kills: Tree<(Ucid, Vehicle, RoundId), u32>,
+    /// Career G2S kills.
+    pilot_ground_ship_kills: Tree<Ucid, u32>,
     /// Per-vehicle/round CSAR rescues.
     agg_csar: Tree<(Ucid, Vehicle, RoundId), u32>,
     /// Career CSAR rescues.
@@ -353,6 +363,8 @@ impl Pilots {
             pilot_ground_air_kills: Tree::open(db, "pilot_ground_air_kills")?,
             agg_ground_ground_kills: Tree::open(db, "agg_ground_ground_kills")?,
             pilot_ground_ground_kills: Tree::open(db, "pilot_ground_ground_kills")?,
+            agg_ground_ship_kills: Tree::open(db, "agg_ground_ship_kills")?,
+            pilot_ground_ship_kills: Tree::open(db, "pilot_ground_ship_kills")?,
             agg_csar: Tree::open(db, "agg_csar")?,
             pilot_csar: Tree::open(db, "pilot_csar")?,
             round_info: Tree::open(db, "pilot_round_info")?,
@@ -368,6 +380,34 @@ impl Pilots {
             .and_then(|ri| ri.slot.and_then(|s| s.vehicle));
         if let Some(vehicle) = vehicle {
             self.agg_ship_kills
+                .fetch_and_update(&(ucid, vehicle, round), |n| {
+                    Some(n.unwrap_or(0).saturating_add(1))
+                })?;
+        }
+        Ok(())
+    }
+
+    fn bump_ground_ship_kill(
+        &self,
+        ucid: Ucid,
+        round: RoundId,
+        shooter_typ: Option<&str>,
+    ) -> Result<()> {
+        self.pilot_ground_ship_kills
+            .fetch_and_update(&ucid, |n| Some(n.unwrap_or(0).saturating_add(1)))?;
+        let vehicle = shooter_typ
+            .map(|t| t.trim())
+            .filter(|t| !t.is_empty())
+            .map(Vehicle::from)
+            .or_else(|| {
+                self.round_info
+                    .get(&(ucid, round))
+                    .ok()
+                    .flatten()
+                    .and_then(|ri| ri.slot.and_then(|s| s.vehicle))
+            });
+        if let Some(vehicle) = vehicle {
+            self.agg_ground_ship_kills
                 .fetch_and_update(&(ucid, vehicle, round), |n| {
                     Some(n.unwrap_or(0).saturating_add(1))
                 })?;
@@ -457,6 +497,10 @@ impl Pilots {
 
     fn career_ground_ground_kills(&self, ucid: &Ucid) -> Result<u32> {
         Ok(self.pilot_ground_ground_kills.get(ucid)?.unwrap_or(0))
+    }
+
+    fn career_ground_ship_kills(&self, ucid: &Ucid) -> Result<u32> {
+        Ok(self.pilot_ground_ship_kills.get(ucid)?.unwrap_or(0))
     }
 
     fn career_csar(&self, ucid: &Ucid) -> Result<u32> {
@@ -643,13 +687,58 @@ impl StatCtx {
     }
 }
 
-#[derive(Clone)]
-pub(crate) struct StatsDbInner {
+/// Per-DCS-server runtime. One per `--instances` entry (or one `default`).
+pub(crate) struct InstanceState {
+    pub(crate) cfg: Arc<InstanceCfg>,
+    pub(crate) id: InstanceId,
     #[allow(dead_code)]
     subscriber: Option<Subscriber>,
-    #[allow(dead_code)]
     base: Option<NetidxPath>,
     stats_dir: Option<PathBuf>,
+    stats_jsonl: Option<PathBuf>,
+    current_sortie: StdMutex<Option<Scenario>>,
+    latest_weather: RwLock<Option<WeatherSnapshot>>,
+    engine_log_tx: broadcast::Sender<std::string::String>,
+    engine_log_history: StdMutex<VecDeque<std::string::String>>,
+    engine_error_history: StdMutex<VecDeque<std::string::String>>,
+    jsonl_reset: AtomicBool,
+    pub(crate) health_cache:
+        StdMutex<Option<(std::time::Instant, bool, Option<std::string::String>)>>,
+}
+
+impl InstanceState {
+    fn new(cfg: Arc<InstanceCfg>, subscriber: Option<Subscriber>) -> Self {
+        let id: InstanceId = Arc::from(cfg.id.as_str());
+        Self {
+            id,
+            subscriber,
+            base: cfg.base.clone(),
+            stats_dir: cfg.stats_dir.clone(),
+            stats_jsonl: cfg.stats_jsonl.clone(),
+            current_sortie: StdMutex::new(None),
+            latest_weather: RwLock::new(None),
+            engine_log_tx: broadcast::channel(1024).0,
+            engine_log_history: StdMutex::new(VecDeque::new()),
+            engine_error_history: StdMutex::new(VecDeque::new()),
+            jsonl_reset: AtomicBool::new(false),
+            health_cache: StdMutex::new(None),
+            cfg,
+        }
+    }
+
+    pub(crate) fn live_sortie_public(&self) -> Option<std::string::String> {
+        self.current_sortie
+            .lock()
+            .unwrap()
+            .as_ref()
+            .map(|s| s.to_string())
+    }
+}
+
+#[derive(Clone)]
+pub(crate) struct StatsDbInner {
+    instances: Registry,
+    states: Arc<HashMap<InstanceId, Arc<InstanceState>>>,
     #[allow(dead_code)]
     include: Option<Regex>,
     #[allow(dead_code)]
@@ -662,11 +751,8 @@ pub(crate) struct StatsDbInner {
     kills: Tree<(EnId, RoundId, KillId), Dead>,
     shared_kills: Tree<KillId, SmallVec<[EnId; 2]>>,
     /// (round, victim, death time millis) — skip redelivered Stat::Kill
-    /// (JSONL/archive replay) so air/ground victories are not doubled.
     kill_seen: Tree<(RoundId, EnId, i64), KillId>,
-    /// (round, pilot, takeoff millis) — skip redelivered Stat::Takeoff.
     sortie_seen: Tree<(RoundId, Ucid, i64), SortieId>,
-    /// (round, group) — skip redelivered Stat::DeployGroup.
     deploy_seen: Tree<(RoundId, GroupId), DeployId>,
     units: Tree<(RoundId, EnId), Unit>,
     groups: Tree<(RoundId, GroupId), Group>,
@@ -674,67 +760,49 @@ pub(crate) struct StatsDbInner {
     objectives: Tree<(RoundId, ObjectiveId), Objective>,
     equipment: Tree<(RoundId, ObjectiveId, String), u32>,
     liquids: Tree<(RoundId, ObjectiveId, LiquidType), u32>,
-    stats_jsonl: Option<PathBuf>,
-    // Auth
-    auth_sessions:    Tree<Uuid, SessionData>,
-    auth_states:      Tree<Uuid, OAuthState>,
-    // Trail history
+    /// Round → instance id. Untagged rounds belong to the registry default.
+    round_instance: Tree<RoundId, std::string::String>,
+    auth_sessions: Tree<Uuid, SessionData>,
+    auth_states: Tree<Uuid, OAuthState>,
     trail_points: Tree<(RoundId, std::string::String, i64), (f64, f64, f64, f64)>,
-    latest_weather: Arc<RwLock<Option<WeatherSnapshot>>>,
-    // Capture counts per objective per round
     objective_captures: Tree<(RoundId, ObjectiveId), u32>,
-    // Capture events (who, what, when) per round -- see CaptureRecord
     captures: Tree<(RoundId, CaptureId), CaptureRecord>,
-    // Deploy events, keyed pilot-first (unlike captures) for efficient
-    // per-pilot scans -- see DeployRecord and pilot_deploys_for.
     deploys: Tree<(Ucid, RoundId, DeployId), DeployRecord>,
-    /// ME objective static / OPR factory kills (`Stat::StaticKill`), pilot-first.
     static_kills: Tree<(Ucid, RoundId, KillId), StaticKillRecord>,
-    /// Dedup StaticKill on JSONL replay: (round, unit, death millis).
     static_kill_seen: Tree<(RoundId, UnitId, i64), KillId>,
-    // Aircraft sortie counts per round: (RoundId, vehicle_type) -> (sortie_count, total_hours_f32)
     aircraft_sorties: Tree<(RoundId, std::string::String), (u32, f32)>,
-    /// Last known activity per pilot/round (Takeoff/Land/Position/Disconnect/Deslot).
-    /// Used to close orphan In-flight sorties on Connect without crediting days of hours.
     pilot_last_activity: Tree<(Ucid, RoundId), DateTime<Utc>>,
-    // Admin-managed ban list (bfdb-native, separate from bflib's cfg.banned)
     admin_bans: Tree<Ucid, BanRecord>,
-    // bfwiki content, keyed by page slug (e.g. "gameplay/objectives")
     wiki_pages: Tree<std::string::String, WikiPage>,
-    // bfwiki uploaded images (screenshots etc.), keyed by generated Uuid
     wiki_images: Tree<Uuid, WikiImage>,
-    // Live bflib engine log, streamed over netidx from the running DCS mission
-    // (distinct from bfdb's own process log)
-    engine_log_tx: broadcast::Sender<std::string::String>,
-    engine_log_history: Arc<StdMutex<VecDeque<std::string::String>>>,
-    // Subset of engine_log_history matching an ERROR/WARN level tag -- kept
-    // separately so the admin dashboard can show a short, high-signal error
-    // feed without the client having to filter the full (much larger,
-    // frequently-scrolling) log history itself.
-    engine_error_history: Arc<StdMutex<VecDeque<std::string::String>>>,
-    // The sortie name of the currently/most-recently active round, learned
-    // from Stat::NewRound. bflib publishes its engine log and RPC procs
-    // under `<netidx_base>/<sortie>/...` (see bflib/src/bg/mod.rs), so this
-    // must be appended to `base` before subscribing -- a bare `base` path
-    // will never resolve.
-    current_sortie: Arc<StdMutex<Option<Scenario>>>,
-    // Timestamp of the last stats-archive batch fully processed by
-    // background_loop, persisted so a restart resumes from there instead of
-    // replaying the entire historical archive from the beginning every time
-    // (see background_loop -- a corrupted/duplicate-spammed archive segment
-    // otherwise gets re-read in full on every single bfdb startup).
-    replay_cursor: Tree<u8, DateTime<Utc>>,
-    /// Byte offset into stats.jsonl last fully ingested. Without this, every
-    /// bfdb restart re-reads the file from 0 and re-applies every Stat::Kill
-    /// (inflating A/A, A/G and A/S victories). Key 0u8 — single-server layout.
-    jsonl_cursor: Tree<u8, u64>,
-    /// Sealed `stats-*.jsonl.zst` (or plain) segment names fully ingested.
+    /// Per-instance archive replay cursor (instance id → last batch ts).
+    replay_cursor: Tree<std::string::String, DateTime<Utc>>,
+    legacy_replay_cursor: Tree<u8, DateTime<Utc>>,
+    /// Per-instance JSONL byte offset (instance id → offset).
+    jsonl_cursor: Tree<std::string::String, u64>,
+    legacy_jsonl_cursor: Tree<u8, u64>,
+    /// Sealed segment keys, prefixed `{instance_id}:{stem}.jsonl`.
     jsonl_sealed: Tree<std::string::String, u8>,
-    /// Set by POST /api/admin/rebuild-stats; jsonl_loop wipes derived trees
-    /// and re-ingests from offset 0 on the next tick.
-    jsonl_reset: Arc<AtomicBool>,
-    /// Cached engine probe for GET /api/health (Instant, reachable, error).
-    pub(crate) health_cache: Arc<StdMutex<Option<(std::time::Instant, bool, Option<std::string::String>)>>>,
+    rebuild_status: Arc<StdMutex<RebuildStatusInner>>,
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct RebuildStatusInner {
+    pub phase: std::string::String,
+    pub active: bool,
+    pub started_at: Option<DateTime<Utc>>,
+    pub finished_at: Option<DateTime<Utc>>,
+}
+
+impl Default for RebuildStatusInner {
+    fn default() -> Self {
+        Self {
+            phase: "idle".into(),
+            active: false,
+            started_at: None,
+            finished_at: None,
+        }
+    }
 }
 
 const ENGINE_LOG_HISTORY_CAP: usize = 500;
@@ -881,20 +949,54 @@ fn txn_err(e: TransactionError<anyhow::Error>) -> anyhow::Error {
 }
 
 impl StatsDb {
+    /// Open the DB and start one ingest + engine-log pipeline per instance.
     pub(crate) fn new<P: AsRef<Path>>(
-        subscriber: Subscriber,
+        subscribers: &HashMap<Option<PathBuf>, Subscriber>,
         db: P,
-        base: NetidxPath,
-        stats_dir: Option<PathBuf>,
-        stats_jsonl: Option<PathBuf>,
+        instances: Registry,
         include: Option<Regex>,
         exclude: Option<Regex>,
     ) -> Result<Self> {
         let db = sled::open(db.as_ref())?;
+        let states: HashMap<InstanceId, Arc<InstanceState>> = instances
+            .all()
+            .iter()
+            .map(|cfg| {
+                let st = Arc::new(InstanceState::new(
+                    cfg.clone(),
+                    cfg.base
+                        .as_ref()
+                        .and_then(|_| subscribers.get(&cfg.netidx_config).cloned()),
+                ));
+                (st.id.clone(), st)
+            })
+            .collect();
+        for cfg in instances.all() {
+            info!(
+                "instance {:?} ({}): base={} sortie={} jsonl={} archive={} export_port={}",
+                cfg.id,
+                cfg.label(),
+                cfg.base
+                    .as_ref()
+                    .map(|b| format!("{b}"))
+                    .unwrap_or_else(|| "-".into()),
+                cfg.sortie.clone().unwrap_or_else(|| "auto".into()),
+                cfg.stats_jsonl
+                    .as_ref()
+                    .map(|p| p.display().to_string())
+                    .unwrap_or_else(|| "-".into()),
+                cfg.stats_dir
+                    .as_ref()
+                    .map(|p| p.display().to_string())
+                    .unwrap_or_else(|| "-".into()),
+                cfg.export_port
+                    .map(|p| p.to_string())
+                    .unwrap_or_else(|| "-".into()),
+            );
+        }
         let t = Self(Arc::new(StatsDbInner {
-            subscriber: Some(subscriber),
-            base: Some(base),
-            stats_dir,
+            instances: instances.clone(),
+            states: Arc::new(states),
             include,
             exclude,
             db: db.clone(),
@@ -913,11 +1015,10 @@ impl StatsDb {
             objectives: Tree::open(&db, "objectives")?,
             equipment: Tree::open(&db, "equipment")?,
             liquids: Tree::open(&db, "liquids")?,
-            stats_jsonl,
+            round_instance: Tree::open(&db, "round_instance")?,
             auth_sessions: Tree::open(&db, "auth_sessions")?,
             auth_states: Tree::open(&db, "auth_states")?,
             trail_points: Tree::open(&db, "trail_points")?,
-            latest_weather: Arc::new(RwLock::new(None)),
             objective_captures: Tree::open(&db, "objective_captures")?,
             captures: Tree::open(&db, "captures")?,
             deploys: Tree::open(&db, "deploys")?,
@@ -928,173 +1029,229 @@ impl StatsDb {
             admin_bans: Tree::open(&db, "admin_bans")?,
             wiki_pages: Tree::open(&db, "wiki_pages")?,
             wiki_images: Tree::open(&db, "wiki_images")?,
-            engine_log_tx: broadcast::channel(1024).0,
-            engine_log_history: Arc::new(StdMutex::new(VecDeque::new())),
-            engine_error_history: Arc::new(StdMutex::new(VecDeque::new())),
-            replay_cursor: Tree::open(&db, "replay_cursor")?,
-            jsonl_cursor: Tree::open(&db, "jsonl_cursor")?,
+            replay_cursor: Tree::open(&db, "replay_cursor_v2")?,
+            legacy_replay_cursor: Tree::open(&db, "replay_cursor")?,
+            jsonl_cursor: Tree::open(&db, "jsonl_cursor_v2")?,
+            legacy_jsonl_cursor: Tree::open(&db, "jsonl_cursor")?,
             jsonl_sealed: Tree::open(&db, "jsonl_sealed")?,
-            jsonl_reset: Arc::new(AtomicBool::new(false)),
-            health_cache: Arc::new(StdMutex::new(None)),
-            current_sortie: Arc::new(StdMutex::new(None)),
+            rebuild_status: Arc::new(StdMutex::new(RebuildStatusInner::default())),
         }));
-        if t.0.stats_jsonl.is_some() {
-            info!(
-                "stats ingest: JSONL {}",
-                t.0.stats_jsonl.as_ref().unwrap().display()
-            );
-        } else if t.0.stats_dir.is_some() {
-            info!(
-                "stats ingest: netidx-archive {}",
-                t.0.stats_dir.as_ref().unwrap().display()
-            );
-        } else {
-            warn!("stats ingest: neither --stats-jsonl nor --stats-dir configured");
-        }        t.seed_wiki_if_empty()?;
-        t.seed_wiki_images_if_empty()?;
-        t.reconcile_flight_hours_from_sorties_once()?;
-        t.reconcile_a2a_g2a_once()?;
-        t.reconcile_a2g_g2g_once()?;
-        // A older bug fabricated a round named after the last segment of the
-        // netidx base (e.g. "campaign" from "/local/fowl/campaign") whenever a
-        // SessionStart was replayed without a NewRound. Those bogus rounds are
-        // never the real sortie and, being left open, hijack round selection.
-        // Close any that are still open so they stop shadowing the real round.
-        let base_tail = t
-            .0
-            .base
-            .as_ref()
-            .and_then(|p| format!("{p}").rsplit('/').next().map(String::from));
-        if let Some(bogus) = &base_tail {
-            let open_bogus: Vec<(RoundId, Round)> = t
-                .round
-                .scan_prefix(bogus)?
-                .filter_map(|r| r.ok())
-                .filter(|((_, _), rd)| rd.end.is_none())
-                .map(|((_, rid), rd)| (rid, rd))
-                .collect();
-            for (rid, mut rd) in open_bogus {
-                warn!("closing bogus open round {rid:?} (scenario {bogus:?} == netidx base tail, not a real sortie)");
-                rd.end = Some(chrono::Utc::now());
-                let _ = t.round.insert(&(bogus.clone(), rid), &rd)?;
-            }
-        }
-        // Prime current_sortie from whatever *real* round is already open in the
-        // DB. On restart, the archive replay resumes from replay_cursor and may
-        // never re-witness the NewRound/SessionStart stat that originally
-        // started the active round (they're before the cursor) -- without this,
-        // the engine log/RPC subscriptions would wait forever for a sortie that
-        // already exists.
-        if let Some((sortie, _, _)) = t
-            .latest_rounds()?
-            .into_iter()
-            .filter(|(s, _, _)| base_tail.as_ref().map(|t| t.as_str()) != Some(s.as_str()))
-            .find(|(_, _, r)| r.end.is_none())
-        {
-            info!("resuming with active round sortie={sortie:?}");
-            *t.current_sortie.lock().unwrap() = Some(sortie);
-        }
-        let _t = t.clone();
-        task::spawn(async move {
-            if let Err(e) = _t.background_loop().await {
-                error!("background task failed {e:?}")
-            }
-        });
-        let _t = t.clone();
-        task::spawn(async move {
-            if let Err(e) = _t.engine_log_loop().await {
-                error!("engine log subscription failed {e:?}")
-            }
-        });
-        Ok(t)
-    }
-
-    /// Create a database in offline mode (no Netidx subscription)
-    pub(crate) fn new_offline<P: AsRef<Path>>(db: P, stats_dir: Option<PathBuf>, stats_jsonl: Option<PathBuf>) -> Result<Self> {
-        let db = sled::open(db.as_ref())?;
-        let t = Self(Arc::new(StatsDbInner {
-            subscriber: None,
-            base: None,
-            stats_dir,
-            include: None,
-            exclude: None,
-            db: db.clone(),
-            pilots: Pilots::new(&db)?,
-            seq: Tree::open(&db, "seq")?,
-            round: Tree::open(&db, "round")?,
-            session: Tree::open(&db, "session")?,
-            kills: Tree::open(&db, "kills")?,
-            shared_kills: Tree::open(&db, "shared_kills")?,
-            kill_seen: Tree::open(&db, "kill_seen")?,
-            sortie_seen: Tree::open(&db, "sortie_seen")?,
-            deploy_seen: Tree::open(&db, "deploy_seen")?,
-            units: Tree::open(&db, "units")?,
-            groups: Tree::open(&db, "groups")?,
-            detected: Tree::open(&db, "detected")?,
-            objectives: Tree::open(&db, "objectives")?,
-            equipment: Tree::open(&db, "equipment")?,
-            liquids: Tree::open(&db, "liquids")?,
-            stats_jsonl,
-            auth_sessions: Tree::open(&db, "auth_sessions")?,
-            auth_states: Tree::open(&db, "auth_states")?,
-            trail_points: Tree::open(&db, "trail_points")?,
-            latest_weather: Arc::new(RwLock::new(None)),
-            objective_captures: Tree::open(&db, "objective_captures")?,
-            captures: Tree::open(&db, "captures")?,
-            deploys: Tree::open(&db, "deploys")?,
-            static_kills: Tree::open(&db, "static_kills")?,
-            static_kill_seen: Tree::open(&db, "static_kill_seen")?,
-            aircraft_sorties: Tree::open(&db, "aircraft_sorties")?,
-            pilot_last_activity: Tree::open(&db, "pilot_last_activity")?,
-            admin_bans: Tree::open(&db, "admin_bans")?,
-            wiki_pages: Tree::open(&db, "wiki_pages")?,
-            wiki_images: Tree::open(&db, "wiki_images")?,
-            engine_log_tx: broadcast::channel(1024).0,
-            engine_log_history: Arc::new(StdMutex::new(VecDeque::new())),
-            engine_error_history: Arc::new(StdMutex::new(VecDeque::new())),
-            replay_cursor: Tree::open(&db, "replay_cursor")?,
-            jsonl_cursor: Tree::open(&db, "jsonl_cursor")?,
-            jsonl_sealed: Tree::open(&db, "jsonl_sealed")?,
-            jsonl_reset: Arc::new(AtomicBool::new(false)),
-            health_cache: Arc::new(StdMutex::new(None)),
-            current_sortie: Arc::new(StdMutex::new(None)),
-        }));
+        t.migrate_legacy_cursors()?;
+        t.migrate_legacy_sealed_keys()?;
         t.seed_wiki_if_empty()?;
         t.seed_wiki_images_if_empty()?;
         t.reconcile_flight_hours_from_sorties_once()?;
         t.reconcile_a2a_g2a_once()?;
         t.reconcile_a2g_g2g_once()?;
-        let _t = t.clone();
-        task::spawn(async move {
-            if let Err(e) = _t.background_loop().await {
-                error!("background task failed {e:?}")
+        t.close_stale_open_rounds()?;
+        for st in t.0.states.values() {
+            let _t = t.clone();
+            let _st = st.clone();
+            task::spawn(async move {
+                if let Err(e) = _t.background_loop(_st.clone()).await {
+                    error!("[{}] background task failed {e:?}", _st.id)
+                }
+            });
+            if st.base.is_some() {
+                let _t = t.clone();
+                let _st = st.clone();
+                task::spawn(async move {
+                    if let Err(e) = _t.engine_log_loop(_st.clone()).await {
+                        error!("[{}] engine log subscription failed {e:?}", _st.id)
+                    }
+                });
             }
-        });
-        info!("running in offline mode (no Netidx subscription)");
+        }
+        if t.0.states.values().all(|s| s.base.is_none()) {
+            info!("running in offline mode (no instance has a netidx base)");
+        }
         Ok(t)
     }
 
-    /// A live subscription to the running bflib engine's log stream,
-    /// published over netidx at `<base>/<sortie>/log` by `bflib::bg::logpub`
-    /// (bflib appends its mission sortie name to `netidx_base` before
-    /// publishing anything -- see `Task::CfgLoaded` in bflib/src/bg/mod.rs).
-    /// No-op if bfdb wasn't started with --base. Each update from the
-    /// publisher carries the *entire* accumulated log content (not just the
-    /// new line), so we track how much we've already seen and only forward
-    /// the newly-appended lines. Waits for the sortie to become known via
-    /// Stat::NewRound, and resubscribes if it changes (new mission/round).
-    async fn engine_log_loop(self) -> Result<()> {
-        use futures::{channel::mpsc, StreamExt};
-        use netidx::subscriber::{Event, UpdatesFlags};
-        use netidx::publisher::Value;
+    /// Offline open (no netidx). Single default instance from paths.
+    pub(crate) fn new_offline<P: AsRef<Path>>(
+        db: P,
+        stats_dir: Option<PathBuf>,
+        stats_jsonl: Option<PathBuf>,
+    ) -> Result<Self> {
+        let reg = Registry::single(InstanceCfg {
+            id: DEFAULT_INSTANCE.to_string(),
+            label: None,
+            base: None,
+            netidx_config: None,
+            sortie: None,
+            stats_jsonl,
+            stats_dir,
+            export_port: None,
+            engine_config: None,
+            srs_url: None,
+            dcs_server_name: None,
+            public: true,
+        });
+        Self::new(&HashMap::new(), db, reg, None, None)
+    }
 
-        let (subscriber, base) = match (&self.0.subscriber, &self.0.base) {
+    fn migrate_legacy_cursors(&self) -> Result<()> {
+        let default = self.0.instances.default_id().to_string();
+        if let Some(pos) = self.0.legacy_jsonl_cursor.get(&0u8)? {
+            if self.0.jsonl_cursor.get(&default)?.is_none() {
+                info!("migrating legacy JSONL cursor (offset {pos}) to instance {default:?}");
+                self.0.jsonl_cursor.insert(&default, &pos)?;
+            }
+            self.0.legacy_jsonl_cursor.remove(&0u8)?;
+        }
+        if let Some(ts) = self.0.legacy_replay_cursor.get(&0u8)? {
+            if self.0.replay_cursor.get(&default)?.is_none() {
+                info!("migrating legacy archive replay cursor ({ts}) to instance {default:?}");
+                self.0.replay_cursor.insert(&default, &ts)?;
+            }
+            self.0.legacy_replay_cursor.remove(&0u8)?;
+        }
+        Ok(())
+    }
+
+    fn migrate_legacy_sealed_keys(&self) -> Result<()> {
+        let default = self.0.instances.default_id().to_string();
+        let prefix = format!("{default}:");
+        let keys: Vec<std::string::String> = self
+            .jsonl_sealed
+            .iter()
+            .keys()
+            .filter_map(|k| k.ok())
+            .filter(|k| !k.contains(':'))
+            .collect();
+        for key in &keys {
+            let new_key = format!("{prefix}{key}");
+            if self.jsonl_sealed.get(&new_key)?.is_none() {
+                if let Some(v) = self.jsonl_sealed.get(key)? {
+                    self.jsonl_sealed.insert(&new_key, &v)?;
+                }
+            }
+            self.jsonl_sealed.remove(key)?;
+        }
+        if !keys.is_empty() {
+            info!(
+                "migrated {} sealed JSONL key(s) under instance {default:?}",
+                keys.len()
+            );
+        }
+        Ok(())
+    }
+
+    fn close_stale_open_rounds(&self) -> Result<()> {
+        let mut open_by_instance: HashMap<InstanceId, Vec<(Scenario, RoundId, Round)>> =
+            HashMap::new();
+        for r in self.round.iter() {
+            let ((s, rid), rd) = r?;
+            if rd.end.is_some() {
+                continue;
+            }
+            let inst = self.round_instance_of(rid);
+            open_by_instance.entry(inst).or_default().push((s, rid, rd));
+        }
+        for (inst, mut open) in open_by_instance {
+            open.sort_by(|a, b| a.2.start.cmp(&b.2.start).then(a.1.cmp(&b.1)));
+            let keep = open.pop();
+            for (s, rid, mut rd) in open {
+                warn!("[{inst}] closing stale open round {rid:?} (scenario {s:?})");
+                rd.end = Some(chrono::Utc::now());
+                let _ = self.round.insert(&(s, rid), &rd)?;
+            }
+            if let (Some((sortie, _, _)), Some(st)) = (keep, self.0.states.get(&inst)) {
+                info!("[{inst}] resuming with active round sortie={sortie:?}");
+                *st.current_sortie.lock().unwrap() = Some(sortie);
+            }
+        }
+        Ok(())
+    }
+
+    pub(crate) fn instances(&self) -> &Registry {
+        &self.0.instances
+    }
+
+    pub(crate) fn state(&self, id: &InstanceId) -> Arc<InstanceState> {
+        self.0
+            .states
+            .get(id)
+            .or_else(|| self.0.states.get(self.0.instances.default_id()))
+            .expect("registry always has its default instance")
+            .clone()
+    }
+
+    pub(crate) fn default_state(&self) -> Arc<InstanceState> {
+        self.state(self.0.instances.default_id())
+    }
+
+    pub(crate) fn resolve_state(&self, requested: Option<&str>) -> Result<Arc<InstanceState>> {
+        let cfg = self.0.instances.resolve(requested)?;
+        let id: InstanceId = Arc::from(cfg.id.as_str());
+        Ok(self.state(&id))
+    }
+
+    pub(crate) fn round_instance_of(&self, round: RoundId) -> InstanceId {
+        match self.round_instance.get(&round) {
+            Ok(Some(id)) => Arc::from(id.as_str()),
+            _ => self.0.instances.default_id().clone(),
+        }
+    }
+
+    pub(crate) fn rounds_of(&self, inst: &InstanceId) -> Result<HashSet<RoundId>> {
+        let mut out = HashSet::new();
+        for r in self.round.iter() {
+            let ((_, rid), _) = r?;
+            if &self.round_instance_of(rid) == inst {
+                out.insert(rid);
+            }
+        }
+        Ok(out)
+    }
+
+    pub(crate) fn latest_rounds_for(
+        &self,
+        inst: &InstanceId,
+    ) -> Result<Vec<(Scenario, RoundId, Round)>> {
+        Ok(self
+            .latest_rounds()?
+            .into_iter()
+            .filter(|(_, rid, _)| &self.round_instance_of(*rid) == inst)
+            .collect())
+    }
+
+    /// Round for a dashboard request scoped to `inst`.
+    /// Explicit id must belong to that instance; otherwise `None` (empty view).
+    /// With no id: open round for `inst`, else latest closed for `inst`.
+    pub(crate) fn resolve_round_id(
+        &self,
+        inst: &InstanceId,
+        round_id: Option<u64>,
+    ) -> Result<Option<RoundId>> {
+        if let Some(id) = round_id {
+            let rid = RoundId(id);
+            if &self.round_instance_of(rid) != inst {
+                return Ok(None);
+            }
+            return Ok(Some(rid));
+        }
+        let rounds = self.latest_rounds_for(inst)?;
+        Ok(rounds
+            .iter()
+            .find(|(_, _, r)| r.end.is_none())
+            .or_else(|| rounds.first())
+            .map(|(_, rid, _)| *rid))
+    }
+
+    async fn engine_log_loop(self, inst: Arc<InstanceState>) -> Result<()> {
+        use futures::{channel::mpsc, StreamExt};
+        use netidx::publisher::Value;
+        use netidx::subscriber::{Event, UpdatesFlags};
+
+        let (subscriber, base) = match (&inst.subscriber, &inst.base) {
             (Some(s), Some(b)) => (s.clone(), b.clone()),
             _ => return Ok(()),
         };
         loop {
             let sortie = loop {
-                if let Some(s) = self.0.current_sortie.lock().unwrap().clone() {
+                if let Some(s) = inst.current_sortie.lock().unwrap().clone() {
                     break s;
                 }
                 tokio::time::sleep(std::time::Duration::from_secs(1)).await;
@@ -1104,87 +1261,88 @@ impl StatsDb {
             dval.updates(UpdatesFlags::empty(), tx);
             let mut seen_len = 0usize;
             while let Some(batch) = rx.next().await {
-                if self.0.current_sortie.lock().unwrap().as_ref() != Some(&sortie) {
-                    break; // sortie changed -- resubscribe under the new one
+                if inst.current_sortie.lock().unwrap().as_ref() != Some(&sortie) {
+                    break;
                 }
                 for (_id, ev) in batch.iter() {
-                    let Event::Update(Value::String(chars)) = ev else { continue };
+                    let Event::Update(Value::String(chars)) = ev else {
+                        continue;
+                    };
                     let full: &str = chars.as_ref();
-                    // publisher truncated/restarted (new mission) — resend everything as new
                     let start = if full.len() >= seen_len { seen_len } else { 0 };
                     let new_part = &full[start..];
                     seen_len = full.len();
                     for line in new_part.lines().filter(|l| !l.is_empty()) {
                         let line = std::string::String::from(line);
-                        let mut hist = self.0.engine_log_history.lock().unwrap();
+                        let mut hist = inst.engine_log_history.lock().unwrap();
                         if hist.len() >= ENGINE_LOG_HISTORY_CAP {
                             hist.pop_front();
                         }
                         hist.push_back(line.clone());
                         drop(hist);
                         if is_engine_error_line(&line) {
-                            let mut errs = self.0.engine_error_history.lock().unwrap();
+                            let mut errs = inst.engine_error_history.lock().unwrap();
                             if errs.len() >= ENGINE_ERROR_HISTORY_CAP {
                                 errs.pop_front();
                             }
                             errs.push_back(line.clone());
                         }
-                        let _ = self.0.engine_log_tx.send(line);
+                        let _ = inst.engine_log_tx.send(line);
                     }
                 }
             }
-            if self.0.current_sortie.lock().unwrap().as_ref() == Some(&sortie) {
-                // subscription itself ended (not a sortie change) -- nothing left to do
+            if inst.current_sortie.lock().unwrap().as_ref() == Some(&sortie) {
                 return Ok(());
             }
         }
     }
 
-    /// Subscribe to the live engine log stream, plus a snapshot of recent
-    /// history for a newly-connected client to catch up with.
-    pub(crate) fn engine_log_subscribe(&self) -> (broadcast::Receiver<std::string::String>, Vec<std::string::String>) {
-        let rx = self.0.engine_log_tx.subscribe();
-        let hist = self.0.engine_log_history.lock().unwrap().iter().cloned().collect();
+    pub(crate) fn engine_log_subscribe(
+        &self,
+        inst: &InstanceState,
+    ) -> (
+        broadcast::Receiver<std::string::String>,
+        Vec<std::string::String>,
+    ) {
+        let rx = inst.engine_log_tx.subscribe();
+        let hist = inst.engine_log_history.lock().unwrap().iter().cloned().collect();
         (rx, hist)
     }
 
-    /// Recent ERROR/WARN lines from the engine log, oldest first -- backs the
-    /// admin dashboard's error feed (see api_admin_engine_errors in main.rs).
-    pub(crate) fn engine_error_snapshot(&self) -> Vec<std::string::String> {
-        self.0.engine_error_history.lock().unwrap().iter().cloned().collect()
+    pub(crate) fn engine_error_snapshot(&self, inst: &InstanceState) -> Vec<std::string::String> {
+        inst.engine_error_history
+            .lock()
+            .unwrap()
+            .iter()
+            .cloned()
+            .collect()
     }
 
-    /// Call one of bflib's netidx RPC procs (published under
-    /// `<base>/<sortie>/api/<name>`, see bflib/src/bg/rpcs.rs -- bflib
-    /// appends its mission sortie name to `netidx_base` before publishing,
-    /// same as the engine log) and return its raw reply. Errors if bfdb
-    /// wasn't started with --base (netidx disabled) or if the mission isn't
-    /// running / hasn't published a sortie yet.
-    ///
-    /// A successful RPC call still returns `Ok` even when the *engine* reported
-    /// a logical error (bflib replies with `Value::Error` in that case, per its
-    /// `reply_err!` macro) -- callers should check the returned Value's variant.
     pub(crate) async fn call_engine_rpc(
         &self,
+        inst: &InstanceState,
         proc_name: &str,
         args: Vec<(&str, netidx::publisher::Value)>,
     ) -> Result<netidx::publisher::Value> {
         use netidx_protocols::rpc::client::Proc;
-        let (subscriber, base) = match (&self.0.subscriber, &self.0.base) {
+        let (subscriber, base) = match (&inst.subscriber, &inst.base) {
             (Some(s), Some(b)) => (s, b),
             _ => bail!("netidx is disabled (bfdb started without --base)"),
         };
-        let sortie = self.0.current_sortie.lock().unwrap().clone()
+        let sortie = inst
+            .current_sortie
+            .lock()
+            .unwrap()
+            .clone()
             .ok_or_else(|| anyhow!("no active sortie yet (mission hasn't reported in)"))?;
         let path = base.append(&sortie).append("api").append(proc_name);
         let proc = Proc::new(subscriber, path)?;
         proc.call(args).await
     }
 
-    async fn background_loop(self) -> Result<()> {
-        // If stats_jsonl is configured, use the JSONL reader instead of archive
-        if let Some(jsonl_path) = self.stats_jsonl.clone() {
-            return self.jsonl_loop(jsonl_path).await;
+    async fn background_loop(self, inst: Arc<InstanceState>) -> Result<()> {
+        if let Some(jsonl_path) = inst.stats_jsonl.clone() {
+            return self.jsonl_loop(inst, jsonl_path).await;
         }
 
         use arcstr::ArcStr;
@@ -1192,10 +1350,11 @@ impl StatsDb {
         use netidx_archive::logfile::BatchItem;
         use tokio::time;
 
-        let stats_dir = match &self.stats_dir {
+        let stats_dir = match &inst.stats_dir {
             Some(d) => d.clone(),
-            None => return Ok(()), // no archive configured
+            None => return Ok(()),
         };
+        let inst_key = inst.id.to_string();
 
         let shard: ArcStr = "0".into();
         let mut archive_cfg = ArchiveFileCfg::default();
@@ -1204,13 +1363,13 @@ impl StatsDb {
         let archive_cfg = Arc::new(netidx_archive::config::Config::try_from(archive_cfg)?);
 
         let head_path = archive_cfg.archive_directory().join(shard.as_str()).join("current");
-        let head_copy_path = archive_cfg.archive_directory().join(shard.as_str()).join("current_copy");
-        // Resume from wherever we last left off instead of always replaying
-        // the entire historical archive from the beginning -- see
-        // replay_cursor's doc comment on StatsDbInner.
-        let resume_from = self.0.replay_cursor.get(&0u8)?;
+        let head_copy_path = archive_cfg
+            .archive_directory()
+            .join(shard.as_str())
+            .join("current_copy");
+        let resume_from = self.0.replay_cursor.get(&inst_key)?;
         if let Some(ts) = resume_from {
-            info!("resuming stats archive replay after {ts}");
+            info!("[{}] resuming stats archive replay after {ts}", inst.id);
         }
 
         let mut ctx = StatCtx::default();
@@ -1221,16 +1380,6 @@ impl StatsDb {
 
         loop {
             timer.tick().await;
-            // ArchiveCollectionReader caches its head-file DataSource the
-            // first time it's derived and never refreshes it from later
-            // set_head() calls (see ArchiveCollectionReader::source /
-            // apply_read in netidx-archive) -- so reusing one reader across
-            // ticks means it silently stops seeing new data the moment it
-            // first catches up to the head file's end, forever, even though
-            // bflib keeps appending. Building a fresh reader every tick,
-            // seeded from our own persisted/tracked position, sidesteps that
-            // by forcing a correct re-derivation from the current head
-            // snapshot each time.
             let new_index = task::block_in_place(|| ArchiveIndex::new(&archive_cfg, &shard)).ok();
             let new_head = task::block_in_place(|| {
                 match copy_locked_file(&head_path, &head_copy_path) {
@@ -1238,7 +1387,9 @@ impl StatsDb {
                     Err(_) => netidx_archive::logfile::ArchiveReader::open(&head_path).ok(),
                 }
             });
-            let Some(new_index) = new_index else { continue };
+            let Some(new_index) = new_index else {
+                continue;
+            };
             let start_bound = match last_seen_ts {
                 Some(ts) => Bound::Excluded(ts),
                 None => Bound::Unbounded,
@@ -1251,13 +1402,6 @@ impl StatsDb {
                 start_bound,
                 Bound::Unbounded,
             );
-            // Cap batches drained per tick and yield back to the runtime in
-            // between -- a large backlog (e.g. replaying a big historical
-            // archive on startup) would otherwise monopolize this worker
-            // thread inside back-to-back block_in_place calls and starve the
-            // warp HTTP handlers (e.g. /api/objectives), which is what made
-            // external pollers like the Discord bot's FowlEngine plugin see
-            // request timeouts while bfdb was catching up.
             const MAX_BATCHES_PER_TICK: u32 = 2_000;
             let mut batches_this_tick = 0u32;
             loop {
@@ -1268,39 +1412,26 @@ impl StatsDb {
                 let batch = task::block_in_place(|| reader.read_next(None));
                 match batch {
                     Err(e) => {
-                        // "no data source available" just means the head
-                        // file copy transiently failed to open this tick
-                        // (e.g. raced a write) with no unread historical
-                        // files to fall back to -- expected and self-heals
-                        // next tick, not worth error-level noise.
                         if e.to_string().contains("no data source available") {
-                            debug!("archive read: nothing available this tick ({e})");
+                            debug!("[{}] archive read: nothing available this tick ({e})", inst.id);
                         } else {
-                            error!("archive read error: {e:?}");
+                            error!("[{}] archive read error: {e:?}", inst.id);
                         }
                         break;
                     }
-                    Ok(None) => break, // caught up to end of available historical files
+                    Ok(None) => break,
                     Ok(Some((ts, items))) => {
                         total_batches += 1;
                         total_items += items.len() as u64;
-                        // Coarser cadence past the first 100k batches so a
-                        // large backlog (e.g. a corrupted archive segment
-                        // full of duplicate records) doesn't blow the log
-                        // file up while it's replayed.
                         let log_every = if total_batches <= 100_000 { 100 } else { 50_000 };
                         if total_batches <= 5 || total_batches % log_every == 0 {
-                            info!("batch #{total_batches} ts={ts} items={} (total_items={total_items})", items.len());
+                            info!(
+                                "[{}] batch #{total_batches} ts={ts} items={} (total_items={total_items})",
+                                inst.id,
+                                items.len()
+                            );
                         }
                         last_seen_ts = Some(ts);
-                        // ArchiveCollectionReader::read_next does NOT advance
-                        // its own cursor -- per its docs it reads "without
-                        // changing the cursor position." Without this, every
-                        // call re-reads the same batch forever and this loop
-                        // never terminates (this was the actual cause of the
-                        // runaway duplicate-record replay we hit -- there was
-                        // never any corrupted/duplicated archive data, just
-                        // one record being read over and over).
                         reader.position_mut().set_current(ts);
                         for BatchItem(path_id, ev) in items.iter() {
                             if let Event::Update(v) = ev {
@@ -1308,80 +1439,101 @@ impl StatsDb {
                                     netidx::publisher::Value::String(s) => s.clone(),
                                     other => {
                                         if total_batches <= 5 {
-                                            info!("  non-string value type for path_id={path_id:?}: {other:?}");
+                                            info!(
+                                                "[{}]   non-string value type for path_id={path_id:?}: {other:?}",
+                                                inst.id
+                                            );
                                         }
                                         continue;
                                     }
                                 };
-                                if total_batches <= 3 {
-                                    let preview: std::string::String = s.chars().take(100).collect();
-                                    info!("  raw[path_id={path_id:?}]: {preview}");
-                                }
                                 let st: Stat = match serde_json::from_str::<Stat>(&s) {
                                     Ok(s) => s,
                                     Err(e) => {
-                                        let preview: std::string::String = s.chars().take(200).collect();
-                                        error!("failed to deserialize stat: {e}, raw: {preview}");
+                                        let preview: std::string::String =
+                                            s.chars().take(200).collect();
+                                        error!(
+                                            "[{}] failed to deserialize stat: {e}, raw: {preview}",
+                                            inst.id
+                                        );
                                         continue;
                                     }
                                 };
-                                if total_batches <= 10 || total_batches % 100 == 0 {
-                                    info!("adding stat variant={}", stat_variant_name(&st));
-                                }
-                                if let Err(e) = task::block_in_place(|| self.add_stat(&mut ctx, ts, st)) {
-                                    error!("failed to add stat {e:?}")
+                                if let Err(e) =
+                                    task::block_in_place(|| self.add_stat(&inst, &mut ctx, ts, st))
+                                {
+                                    error!("[{}] failed to add stat {e:?}", inst.id)
                                 }
                             }
                         }
                     }
                 }
             }
-            // Persist how far we've gotten so a restart resumes here instead
-            // of replaying the whole archive from scratch.
             if let Some(ts) = last_seen_ts {
-                if let Err(e) = self.0.replay_cursor.insert(&0u8, &ts) {
-                    error!("failed to save replay cursor: {e:?}");
+                if let Err(e) = self.0.replay_cursor.insert(&inst_key, &ts) {
+                    error!("[{}] failed to save replay cursor: {e:?}", inst.id);
                 }
             }
         }
     }
 
-    /// Read stats from a JSONL file (one JSON object per line)
-    async fn jsonl_loop(self, jsonl_path: PathBuf) -> Result<()> {
+    async fn jsonl_loop(self, inst: Arc<InstanceState>, jsonl_path: PathBuf) -> Result<()> {
         use tokio::time;
 
+        let inst_key = inst.id.to_string();
         let mut ctx = StatCtx::default();
         let mut timer = time::interval(Duration::from_secs(5));
-        let mut last_pos: u64 = self.0.jsonl_cursor.get(&0u8)?.unwrap_or(0);
+        let mut last_pos: u64 = self.0.jsonl_cursor.get(&inst_key)?.unwrap_or(0);
 
-        // Resume round context after restart so stats before the next
-        // SessionStart are still attributed (cursor skipped NewRound).
         if last_pos > 0 {
-            if let Ok(rounds) = self.latest_rounds() {
+            if let Ok(rounds) = self.latest_rounds_for(&inst.id) {
                 if let Some((sortie, round, _)) =
                     rounds.into_iter().find(|(_, _, r)| r.end.is_none())
                 {
                     if let Ok(Some(seq)) = self.seq.get(&(sortie.clone(), round)) {
-                        ctx.0 = Some(StatCtxInner { sortie, round, seq });
+                        ctx.0 = Some(StatCtxInner {
+                            sortie,
+                            round,
+                            seq,
+                        });
                     }
                 }
             }
         }
 
-        info!("starting JSONL reader from {jsonl_path:?} at offset {last_pos}");
+        info!(
+            "[{}] starting JSONL reader from {jsonl_path:?} at offset {last_pos}",
+            inst.id
+        );
 
         loop {
             timer.tick().await;
 
-            if self.0.jsonl_reset.swap(false, Ordering::SeqCst) {
+            if inst.jsonl_reset.swap(false, Ordering::SeqCst) {
                 warn!(
-                    "jsonl rebuild requested -- wiping derived stats and re-ingesting {jsonl_path:?} from offset 0"
+                    "[{}] jsonl rebuild requested -- wiping derived stats and re-ingesting {jsonl_path:?} from offset 0",
+                    inst.id
                 );
+                {
+                    let mut st = self.0.rebuild_status.lock().unwrap();
+                    st.phase = "rebuilding".into();
+                    st.active = true;
+                    if st.started_at.is_none() {
+                        st.started_at = Some(Utc::now());
+                    }
+                }
                 if let Err(e) = task::block_in_place(|| self.wipe_stats_derived_trees()) {
-                    error!("jsonl rebuild: wipe failed ({e:?}) -- aborting, keeping current data");
+                    error!(
+                        "[{}] jsonl rebuild: wipe failed ({e:?}) -- aborting, keeping current data",
+                        inst.id
+                    );
+                    let mut st = self.0.rebuild_status.lock().unwrap();
+                    st.phase = "error".into();
+                    st.active = false;
+                    st.finished_at = Some(Utc::now());
                 } else {
-                    let _ = self.0.jsonl_cursor.insert(&0u8, &0u64);
-                    *self.0.current_sortie.lock().unwrap() = None;
+                    let _ = self.0.jsonl_cursor.insert(&inst_key, &0u64);
+                    *inst.current_sortie.lock().unwrap() = None;
                     last_pos = 0;
                     ctx = StatCtx::default();
                 }
@@ -1392,91 +1544,115 @@ impl StatsDb {
             let aliases = match crate::ucid_alias::UcidAliasTable::load(&aliases_path) {
                 Ok(t) => t,
                 Err(e) => {
-                    error!("failed to load UCID aliases: {e:?}");
+                    error!("[{}] failed to load UCID aliases: {e:?}", inst.id);
                     crate::ucid_alias::UcidAliasTable::default()
                 }
             };
 
-            // Ingest sealed rotated segments not yet marked done (rotation or rebuild).
             if let Err(e) = task::block_in_place(|| {
-                self.ingest_pending_sealed_segments(&jsonl_path, &aliases, &mut ctx)
+                self.ingest_pending_sealed_segments(&inst, &jsonl_path, &aliases, &mut ctx)
             }) {
-                error!("sealed JSONL ingest error: {e:?}");
+                error!("[{}] sealed JSONL ingest error: {e:?}", inst.id);
             }
 
-            let read_result = task::block_in_place(|| {
-                read_live_jsonl_stats(&jsonl_path, last_pos, &aliases)
-            });
+            let read_result =
+                task::block_in_place(|| read_live_jsonl_stats(&jsonl_path, last_pos, &aliases));
             match read_result {
                 Ok((pos, stats, unparsed, first_unparsed, undecodable, first_undecodable)) => {
                     if unparsed > 0 {
                         error!(
-                            "skipped {unparsed} unparsable JSONL line(s); first: {}",
+                            "[{}] skipped {unparsed} unparsable JSONL line(s); first: {}",
+                            inst.id,
                             first_unparsed.as_deref().unwrap_or("?")
                         );
                     }
                     if undecodable > 0 {
                         error!(
-                            "skipped {undecodable} undecodable JSONL stat(s); first: {}",
+                            "[{}] skipped {undecodable} undecodable JSONL stat(s); first: {}",
+                            inst.id,
                             first_undecodable.as_deref().unwrap_or("?")
                         );
                     }
                     if !stats.is_empty() {
                         let count = stats.len();
                         for (ts, st) in stats {
-                            if let Err(e) = task::block_in_place(|| self.add_stat(&mut ctx, ts, st)) {
-                                warn!("failed to add stat from JSONL: {e:?}");
+                            if let Err(e) =
+                                task::block_in_place(|| self.add_stat(&inst, &mut ctx, ts, st))
+                            {
+                                warn!("[{}] failed to add stat from JSONL: {e:?}", inst.id);
                             }
                         }
-                        info!("processed {count} stats from JSONL (pos {last_pos} -> {pos})");
+                        info!(
+                            "[{}] processed {count} stats from JSONL (pos {last_pos} -> {pos})",
+                            inst.id
+                        );
                     }
                     last_pos = pos;
-                    if let Err(e) = self.0.jsonl_cursor.insert(&0u8, &pos) {
-                        error!("failed to save JSONL cursor: {e:?}");
+                    if let Err(e) = self.0.jsonl_cursor.insert(&inst_key, &pos) {
+                        error!("[{}] failed to save JSONL cursor: {e:?}", inst.id);
+                    }
+                    {
+                        let mut st = self.0.rebuild_status.lock().unwrap();
+                        if st.active && st.phase == "rebuilding" {
+                            let live_len =
+                                std::fs::metadata(&jsonl_path).map(|m| m.len()).unwrap_or(0);
+                            if pos >= live_len {
+                                st.phase = "complete".into();
+                                st.active = false;
+                                st.finished_at = Some(Utc::now());
+                                info!("[{}] jsonl rebuild complete at offset {pos}", inst.id);
+                            }
+                        }
                     }
                 }
-                Err(e) => error!("JSONL read error: {e:?}"),
+                Err(e) => error!("[{}] JSONL read error: {e:?}", inst.id),
             }
         }
     }
 
     fn ingest_pending_sealed_segments(
         &self,
+        inst: &InstanceState,
         live_path: &Path,
         aliases: &crate::ucid_alias::UcidAliasTable,
         ctx: &mut StatCtx,
     ) -> Result<()> {
+        let prefix = format!("{}:", inst.id);
         for (key, path) in list_sealed_stats_segments(live_path)? {
-            if self.jsonl_sealed.get(&key)?.is_some() {
+            let sealed_key = format!("{prefix}{key}");
+            if self.jsonl_sealed.get(&sealed_key)?.is_some() {
                 continue;
             }
-            info!("ingesting sealed stats segment {path:?}");
+            info!("[{}] ingesting sealed stats segment {path:?}", inst.id);
             let (stats, unparsed, first_unparsed, undecodable, first_undecodable) =
                 read_stats_lines_from_path(&path, aliases)?;
             if unparsed > 0 {
                 error!(
-                    "sealed {key}: skipped {unparsed} unparsable line(s); first: {}",
+                    "[{}] sealed {key}: skipped {unparsed} unparsable line(s); first: {}",
+                    inst.id,
                     first_unparsed.as_deref().unwrap_or("?")
                 );
             }
             if undecodable > 0 {
                 error!(
-                    "sealed {key}: skipped {undecodable} undecodable stat(s); first: {}",
+                    "[{}] sealed {key}: skipped {undecodable} undecodable stat(s); first: {}",
+                    inst.id,
                     first_undecodable.as_deref().unwrap_or("?")
                 );
             }
             let count = stats.len();
             for (ts, st) in stats {
-                if let Err(e) = self.add_stat(ctx, ts, st) {
-                    warn!("failed to add stat from sealed segment: {e:?}");
+                if let Err(e) = self.add_stat(inst, ctx, ts, st) {
+                    warn!("[{}] failed to add stat from sealed segment: {e:?}", inst.id);
                 }
             }
-            self.jsonl_sealed.insert(&key, &1u8)?;
-            info!("sealed segment {key}: ingested {count} stats");
+            self.jsonl_sealed.insert(&sealed_key, &1u8)?;
+            info!("[{}] sealed segment {key}: ingested {count} stats", inst.id);
         }
         Ok(())
     }
 }
+
 
 /// Canonical sealed key is the `.jsonl` name so plain and `.zst` share one cursor entry.
 fn sealed_stats_key(file_name: &str) -> Option<std::string::String> {
@@ -1692,6 +1868,7 @@ fn read_live_jsonl_stats(
 impl StatsDb {
     fn new_round(
         &self,
+        inst: &InstanceState,
         ctx: &mut StatCtx,
         start: DateTime<Utc>,
         sortie: String,
@@ -1704,11 +1881,15 @@ impl StatsDb {
             end: None,
             winner: None,
         };
-        info!("new_round: inserting round id={id:?} sortie={sortie:?}");
+        info!(
+            "[{}] new_round: inserting round id={id:?} sortie={sortie:?}",
+            inst.id
+        );
         self.seq.insert(&key, &seqnum)?;
         self.round.insert(&key, &r)?;
+        self.round_instance.insert(&id, &inst.id.to_string())?;
         info!("new_round: round inserted successfully");
-        *self.current_sortie.lock().unwrap() = Some(sortie.clone());
+        *inst.current_sortie.lock().unwrap() = Some(sortie.clone());
         ctx.0 = Some(StatCtxInner {
             sortie,
             round: id,
@@ -1729,6 +1910,16 @@ impl StatsDb {
             .round
             .get(&key)?
             .ok_or_else(|| anyhow!("round not found"))?;
+        if self.round_is_roundend_blip(inner.round, round.start, time)? {
+            info!(
+                "RoundEnd: discarding restart blip {:?} (short, no sorties)",
+                inner.round
+            );
+            let sortie = inner.sortie.clone();
+            let rid = inner.round;
+            ctx.0 = None;
+            return self.delete_round_cascade(&sortie, rid);
+        }
         round.end = Some(time);
         round.winner = winner;
         let _ = self.round.insert(&key, &round)?;
@@ -1991,7 +2182,13 @@ impl StatsDb {
             } => {
                 match kind {
                     KillTarget::Ship => {
-                        self.pilots.bump_ship_kill(*ucid, ctx.round)?;
+                        // A2S = airframe shooter; G2S = ground / CA / Silkworm deploy.
+                        let typ = Self::resolve_shooter_typ(&dead, shot);
+                        if self.shooter_is_airframe(ctx.round, &shot.shooter, typ)? {
+                            self.pilots.bump_ship_kill(*ucid, ctx.round)?;
+                        } else {
+                            self.pilots.bump_ground_ship_kill(*ucid, ctx.round, typ)?;
+                        }
                     }
                     KillTarget::Ground => {
                         // A2G = airframe shooter; G2G = ground / CA / deploy.
@@ -2073,86 +2270,126 @@ impl StatsDb {
 
     /// Get all pilots with their aggregate stats, sorted by total kills descending.
     /// If `round` is Some, only stats from that round are included; otherwise all-time.
-    pub(crate) fn pilot_leaderboard(&self, round: Option<RoundId>) -> Result<Vec<(Ucid, String, Aggregates)>> {
-        match round {
-            None => {
-                // All-time: use pre-aggregated totals
-                let mut entries = Vec::new();
-                for r in self.pilots.pilots.iter() {
-                    let (ucid, pilot) = r?;
-                    let name = pilot.name.last().map(|s| s.clone()).unwrap_or_default();
-                    let mut total = pilot.total;
-                    total.ship_kills = self.pilots.career_ship_kills(&ucid)?;
-                    total.ground_air_kills = self.pilots.career_ground_air_kills(&ucid)?;
-                    total.ground_ground_kills = self.pilots.career_ground_ground_kills(&ucid)?;
-                    total.csar = self.pilots.career_csar(&ucid)?;
-                    entries.push((ucid, name, total));
-                }
-                entries.sort_by(|a, b| {
-                    total_kills(&b.2).cmp(&total_kills(&a.2))
-                });
-                Ok(entries)
+    /// If `inst` is Some (and `round` is None), only rounds owned by that DCS
+    /// server instance are summed — multi-instance dashboards must pass this.
+    /// All-time sums the same `aggregates` (+ side kill tables) as PILOTS theater
+    /// breakdown — not `pilot.total`, which can drift from the per-round trees.
+    /// UCIDs with an open merge (source side) are omitted — their history lives on the target.
+    pub(crate) fn pilot_leaderboard(
+        &self,
+        round: Option<RoundId>,
+        inst: Option<&InstanceId>,
+    ) -> Result<Vec<(Ucid, String, Aggregates)>> {
+        let merged_away = self.merged_away_ucids();
+        let inst_rounds = match (round, inst) {
+            (Some(_), _) => None,
+            (None, Some(id)) => Some(self.rounds_of(id)?),
+            (None, None) => None,
+        };
+        let allow = |round_id: RoundId| -> bool {
+            if let Some(rid) = round {
+                return round_id == rid;
             }
-            Some(rid) => {
-                // Per-round: sum aggregates tree entries for this round across all vehicles
-                let mut map: std::collections::HashMap<Ucid, Aggregates> = std::collections::HashMap::new();
-                for r in self.pilots.aggregates.iter() {
-                    let ((ucid, _vehicle, round_id), agg) = r?;
-                    if round_id != rid { continue; }
-                    let e = map.entry(ucid).or_insert_with(Aggregates::default);
-                    e.air_kills       += agg.air_kills;
-                    e.ground_kills    += agg.ground_kills;
-                    e.captures        += agg.captures;
-                    e.repairs         += agg.repairs;
-                    e.supply_transfers += agg.supply_transfers;
-                    e.troops          += agg.troops;
-                    e.farps           += agg.farps;
-                    e.deploys         += agg.deploys;
-                    e.actions         += agg.actions;
-                    e.deaths          += agg.deaths;
-                    e.hours           += agg.hours;
-                    e.donated_points  += agg.donated_points;
-                }
-                for r in self.pilots.agg_ship_kills.iter() {
-                    let ((ucid, _vehicle, round_id), n) = r?;
-                    if round_id != rid { continue; }
-                    let e = map.entry(ucid).or_insert_with(Aggregates::default);
-                    e.ship_kills = e.ship_kills.saturating_add(n);
-                }
-                for r in self.pilots.agg_ground_air_kills.iter() {
-                    let ((ucid, _vehicle, round_id), n) = r?;
-                    if round_id != rid { continue; }
-                    let e = map.entry(ucid).or_insert_with(Aggregates::default);
-                    e.ground_air_kills = e.ground_air_kills.saturating_add(n);
-                }
-                for r in self.pilots.agg_ground_ground_kills.iter() {
-                    let ((ucid, _vehicle, round_id), n) = r?;
-                    if round_id != rid { continue; }
-                    let e = map.entry(ucid).or_insert_with(Aggregates::default);
-                    e.ground_ground_kills = e.ground_ground_kills.saturating_add(n);
-                }
-                for r in self.pilots.agg_csar.iter() {
-                    let ((ucid, _vehicle, round_id), n) = r?;
-                    if round_id != rid { continue; }
-                    let e = map.entry(ucid).or_insert_with(Aggregates::default);
-                    e.csar = e.csar.saturating_add(n);
-                }
-                let mut entries: Vec<(Ucid, String, Aggregates)> = map
-                    .into_iter()
-                    .map(|(ucid, agg)| {
-                        let name = self.pilots.pilots.get(&ucid)
-                            .ok().flatten()
-                            .and_then(|p| p.name.last().cloned())
-                            .unwrap_or_default();
-                        (ucid, name, agg)
-                    })
-                    .collect();
-                entries.sort_by(|a, b| {
-                    total_kills(&b.2).cmp(&total_kills(&a.2))
-                });
-                Ok(entries)
+            if let Some(ref allowed) = inst_rounds {
+                return allowed.contains(&round_id);
             }
+            true
+        };
+        let mut map: std::collections::HashMap<Ucid, Aggregates> =
+            std::collections::HashMap::new();
+        for r in self.pilots.aggregates.iter() {
+            let ((ucid, _vehicle, round_id), agg) = r?;
+            if !allow(round_id) {
+                continue;
+            }
+            if merged_away.contains(&ucid) {
+                continue;
+            }
+            let e = map.entry(ucid).or_insert_with(Aggregates::default);
+            e.air_kills += agg.air_kills;
+            e.ground_kills += agg.ground_kills;
+            e.captures += agg.captures;
+            e.repairs += agg.repairs;
+            e.supply_transfers += agg.supply_transfers;
+            e.troops += agg.troops;
+            e.farps += agg.farps;
+            e.deploys += agg.deploys;
+            e.actions += agg.actions;
+            e.deaths += agg.deaths;
+            e.hours += agg.hours;
+            e.donated_points += agg.donated_points;
         }
+        for r in self.pilots.agg_ship_kills.iter() {
+            let ((ucid, _vehicle, round_id), n) = r?;
+            if !allow(round_id) {
+                continue;
+            }
+            if merged_away.contains(&ucid) {
+                continue;
+            }
+            let e = map.entry(ucid).or_insert_with(Aggregates::default);
+            e.ship_kills = e.ship_kills.saturating_add(n);
+        }
+        for r in self.pilots.agg_ground_air_kills.iter() {
+            let ((ucid, _vehicle, round_id), n) = r?;
+            if !allow(round_id) {
+                continue;
+            }
+            if merged_away.contains(&ucid) {
+                continue;
+            }
+            let e = map.entry(ucid).or_insert_with(Aggregates::default);
+            e.ground_air_kills = e.ground_air_kills.saturating_add(n);
+        }
+        for r in self.pilots.agg_ground_ground_kills.iter() {
+            let ((ucid, _vehicle, round_id), n) = r?;
+            if !allow(round_id) {
+                continue;
+            }
+            if merged_away.contains(&ucid) {
+                continue;
+            }
+            let e = map.entry(ucid).or_insert_with(Aggregates::default);
+            e.ground_ground_kills = e.ground_ground_kills.saturating_add(n);
+        }
+        for r in self.pilots.agg_ground_ship_kills.iter() {
+            let ((ucid, _vehicle, round_id), n) = r?;
+            if !allow(round_id) {
+                continue;
+            }
+            if merged_away.contains(&ucid) {
+                continue;
+            }
+            let e = map.entry(ucid).or_insert_with(Aggregates::default);
+            e.ground_ship_kills = e.ground_ship_kills.saturating_add(n);
+        }
+        for r in self.pilots.agg_csar.iter() {
+            let ((ucid, _vehicle, round_id), n) = r?;
+            if !allow(round_id) {
+                continue;
+            }
+            if merged_away.contains(&ucid) {
+                continue;
+            }
+            let e = map.entry(ucid).or_insert_with(Aggregates::default);
+            e.csar = e.csar.saturating_add(n);
+        }
+        let mut entries: Vec<(Ucid, String, Aggregates)> = map
+            .into_iter()
+            .map(|(ucid, agg)| {
+                let name = self
+                    .pilots
+                    .pilots
+                    .get(&ucid)
+                    .ok()
+                    .flatten()
+                    .and_then(|p| p.name.last().cloned())
+                    .unwrap_or_default();
+                (ucid, name, agg)
+            })
+            .collect();
+        entries.sort_by(|a, b| total_kills(&b.2).cmp(&total_kills(&a.2)));
+        Ok(entries)
     }
 
     /// Active-round side if registered, else most recent Blue/Red on record.
@@ -2190,9 +2427,13 @@ impl StatsDb {
     }
 
     pub(crate) fn all_pilot_names(&self) -> Result<Vec<(Ucid, String)>> {
+        let merged_away = self.merged_away_ucids();
         let mut entries = Vec::new();
         for r in self.pilots.pilots.iter() {
             let (ucid, pilot) = r?;
+            if merged_away.contains(&ucid) {
+                continue;
+            }
             let name = pilot.name.last().map(|s| s.clone()).unwrap_or_default();
             entries.push((ucid, name));
         }
@@ -2364,8 +2605,8 @@ impl StatsDb {
         Ok((blue_reg, red_reg, blue_online, red_online))
     }
 
-    pub(crate) fn latest_weather(&self) -> Option<WeatherSnapshot> {
-        self.latest_weather.read().ok()?.clone()
+    pub(crate) fn latest_weather(&self, inst: &InstanceState) -> Option<WeatherSnapshot> {
+        inst.latest_weather.read().ok()?.clone()
     }
 
     pub(crate) fn latest_session_end(&self) -> Result<Option<SessionEnd>> {
@@ -2942,6 +3183,12 @@ impl StatsDb {
                 return Ok(false);
             }
         }
+        for r in self.pilots.agg_ground_ship_kills.iter() {
+            let ((_u, _v, round), _) = r?;
+            if round == rid {
+                return Ok(false);
+            }
+        }
         for r in self.pilots.agg_csar.iter() {
             let ((_u, _v, round), _) = r?;
             if round == rid {
@@ -2951,9 +3198,47 @@ impl StatsDb {
         Ok(true)
     }
 
+    /// Abort/restart window: second NewRound within this age collapses the prior segment.
+    const ROUND_BLIP_MAX_SECS: i64 = 2 * 3600;
+
+    fn round_age_is_blip_window(start: DateTime<Utc>, end_or_now: DateTime<Utc>) -> bool {
+        let age = end_or_now.signed_duration_since(start);
+        age >= chrono::Duration::zero()
+            && age <= chrono::Duration::seconds(Self::ROUND_BLIP_MAX_SECS)
+    }
+
+    fn round_has_sortie(&self, rid: RoundId) -> Result<bool> {
+        for r in self.pilots.sortie.iter() {
+            let ((_u, round, _), _) = r?;
+            if round == rid {
+                return Ok(true);
+            }
+        }
+        Ok(false)
+    }
+
+    /// NewRound superseding a short prior segment (kills/FARPs from a failed start OK).
+    fn round_is_newround_blip(start: DateTime<Utc>, end_or_now: DateTime<Utc>) -> bool {
+        Self::round_age_is_blip_window(start, end_or_now)
+    }
+
+    /// RoundEnd discard: short and nobody flew (keep a real short war that ended).
+    fn round_is_roundend_blip(
+        &self,
+        rid: RoundId,
+        start: DateTime<Utc>,
+        end_or_now: DateTime<Utc>,
+    ) -> Result<bool> {
+        if !Self::round_age_is_blip_window(start, end_or_now) {
+            return Ok(false);
+        }
+        Ok(!self.round_has_sortie(rid)?)
+    }
+
     fn delete_round_cascade(&self, scenario: &Scenario, rid: RoundId) -> Result<()> {
         self.round.remove(&(scenario.clone(), rid))?;
         self.seq.remove(&(scenario.clone(), rid))?;
+        let _ = self.round_instance.remove(&rid)?;
 
         macro_rules! purge_prefix {
             ($tree:expr) => {{
@@ -3037,6 +3322,7 @@ impl StatsDb {
             let _ = self.pilots.agg_ship_kills.remove(k)?;
             let _ = self.pilots.agg_ground_air_kills.remove(k)?;
             let _ = self.pilots.agg_ground_ground_kills.remove(k)?;
+            let _ = self.pilots.agg_ground_ship_kills.remove(k)?;
             let _ = self.pilots.agg_csar.remove(k)?;
         }
 
@@ -3095,20 +3381,72 @@ impl StatsDb {
         Ok(results)
     }
 
-    /// Get recent kills for a round (last N)
+    /// Career aggregates for one pilot — sum of per-round trees (same as leaderboard).
     pub(crate) fn pilot_detail(&self, ucid: &Ucid) -> Result<Option<(String, Aggregates)>> {
-        match self.pilots.pilots.get(ucid)? {
-            None => Ok(None),
-            Some(pilot) => {
-                let name = pilot.name.last().cloned().unwrap_or_default();
-                let mut total = pilot.total;
-                total.ship_kills = self.pilots.career_ship_kills(ucid)?;
-                total.ground_air_kills = self.pilots.career_ground_air_kills(ucid)?;
-                total.ground_ground_kills = self.pilots.career_ground_ground_kills(ucid)?;
-                total.csar = self.pilots.career_csar(ucid)?;
-                Ok(Some((name, total)))
+        let name = match self.pilots.pilots.get(ucid)? {
+            None => return Ok(None),
+            Some(pilot) => pilot.name.last().cloned().unwrap_or_default(),
+        };
+        let mut total = Aggregates::default();
+        let mut any = false;
+        for r in self.pilots.aggregates.iter() {
+            let ((u, _vehicle, _), agg) = r?;
+            if u != *ucid {
+                continue;
+            }
+            any = true;
+            total.air_kills += agg.air_kills;
+            total.ground_kills += agg.ground_kills;
+            total.captures += agg.captures;
+            total.repairs += agg.repairs;
+            total.supply_transfers += agg.supply_transfers;
+            total.troops += agg.troops;
+            total.farps += agg.farps;
+            total.deploys += agg.deploys;
+            total.actions += agg.actions;
+            total.deaths += agg.deaths;
+            total.hours += agg.hours;
+            total.donated_points += agg.donated_points;
+        }
+        for r in self.pilots.agg_ship_kills.iter() {
+            let ((u, _, _), n) = r?;
+            if u == *ucid {
+                any = true;
+                total.ship_kills = total.ship_kills.saturating_add(n);
             }
         }
+        for r in self.pilots.agg_ground_air_kills.iter() {
+            let ((u, _, _), n) = r?;
+            if u == *ucid {
+                any = true;
+                total.ground_air_kills = total.ground_air_kills.saturating_add(n);
+            }
+        }
+        for r in self.pilots.agg_ground_ground_kills.iter() {
+            let ((u, _, _), n) = r?;
+            if u == *ucid {
+                any = true;
+                total.ground_ground_kills = total.ground_ground_kills.saturating_add(n);
+            }
+        }
+        for r in self.pilots.agg_ground_ship_kills.iter() {
+            let ((u, _, _), n) = r?;
+            if u == *ucid {
+                any = true;
+                total.ground_ship_kills = total.ground_ship_kills.saturating_add(n);
+            }
+        }
+        for r in self.pilots.agg_csar.iter() {
+            let ((u, _, _), n) = r?;
+            if u == *ucid {
+                any = true;
+                total.csar = total.csar.saturating_add(n);
+            }
+        }
+        if !any && name.is_empty() {
+            return Ok(None);
+        }
+        Ok(Some((name, total)))
     }
 
     /// All sorties for a pilot across all rounds, sorted chronologically.
@@ -3173,6 +3511,12 @@ impl StatsDb {
             if u != *ucid { continue; }
             let e = map.entry(round_id).or_insert_with(Aggregates::default);
             e.ground_ground_kills = e.ground_ground_kills.saturating_add(n);
+        }
+        for r in self.pilots.agg_ground_ship_kills.iter() {
+            let ((u, _vehicle, round_id), n) = r?;
+            if u != *ucid { continue; }
+            let e = map.entry(round_id).or_insert_with(Aggregates::default);
+            e.ground_ship_kills = e.ground_ship_kills.saturating_add(n);
         }
         for r in self.pilots.agg_csar.iter() {
             let ((u, _vehicle, round_id), n) = r?;
@@ -3445,54 +3789,84 @@ impl StatsDb {
         }
     }
 
-    fn add_stat(&self, ctx: &mut StatCtx, time: DateTime<Utc>, stat: Stat) -> Result<()> {
+    fn last_seq_for(
+        &self,
+        inst: &InstanceState,
+        sortie: &Scenario,
+    ) -> Result<Option<(RoundId, DateTime<Utc>)>> {
+        for r in self.seq.scan_prefix(sortie)?.rev() {
+            let ((_, round), seq) = r?;
+            if self.round_instance_of(round) == inst.id {
+                return Ok(Some((round, seq)));
+            }
+        }
+        Ok(None)
+    }
+
+    fn add_stat(
+        &self,
+        inst: &InstanceState,
+        ctx: &mut StatCtx,
+        time: DateTime<Utc>,
+        stat: Stat,
+    ) -> Result<()> {
         if let Some(ctx) = &ctx.0 {
             if time <= ctx.seq {
                 return Ok(());
             }
         }
         if let Stat::NewRound { sortie } = &stat {
-            ctx.0 = None; // reset on session restart so we re-attach or create a new round
-            info!("processing NewRound sortie={sortie:?}");
-            match self.seq.scan_prefix(sortie)?.next_back().transpose()? {
+            ctx.0 = None;
+            info!("[{}] processing NewRound sortie={sortie:?}", inst.id);
+            match self.last_seq_for(inst, sortie)? {
                 None => {
                     info!("NewRound: no existing seq, creating new round");
-                    return self.new_round(ctx, time, sortie.clone(), time);
+                    return self.new_round(inst, ctx, time, sortie.clone(), time);
                 }
-                Some(((_, round), _seq)) => match self.round.get(&(sortie.clone(), round))? {
+                Some((round, _seq)) => match self.round.get(&(sortie.clone(), round))? {
                     Some(r) if r.end.is_none() => {
-                        info!("NewRound: ending stale open round {round:?}, creating new round");
-                        let key = (sortie.clone(), round);
-                        let mut stale = r;
-                        stale.end = Some(time);
-                        let _ = self.round.insert(&key, &stale)?;
-                        return self.new_round(ctx, time, sortie.clone(), time);
+                        if Self::round_is_newround_blip(r.start, time) {
+                            info!(
+                                "NewRound: collapsing restart blip {round:?} before new round (age <= {}h)",
+                                Self::ROUND_BLIP_MAX_SECS / 3600
+                            );
+                            self.delete_round_cascade(sortie, round)?;
+                        } else {
+                            info!("NewRound: ending stale open round {round:?}, creating new round");
+                            let key = (sortie.clone(), round);
+                            let mut stale = r;
+                            stale.end = Some(time);
+                            let _ = self.round.insert(&key, &stale)?;
+                        }
+                        return self.new_round(inst, ctx, time, sortie.clone(), time);
                     }
-                    Some(_) => {
+                    Some(r) => {
+                        let blip_end = r.end.unwrap_or(time);
+                        if Self::round_is_newround_blip(r.start, blip_end) {
+                            info!(
+                                "NewRound: discarding prior restart blip {round:?} (age <= {}h)",
+                                Self::ROUND_BLIP_MAX_SECS / 3600
+                            );
+                            self.delete_round_cascade(sortie, round)?;
+                        }
                         info!("NewRound: existing round is ended, creating new round");
-                        return self.new_round(ctx, time, sortie.clone(), time);
+                        return self.new_round(inst, ctx, time, sortie.clone(), time);
                     }
                     None => {
                         info!("NewRound: seq entry exists but round missing, creating new round");
-                        return self.new_round(ctx, time, sortie.clone(), time);
+                        return self.new_round(inst, ctx, time, sortie.clone(), time);
                     }
                 },
             }
         }
-        // If we see a SessionStart but have no round context, auto-create a round.
-        // This happens on load-from-save (NewRound is only emitted for a fresh
-        // campaign) and when replaying JSONL/archives that lack NewRound.
-        // Prefer an explicit sortie on the stat (bflib always sends it). Do not
-        // invent a placeholder: new_round() also sets live current_sortie for
-        // netidx RPC/log paths.
-        if let Stat::SessionStart { cfg, sortie: start_sortie, .. } = &stat {
+        if let Stat::SessionStart {
+            cfg,
+            sortie: start_sortie,
+            ..
+        } = &stat
+        {
             if ctx.0.is_none() {
-                // Prefer the real sortie already primed from the open round in
-                // our DB (see the "resuming with active round" prime at startup).
-                // `netidx_base` is the BASE, not `base/sortie` -- its last path
-                // segment (e.g. "campaign" from "/local/fowl/campaign") is NOT a
-                // sortie; only use it as a last-resort offline guess.
-                let sortie = self
+                let sortie = inst
                     .current_sortie
                     .lock()
                     .unwrap()
@@ -3513,35 +3887,36 @@ impl StatsDb {
                     });
                 match sortie {
                     Some(sortie) => {
-                        // Reattach to the sortie's existing open round if there is
-                        // one, instead of spawning a duplicate. A second round id
-                        // fragments stats -- deploys/kills/health land in a round
-                        // the dashboard never queries.
-                        let open = self
-                            .seq
-                            .scan_prefix(&sortie)?
-                            .next_back()
-                            .transpose()?
-                            .and_then(|((_, round), seq)| {
-                                match self.round.get(&(sortie.clone(), round)) {
-                                    Ok(Some(r)) if r.end.is_none() => Some((round, seq)),
-                                    _ => None,
-                                }
-                            });
+                        let open = self.last_seq_for(inst, &sortie)?.and_then(|(round, seq)| {
+                            match self.round.get(&(sortie.clone(), round)) {
+                                Ok(Some(r)) if r.end.is_none() => Some((round, seq)),
+                                _ => None,
+                            }
+                        });
                         match open {
                             Some((round, seq)) => {
-                                info!("SessionStart: reattaching to open round {round:?} for sortie {sortie:?}");
-                                *self.current_sortie.lock().unwrap() = Some(sortie.clone());
-                                ctx.0 = Some(StatCtxInner { sortie, round, seq });
+                                info!(
+                                    "[{}] SessionStart: reattaching to open round {round:?} for sortie {sortie:?}",
+                                    inst.id
+                                );
+                                *inst.current_sortie.lock().unwrap() = Some(sortie.clone());
+                                ctx.0 = Some(StatCtxInner {
+                                    sortie,
+                                    round,
+                                    seq,
+                                });
                             }
                             None => {
-                                info!("auto-creating round from SessionStart, sortie={sortie:?}");
-                                self.new_round(ctx, time, sortie, time)?;
+                                info!(
+                                    "[{}] auto-creating round from SessionStart, sortie={sortie:?}",
+                                    inst.id
+                                );
+                                self.new_round(inst, ctx, time, sortie, time)?;
                             }
                         }
                     }
                     None => {
-                        warn!("SessionStart with no round context and no sortie to derive -- skipping instead of fabricating a placeholder round");
+                        warn!("[{}] SessionStart with no round context and no sortie to derive -- skipping", inst.id);
                     }
                 }
             }
@@ -4075,7 +4450,7 @@ impl StatsDb {
                 // Not currently tracked in database
             }
             Stat::Weather { temp_c, wind_speed_kts, wind_from_deg, cloud_base_m, qnh_hpa, cloud_density, visibility_m } => {
-                if let Ok(mut w) = self.latest_weather.write() {
+                if let Ok(mut w) = inst.latest_weather.write() {
                     *w = Some(WeatherSnapshot {
                         temp_c,
                         wind_speed_kts,
@@ -4218,6 +4593,8 @@ impl StatsDb {
         self.pilots.pilot_ground_air_kills.clear()?;
         self.pilots.agg_ground_ground_kills.clear()?;
         self.pilots.pilot_ground_ground_kills.clear()?;
+        self.pilots.agg_ground_ship_kills.clear()?;
+        self.pilots.pilot_ground_ship_kills.clear()?;
         self.pilots.agg_csar.clear()?;
         self.pilots.pilot_csar.clear()?;
         self.pilots.round_info.clear()?;
@@ -4248,14 +4625,15 @@ impl StatsDb {
         self.pilot_last_activity.clear()?;
         // Trails & weather
         self.trail_points.clear()?;
-        if let Ok(mut w) = self.latest_weather.write() { *w = None; }
-        // Resume JSONL from current EOF so wiped counters are not refilled
-        // from historical Kill lines still in the log file.
-        if let Some(path) = &self.stats_jsonl {
-            let end = std::fs::metadata(path).map(|m| m.len()).unwrap_or(0);
-            self.jsonl_cursor.insert(&0u8, &end)?;
-        } else {
-            self.jsonl_cursor.clear()?;
+        self.round_instance.clear()?;
+        for st in self.0.states.values() {
+            if let Ok(mut w) = st.latest_weather.write() {
+                *w = None;
+            }
+            if let Some(path) = &st.stats_jsonl {
+                let end = std::fs::metadata(path).map(|m| m.len()).unwrap_or(0);
+                self.jsonl_cursor.insert(&st.id.to_string(), &end)?;
+            }
         }
         // auth_sessions, auth_states → preserved
         Ok(())
@@ -4267,7 +4645,9 @@ impl StatsDb {
         self.wipe_stats_derived_trees()?;
         self.replay_cursor.clear()?;
         self.jsonl_cursor.clear()?;
-        *self.current_sortie.lock().unwrap() = None;
+        for st in self.0.states.values() {
+            *st.current_sortie.lock().unwrap() = None;
+        }
         Ok(())
     }
 
@@ -4283,6 +4663,8 @@ impl StatsDb {
         self.pilots.pilot_ground_air_kills.clear()?;
         self.pilots.agg_ground_ground_kills.clear()?;
         self.pilots.pilot_ground_ground_kills.clear()?;
+        self.pilots.agg_ground_ship_kills.clear()?;
+        self.pilots.pilot_ground_ship_kills.clear()?;
         self.pilots.agg_csar.clear()?;
         self.pilots.pilot_csar.clear()?;
         self.pilots.round_info.clear()?;
@@ -4309,26 +4691,65 @@ impl StatsDb {
         self.pilot_last_activity.clear()?;
         self.trail_points.clear()?;
         self.jsonl_sealed.clear()?;
-        if let Ok(mut w) = self.latest_weather.write() {
-            *w = None;
+        self.round_instance.clear()?;
+        for st in self.0.states.values() {
+            if let Ok(mut w) = st.latest_weather.write() {
+                *w = None;
+            }
         }
         Ok(())
     }
 
-    /// Queue in-process JSONL rebuild (next jsonl_loop tick).
+    /// Queue in-process JSONL rebuild (next jsonl_loop tick) for every instance.
     pub(crate) fn request_jsonl_rebuild(&self) -> Result<()> {
-        if self.stats_jsonl.is_none() {
+        let mut any = false;
+        for st in self.0.states.values() {
+            if st.stats_jsonl.is_some() {
+                any = true;
+                self.jsonl_cursor.insert(&st.id.to_string(), &0u64)?;
+                st.jsonl_reset.store(true, Ordering::SeqCst);
+            }
+        }
+        if !any {
             bail!("no stats.jsonl configured -- use --rebuild-stats with --stats-jsonl offline");
         }
-        self.jsonl_cursor.insert(&0u8, &0u64)?;
-        self.0.jsonl_reset.store(true, Ordering::SeqCst);
+        {
+            let mut st = self.0.rebuild_status.lock().unwrap();
+            st.phase = "queued".into();
+            st.active = true;
+            st.started_at = Some(Utc::now());
+            st.finished_at = None;
+        }
         Ok(())
+    }
+
+    pub(crate) fn rebuild_status_snapshot(&self) -> RebuildStatusInner {
+        self.0.rebuild_status.lock().unwrap().clone()
     }
 
     fn aliases_path(&self) -> Option<PathBuf> {
-        self.stats_jsonl
+        self.default_state()
+            .stats_jsonl
             .as_ref()
             .map(|p| crate::ucid_alias::UcidAliasTable::aliases_path_for_jsonl(p))
+    }
+
+    pub(crate) fn aliases_path_public(&self) -> Option<PathBuf> {
+        self.aliases_path()
+    }
+
+    /// UCIDs currently merged into another account (open alias, source side).
+    fn merged_away_ucids(&self) -> std::collections::HashSet<Ucid> {
+        let Some(path) = self.aliases_path() else {
+            return std::collections::HashSet::new();
+        };
+        match crate::ucid_alias::UcidAliasTable::load(&path) {
+            Ok(t) => t.active_sources().into_iter().collect(),
+            Err(e) => {
+                error!("failed to load UCID aliases for leaderboard filter: {e:?}");
+                std::collections::HashSet::new()
+            }
+        }
     }
 
     pub(crate) fn list_ucid_aliases(&self) -> Result<Vec<crate::ucid_alias::AliasRecord>> {

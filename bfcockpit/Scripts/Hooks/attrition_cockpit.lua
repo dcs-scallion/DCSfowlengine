@@ -1,11 +1,26 @@
--- Attrition Fowl Engine in-game cockpit overlay (Attrition Control).
--- Install: copy to Saved Games\DCS\Scripts\Hooks\attrition_cockpit.lua
+-- Attrition Control — Fowl Engine 2.0 in-game cockpit overlay (DCS Hooks).
+--
+-- Copyright (c) 2026 Robo76. All rights reserved.
+--
+-- PROPRIETARY SOFTWARE — NOT OPEN SOURCE
+--
+-- Author: Robo76 (individual author; not a company).
+--
+-- This software may be used only by the operator of the DCS server on which
+-- it is deployed, unless Robo76 grants written permission otherwise.
+--
+-- Contact for licensing: Discord private message to Robo76.
+--
+-- Independent Attrition rewrite. Not derived from a licensed Vector Strike
+-- cockpit. Companion UI: bfweb/LICENSE.cockpit. See also bfcockpit/LICENSE.
+--
+-- Install: Saved Games\DCS\Scripts\Hooks\attrition_cockpit.lua
 -- Config:  Saved Games\DCS\Config\AttritionCockpit.lua (written on first run)
 --
 -- DCS dxgui Window/WebViewWidget have no LuaLS stubs; calls are guarded with pcall.
 ---@diagnostic disable: undefined-field, need-check-nil
 
-local ATTRITION_COCKPIT_VERSION = "1.0.23"
+local ATTRITION_COCKPIT_VERSION = "1.0.32"
 
 local net = require('net')
 
@@ -53,12 +68,11 @@ local DEFAULTS = {
         "attrition",
     },
     hotkeys = {
-        toggle = "Ctrl+Alt+J",
+        toggle = "Ctrl+Shift+J",
         hide = "Escape",
-        opacity_up = "Ctrl+Alt+O",
-        opacity_down = "Ctrl+Alt+L",
-        click_through = "Ctrl+Alt+T",
-        reload = "Ctrl+Alt+R",
+        opacity_up = "Ctrl+Shift+O",
+        opacity_down = "Ctrl+Shift+L",
+        click_through = "Ctrl+Shift+T",
     },
     vr = "auto",
     scale = nil,
@@ -200,6 +214,10 @@ load_config()
 -- Legacy compact mode removed — sleep is the only minimize path.
 cfg.compacted = nil
 cfg.compact_size = nil
+-- Reload is toolbar-only (no Ctrl+Alt+R).
+if type(cfg.hotkeys) == "table" then
+    cfg.hotkeys.reload = nil
+end
 
 local function detect_vr()
     if cfg.vr == "on" then return true end
@@ -226,6 +244,10 @@ end
 
 local window = nil
 local webview = nil
+-- Always-visible 1×1 sink: Window hotkeys die when the main overlay is hidden.
+local hotkey_sink = nil
+local sink_hotkeys_bound = false
+local hide_hotkey_bound = false
 local visible = false
 local click_through = false
 local dirty_geom = false
@@ -241,24 +263,7 @@ local toggle_sleep
 local enter_sleep
 local wake_from_sleep
 local apply_webview_bounds
-
-local function build_url()
-    local base = tostring(cfg.url or DEFAULTS.url)
-    local sep = string.find(base, "?", 1, true) and "&" or "?"
-    local pid = 0
-    local ok, id = pcall(net.get_my_player_id)
-    if ok and type(id) == 'number' then pid = id end
-    local o = tonumber(cfg.opacity) or DEFAULTS.opacity
-    if o < 0.15 then o = 0.15 end
-    if o > 1 then o = 1 end
-    return base
-        .. sep .. "playerid=" .. tostring(pid)
-        .. "&plugin=" .. urlencode(ATTRITION_COCKPIT_VERSION)
-        .. (IS_VR and "&vr=1" or "")
-        .. "&scale=" .. tostring(UI_SCALE)
-        -- Widget setOpacity blanks CEF; page applies this via CSS instead.
-        .. "&opacity=" .. string.format("%.2f", o)
-end
+local show -- forward (toggle from sink before create_window)
 
 local function current_server_host()
     local ok, host = pcall(function()
@@ -278,6 +283,38 @@ local function current_server_name()
         return tostring(settings.name)
     end
     return nil
+end
+
+local function build_url()
+    local base = tostring(cfg.url or DEFAULTS.url)
+    local sep = string.find(base, "?", 1, true) and "&" or "?"
+    local pid = 0
+    local ok, id = pcall(net.get_my_player_id)
+    if ok and type(id) == 'number' then pid = id end
+    local o = tonumber(cfg.opacity) or DEFAULTS.opacity
+    if o < 0.15 then o = 0.15 end
+    if o > 1 then o = 1 end
+    local toggle = ((cfg.hotkeys or {}).toggle)
+        or ((DEFAULTS.hotkeys or {}).toggle)
+        or "Ctrl+Shift+J"
+    -- bfdb routes cockpit RPC via instances.json dcs_server_name (?server=).
+    local server = current_server_name()
+    local server_q = ""
+    if server and server ~= "" then
+        server_q = "&server=" .. urlencode(server)
+    end
+    return base
+        .. sep .. "playerid=" .. tostring(pid)
+        .. server_q
+        .. "&plugin=" .. urlencode(ATTRITION_COCKPIT_VERSION)
+        .. (IS_VR and "&vr=1" or "")
+        .. "&scale=" .. tostring(UI_SCALE)
+        -- Widget setOpacity blanks CEF; page applies this via CSS instead.
+        .. "&opacity=" .. string.format("%.2f", o)
+        -- Footer shows the live toggle binding from AttritionCockpit.lua.
+        .. "&toggle=" .. urlencode(tostring(toggle))
+        -- CEF caches /cockpit HTML hard; change query so each load gets fresh assets.
+        .. "&_cb=" .. tostring(os.time())
 end
 
 local function host_is_allowed(host)
@@ -408,53 +445,75 @@ local function flush_geom()
     end
 end
 
-local function register_hotkeys()
-    if not window then return end
-    -- Window.addHotKeyCallback expects a string like "Ctrl+Alt+J" (see dxgui Window.lua).
-    local hk = cfg.hotkeys or {}
-    local map = {
-        { hk.toggle, function()
-            if slept then
-                wake_from_sleep()
-            elseif visible then
-                hide()
-            else
-                show()
-            end
-        end },
-        { hk.hide, function() hide() end },
-        { hk.opacity_up, function()
-            cfg.opacity = math.min(1, (tonumber(cfg.opacity) or 0.92) + 0.05)
-            apply_opacity(); save_config()
-            if visible and not slept then load_webview_url() end
-        end },
-        { hk.opacity_down, function()
-            cfg.opacity = math.max(0.15, (tonumber(cfg.opacity) or 0.92) - 0.05)
-            apply_opacity(); save_config()
-            if visible and not slept then load_webview_url() end
-        end },
-        { hk.click_through, function()
-            click_through = not click_through
-            pcall(function()
-                if window.setTransparentForUserInput then
-                    window:setTransparentForUserInput(click_through)
-                elseif window.setTransparentForMouse then
-                    window:setTransparentForMouse(click_through)
-                end
-            end)
-            logmsg("click_through=" .. tostring(click_through))
-        end },
-        { hk.reload, function()
-            load_webview_url()
-        end },
-    }
-    for _, item in ipairs(map) do
-        if type(item[1]) == 'string' and item[1] ~= "" then
-            pcall(function()
-                window:addHotKeyCallback(item[1], item[2])
-            end)
-        end
+local function ensure_hotkey_sink()
+    if hotkey_sink or not Window then return end
+    hotkey_sink = Window.new()
+    pcall(function() hotkey_sink:setText("") end)
+    pcall(function() hotkey_sink:setBounds(-200, -200, 1, 1) end)
+    pcall(function() hotkey_sink:setTransparentForUserInput(true) end)
+    pcall(function() hotkey_sink:setVisible(true) end)
+end
+
+local function on_toggle_hotkey()
+    if slept then
+        wake_from_sleep()
+    elseif visible then
+        hide()
+    else
+        show()
     end
+end
+
+local function bind_hide_hotkey_on_main()
+    if not window or hide_hotkey_bound then return end
+    local hide_key = (cfg.hotkeys or {}).hide
+    if type(hide_key) ~= "string" or hide_key == "" then return end
+    -- Escape only while the overlay is up — do not steal Esc from DCS when hidden.
+    local ok = pcall(function()
+        window:addHotKeyCallback(hide_key, function() hide() end)
+    end)
+    if ok then hide_hotkey_bound = true end
+end
+
+local function register_hotkeys()
+    ensure_hotkey_sink()
+    if not sink_hotkeys_bound and hotkey_sink then
+        sink_hotkeys_bound = true
+        local hk = cfg.hotkeys or {}
+        local map = {
+            { hk.toggle, on_toggle_hotkey },
+            { hk.opacity_up, function()
+                cfg.opacity = math.min(1, (tonumber(cfg.opacity) or 0.92) + 0.05)
+                apply_opacity(); save_config()
+                if visible and not slept then load_webview_url() end
+            end },
+            { hk.opacity_down, function()
+                cfg.opacity = math.max(0.15, (tonumber(cfg.opacity) or 0.92) - 0.05)
+                apply_opacity(); save_config()
+                if visible and not slept then load_webview_url() end
+            end },
+            { hk.click_through, function()
+                click_through = not click_through
+                pcall(function()
+                    if window and window.setTransparentForUserInput then
+                        window:setTransparentForUserInput(click_through)
+                    elseif window and window.setTransparentForMouse then
+                        window:setTransparentForMouse(click_through)
+                    end
+                end)
+                logmsg("click_through=" .. tostring(click_through))
+            end },
+        }
+        for _, item in ipairs(map) do
+            if type(item[1]) == "string" and item[1] ~= "" then
+                pcall(function()
+                    hotkey_sink:addHotKeyCallback(item[1], item[2])
+                end)
+            end
+        end
+        logmsg("hotkey sink armed (toggle survives hide)")
+    end
+    bind_hide_hotkey_on_main()
 end
 
 -- DCS CEF API (dxgui/bind/WebViewWidget.lua): cefLoadUrl, not setUrl.
@@ -611,6 +670,19 @@ local function handle_cef_query(queryId, jsonRequest)
     end
     if string.find(req, "get_sleep", 1, true) then
         pcall(function() webview:edQuerySuccess(queryId, '{"ok":true,"slept":' .. tostring(slept) .. '}') end)
+        return
+    end
+    if string.find(req, "get_hotkeys", 1, true) then
+        local toggle = ((cfg.hotkeys or {}).toggle)
+            or ((DEFAULTS.hotkeys or {}).toggle)
+            or "Ctrl+Shift+J"
+        local payload = '{"ok":true,"toggle":"' .. tostring(toggle):gsub('\\', '\\\\'):gsub('"', '\\"') .. '"}'
+        pcall(function() webview:edQuerySuccess(queryId, payload) end)
+        return
+    end
+    if string.find(req, '"method":"reload"', 1, true) then
+        pcall(function() webview:edQuerySuccess(queryId, '{"ok":true}') end)
+        load_webview_url()
         return
     end
     pcall(function() webview:edQueryFailure(queryId, -1, "unknown method") end)
@@ -796,6 +868,7 @@ function handler.onNetConnect(_playerId)
         logmsg("overlay disabled — not an Attrition server")
         return
     end
+    register_hotkeys()
     if cfg.open_on_start then
         show()
     end

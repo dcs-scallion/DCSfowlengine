@@ -1,22 +1,19 @@
-bfcockpit — Attrition in-game cockpit (DCS Hooks)
+bfcockpit — Attrition Control (DCS Hooks in-game cockpit)
 
-Copyright (c) Attrition. All rights reserved.
+Copyright (c) 2026 Robo76. All rights reserved.
 
-PROPRIETARY AND CONFIDENTIAL.
+PROPRIETARY SOFTWARE — NOT OPEN SOURCE
+
+Author: Robo76 (individual author; not a company).
+
+This software may be used only by the operator of the DCS server on which
+it is deployed, unless Robo76 grants written permission otherwise.
+
+Contact for licensing: Discord private message to Robo76.
 
 This directory contains Attrition's independent in-game cockpit hooks and
-related files for Fowl Engine 2.0 / Attrition servers.
-
-It is not derived from a licensed Vector Strike in-game cockpit. No Vector
-cockpit license was granted for Attrition use. This package is outside the
+related files for Fowl Engine 2.0 / Attrition servers. It is not derived
+from a licensed Vector Strike in-game cockpit. This package is outside the
 scope of bfweb/LICENSE (dashboard / Vector-derived grant).
 
 The companion cockpit web UI under bfweb is covered by bfweb/LICENSE.cockpit.
-
-No open-source license is granted. Use is permitted only under a separate
-written agreement with the copyright holder (Attrition Fowl Engine 2.0
-operators), except as already authorized for Attrition server operations
-by those operators.
-
-Viewing this source because it lives beside an AGPL campaign runtime does
-not grant rights to copy, modify, distribute, or deploy it independently.

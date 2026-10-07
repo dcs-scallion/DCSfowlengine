@@ -1,3 +1,5 @@
+#![recursion_limit = "512"]
+
 use anyhow::Result;
 use bfprotocols::cfg::UnitTag;
 use bfprotocols::db::objective::ObjectiveKind;
@@ -24,7 +26,13 @@ use warp::{
 
 mod db;
 mod db_id;
+mod instance;
 mod ucid_alias;
+
+use crate::db::InstanceState;
+use crate::instance::{InstanceCfg, InstanceId, Registry, DEFAULT_INSTANCE};
+
+type Inst = Arc<InstanceState>;
 
 /// Load stats and serve the Fowl Engine API
 #[derive(Parser, Debug)]
@@ -33,6 +41,11 @@ struct Args {
     /// The base path to find and subscribe to the stats (omit for offline mode)
     #[arg(short, long)]
     base: Option<NetidxPath>,
+    /// JSON file listing every DCS server instance this bfdb fronts.
+    /// Mutually exclusive with flat --base/--stats-jsonl/--stats-dir/
+    /// --engine-config/--srs-url. Omit to synthesize one instance "default".
+    #[arg(long)]
+    instances: Option<PathBuf>,
     /// The path to the database
     #[arg(short, long)]
     db: PathBuf,
@@ -447,20 +460,32 @@ async fn api_config(cfg_json: Arc<String>) -> impl warp::Reply {
 
 // ── API handlers ────────────────────────────────────────────────────
 
-async fn api_rounds(db: StatsDb) -> std::result::Result<impl warp::Reply, Error> {
+/// GET /api/rounds — round history for one instance (`?instance=`), or all
+/// when `?instance=all`. Each row includes its `instance` id.
+async fn api_rounds(
+    db: StatsDb,
+    q: std::collections::HashMap<std::string::String, std::string::String>,
+    inst: Inst,
+) -> std::result::Result<impl warp::Reply, Error> {
+    let all = q.get("instance").map(|s| s == "all").unwrap_or(false);
     let data = task::block_in_place(|| -> Result<String> {
         let rounds = db.all_rounds()?;
         let entries: Vec<_> = rounds
             .iter()
-            .map(|(scenario, rid, round)| {
-                serde_json::json!({
+            .filter_map(|(scenario, rid, round)| {
+                let owner = db.round_instance_of(*rid);
+                if !all && owner != inst.id {
+                    return None;
+                }
+                Some(serde_json::json!({
                     "id": rid.0,
+                    "instance": owner.to_string(),
                     "scenario": scenario.to_string(),
                     "start": round.start.to_rfc3339(),
                     "end": round.end.map(|d| d.to_rfc3339()),
                     "active": round.end.is_none(),
                     "winner": round.winner.map(|s| format!("{s:?}")),
-                })
+                }))
             })
             .collect();
         Ok(serde_json::to_string(&entries)?)
@@ -468,10 +493,14 @@ async fn api_rounds(db: StatsDb) -> std::result::Result<impl warp::Reply, Error>
     Ok(json_response(data))
 }
 
-async fn api_leaderboard(db: StatsDb) -> std::result::Result<impl warp::Reply, Error> {
+/// GET /api/leaderboard — all-time pilot aggregates for one instance (`?instance=`).
+async fn api_leaderboard(
+    db: StatsDb,
+    inst: Inst,
+) -> std::result::Result<impl warp::Reply, Error> {
     let data = task::block_in_place(|| -> Result<String> {
-        // Use all-time totals so pilot stats are never empty
-        let pilots = db.pilot_leaderboard(None)?;
+        // All-time within the selected DCS server (not merged across instances).
+        let pilots = db.pilot_leaderboard(None, Some(&inst.id))?;
         let entries: Vec<_> = pilots
             .iter()
             .map(|(ucid, name, agg)| {
@@ -490,6 +519,7 @@ async fn api_leaderboard(db: StatsDb) -> std::result::Result<impl warp::Reply, E
                     "ship_kills": agg.ship_kills,
                     "ground_air_kills": agg.ground_air_kills,
                     "ground_ground_kills": agg.ground_ground_kills,
+                    "ground_ship_kills": agg.ground_ship_kills,
                     "csar": agg.csar,
                     "captures": agg.captures,
                     "repairs": agg.repairs,
@@ -549,7 +579,22 @@ async fn call_engine_rpc_str(
     args: Vec<(&str, netidx::publisher::Value)>,
 ) -> std::result::Result<std::string::String, Error> {
     use netidx::publisher::Value;
-    match db.call_engine_rpc(proc_name, args).await? {
+    let inst = db.default_state();
+    match db.call_engine_rpc(&inst, proc_name, args).await? {
+        Value::Error(e) => Err(Error(anyhow::anyhow!("{e}"))),
+        Value::String(s) => Ok(s.to_string()),
+        other => Err(Error(anyhow::anyhow!("unexpected RPC reply: {other:?}"))),
+    }
+}
+
+async fn call_engine_rpc_str_for(
+    db: &StatsDb,
+    inst: &db::InstanceState,
+    proc_name: &str,
+    args: Vec<(&str, netidx::publisher::Value)>,
+) -> std::result::Result<std::string::String, Error> {
+    use netidx::publisher::Value;
+    match db.call_engine_rpc(inst, proc_name, args).await? {
         Value::Error(e) => Err(Error(anyhow::anyhow!("{e}"))),
         Value::String(s) => Ok(s.to_string()),
         other => Err(Error(anyhow::anyhow!("unexpected RPC reply: {other:?}"))),
@@ -558,20 +603,14 @@ async fn call_engine_rpc_str(
 
 async fn api_objectives(
     db: StatsDb,
+    inst: Inst,
     round_id: Option<u64>,
 ) -> std::result::Result<impl warp::Reply, Error> {
     let (mut entries, is_active) = task::block_in_place(|| -> Result<(Vec<serde_json::Value>, bool)> {
-        let rounds = db.latest_rounds()?;
+        let rounds = db.latest_rounds_for(&inst.id)?;
         let active_rid = rounds.iter().find(|(_, _, r)| r.end.is_none()).map(|(_, rid, _)| *rid);
-        let rid = match round_id {
-            Some(id) => db::RoundId(id),
-            None => match active_rid {
-                Some(rid) => rid,
-                None => match rounds.first() {
-                    Some((_, rid, _)) => *rid,
-                    None => return Ok((vec![], false)),
-                },
-            },
+        let Some(rid) = db.resolve_round_id(&inst.id, round_id)? else {
+            return Ok((vec![], false));
         };
         let is_active = active_rid == Some(rid);
         let objs = db.objectives_for_round(rid)?;
@@ -679,20 +718,13 @@ async fn api_objectives(
 /// Fowl F10/HTML live-map ribbons stay in `bflib` `front_line` — separate path.
 async fn api_frontline(
     db: StatsDb,
+    inst: Inst,
     round_id: Option<u64>,
 ) -> std::result::Result<impl warp::Reply, Error> {
     let empty = || Ok(r#"{"mid":[],"blue":[],"red":[]}"#.to_string());
     let data = task::block_in_place(|| -> Result<String> {
-        let rounds = db.latest_rounds()?;
-        let rid = match round_id {
-            Some(id) => db::RoundId(id),
-            None => match rounds.iter().find(|(_, _, r)| r.end.is_none()) {
-                Some((_, rid, _)) => *rid,
-                None => match rounds.first() {
-                    Some((_, rid, _)) => *rid,
-                    None => return empty(),
-                },
-            },
+        let Some(rid) = db.resolve_round_id(&inst.id, round_id)? else {
+            return empty();
         };
         let objs = db.objectives_for_round(rid)?;
 
@@ -819,6 +851,7 @@ async fn api_frontline(
 /// only meaningful for the active round.
 async fn api_briefing(
     db: StatsDb,
+    inst: Inst,
     query: std::collections::HashMap<std::string::String, std::string::String>,
 ) -> std::result::Result<impl warp::Reply, Error> {
     use netidx::publisher::Value;
@@ -830,7 +863,12 @@ async fn api_briefing(
     };
     match tokio::time::timeout(
         std::time::Duration::from_secs(5),
-        call_engine_rpc_str(&db, "query-briefing", vec![("side", Value::from(side.to_string()))]),
+        call_engine_rpc_str_for(
+            &db,
+            &inst,
+            "query-briefing",
+            vec![("side", Value::from(side.to_string()))],
+        ),
     )
     .await
     {
@@ -848,20 +886,13 @@ async fn api_briefing(
 
 async fn api_kills(
     db: StatsDb,
+    inst: Inst,
     round_id: Option<u64>,
     limit: Option<usize>,
 ) -> std::result::Result<impl warp::Reply, Error> {
     let data = task::block_in_place(|| -> Result<String> {
-        let rounds = db.latest_rounds()?;
-        let rid = match round_id {
-            Some(id) => db::RoundId(id),
-            None => match rounds.iter().find(|(_, _, r)| r.end.is_none()) {
-                Some((_, rid, _)) => *rid,
-                None => match rounds.first() {
-                    Some((_, rid, _)) => *rid,
-                    None => return Ok("[]".to_string()),
-                },
-            },
+        let Some(rid) = db.resolve_round_id(&inst.id, round_id)? else {
+            return Ok("[]".to_string());
         };
         let kills = db.recent_kills(rid, limit.unwrap_or(50))?;
         let static_kills = db.recent_static_kills(rid, limit.unwrap_or(50))?;
@@ -958,6 +989,7 @@ async fn api_pilot(
                 "ship_kills": agg.ship_kills,
                 "ground_air_kills": agg.ground_air_kills,
                 "ground_ground_kills": agg.ground_ground_kills,
+                "ground_ship_kills": agg.ground_ship_kills,
                 "csar": agg.csar,
                 "captures": agg.captures,
                 "repairs": agg.repairs,
@@ -1017,6 +1049,7 @@ async fn api_pilot_breakdown(
             "ship_kills": agg.ship_kills,
             "ground_air_kills": agg.ground_air_kills,
             "ground_ground_kills": agg.ground_ground_kills,
+            "ground_ship_kills": agg.ground_ship_kills,
             "csar": agg.csar,
             "captures": agg.captures,
             "repairs": agg.repairs,
@@ -1116,13 +1149,14 @@ async fn api_pilot_deploys(
 
 async fn api_stats(
     db: StatsDb,
+    inst: Inst,
     bot_cfg: Arc<Option<BotLinkConfig>>,
 ) -> std::result::Result<impl warp::Reply, Error> {
     let mut value = task::block_in_place(|| -> Result<serde_json::Value> {
-        let rounds = db.latest_rounds()?;
+        let rounds = db.latest_rounds_for(&inst.id)?;
         let active_round = rounds.iter().find(|(_, _, r)| r.end.is_none());
         let active_rid = active_round.map(|(_, rid, _)| *rid);
-        let pilots = db.pilot_leaderboard(active_rid)?;
+        let pilots = db.pilot_leaderboard(active_rid, None)?;
         let obj_count = if let Some((_, rid, _)) = active_round {
             // Match the filtering in api_objectives (only special SAM sites
             // are hidden now) so this count stays consistent with what
@@ -1147,7 +1181,7 @@ async fn api_stats(
         let local_restart_at = active_round
             .and_then(|(_, rid, _)| db.active_session_stop(*rid))
             .map(|t| t.to_rfc3339());
-        let weather = db.latest_weather().map(|w| serde_json::json!({
+        let weather = db.latest_weather(&inst).map(|w| serde_json::json!({
             "temp_c": w.temp_c,
             "wind_speed_kts": w.wind_speed_kts,
             "wind_from_deg": w.wind_from_deg,
@@ -1237,8 +1271,9 @@ async fn api_stats(
         .to_string();
         let _ = tokio::time::timeout(
             std::time::Duration::from_secs(2),
-            call_engine_rpc_str(
+            call_engine_rpc_str_for(
                 &db,
+                &inst,
                 "set-server-info",
                 vec![("info", netidx::publisher::Value::from(payload))],
             ),
@@ -1250,7 +1285,7 @@ async fn api_stats(
     if value["active_round"].is_object() {
         match tokio::time::timeout(
             std::time::Duration::from_secs(8),
-            call_engine_rpc_str(&db, "query-campaign-state", vec![]),
+            call_engine_rpc_str_for(&db, &inst, "query-campaign-state", vec![]),
         )
         .await
         {
@@ -1280,12 +1315,10 @@ async fn api_stats(
     Ok(json_response(serde_json::to_string(&value).map_err(anyhow::Error::from)?))
 }
 
-async fn api_points(db: StatsDb) -> std::result::Result<impl warp::Reply, Error> {
+async fn api_points(db: StatsDb, inst: Inst) -> std::result::Result<impl warp::Reply, Error> {
     let data = task::block_in_place(|| -> Result<String> {
-        let rounds = db.latest_rounds()?;
-        let rid = match rounds.iter().find(|(_, _, r)| r.end.is_none()) {
-            Some((_, rid, _)) => *rid,
-            None => return Ok("[]".to_string()),
+        let Some(rid) = db.resolve_round_id(&inst.id, None)? else {
+            return Ok("[]".to_string());
         };
         let entries = db.pilot_points(rid)?;
         let json: Vec<_> = entries.iter().map(|(name, pts, side)| serde_json::json!({
@@ -1296,12 +1329,10 @@ async fn api_points(db: StatsDb) -> std::result::Result<impl warp::Reply, Error>
     Ok(json_response(data))
 }
 
-async fn api_captures(db: StatsDb) -> std::result::Result<impl warp::Reply, Error> {
+async fn api_captures(db: StatsDb, inst: Inst) -> std::result::Result<impl warp::Reply, Error> {
     let data = task::block_in_place(|| -> Result<String> {
-        let rounds = db.latest_rounds()?;
-        let rid = match rounds.iter().find(|(_, _, r)| r.end.is_none()) {
-            Some((_, rid, _)) => *rid,
-            None => return Ok("[]".to_string()),
+        let Some(rid) = db.resolve_round_id(&inst.id, None)? else {
+            return Ok("[]".to_string());
         };
         let entries = db.most_captured(rid)?;
         let json: Vec<_> = entries.iter().map(|(name, count)| serde_json::json!({
@@ -1317,20 +1348,13 @@ async fn api_captures(db: StatsDb) -> std::result::Result<impl warp::Reply, Erro
 /// timeline or "who did it".
 async fn api_capture_events(
     db: StatsDb,
+    inst: Inst,
     round_id: Option<u64>,
     limit: Option<usize>,
 ) -> std::result::Result<impl warp::Reply, Error> {
     let data = task::block_in_place(|| -> Result<String> {
-        let rounds = db.latest_rounds()?;
-        let rid = match round_id {
-            Some(id) => db::RoundId(id),
-            None => match rounds.iter().find(|(_, _, r)| r.end.is_none()) {
-                Some((_, rid, _)) => *rid,
-                None => match rounds.first() {
-                    Some((_, rid, _)) => *rid,
-                    None => return Ok("[]".to_string()),
-                },
-            },
+        let Some(rid) = db.resolve_round_id(&inst.id, round_id)? else {
+            return Ok("[]".to_string());
         };
         let entries = db.recent_captures(rid, limit.unwrap_or(50))?;
         let json: Vec<_> = entries
@@ -1355,13 +1379,12 @@ async fn api_capture_events(
 
 async fn api_aircraft_usage(
     db: StatsDb,
+    inst: Inst,
     q: std::collections::HashMap<std::string::String, std::string::String>,
 ) -> std::result::Result<impl warp::Reply, Error> {
     let data = task::block_in_place(|| -> Result<String> {
-        let rounds = db.latest_rounds()?;
-        let rid = match rounds.iter().find(|(_, _, r)| r.end.is_none()) {
-            Some((_, rid, _)) => *rid,
-            None => return Ok("[]".to_string()),
+        let Some(rid) = db.resolve_round_id(&inst.id, None)? else {
+            return Ok("[]".to_string());
         };
         let side_filter = match q.get("side").map(|s| s.as_str()) {
             Some("Blue") | Some("blue") => Some(dcso3::coalition::Side::Blue),
@@ -1377,12 +1400,10 @@ async fn api_aircraft_usage(
     Ok(json_response(data))
 }
 
-async fn api_online(db: StatsDb) -> std::result::Result<impl warp::Reply, Error> {
+async fn api_online(db: StatsDb, inst: Inst) -> std::result::Result<impl warp::Reply, Error> {
     let data = task::block_in_place(|| -> Result<String> {
-        let rounds = db.latest_rounds()?;
-        let rid = match rounds.iter().find(|(_, _, r)| r.end.is_none()) {
-            Some((_, rid, _)) => *rid,
-            None => return Ok("[]".to_string()),
+        let Some(rid) = db.resolve_round_id(&inst.id, None)? else {
+            return Ok("[]".to_string());
         };
         let pilots = db.connected_pilots(rid)?;
         let entries: Vec<_> = pilots.iter().map(|(ucid, name, side, aircraft)| {
@@ -1398,15 +1419,10 @@ async fn api_online(db: StatsDb) -> std::result::Result<impl warp::Reply, Error>
     Ok(json_response(data))
 }
 
-async fn api_units(db: StatsDb) -> std::result::Result<impl warp::Reply, Error> {
+async fn api_units(db: StatsDb, inst: Inst) -> std::result::Result<impl warp::Reply, Error> {
     let data = task::block_in_place(|| -> Result<String> {
-        let rounds = db.latest_rounds()?;
-        let rid = match rounds.iter().find(|(_, _, r)| r.end.is_none()) {
-            Some((_, rid, _)) => *rid,
-            None => match rounds.first() {
-                Some((_, rid, _)) => *rid,
-                None => return Ok("[]".to_string()),
-            },
+        let Some(rid) = db.resolve_round_id(&inst.id, None)? else {
+            return Ok("[]".to_string());
         };
         let units = db.detected_units_for_round(rid)?;
         let entries: Vec<_> = units
@@ -1685,9 +1701,14 @@ async fn require_admin(session_id: Option<Uuid>, db: StatsDb) -> std::result::Re
 //  - a browser session cookie linked to a Discord account, for testing the
 //    standalone /cockpit page outside DCS.
 
-async fn resolve_by_player_id(id: i64, db: &StatsDb) -> std::result::Result<dcso3::net::Ucid, Error> {
+async fn resolve_by_player_id(
+    id: i64,
+    db: &StatsDb,
+    inst: &Inst,
+) -> std::result::Result<dcso3::net::Ucid, Error> {
     use netidx::publisher::Value;
-    let s = call_engine_rpc_str(db, "resolve-player-id", vec![("id", Value::from(id))]).await?;
+    let s = call_engine_rpc_str_for(db, inst, "resolve-player-id", vec![("id", Value::from(id))])
+        .await?;
     s.parse::<dcso3::net::Ucid>()
         .map_err(|e| anyhow::anyhow!("bad ucid from engine: {e:?}").into())
 }
@@ -1696,13 +1717,15 @@ async fn resolve_by_player_id(id: i64, db: &StatsDb) -> std::result::Result<dcso
 async fn api_cockpit_jtac_list(
     session_id: Option<Uuid>,
     query: std::collections::HashMap<std::string::String, std::string::String>,
+    inst: Inst,
     db: StatsDb,
     bot_cfg: Arc<Option<BotLinkConfig>>,
 ) -> std::result::Result<impl warp::Reply, Error> {
-    let ucid = require_linked_player(&query, session_id, db.clone(), &bot_cfg).await?;
+    let ucid = require_linked_player(&query, session_id, db.clone(), &bot_cfg, &inst).await?;
     use netidx::publisher::Value;
-    let json = call_engine_rpc_str(
+    let json = call_engine_rpc_str_for(
         &db,
+        &inst,
         "jtac-list",
         vec![("ucid", Value::from(ucid.to_string()))],
     )
@@ -1743,15 +1766,17 @@ async fn api_cockpit_jtac_action(
     session_id: Option<Uuid>,
     query: std::collections::HashMap<std::string::String, std::string::String>,
     body: JtacActionBody,
+    inst: Inst,
     db: StatsDb,
     bot_cfg: Arc<Option<BotLinkConfig>>,
 ) -> std::result::Result<impl warp::Reply, Error> {
-    let ucid = require_linked_player(&query, session_id, db.clone(), &bot_cfg).await?;
+    let ucid = require_linked_player(&query, session_id, db.clone(), &bot_cfg, &inst).await?;
     let payload = serde_json::to_string(&body)
         .map_err(|e| anyhow::anyhow!("serialize jtac action: {e}"))?;
     use netidx::publisher::Value;
-    let message = call_engine_rpc_str(
+    let message = call_engine_rpc_str_for(
         &db,
+        &inst,
         "jtac-action",
         vec![
             ("ucid", Value::from(ucid.to_string())),
@@ -1762,11 +1787,32 @@ async fn api_cockpit_jtac_action(
     Ok(warp::reply::json(&serde_json::json!({ "message": message })))
 }
 
+const ATTRITION_COCKPIT_SCRIPT: &str =
+    include_str!("../../bfcockpit/Scripts/Hooks/attrition_cockpit.lua");
+
+fn attrition_cockpit_plugin_version() -> &'static str {
+    ATTRITION_COCKPIT_SCRIPT
+        .lines()
+        .find_map(|line| {
+            line.trim()
+                .strip_prefix("local ATTRITION_COCKPIT_VERSION = \"")
+                .and_then(|rest| rest.strip_suffix('"'))
+        })
+        .unwrap_or("unknown")
+}
+
+/// GET /api/cockpit/plugin — metadata for the downloadable Hooks overlay.
+async fn api_cockpit_plugin_info() -> std::result::Result<impl warp::Reply, Error> {
+    Ok(warp::reply::json(&serde_json::json!({
+        "version": attrition_cockpit_plugin_version(),
+        "filename": "attrition_cockpit.lua",
+    })))
+}
+
 /// GET /api/cockpit/plugin/download — Attrition Hooks overlay script.
 async fn api_cockpit_plugin_download() -> std::result::Result<impl warp::Reply, Error> {
-    const SCRIPT: &str = include_str!("../../bfcockpit/Scripts/Hooks/attrition_cockpit.lua");
     Ok(warp::reply::with_header(
-        SCRIPT.to_string(),
+        ATTRITION_COCKPIT_SCRIPT.to_string(),
         "Content-Disposition",
         "attachment; filename=\"attrition_cockpit.lua\"",
     ))
@@ -1777,9 +1823,10 @@ async fn require_linked_player(
     session_id: Option<Uuid>,
     db: StatsDb,
     bot_cfg: &Arc<Option<BotLinkConfig>>,
+    inst: &Inst,
 ) -> std::result::Result<dcso3::net::Ucid, Error> {
     if let Some(id) = query.get("playerid").and_then(|s| s.parse::<i64>().ok()) {
-        return resolve_by_player_id(id, &db).await;
+        return resolve_by_player_id(id, &db, inst).await;
     }
     let Some(id) = session_id else {
         return Err(anyhow::anyhow!("not logged in").into());
@@ -1794,13 +1841,14 @@ async fn require_linked_player(
 async fn api_cockpit_ewr_report(
     session_id: Option<Uuid>,
     query: std::collections::HashMap<std::string::String, std::string::String>,
+    inst: Inst,
     db: StatsDb,
     bot_cfg: Arc<Option<BotLinkConfig>>,
 ) -> std::result::Result<impl warp::Reply, Error> {
-    let ucid = require_linked_player(&query, session_id, db.clone(), &bot_cfg).await?;
+    let ucid = require_linked_player(&query, session_id, db.clone(), &bot_cfg, &inst).await?;
     let friendly = query.get("friendly").map(|s| s == "true").unwrap_or(false);
     use netidx::publisher::Value;
-    let report = call_engine_rpc_str(&db, "ewr-report", vec![
+    let report = call_engine_rpc_str_for(&db, &inst, "ewr-report", vec![
         ("ucid", Value::from(ucid.to_string())),
         ("friendly", Value::from(friendly)),
     ]).await?;
@@ -1810,12 +1858,13 @@ async fn api_cockpit_ewr_report(
 async fn api_cockpit_ewr_toggle(
     session_id: Option<Uuid>,
     query: std::collections::HashMap<std::string::String, std::string::String>,
+    inst: Inst,
     db: StatsDb,
     bot_cfg: Arc<Option<BotLinkConfig>>,
 ) -> std::result::Result<impl warp::Reply, Error> {
-    let ucid = require_linked_player(&query, session_id, db.clone(), &bot_cfg).await?;
+    let ucid = require_linked_player(&query, session_id, db.clone(), &bot_cfg, &inst).await?;
     use netidx::publisher::Value;
-    let state = call_engine_rpc_str(&db, "ewr-toggle", vec![
+    let state = call_engine_rpc_str_for(&db, &inst, "ewr-toggle", vec![
         ("ucid", Value::from(ucid.to_string())),
     ]).await?;
     Ok(warp::reply::json(&serde_json::json!({ "state": state })))
@@ -1830,12 +1879,13 @@ async fn api_cockpit_ewr_units(
     session_id: Option<Uuid>,
     query: std::collections::HashMap<std::string::String, std::string::String>,
     body: EwrUnitsBody,
+    inst: Inst,
     db: StatsDb,
     bot_cfg: Arc<Option<BotLinkConfig>>,
 ) -> std::result::Result<impl warp::Reply, Error> {
-    let ucid = require_linked_player(&query, session_id, db.clone(), &bot_cfg).await?;
+    let ucid = require_linked_player(&query, session_id, db.clone(), &bot_cfg, &inst).await?;
     use netidx::publisher::Value;
-    let units = call_engine_rpc_str(&db, "ewr-set-units", vec![
+    let units = call_engine_rpc_str_for(&db, &inst, "ewr-set-units", vec![
         ("ucid", Value::from(ucid.to_string())),
         ("imperial", Value::from(body.imperial)),
     ]).await?;
@@ -1845,12 +1895,13 @@ async fn api_cockpit_ewr_units(
 async fn api_cockpit_ewr_intel(
     session_id: Option<Uuid>,
     query: std::collections::HashMap<std::string::String, std::string::String>,
+    inst: Inst,
     db: StatsDb,
     bot_cfg: Arc<Option<BotLinkConfig>>,
 ) -> std::result::Result<impl warp::Reply, Error> {
-    let ucid = require_linked_player(&query, session_id, db.clone(), &bot_cfg).await?;
+    let ucid = require_linked_player(&query, session_id, db.clone(), &bot_cfg, &inst).await?;
     use netidx::publisher::Value;
-    let report = call_engine_rpc_str(&db, "ewr-ground-intel", vec![
+    let report = call_engine_rpc_str_for(&db, &inst, "ewr-ground-intel", vec![
         ("ucid", Value::from(ucid.to_string())),
     ]).await?;
     Ok(warp::reply::json(&serde_json::json!({ "report": report })))
@@ -1862,16 +1913,17 @@ async fn api_cockpit_ewr_intel(
 async fn api_cockpit_carp_solve(
     session_id: Option<Uuid>,
     query: std::collections::HashMap<std::string::String, std::string::String>,
+    inst: Inst,
     db: StatsDb,
     bot_cfg: Arc<Option<BotLinkConfig>>,
 ) -> std::result::Result<impl warp::Reply, Error> {
-    let ucid = require_linked_player(&query, session_id, db.clone(), &bot_cfg).await?;
+    let ucid = require_linked_player(&query, session_id, db.clone(), &bot_cfg, &inst).await?;
     let key = query.get("key").cloned().ok_or_else(|| anyhow::anyhow!("missing key"))?;
     let alt_ft: f64 = query.get("altft")
         .and_then(|s| s.parse().ok())
         .ok_or_else(|| anyhow::anyhow!("missing or invalid altft"))?;
     use netidx::publisher::Value;
-    let json = call_engine_rpc_str(&db, "carp-solve", vec![
+    let json = call_engine_rpc_str_for(&db, &inst, "carp-solve", vec![
         ("ucid", Value::from(ucid.to_string())),
         ("mark_key", Value::from(key)),
         ("drop_altitude_agl_ft", Value::from(alt_ft)),
@@ -1887,10 +1939,11 @@ async fn api_cockpit_carp_solve(
 async fn api_cockpit_carp_solve_latlon(
     session_id: Option<Uuid>,
     query: std::collections::HashMap<std::string::String, std::string::String>,
+    inst: Inst,
     db: StatsDb,
     bot_cfg: Arc<Option<BotLinkConfig>>,
 ) -> std::result::Result<impl warp::Reply, Error> {
-    let ucid = require_linked_player(&query, session_id, db.clone(), &bot_cfg).await?;
+    let ucid = require_linked_player(&query, session_id, db.clone(), &bot_cfg, &inst).await?;
     let lat: f64 = query.get("lat")
         .and_then(|s| s.parse().ok())
         .ok_or_else(|| anyhow::anyhow!("missing or invalid lat"))?;
@@ -1901,7 +1954,7 @@ async fn api_cockpit_carp_solve_latlon(
         .and_then(|s| s.parse().ok())
         .ok_or_else(|| anyhow::anyhow!("missing or invalid altft"))?;
     use netidx::publisher::Value;
-    let json = call_engine_rpc_str(&db, "carp-solve-latlon", vec![
+    let json = call_engine_rpc_str_for(&db, &inst, "carp-solve-latlon", vec![
         ("ucid", Value::from(ucid.to_string())),
         ("lat", Value::from(lat)),
         ("lon", Value::from(lon)),
@@ -1927,15 +1980,16 @@ async fn api_cockpit_cargo_spawn(
     session_id: Option<Uuid>,
     query: std::collections::HashMap<std::string::String, std::string::String>,
     body: CargoSpawnBody,
+    inst: Inst,
     db: StatsDb,
     bot_cfg: Arc<Option<BotLinkConfig>>,
 ) -> std::result::Result<impl warp::Reply, Error> {
-    let ucid = require_linked_player(&query, session_id, db.clone(), &bot_cfg).await?;
+    let ucid = require_linked_player(&query, session_id, db.clone(), &bot_cfg, &inst).await?;
     if body.qty < 1 {
         return Err(anyhow::anyhow!("qty must be at least 1").into());
     }
     use netidx::publisher::Value;
-    let msg = call_engine_rpc_str(&db, "cargo-spawn-crate", vec![
+    let msg = call_engine_rpc_str_for(&db, &inst, "cargo-spawn-crate", vec![
         ("ucid", Value::from(ucid.to_string())),
         ("crate_name", Value::from(body.crate_name)),
         ("qty", Value::from(body.qty as i64)),
@@ -2062,6 +2116,73 @@ async fn api_admin_rebuild_stats(
     })))
 }
 
+/// GET /api/admin/rebuild-status — queued / rebuilding / complete / idle
+async fn api_admin_rebuild_status(
+    session_id: Option<Uuid>,
+    db: StatsDb,
+) -> std::result::Result<impl warp::Reply, Error> {
+    require_admin(session_id, db.clone()).await?;
+    let st = db.rebuild_status_snapshot();
+    Ok(warp::reply::json(&serde_json::json!({
+        "phase": st.phase,
+        "active": st.active,
+        "started_at": st.started_at.map(|t| t.to_rfc3339()),
+        "finished_at": st.finished_at.map(|t| t.to_rfc3339()),
+    })))
+}
+
+#[derive(serde::Deserialize)]
+struct KickBody {
+    player: std::string::String,
+}
+
+/// POST /api/admin/kick — live kick via bflib netidx RPC
+async fn api_admin_kick(
+    session_id: Option<Uuid>,
+    body: KickBody,
+    db: StatsDb,
+) -> std::result::Result<impl warp::Reply, Error> {
+    require_admin(session_id, db.clone()).await?;
+    let player = body.player.trim();
+    if player.is_empty() {
+        return Err(Error(anyhow::anyhow!("player name required")));
+    }
+    use netidx::publisher::Value;
+    let msg = call_engine_rpc_str(
+        &db,
+        "kick",
+        vec![("player", Value::from(player.to_string()))],
+    )
+    .await?;
+    log::info!("ADMIN: kicked {player}: {msg}");
+    Ok(warp::reply::json(&serde_json::json!({
+        "ok": true,
+        "message": msg,
+    })))
+}
+
+/// GET /api/admin/ucid-aliases/download — raw aliases JSONL file
+async fn api_admin_ucid_aliases_download(
+    session_id: Option<Uuid>,
+    db: StatsDb,
+) -> std::result::Result<impl warp::Reply, Error> {
+    require_admin(session_id, db.clone()).await?;
+    let path = db
+        .aliases_path_public()
+        .ok_or_else(|| Error(anyhow::anyhow!("no stats.jsonl configured")))?;
+    let body = if path.exists() {
+        std::fs::read_to_string(&path)
+            .map_err(|e| Error(anyhow::anyhow!("read aliases: {e}")))?
+    } else {
+        String::new()
+    };
+    Ok(warp::reply::with_header(
+        body,
+        "Content-Disposition",
+        "attachment; filename=\"stats_ucid_aliases.jsonl\"",
+    ))
+}
+
 /// GET /api/admin/ucid-aliases — append-only merge/revoke log
 async fn api_admin_ucid_aliases(
     session_id: Option<Uuid>,
@@ -2135,12 +2256,12 @@ async fn api_admin_ucid_revoke(
 }
 
 /// GET /api/health — bfdb liveness + optional engine probe (cached 15s).
-async fn api_health(db: StatsDb) -> std::result::Result<impl warp::Reply, Error> {
+async fn api_health(db: StatsDb, inst: Inst) -> std::result::Result<impl warp::Reply, Error> {
     const CACHE_FOR: std::time::Duration = std::time::Duration::from_secs(15);
     const PROBE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(8);
 
     let cached = {
-        let cache = db.health_cache.lock().unwrap();
+        let cache = inst.health_cache.lock().unwrap();
         match &*cache {
             Some((at, ok, err)) if at.elapsed() < CACHE_FOR => {
                 Some((*ok, err.clone(), at.elapsed().as_millis() as u64))
@@ -2155,7 +2276,7 @@ async fn api_health(db: StatsDb) -> std::result::Result<impl warp::Reply, Error>
             let started = std::time::Instant::now();
             let probe = tokio::time::timeout(
                 PROBE_TIMEOUT,
-                call_engine_rpc_str(&db, "query-campaign-state", vec![]),
+                call_engine_rpc_str_for(&db, &inst, "query-campaign-state", vec![]),
             )
             .await;
             let elapsed_ms = started.elapsed().as_millis() as u64;
@@ -2172,19 +2293,20 @@ async fn api_health(db: StatsDb) -> std::result::Result<impl warp::Reply, Error>
             };
             if !ok {
                 log::warn!(
-                    "api_health: query-campaign-state probe failed after {}ms: {}",
+                    "api_health: [{}] query-campaign-state probe failed after {}ms: {}",
+                    inst.id,
                     elapsed_ms,
                     err.as_deref().unwrap_or("unknown")
                 );
             }
-            *db.health_cache.lock().unwrap() =
+            *inst.health_cache.lock().unwrap() =
                 Some((std::time::Instant::now(), ok, err.clone()));
             (ok, err, elapsed_ms)
         }
     };
 
     let round = task::block_in_place(|| -> Result<Option<serde_json::Value>> {
-        let rounds = db.latest_rounds()?;
+        let rounds = db.latest_rounds_for(&inst.id)?;
         Ok(rounds
             .iter()
             .find(|(_, _, r)| r.end.is_none())
@@ -2292,11 +2414,12 @@ async fn api_admin_bot_mission_unpause(
 async fn api_admin_cfg_get(
     session_id: Option<Uuid>,
     db: StatsDb,
-    path: Arc<Option<PathBuf>>,
+    inst: Inst,
 ) -> std::result::Result<impl warp::Reply, Error> {
     require_admin(session_id, db.clone()).await?;
-    let path = path
-        .as_ref()
+    let path = inst
+        .cfg
+        .engine_config
         .clone()
         .ok_or_else(|| anyhow::anyhow!("engine config not configured (missing --engine-config)"))?;
     let data = task::block_in_place(|| -> Result<String> {
@@ -2333,11 +2456,12 @@ async fn api_admin_cfg_post(
     session_id: Option<Uuid>,
     body: SaveCfgBody,
     db: StatsDb,
-    path: Arc<Option<PathBuf>>,
+    inst: Inst,
 ) -> std::result::Result<impl warp::Reply, Error> {
     require_admin(session_id, db.clone()).await?;
-    let path = path
-        .as_ref()
+    let path = inst
+        .cfg
+        .engine_config
         .clone()
         .ok_or_else(|| anyhow::anyhow!("engine config not configured (missing --engine-config)"))?;
     let mut cfg_json = body.cfg.clone();
@@ -2741,7 +2865,7 @@ async fn api_admin_engine_errors(
     db: StatsDb,
 ) -> std::result::Result<impl warp::Reply, Error> {
     require_admin(session_id, db.clone()).await?;
-    let lines = db.engine_error_snapshot();
+    let lines = db.engine_error_snapshot(&db.default_state());
     Ok(json_response(serde_json::to_string(&lines).map_err(|e| Error(e.into()))?))
 }
 
@@ -3100,7 +3224,7 @@ async fn ws_engine_logs_handler(
             .on_upgrade(|sock| async move { drop(sock) })
             .into_response();
     }
-    let (rx, history) = db.engine_log_subscribe();
+    let (rx, history) = db.engine_log_subscribe(&db.default_state());
     ws.on_upgrade(move |socket| ws_engine_logs(socket, rx, history))
         .into_response()
 }
@@ -3279,9 +3403,15 @@ fn normalize_srs_status(v: serde_json::Value) -> serde_json::Value {
     serde_json::json!({ "version": version, "clients": clients })
 }
 
-async fn api_srs(srs: Arc<(Option<String>, String)>) -> Response {
+async fn api_srs(inst: Inst, srs_fallback: Arc<(Option<String>, String)>) -> Response {
     let empty = warp::reply::json(&serde_json::json!({"version": null, "clients": []}));
-    let (Some(base), api_key) = (srs.0.as_deref(), srs.1.as_str()) else {
+    let url_opt = inst
+        .cfg
+        .srs_url
+        .clone()
+        .or_else(|| srs_fallback.0.clone());
+    let api_key = srs_fallback.1.as_str();
+    let Some(base) = url_opt.as_deref() else {
         return empty.into_response();
     };
     let url = srs_clients_url(base);
@@ -3314,6 +3444,183 @@ fn with_db(db: StatsDb) -> impl Filter<Extract = (StatsDb,), Error = std::conver
     warp::any().map(move || db.clone())
 }
 
+fn with_instance(db: StatsDb) -> impl Filter<Extract = (Inst,), Error = warp::Rejection> + Clone {
+    warp::query::<std::collections::HashMap<std::string::String, std::string::String>>()
+        .and(warp::any().map(move || db.clone()))
+        .map(
+            |q: std::collections::HashMap<std::string::String, std::string::String>, db: StatsDb| {
+                let by_server = q.get("server").and_then(|name| {
+                    db.instances()
+                        .by_dcs_server_name(name)
+                        .map(|cfg| cfg.id.clone())
+                });
+                let requested = by_server
+                    .as_deref()
+                    .or_else(|| q.get("instance").map(|s| s.as_str()));
+                db.resolve_state(requested)
+                    .unwrap_or_else(|_| db.state(db.instances().default_id()))
+            },
+        )
+}
+
+fn session_is_admin(db: &StatsDb, session_id: Option<Uuid>) -> bool {
+    match session_id {
+        Some(id) => task::block_in_place(|| db.get_session(id))
+            .ok()
+            .flatten()
+            .map(|s| s.is_admin)
+            .unwrap_or(false),
+        None => false,
+    }
+}
+
+/// Turn an unknown `?instance=` / `?server=` into 400 before the SPA catch-all.
+fn bad_instance_guard(
+    db: StatsDb,
+) -> impl Filter<Extract = (Response,), Error = warp::Rejection> + Clone {
+    warp::path::full()
+        .and(warp::query::<std::collections::HashMap<std::string::String, std::string::String>>())
+        .and(extract_session_cookie())
+        .and(warp::any().map(move || db.clone()))
+        .and_then(
+            |full: warp::path::FullPath,
+             q: std::collections::HashMap<std::string::String, std::string::String>,
+             session_id: Option<Uuid>,
+             db: StatsDb| async move {
+                let path = full.as_str();
+                if !(path.starts_with("/api/") || path.starts_with("/ws/")) {
+                    return Err(warp::reject::reject());
+                }
+                let by_instance = q.get("instance");
+                let named = q.get("server").or(by_instance);
+                let Some(name) = named.map(|s| s.trim()).filter(|s| !s.is_empty()) else {
+                    return Err(warp::reject::reject());
+                };
+                if name == "all" {
+                    return Err(warp::reject::reject());
+                }
+                let cfg = db
+                    .instances()
+                    .by_dcs_server_name(name)
+                    .or_else(|| db.instances().get(name))
+                    .cloned();
+                if let Some(cfg) = cfg {
+                    let locked = !cfg.public
+                        && !path.starts_with("/api/cockpit/")
+                        && !session_is_admin(&db, session_id);
+                    if !locked {
+                        return Err(warp::reject::reject());
+                    }
+                    return Ok(warp::reply::with_status(
+                        warp::reply::json(&serde_json::json!({
+                            "error": format!("unknown instance {name:?}"),
+                        })),
+                        warp::http::StatusCode::NOT_FOUND,
+                    )
+                    .into_response());
+                }
+                if by_instance.is_none() && db.instances().is_single() {
+                    return Err(warp::reject::reject());
+                }
+                let ids: Vec<&str> = db.instances().all().iter().map(|i| i.id.as_str()).collect();
+                Ok(warp::reply::with_status(
+                    warp::reply::json(&serde_json::json!({
+                        "error": format!("unknown instance {name:?}"),
+                        "instances": ids,
+                    })),
+                    warp::http::StatusCode::BAD_REQUEST,
+                )
+                .into_response())
+            },
+        )
+}
+
+async fn api_instances(
+    session_id: Option<Uuid>,
+    db: StatsDb,
+) -> std::result::Result<impl warp::Reply, Error> {
+    let is_admin = session_is_admin(&db, session_id);
+    let default = db.instances().default_id().to_string();
+    let rows: Vec<serde_json::Value> = db
+        .instances()
+        .all()
+        .iter()
+        .filter(|cfg| cfg.public || is_admin)
+        .map(|cfg| {
+            let id: InstanceId = Arc::from(cfg.id.as_str());
+            let st = db.state(&id);
+            let active = task::block_in_place(|| db.latest_rounds_for(&id))
+                .ok()
+                .and_then(|rounds| {
+                    rounds
+                        .into_iter()
+                        .find(|(_, _, r)| r.end.is_none())
+                        .map(|(scenario, rid, r)| {
+                            serde_json::json!({
+                                "id": rid.0,
+                                "scenario": scenario.to_string(),
+                                "start": r.start,
+                            })
+                        })
+                });
+            serde_json::json!({
+                "id": cfg.id,
+                "label": cfg.label(),
+                "default": cfg.id == default,
+                "live": cfg.base.is_some(),
+                "sortie": st.live_sortie_public(),
+                "active_round": active,
+                "dcs_server_name": cfg.dcs_server_name,
+                "public": cfg.public,
+            })
+        })
+        .collect();
+    Ok(warp::reply::json(&serde_json::json!({
+        "default": default,
+        "instances": rows,
+    })))
+}
+
+fn registry_from_args(args: &Args) -> Result<Registry> {
+    let legacy_used = args.base.is_some()
+        || args.stats_jsonl.is_some()
+        || args.stats_dir.is_some()
+        || args.engine_config.is_some()
+        || args.srs_url.is_some();
+    match &args.instances {
+        Some(path) => {
+            if legacy_used {
+                anyhow::bail!(
+                    "--instances cannot be combined with the single-server flags \
+                     (--base/--stats-jsonl/--stats-dir/--engine-config/--srs-url); \
+                     move those settings into the instances file"
+                );
+            }
+            let reg = Registry::load(path)?;
+            log::info!(
+                "multi-instance mode: {} instance(s) from {}",
+                reg.all().len(),
+                path.display()
+            );
+            Ok(reg)
+        }
+        None => Ok(Registry::single(InstanceCfg {
+            id: DEFAULT_INSTANCE.to_string(),
+            label: None,
+            base: args.base.clone(),
+            netidx_config: None,
+            sortie: None,
+            stats_jsonl: args.stats_jsonl.clone(),
+            stats_dir: args.stats_dir.clone(),
+            export_port: Some(instance::DEFAULT_EXPORT_PORT),
+            engine_config: args.engine_config.clone(),
+            srs_url: args.srs_url.clone(),
+            dcs_server_name: None,
+            public: true,
+        })),
+    }
+}
+
 fn with_bot_link_cfg(
     cfg: Arc<Option<BotLinkConfig>>,
 ) -> impl Filter<Extract = (Arc<Option<BotLinkConfig>>,), Error = std::convert::Infallible> + Clone {
@@ -3332,7 +3639,14 @@ async fn main() -> Result<()> {
     }
 
     if args.rebuild_stats {
-        let db = StatsDb::new_offline(args.db.clone(), args.stats_dir.clone(), args.stats_jsonl.clone())?;
+        if args.instances.is_none() && args.stats_dir.is_none() && args.stats_jsonl.is_none() {
+            eprintln!(
+                "--rebuild-stats needs --stats-dir (or --stats-jsonl), or --instances, so the next start can re-ingest"
+            );
+            std::process::exit(2);
+        }
+        let reg = registry_from_args(&args)?;
+        let db = StatsDb::new(&std::collections::HashMap::new(), &args.db, reg, None, None)?;
         db.rebuild_stats_from_archive()?;
         println!("wiped derived stats trees and rewound JSONL/archive cursors -- restart bfdb normally to re-ingest");
         return Ok(());
@@ -3373,26 +3687,34 @@ async fn main() -> Result<()> {
         log::set_boxed_logger(Box::new(logger)).expect("logger already set");
         log::set_max_level(max_level);
     }
-    let db = match args.base {
-        Some(base) => {
-            let subscriber = SubscriberBuilder::new()
-                .config(Config::load_default()?)
-                .build()?;
-            StatsDb::new(
-                subscriber,
-                args.db,
-                base,
-                args.stats_dir,
-                args.stats_jsonl,
-                args.include,
-                args.exclude,
-            )?
+    let registry = registry_from_args(&args)?;
+    let mut subscribers: std::collections::HashMap<Option<PathBuf>, _> =
+        std::collections::HashMap::new();
+    for cfg in registry.all() {
+        if cfg.base.is_none() {
+            continue;
         }
-        None => {
-            log::info!("Running in offline mode (no --base specified, Netidx disabled)");
-            StatsDb::new_offline(args.db, args.stats_dir, args.stats_jsonl)?
+        let key = cfg.netidx_config.clone();
+        if subscribers.contains_key(&key) {
+            continue;
         }
-    };
+        let netidx_cfg = match &key {
+            Some(p) => Config::load(p)?,
+            None => Config::load_default()?,
+        };
+        let sub = SubscriberBuilder::new().config(netidx_cfg).build()?;
+        subscribers.insert(key, sub);
+    }
+    if subscribers.is_empty() {
+        log::info!("Running in offline mode (no instance has a netidx base)");
+    }
+    let db = StatsDb::new(
+        &subscribers,
+        args.db,
+        registry,
+        args.include,
+        args.exclude,
+    )?;
 
     let auth_cfg: Option<AuthConfig> = match (
         args.discord_client_id,
@@ -3475,18 +3797,26 @@ async fn main() -> Result<()> {
             (Arc::new("{}".to_string()), None)
         }
     };
-    // CLI --srs-url takes precedence over campaign.json srsUrl
+    // CLI / campaign.json SRS fallback when an instance has no srs_url of its own.
     let effective_srs_url = args.srs_url.clone().or(srs_url_from_cfg);
     let srs_api_key = args.srs_api_key.clone().unwrap_or_default();
     if let Some(ref u) = effective_srs_url {
-        log::info!("SRS proxy enabled → {u}/clients (X-API-KEY {})",
+        log::info!("SRS proxy fallback → {u}/clients (X-API-KEY {})",
             if srs_api_key.is_empty() { "empty" } else { "set" });
     }
-
-    let engine_config_path: Arc<Option<PathBuf>> = Arc::new(args.engine_config.clone());
-    match &args.engine_config {
-        Some(p) => log::info!("Engine config editor enabled → {p:?}"),
-        None => log::info!("No --engine-config specified; the admin config editor is disabled"),
+    for cfg in db.instances().all() {
+        match &cfg.srs_url {
+            Some(u) => log::info!("[{}] SRS proxy → {u}", cfg.id),
+            None if effective_srs_url.is_some() => {}
+            None => log::info!("[{}] no srs_url; SRS panel disabled for this instance", cfg.id),
+        }
+        match &cfg.engine_config {
+            Some(p) => log::info!("[{}] engine config editor → {p:?}", cfg.id),
+            None => log::info!(
+                "[{}] no engine_config; admin CFG editor disabled for this instance",
+                cfg.id
+            ),
+        }
     }
 
     let cross_origin = !args.cors_origins.is_empty();
@@ -3504,12 +3834,22 @@ async fn main() -> Result<()> {
         log::info!("Cross-origin mode enabled for: {:?} (cookies use SameSite=None; Secure — bfdb must be served over TLS)", args.cors_origins);
     }
 
+    let bad_instance = bad_instance_guard(db.clone());
+
+    let instances_route = warp::path!("api" / "instances")
+        .and(extract_session_cookie())
+        .and(with_db(db.clone()))
+        .then(api_instances);
+
     let rounds = warp::path!("api" / "rounds")
         .and(with_db(db.clone()))
+        .and(warp::query::<std::collections::HashMap<std::string::String, std::string::String>>())
+        .and(with_instance(db.clone()))
         .then(api_rounds);
 
     let leaderboard = warp::path!("api" / "leaderboard")
         .and(with_db(db.clone()))
+        .and(with_instance(db.clone()))
         .then(api_leaderboard);
 
     let all_pilots = warp::path!("api" / "pilots")
@@ -3518,41 +3858,48 @@ async fn main() -> Result<()> {
 
     let objectives = warp::path!("api" / "objectives")
         .and(with_db(db.clone()))
+        .and(with_instance(db.clone()))
         .and(warp::query::<std::collections::HashMap<String, String>>())
-        .then(|db, q: std::collections::HashMap<String, String>| {
+        .then(|db, inst, q: std::collections::HashMap<String, String>| {
             let round_id = q.get("round").and_then(|s| s.parse().ok());
-            api_objectives(db, round_id)
+            api_objectives(db, inst, round_id)
         });
 
     let frontline = warp::path!("api" / "frontline")
         .and(with_db(db.clone()))
+        .and(with_instance(db.clone()))
         .and(warp::query::<std::collections::HashMap<String, String>>())
-        .then(|db, q: std::collections::HashMap<String, String>| {
+        .then(|db, inst, q: std::collections::HashMap<String, String>| {
             let round_id = q.get("round").and_then(|s| s.parse().ok());
-            api_frontline(db, round_id)
+            api_frontline(db, inst, round_id)
         });
 
     let briefing = warp::path!("api" / "briefing")
         .and(with_db(db.clone()))
+        .and(with_instance(db.clone()))
         .and(warp::query::<std::collections::HashMap<String, String>>())
-        .then(|db, q: std::collections::HashMap<String, String>| api_briefing(db, q));
+        .then(|db, inst, q: std::collections::HashMap<String, String>| {
+            api_briefing(db, inst, q)
+        });
 
     let kills = warp::path!("api" / "kills")
         .and(with_db(db.clone()))
+        .and(with_instance(db.clone()))
         .and(warp::query::<std::collections::HashMap<String, String>>())
-        .then(|db, q: std::collections::HashMap<String, String>| {
+        .then(|db, inst, q: std::collections::HashMap<String, String>| {
             let round_id = q.get("round").and_then(|s| s.parse().ok());
             let limit = q.get("limit").and_then(|s| s.parse().ok());
-            api_kills(db, round_id, limit)
+            api_kills(db, inst, round_id, limit)
         });
 
     let capture_events = warp::path!("api" / "capture-events")
         .and(with_db(db.clone()))
+        .and(with_instance(db.clone()))
         .and(warp::query::<std::collections::HashMap<String, String>>())
-        .then(|db, q: std::collections::HashMap<String, String>| {
+        .then(|db, inst, q: std::collections::HashMap<String, String>| {
             let round_id = q.get("round").and_then(|s| s.parse().ok());
             let limit = q.get("limit").and_then(|s| s.parse().ok());
-            api_capture_events(db, round_id, limit)
+            api_capture_events(db, inst, round_id, limit)
         });
 
     let pilot = warp::path!("api" / "pilot" / String)
@@ -3581,31 +3928,38 @@ async fn main() -> Result<()> {
     // still replaying at startup). Engine probe is cached 15s inside api_health.
     let health = warp::path!("api" / "health")
         .and(with_db(db.clone()))
+        .and(with_instance(db.clone()))
         .then(api_health);
 
     let stats = warp::path!("api" / "stats")
         .and(with_db(db.clone()))
+        .and(with_instance(db.clone()))
         .and(with_bot_link_cfg(bot_link_cfg.clone()))
         .then(api_stats);
 
     let units = warp::path!("api" / "units")
         .and(with_db(db.clone()))
+        .and(with_instance(db.clone()))
         .then(api_units);
 
     let online = warp::path!("api" / "online")
         .and(with_db(db.clone()))
+        .and(with_instance(db.clone()))
         .then(api_online);
 
     let points = warp::path!("api" / "points")
         .and(with_db(db.clone()))
+        .and(with_instance(db.clone()))
         .then(api_points);
 
     let captures = warp::path!("api" / "captures")
         .and(with_db(db.clone()))
+        .and(with_instance(db.clone()))
         .then(api_captures);
 
     let aircraft_usage = warp::path!("api" / "aircraft-usage")
         .and(with_db(db.clone()))
+        .and(with_instance(db.clone()))
         .and(warp::query::<std::collections::HashMap<std::string::String, std::string::String>>())
         .then(api_aircraft_usage);
 
@@ -3717,6 +4071,25 @@ async fn main() -> Result<()> {
         .and(extract_session_cookie())
         .and(with_db(db.clone()))
         .then(api_admin_rebuild_stats);
+
+    let admin_rebuild_status = warp::path!("api" / "admin" / "rebuild-status")
+        .and(warp::get())
+        .and(extract_session_cookie())
+        .and(with_db(db.clone()))
+        .then(api_admin_rebuild_status);
+
+    let admin_kick = warp::path!("api" / "admin" / "kick")
+        .and(warp::post())
+        .and(extract_session_cookie())
+        .and(warp::body::json::<KickBody>())
+        .and(with_db(db.clone()))
+        .then(api_admin_kick);
+
+    let admin_ucid_aliases_download = warp::path!("api" / "admin" / "ucid-aliases" / "download")
+        .and(warp::get())
+        .and(extract_session_cookie())
+        .and(with_db(db.clone()))
+        .then(api_admin_ucid_aliases_download);
 
     let admin_bot_status = warp::path!("api" / "admin" / "bot" / "status")
         .and(extract_session_cookie())
@@ -3836,6 +4209,7 @@ async fn main() -> Result<()> {
     let cockpit_ewr_report_route = warp::path!("api" / "cockpit" / "ewr" / "report")
         .and(extract_session_cookie())
         .and(warp::query::<std::collections::HashMap<std::string::String, std::string::String>>())
+        .and(with_instance(db.clone()))
         .and(with_db(db.clone()))
         .and(with_bot_link_cfg(bot_link_cfg.clone()))
         .then(api_cockpit_ewr_report);
@@ -3843,6 +4217,7 @@ async fn main() -> Result<()> {
     let cockpit_ewr_intel_route = warp::path!("api" / "cockpit" / "ewr" / "intel")
         .and(extract_session_cookie())
         .and(warp::query::<std::collections::HashMap<std::string::String, std::string::String>>())
+        .and(with_instance(db.clone()))
         .and(with_db(db.clone()))
         .and(with_bot_link_cfg(bot_link_cfg.clone()))
         .then(api_cockpit_ewr_intel);
@@ -3851,6 +4226,7 @@ async fn main() -> Result<()> {
         .and(warp::post())
         .and(extract_session_cookie())
         .and(warp::query::<std::collections::HashMap<std::string::String, std::string::String>>())
+        .and(with_instance(db.clone()))
         .and(with_db(db.clone()))
         .and(with_bot_link_cfg(bot_link_cfg.clone()))
         .then(api_cockpit_ewr_toggle);
@@ -3860,6 +4236,7 @@ async fn main() -> Result<()> {
         .and(extract_session_cookie())
         .and(warp::query::<std::collections::HashMap<std::string::String, std::string::String>>())
         .and(warp::body::json::<EwrUnitsBody>())
+        .and(with_instance(db.clone()))
         .and(with_db(db.clone()))
         .and(with_bot_link_cfg(bot_link_cfg.clone()))
         .then(api_cockpit_ewr_units);
@@ -3867,6 +4244,7 @@ async fn main() -> Result<()> {
     let cockpit_carp_solve_route = warp::path!("api" / "cockpit" / "carp" / "solve")
         .and(extract_session_cookie())
         .and(warp::query::<std::collections::HashMap<std::string::String, std::string::String>>())
+        .and(with_instance(db.clone()))
         .and(with_db(db.clone()))
         .and(with_bot_link_cfg(bot_link_cfg.clone()))
         .then(api_cockpit_carp_solve);
@@ -3874,6 +4252,7 @@ async fn main() -> Result<()> {
     let cockpit_carp_solve_latlon_route = warp::path!("api" / "cockpit" / "carp" / "solve-latlon")
         .and(extract_session_cookie())
         .and(warp::query::<std::collections::HashMap<std::string::String, std::string::String>>())
+        .and(with_instance(db.clone()))
         .and(with_db(db.clone()))
         .and(with_bot_link_cfg(bot_link_cfg.clone()))
         .then(api_cockpit_carp_solve_latlon);
@@ -3883,6 +4262,7 @@ async fn main() -> Result<()> {
         .and(extract_session_cookie())
         .and(warp::query::<std::collections::HashMap<std::string::String, std::string::String>>())
         .and(warp::body::json::<CargoSpawnBody>())
+        .and(with_instance(db.clone()))
         .and(with_db(db.clone()))
         .and(with_bot_link_cfg(bot_link_cfg.clone()))
         .then(api_cockpit_cargo_spawn);
@@ -3891,6 +4271,7 @@ async fn main() -> Result<()> {
         .and(warp::get())
         .and(extract_session_cookie())
         .and(warp::query::<std::collections::HashMap<std::string::String, std::string::String>>())
+        .and(with_instance(db.clone()))
         .and(with_db(db.clone()))
         .and(with_bot_link_cfg(bot_link_cfg.clone()))
         .then(api_cockpit_jtac_list);
@@ -3900,13 +4281,18 @@ async fn main() -> Result<()> {
         .and(extract_session_cookie())
         .and(warp::query::<std::collections::HashMap<std::string::String, std::string::String>>())
         .and(warp::body::json::<JtacActionBody>())
+        .and(with_instance(db.clone()))
         .and(with_db(db.clone()))
         .and(with_bot_link_cfg(bot_link_cfg.clone()))
         .then(api_cockpit_jtac_action);
 
+    // Longer path first — warp matches in .or() order.
     let cockpit_plugin_download_route = warp::path!("api" / "cockpit" / "plugin" / "download")
         .and(warp::get())
         .then(api_cockpit_plugin_download);
+    let cockpit_plugin_info_route = warp::path!("api" / "cockpit" / "plugin")
+        .and(warp::get())
+        .then(api_cockpit_plugin_info);
 
     let trails = warp::path!("api" / "trails")
         .and(with_db(db.clone()))
@@ -3919,16 +4305,14 @@ async fn main() -> Result<()> {
     let srs_cfg_arc: Arc<(Option<String>, String)> =
         Arc::new((effective_srs_url, srs_api_key));
     let srs_route = warp::path!("api" / "srs")
+        .and(with_instance(db.clone()))
         .and(warp::any().map(move || srs_cfg_arc.clone()))
         .then(api_srs);
 
     let admin_cfg_get_route = warp::path!("api" / "admin" / "cfg")
         .and(extract_session_cookie())
         .and(with_db(db.clone()))
-        .and(warp::any().map({
-            let p = engine_config_path.clone();
-            move || p.clone()
-        }))
+        .and(with_instance(db.clone()))
         .then(api_admin_cfg_get);
 
     let admin_cfg_schema_route = warp::path!("api" / "admin" / "cfg" / "schema")
@@ -3941,7 +4325,7 @@ async fn main() -> Result<()> {
         .and(extract_session_cookie())
         .and(warp::body::json::<SaveCfgBody>())
         .and(with_db(db.clone()))
-        .and(warp::any().map(move || engine_config_path.clone()))
+        .and(with_instance(db.clone()))
         .then(api_admin_cfg_post);
 
     let wiki_list_route = warp::path!("api" / "wiki" / "pages")
@@ -3992,7 +4376,8 @@ async fn main() -> Result<()> {
     let api_root_route = warp::path::end().and(warp::get()).map(api_root);
 
     // Box sub-chains to avoid warp filter type overflow
-    let api_routes = rounds
+    let api_routes = instances_route
+        .or(rounds)
         .or(health)
         .or(leaderboard)
         .or(objectives)
@@ -4021,6 +4406,7 @@ async fn main() -> Result<()> {
         .or(cockpit_carp_solve_latlon_route)
         .or(cockpit_jtac_list_route)
         .or(cockpit_plugin_download_route)
+        .or(cockpit_plugin_info_route)
         .or(wiki_list_route)
         .or(wiki_get_route)
         .or(wiki_get_image_route)
@@ -4035,6 +4421,7 @@ async fn main() -> Result<()> {
         .or(admin_perf)
         .or(admin_perf_history)
         .or(admin_banned)
+        .or(admin_ucid_aliases_download)
         .or(admin_ucid_aliases)
         .or(admin_engine_errors)
         .or(admin_bot_status)
@@ -4057,6 +4444,8 @@ async fn main() -> Result<()> {
         .or(admin_purge_empty_rounds)
         .or(admin_delete_round)
         .or(admin_rebuild_stats)
+        .or(admin_rebuild_status)
+        .or(admin_kick)
         .or(admin_ban_route)
         .or(admin_unban_route)
         .or(admin_ucid_merge_route)
@@ -4078,6 +4467,7 @@ async fn main() -> Result<()> {
             .or(admin_bot_mission_pause)
             .or(admin_bot_mission_unpause)
             .boxed())
+        .or(bad_instance)
         .with(cors);
 
     log::info!("API server listening on http://{}", args.listen_address);

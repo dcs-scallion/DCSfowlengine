@@ -408,6 +408,9 @@ pub(crate) fn jtac_filter(lua: MizLua, arg: ArgTriple<JtId, u64, Ucid>) -> Resul
     let ctx = unsafe { Context::get_mut() };
     let filter =
         BitFlags::<UnitTag>::from_bits(arg.snd).map_err(|_| anyhow!("invalid filter bits"))?;
+    if filter.iter().any(|t| !t.is_jtac_filter_choice()) {
+        bail!("that JTAC filter is no longer available");
+    }
     let jtac = get_jtac_mut(&mut ctx.jtac, &arg.fst)?;
     jtac.add_filter(&ctx.db, lua, filter)
         .context("setting jtac target filter")?;
@@ -859,7 +862,7 @@ pub(super) fn add_menu_for_jtac(
             snd: jtac.gid(),
         },
     )?;
-    for (i, tag) in UnitTag::all().iter().enumerate() {
+    for (i, tag) in UnitTag::jtac_filter_choices().enumerate() {
         if (i + 1) % 9 == 0 {
             filter_root =
                 mc.add_submenu_for_group(mizgid, "Next>>".into(), Some(filter_root.clone()))?;

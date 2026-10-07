@@ -46,8 +46,14 @@ struct JtacListEntry {
     pinned: bool,
     filter: Vec<StdString>,
     status: StdString,
-    nearby_artillery: Vec<StdString>,
+    nearby_artillery: Vec<ArtyEntry>,
     nearby_calcm: Vec<CalcmEntry>,
+}
+
+#[derive(Debug, Serialize)]
+struct ArtyEntry {
+    id: StdString,
+    name: StdString,
 }
 
 #[derive(Debug, Serialize)]
@@ -82,21 +88,23 @@ struct JtacActionReq {
     calcm_per: Option<u8>,
 }
 
+/// SELECT JTAC: `1200 (Recon) Player` — unit in (), owner after.
 fn jtac_display_name(ctx: &Context, jtac_id: JtId) -> StdString {
     match jtac_id {
         JtId::Group(gid) => match ctx.db.group(&gid) {
             Err(_) => format!("{gid}"),
             Ok(group) => match &group.origin {
-                DeployKind::Action { name, .. } => format!("{gid}({name})"),
-                DeployKind::Deployed { player, spec, .. } => match ctx.db.player(player) {
-                    Some(player) => {
-                        format!("{gid}({} {})", spec.path.last().unwrap(), player.name)
+                DeployKind::Action { name, .. } => format!("{gid} ({name})"),
+                DeployKind::Deployed { player, spec, .. } => {
+                    let unit = spec.path.last().unwrap();
+                    match ctx.db.player(player) {
+                        Some(player) => format!("{gid} ({unit}) {}", player.name),
+                        None => format!("{gid} ({unit})"),
                     }
-                    None => format!("{gid}({})", spec.path.last().unwrap()),
-                },
+                }
                 DeployKind::Troop { player, spec, .. } => match ctx.db.player(player) {
-                    Some(player) => format!("{gid}({} {})", spec.name, player.name),
-                    None => format!("{gid}({})", spec.name),
+                    Some(player) => format!("{gid} ({}) {}", spec.name, player.name),
+                    None => format!("{gid} ({})", spec.name),
                 },
                 DeployKind::Objective { .. }
                 | DeployKind::ObjectiveDeprecated
@@ -118,9 +126,49 @@ fn jtac_display_name(ctx: &Context, jtac_id: JtId) -> StdString {
                 .get_slot_info(&sl)
                 .map(|ifo| ifo.typ.clone())
                 .unwrap_or_else(|| bfprotocols::cfg::Vehicle::from(""));
-            format!("sl{sl}({typ} {name})")
+            if name.is_empty() {
+                format!("sl{sl} ({typ})")
+            } else {
+                format!("sl{sl} ({typ}) {name}")
+            }
         }
     }
+}
+
+fn artillery_label(ctx: &Context, gid: GroupId) -> (StdString, StdString) {
+    let id = gid.to_string();
+    let name = match ctx.db.group(&gid) {
+        Err(_) => StdString::new(),
+        Ok(group) => match &group.origin {
+            DeployKind::Action { name, .. } => name.to_string(),
+            DeployKind::Deployed { spec, .. } => spec
+                .path
+                .last()
+                .map(|s| s.to_string())
+                .filter(|s| !s.is_empty())
+                .unwrap_or_else(|| group.template_name.to_string()),
+            DeployKind::Troop { spec, .. } => spec.name.to_string(),
+            _ => {
+                if !group.template_name.is_empty() {
+                    group.template_name.to_string()
+                } else if !group.name.is_empty() {
+                    group.name.to_string()
+                } else {
+                    group
+                        .units
+                        .into_iter()
+                        .find_map(|uid| {
+                            ctx.db
+                                .unit(uid)
+                                .ok()
+                                .map(|u| u.typ.0.to_string())
+                        })
+                        .unwrap_or_default()
+                }
+            }
+        },
+    };
+    (id, name)
 }
 
 fn filter_tag_names(bits: BitFlags<UnitTag>) -> Vec<StdString> {
@@ -128,12 +176,12 @@ fn filter_tag_names(bits: BitFlags<UnitTag>) -> Vec<StdString> {
 }
 
 fn parse_filter_tag(name: &str) -> Result<BitFlags<UnitTag>> {
-    for tag in UnitTag::all().iter() {
+    for tag in UnitTag::jtac_filter_choices() {
         if format!("{:?}", tag).eq_ignore_ascii_case(name) {
             return Ok(BitFlags::from(tag));
         }
     }
-    bail!("unknown filter tag {name}")
+    bail!("unknown or unavailable filter tag {name}")
 }
 
 pub(crate) fn list_jtacs_for_ucid(ctx: &Context, ucid: &Ucid) -> Result<StdString> {
@@ -179,7 +227,10 @@ pub(crate) fn list_jtacs_for_ucid(ctx: &Context, ucid: &Ucid) -> Result<StdStrin
             nearby_artillery: jtac
                 .nearby_artillery()
                 .iter()
-                .map(|g| g.to_string())
+                .map(|g| {
+                    let (id, name) = artillery_label(ctx, *g);
+                    ArtyEntry { id, name }
+                })
                 .collect(),
             nearby_calcm: jtac
                 .nearby_calcm()
@@ -208,8 +259,7 @@ pub(crate) fn list_jtacs_for_ucid(ctx: &Context, ucid: &Ucid) -> Result<StdStrin
         })
         .collect();
 
-    let filter_tags: Vec<StdString> = UnitTag::all()
-        .iter()
+    let filter_tags: Vec<StdString> = UnitTag::jtac_filter_choices()
         .map(|t| format!("{:?}", t))
         .collect();
 
