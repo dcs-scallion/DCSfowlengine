@@ -24,7 +24,9 @@
       "srs_url": "http://127.0.0.1:8081",
 
       "//dcs_server_name": "DCSServerBot server name for ?server=<name> addressing.",
-      "dcs_server_name": "[Attrition] Caucasus 1985 SARH"
+      "dcs_server_name": "[Attrition] Caucasus 1985 SARH",
+      "//server_ip": "Public DCS connect address shown in the dashboard top bar.",
+      "server_ip": "78.80.144.178:10308"
     },
     {
       "id": "attrition2",
@@ -38,7 +40,8 @@
       "srs_url": "http://127.0.0.1:8082",
       "//public": "false = test/staging: hidden from public GET /api/instances for non-admins.",
       "public": true,
-      "dcs_server_name": "[Attrition] Caucasus 1985 TA"
+      "dcs_server_name": "[Attrition] Caucasus 1985 TA",
+      "server_ip": "78.80.144.178:10309"
     }
   ]
 }

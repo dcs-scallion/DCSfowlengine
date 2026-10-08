@@ -268,9 +268,11 @@ fn parse_bot_datetime(s: &str) -> Option<chrono::DateTime<chrono::Utc>> {
 /// back to bflib-derived data, or nothing, beats /api/stats breaking
 /// because the bot is down). Backs both the restart countdown and live
 /// weather, which live in the same response.
-async fn fetch_bot_server_info(bot_cfg: &Option<BotLinkConfig>) -> Option<BotServerInfo> {
-    let cfg = bot_cfg.as_ref()?;
-    let result: anyhow::Result<Option<BotServerInfo>> = async {
+async fn fetch_bot_servers(bot_cfg: &Option<BotLinkConfig>) -> Vec<BotServerInfo> {
+    let Some(cfg) = bot_cfg.as_ref() else {
+        return Vec::new();
+    };
+    let result: anyhow::Result<Vec<BotServerInfo>> = async {
         let http = reqwest::Client::new();
         let servers: Vec<BotServerInfo> = http
             .get(format!("{}/servers", cfg.base_url))
@@ -281,14 +283,67 @@ async fn fetch_bot_server_info(bot_cfg: &Option<BotLinkConfig>) -> Option<BotSer
             .json()
             .await
             .map_err(|e| anyhow::anyhow!("DCSServerBot servers response parse failed: {e}"))?;
-        Ok(servers.into_iter().next())
-    }.await;
+        Ok(servers)
+    }
+    .await;
     match result {
         Ok(v) => v,
         Err(e) => {
             log::warn!("DCSServerBot /servers lookup failed: {e:?}");
+            Vec::new()
+        }
+    }
+}
+
+/// Strip decorative / non-ASCII noise so `▌ATTRITION▐ …` still matches bot names.
+fn normalize_bot_server_name(s: &str) -> std::string::String {
+    s.chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || matches!(c, '|' | '/' | '-' | '+') {
+                c.to_ascii_lowercase()
+            } else if c.is_whitespace() {
+                ' '
+            } else {
+                ' '
+            }
+        })
+        .collect::<std::string::String>()
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+/// Prefer the bot row whose `name` matches `want_name` (`dcs_server_name`).
+/// Exact first, then normalized. No match → `None` (keep bflib-local). No want → first row.
+async fn fetch_bot_server_info(
+    bot_cfg: &Option<BotLinkConfig>,
+    want_name: Option<&str>,
+) -> Option<BotServerInfo> {
+    let servers = fetch_bot_servers(bot_cfg).await;
+    if servers.is_empty() {
+        return None;
+    }
+    match want_name {
+        Some(want) => {
+            if let Some(s) = servers.iter().find(|s| s.name == want) {
+                return Some(s.clone());
+            }
+            let want_n = normalize_bot_server_name(want);
+            let mut hits: Vec<BotServerInfo> = servers
+                .iter()
+                .filter(|s| normalize_bot_server_name(&s.name) == want_n)
+                .cloned()
+                .collect();
+            if hits.len() == 1 {
+                return hits.pop();
+            }
+            let names: Vec<&str> = servers.iter().map(|s| s.name.as_str()).collect();
+            log::warn!(
+                "DCSServerBot: no server named {want:?} (normalized {want_n:?}); have {names:?} — using bflib-local restart/weather"
+            );
             None
         }
+        None => servers.into_iter().next(),
     }
 }
 
@@ -664,7 +719,7 @@ async fn api_objectives(
     if is_active {
         match tokio::time::timeout(
             std::time::Duration::from_secs(8),
-            call_engine_rpc_str(&db, "query-objectives", vec![]),
+            call_engine_rpc_str_for(&db, &inst, "query-objectives", vec![]),
         ).await {
             Ok(Ok(json)) => {
                 if let Ok(live) = serde_json::from_str::<Vec<bfprotocols::api::ObjectiveInfo>>(&json) {
@@ -1214,7 +1269,7 @@ async fn api_stats(
         }))
     })?;
 
-    let bot_info = fetch_bot_server_info(&bot_cfg).await;
+    let bot_info = fetch_bot_server_info(&bot_cfg, inst.cfg.dcs_server_name.as_deref()).await;
 
     // DCSServerBot's Scheduler plugin is what actually restarts this server
     // (bflib's own stop_time isn't in play here) -- prefer its restart_time
@@ -2334,7 +2389,7 @@ async fn api_admin_bot_status(
     bot_cfg: Arc<Option<BotLinkConfig>>,
 ) -> std::result::Result<impl warp::Reply, Error> {
     require_admin(session_id, db.clone()).await?;
-    let info = fetch_bot_server_info(&bot_cfg).await;
+    let info = fetch_bot_server_info(&bot_cfg, None).await;
     Ok(warp::reply::json(&serde_json::json!({
         "configured": bot_cfg.is_some(),
         "name": info.as_ref().map(|s| s.name.clone()),
@@ -3571,6 +3626,7 @@ async fn api_instances(
                 "sortie": st.live_sortie_public(),
                 "active_round": active,
                 "dcs_server_name": cfg.dcs_server_name,
+                "server_ip": cfg.server_ip,
                 "public": cfg.public,
             })
         })
@@ -3616,6 +3672,7 @@ fn registry_from_args(args: &Args) -> Result<Registry> {
             engine_config: args.engine_config.clone(),
             srs_url: args.srs_url.clone(),
             dcs_server_name: None,
+            server_ip: None,
             public: true,
         })),
     }

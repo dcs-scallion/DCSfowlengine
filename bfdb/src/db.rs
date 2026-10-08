@@ -1086,6 +1086,7 @@ impl StatsDb {
             engine_config: None,
             srs_url: None,
             dcs_server_name: None,
+            server_ip: None,
             public: true,
         });
         Self::new(&HashMap::new(), db, reg, None, None)

@@ -53,6 +53,9 @@ pub(crate) struct InstanceCfg {
     pub srs_url: Option<String>,
     #[serde(default)]
     pub dcs_server_name: Option<String>,
+    /// Public connect address shown in the dashboard (`host:port`).
+    #[serde(default)]
+    pub server_ip: Option<String>,
     /// When false: omit from public `GET /api/instances` for non-admins.
     #[serde(default = "default_true")]
     pub public: bool,
