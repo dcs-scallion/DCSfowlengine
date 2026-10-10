@@ -1070,17 +1070,19 @@ async fn api_pilot_sorties(
     let data = task::block_in_place(|| -> Result<String> {
         let ucid: dcso3::net::Ucid = ucid.parse().map_err(|e| anyhow::anyhow!("{e:?}"))?;
         let sorties = db.pilot_sorties(&ucid)?;
-        let entries: Vec<_> = sorties.iter().rev().map(|(round_id, _sortie_id, s, crashed)| {
+        let entries: Vec<_> = sorties.iter().rev().map(|(round_id, _sortie_id, s, crashed, restart)| {
             let duration_secs = s.land
                 .map(|l| (l - s.takeoff).num_seconds().max(0))
                 .unwrap_or(0);
+            let restart = *restart && s.land.is_some();
             serde_json::json!({
                 "round_id": round_id.0,
                 "aircraft": s.vehicle.to_string(),
                 "takeoff": s.takeoff.to_rfc3339(),
                 "land": s.land.map(|l| l.to_rfc3339()),
                 "duration_secs": duration_secs,
-                "landed": s.land.is_some() && !*crashed,
+                "landed": s.land.is_some() && !*crashed && !restart,
+                "restart": restart,
             })
         }).collect();
         Ok(serde_json::to_string(&entries)?)

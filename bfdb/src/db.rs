@@ -325,6 +325,9 @@ struct Pilots {
     /// Side table: true = closed as Lost (death / mid-air deslot). Kept separate so
     /// existing bincode `sortie` rows stay readable (no schema change on Sortie).
     sortie_crashed: Tree<(Ucid, RoundId, SortieId), bool>,
+    /// Side table: true = closed by SessionEnd (server/mission restart while airborne).
+    /// Distinct from Lost so Flight Log does not treat restart as a kill/deslot.
+    sortie_restart: Tree<(Ucid, RoundId, SortieId), bool>,
     /// Per-vehicle/round ship kills (parallel to `aggregates.ground_kills` path).
     agg_ship_kills: Tree<(Ucid, Vehicle, RoundId), u32>,
     /// Career ship kills (parallel to `Pilot.total`).
@@ -357,6 +360,7 @@ impl Pilots {
             by_token: Tree::open(db, "by_token")?,
             sortie: Tree::open(db, "sortie")?,
             sortie_crashed: Tree::open(db, "sortie_crashed")?,
+            sortie_restart: Tree::open(db, "sortie_restart")?,
             agg_ship_kills: Tree::open(db, "agg_ship_kills")?,
             pilot_ship_kills: Tree::open(db, "pilot_ship_kills")?,
             agg_ground_air_kills: Tree::open(db, "agg_ground_air_kills")?,
@@ -1984,8 +1988,10 @@ impl StatsDb {
         Ok(())
     }
 
-    /// Close an open sortie at `end`, credit flight hours once. `crashed` marks
-    /// death / mid-air deslot (Flight Log shows Lost, not Landed).
+    /// Close an open sortie at `end`, credit flight hours once.
+    /// `restart` = SessionEnd while airborne (Flight Log: Restart).
+    /// `crashed` = death / mid-air deslot (Flight Log: Lost). Ignored when `restart`.
+    /// Already-closed legs are left alone so Deslot after SessionEnd cannot overwrite Restart.
     fn finalize_sortie(
         &self,
         ucid: Ucid,
@@ -1993,6 +1999,7 @@ impl StatsDb {
         sid: SortieId,
         end: DateTime<Utc>,
         crashed: bool,
+        restart: bool,
     ) -> Result<()> {
         let key = (ucid, round, sid);
         let Some(s) = self.pilots.sortie.get(&key)? else {
@@ -2008,7 +2015,11 @@ impl StatsDb {
         self.pilots.with_sortie(key, |s| {
             s.land = Some(end);
         })?;
+        let crashed = if restart { false } else { crashed };
         self.pilots.sortie_crashed.insert(&key, &crashed)?;
+        if restart {
+            self.pilots.sortie_restart.insert(&key, &true)?;
+        }
         let hours = ((end - takeoff).num_seconds().max(0) as f32) / 3600.0;
         if hours > 0.0 {
             let ac_key = (round, vehicle.to_string());
@@ -2065,7 +2076,7 @@ impl StatsDb {
             sid = best.map(|(id, _)| id);
         }
         if let Some(sid) = sid {
-            self.finalize_sortie(ucid, round, sid, end, crashed)?;
+            self.finalize_sortie(ucid, round, sid, end, crashed, false)?;
         }
         Ok(())
     }
@@ -2096,7 +2107,40 @@ impl StatsDb {
             }
         })?;
         for sid in open {
-            self.finalize_sortie(ucid, round, sid, end, crashed)?;
+            self.finalize_sortie(ucid, round, sid, end, crashed, false)?;
+        }
+        Ok(())
+    }
+
+    /// SessionEnd only: close airborne legs as Restart (not Lost / not Landed).
+    fn finalize_round_open_sorties_restart(
+        &self,
+        round: RoundId,
+        end: DateTime<Utc>,
+    ) -> Result<()> {
+        let mut open: Vec<(Ucid, SortieId)> = Vec::new();
+        for r in self.pilots.sortie.iter() {
+            let ((ucid, rid, sid), s) = r?;
+            if rid == round && s.land.is_none() {
+                open.push((ucid, sid));
+            }
+        }
+        if open.is_empty() {
+            return Ok(());
+        }
+        info!(
+            "SessionEnd: closing {} open sortie(s) as Restart in round {round:?}",
+            open.len()
+        );
+        for (ucid, sid) in open {
+            self.pilots.with_pilot_round_info(ucid, round, |ri| {
+                if let Some(sl) = ri.slot.as_mut() {
+                    if sl.sortie == Some(sid) {
+                        sl.sortie = None;
+                    }
+                }
+            })?;
+            self.finalize_sortie(ucid, round, sid, end, false, true)?;
         }
         Ok(())
     }
@@ -2133,7 +2177,7 @@ impl StatsDb {
                     }
                 }
             })?;
-            self.finalize_sortie(ucid, round, sid, end, true)?;
+            self.finalize_sortie(ucid, round, sid, end, true, false)?;
             debug!(
                 "Connect: closed orphan sortie {sid:?} ucid={ucid:?} round={round:?} takeoff={takeoff} end={end}"
             );
@@ -3287,6 +3331,7 @@ impl StatsDb {
         for k in &keys {
             self.pilots.sortie.remove(k)?;
             let _ = self.pilots.sortie_crashed.remove(k)?;
+            let _ = self.pilots.sortie_restart.remove(k)?;
         }
 
         let mut sk: Vec<(Ucid, RoundId, KillId)> = Vec::new();
@@ -3451,17 +3496,18 @@ impl StatsDb {
     }
 
     /// All sorties for a pilot across all rounds, sorted chronologically.
-    /// Last bool is crashed/Lost (death or mid-air deslot).
-    pub(crate) fn pilot_sorties(&self, ucid: &Ucid) -> Result<Vec<(RoundId, SortieId, Sortie, bool)>> {
+    /// Bools: crashed/Lost, restart/SessionEnd.
+    pub(crate) fn pilot_sorties(
+        &self,
+        ucid: &Ucid,
+    ) -> Result<Vec<(RoundId, SortieId, Sortie, bool, bool)>> {
         let mut result = Vec::new();
         for r in self.pilots.sortie.scan_prefix(ucid)? {
             let ((_, round_id, sortie_id), sortie) = r?;
-            let crashed = self
-                .pilots
-                .sortie_crashed
-                .get(&(*ucid, round_id, sortie_id))?
-                .unwrap_or(false);
-            result.push((round_id, sortie_id, sortie, crashed));
+            let key = (*ucid, round_id, sortie_id);
+            let crashed = self.pilots.sortie_crashed.get(&key)?.unwrap_or(false);
+            let restart = self.pilots.sortie_restart.get(&key)?.unwrap_or(false);
+            result.push((round_id, sortie_id, sortie, crashed, restart));
         }
         // Sort chronologically
         result.sort_by(|a, b| a.2.takeoff.cmp(&b.2.takeoff));
@@ -3982,6 +4028,10 @@ impl StatsDb {
                             time,
                         });
                         self.session.insert(&k, &session)?;
+                        // Airborne at mission/server restart — Restart, not Lost.
+                        // Must run before Deslot/Disconnect; already-closed legs stay as-is
+                        // (eject/deslot penalty remains Lost).
+                        self.finalize_round_open_sorties_restart(ctx.round, time)?;
                     }
                 }
             }
@@ -4372,7 +4422,7 @@ impl StatsDb {
                     debug!("{id} landed with no active sortie -- orphan or replay, ignoring");
                     return Ok(());
                 };
-                self.finalize_sortie(id, ctx.round, sid, time, false)?;
+                self.finalize_sortie(id, ctx.round, sid, time, false, false)?;
                 self.touch_pilot_activity(id, ctx.round, time)?;
             }
             Stat::Life { id, lives } => {
@@ -4588,6 +4638,7 @@ impl StatsDb {
         self.pilots.by_name.clear()?;
         self.pilots.sortie.clear()?;
         self.pilots.sortie_crashed.clear()?;
+        self.pilots.sortie_restart.clear()?;
         self.pilots.agg_ship_kills.clear()?;
         self.pilots.pilot_ship_kills.clear()?;
         self.pilots.agg_ground_air_kills.clear()?;
@@ -4658,6 +4709,7 @@ impl StatsDb {
         self.pilots.by_name.clear()?;
         self.pilots.sortie.clear()?;
         self.pilots.sortie_crashed.clear()?;
+        self.pilots.sortie_restart.clear()?;
         self.pilots.agg_ship_kills.clear()?;
         self.pilots.pilot_ship_kills.clear()?;
         self.pilots.agg_ground_air_kills.clear()?;

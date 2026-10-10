@@ -1322,7 +1322,12 @@ fn build_interactive_html(
 <title>{mn} — objective map</title>
 <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Roboto+Condensed:wght@400;700&display=swap">
 <style>
-body{{margin:0;background:#000;color:#686a6e;font-family:"Roboto Condensed",Roboto,sans-serif;font-size:24px;overflow-x:auto}}
+html{{scrollbar-width:thin;scrollbar-color:#3a3d45 #0a0b0d}}
+body{{margin:0;background:#000;color:#686a6e;font-family:"Roboto Condensed",Roboto,sans-serif;font-size:24px;overflow-x:auto;scrollbar-width:thin;scrollbar-color:#3a3d45 #0a0b0d}}
+html::-webkit-scrollbar,body::-webkit-scrollbar{{width:8px;height:8px}}
+html::-webkit-scrollbar-track,body::-webkit-scrollbar-track{{background:#0a0b0d}}
+html::-webkit-scrollbar-thumb,body::-webkit-scrollbar-thumb{{background:#3a3d45;border-radius:4px}}
+html::-webkit-scrollbar-thumb:hover,body::-webkit-scrollbar-thumb:hover{{background:#52565f}}
 .map-panel{{display:flex;flex-direction:column;gap:{layout_gap}px;width:{panel_w}px;min-width:{panel_w}px;box-sizing:border-box}}
 .map-hdr{{display:flex;justify-content:space-between;align-items:center;gap:8px;width:100%;min-height:{brand_h}px;padding:0;line-height:1;color:#686a6e;font-size:clamp(15px,calc(100vw*24/{panel_w}),24px)}}
 .map-hdr-left{{display:flex;flex-direction:row;align-items:center;gap:0;text-align:left;flex:1 1 auto;min-width:0;overflow:hidden;align-self:stretch}}
