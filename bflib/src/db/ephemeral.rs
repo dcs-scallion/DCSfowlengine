@@ -48,7 +48,7 @@ use bfprotocols::{
     stats::Stat,
 };
 use chrono::prelude::*;
-use compact_str::format_compact;
+use compact_str::{CompactString, format_compact};
 use dcso3::{
     MizLua, Position3, String, Vector2,
     airbase::ClassAirbase,
@@ -170,6 +170,10 @@ pub struct Ephemeral {
     pub(super) pending_dep_farp_static_slot_release: smallvec::SmallVec<[(Side, String); 16]>,
     pub(super) global_pad_templates: FxHashSet<String>,
     force_to_spectators: BTreeMap<DateTime<Utc>, SmallVec<[Ucid; 1]>>,
+    /// Delayed public Server chat (e.g. web-link free-joins after DCSServerBot greetings).
+    pending_server_chat: BTreeMap<DateTime<Utc>, SmallVec<[CompactString; 2]>>,
+    /// Last successful bfdb web-link sync/mark. Gate is fail-open when missing or stale.
+    pub(super) web_link_last_sync: Option<DateTime<Utc>>,
     /// Ejected pilot DCS unit id -> owning player (CSAR).
     pub(super) csar_pilot_unit: FxHashMap<DcsOid<ClassUnit>, Ucid>,
     /// Pilot units to destroy on next CSAR tick (life reset without MizLua).
@@ -330,6 +334,8 @@ impl Default for Ephemeral {
             pending_dep_farp_static_slot_release: smallvec::smallvec![],
             global_pad_templates: FxHashSet::default(),
             force_to_spectators: BTreeMap::default(),
+            pending_server_chat: BTreeMap::default(),
+            web_link_last_sync: None,
             csar_pilot_unit: FxHashMap::default(),
             pending_csar_pilot_destroy: Vec::default(),
             csar_extracting: FxHashMap::default(),
@@ -1036,6 +1042,22 @@ impl Ephemeral {
             .entry(ts)
             .or_default()
             .push(ucid.clone())
+    }
+
+    /// Queue a public Server chat line to send at/after `when`.
+    pub fn schedule_server_chat(&mut self, when: DateTime<Utc>, msg: CompactString) {
+        self.pending_server_chat.entry(when).or_default().push(msg);
+    }
+
+    /// Emit due delayed Server chat lines.
+    pub fn flush_pending_server_chat(&mut self, now: DateTime<Utc>) {
+        let keep = self.pending_server_chat.split_off(&now);
+        let due = mem::replace(&mut self.pending_server_chat, keep);
+        for (_, msgs) in due {
+            for msg in msgs {
+                self.msgs.send(crate::msgq::MsgTyp::Chat(None), msg);
+            }
+        }
     }
 
     pub(super) fn reserve_player_spawn_pad(

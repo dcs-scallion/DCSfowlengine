@@ -73,6 +73,17 @@ pub enum SlotAuth {
     AirborneDeslotBlocked {
         remaining_secs: u32,
     },
+    /// Unit/MultiCrew blocked until dashboard `-linkme` (free joins exhausted).
+    WebLinkRequired,
+}
+
+/// Persisted dashboard link / free-join counter per UCID.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct WebLinkGate {
+    #[serde(default)]
+    pub linked: bool,
+    #[serde(default)]
+    pub free_joins_used: u32,
 }
 
 pub enum RegErr {
@@ -896,6 +907,163 @@ impl Db {
             .map(|sifo| sifo.miz_gid)
     }
 
+    fn web_link_blocks_aircraft(&self, ucid: &Ucid) -> bool {
+        if self.ephemeral.cfg.web_link_free_joins == 0 {
+            return false;
+        }
+        // CFG admins bypass aircraft lock (ops); chat must not claim they are locked.
+        if self.ephemeral.cfg.admins.contains_key(ucid) {
+            return false;
+        }
+        let free = self.ephemeral.cfg.web_link_free_joins;
+        match self.persisted.web_link_gates.get(ucid) {
+            Some(g) if g.linked => false,
+            Some(g) => g.free_joins_used >= free,
+            None => false,
+        }
+    }
+
+    fn web_link_status_msg(&self, ucid: &Ucid, player_name: &str) -> Option<CompactString> {
+        let free = self.ephemeral.cfg.web_link_free_joins;
+        if free == 0 {
+            return None;
+        }
+        if self.ephemeral.cfg.admins.contains_key(ucid) {
+            return None;
+        }
+        let url = self.ephemeral.cfg.web_link_dashboard_url.as_str();
+        let (linked, used) = match self.persisted.web_link_gates.get(ucid) {
+            Some(g) => (g.linked, g.free_joins_used),
+            None => (false, 0),
+        };
+        if linked {
+            return None;
+        }
+        let remaining = free.saturating_sub(used);
+        if remaining > 0 {
+            Some(format_compact!(
+                "{player_name}, Free joins left: {remaining} of {free} (this join counted). Link for stats and later aircraft access: {url} → Register or Login → copy claim code → DCS chat: -linkme CODE"
+            ))
+        } else {
+            Some(format_compact!(
+                "{player_name}, Free joins used up ({used}/{free}). Aircraft slots locked until linked: {url} → Register or Login → copy claim code → DCS chat: -linkme CODE. Combined Arms still OK."
+            ))
+        }
+    }
+
+    /// Chat hint for unlinked players (no free-join bump).
+    pub fn web_link_status_hint(&self, ucid: &Ucid, player_name: &str) -> Option<CompactString> {
+        self.web_link_status_msg(ucid, player_name)
+    }
+
+    /// Bump free-join counter on a real server connect; returns chat status.
+    pub fn web_link_on_connect(&mut self, ucid: &Ucid, player_name: &str) -> Option<CompactString> {
+        let free = self.ephemeral.cfg.web_link_free_joins;
+        if free == 0 {
+            info!("web-link connect {ucid}: skipped (web_link_free_joins=0)");
+            return None;
+        }
+        if self.ephemeral.cfg.admins.contains_key(ucid) {
+            info!("web-link connect {ucid}: skipped (CFG admin bypass)");
+            return None;
+        }
+        let gate = match self.persisted.web_link_gates.get_mut_cow(ucid) {
+            Some(g) => g,
+            None => {
+                self.persisted
+                    .web_link_gates
+                    .insert_cow(*ucid, WebLinkGate::default());
+                self.persisted.web_link_gates.get_mut_cow(ucid).unwrap()
+            }
+        };
+        if gate.linked {
+            info!("web-link connect {ucid}: skipped (already linked in campaign gate)");
+            return None;
+        }
+        gate.free_joins_used = gate.free_joins_used.saturating_add(1);
+        self.ephemeral.dirty();
+        let msg = self.web_link_status_msg(ucid, player_name);
+        info!(
+            "web-link connect {ucid}: free_joins_used={} msg={}",
+            self.persisted
+                .web_link_gates
+                .get(ucid)
+                .map(|g| g.free_joins_used)
+                .unwrap_or(0),
+            msg.is_some()
+        );
+        msg
+    }
+
+    pub fn mark_web_linked(&mut self, ucid: &Ucid) {
+        let gate = match self.persisted.web_link_gates.get_mut_cow(ucid) {
+            Some(g) => g,
+            None => {
+                self.persisted
+                    .web_link_gates
+                    .insert_cow(*ucid, WebLinkGate::default());
+                self.persisted.web_link_gates.get_mut_cow(ucid).unwrap()
+            }
+        };
+        if !gate.linked {
+            gate.linked = true;
+            self.ephemeral.dirty();
+        }
+        self.ephemeral.web_link_last_sync = Some(Utc::now());
+    }
+
+    /// Admin unlink: clear linked flag and free-join counter for this UCID.
+    pub fn clear_web_linked(&mut self, ucid: &Ucid) {
+        let Some(gate) = self.persisted.web_link_gates.get_mut_cow(ucid) else {
+            return;
+        };
+        if gate.linked || gate.free_joins_used != 0 {
+            gate.linked = false;
+            gate.free_joins_used = 0;
+            self.ephemeral.dirty();
+        }
+    }
+
+    pub fn sync_web_linked(&mut self, linked: &[Ucid]) {
+        self.ephemeral.web_link_last_sync = Some(Utc::now());
+        let linked_set: FxHashSet<Ucid> = linked.iter().copied().collect();
+        for ucid in &linked_set {
+            let gate = match self.persisted.web_link_gates.get_mut_cow(ucid) {
+                Some(g) => g,
+                None => {
+                    self.persisted
+                        .web_link_gates
+                        .insert_cow(*ucid, WebLinkGate::default());
+                    self.persisted.web_link_gates.get_mut_cow(ucid).unwrap()
+                }
+            };
+            if !gate.linked {
+                gate.linked = true;
+                self.ephemeral.dirty();
+            }
+        }
+        // Admin unlink / dashboard detach: full sync must clear stale linked flags.
+        let stale: SmallVec<[Ucid; 8]> = self
+            .persisted
+            .web_link_gates
+            .into_iter()
+            .filter_map(|(ucid, g)| {
+                if g.linked && !linked_set.contains(ucid) {
+                    Some(*ucid)
+                } else {
+                    None
+                }
+            })
+            .collect();
+        for ucid in stale {
+            if let Some(gate) = self.persisted.web_link_gates.get_mut_cow(&ucid) {
+                gate.linked = false;
+                self.ephemeral.dirty();
+                info!("web-link-sync: cleared stale linked for {ucid}");
+            }
+        }
+    }
+
     pub fn try_occupy_slot(
         &mut self,
         lua: MizLua,
@@ -915,6 +1083,8 @@ impl Db {
         if exits_aircraft {
             self.stash_aircraft_deslot_snapshot(ucid);
         }
+        let aircraft_blocked = matches!(slot, SlotId::Unit(_) | SlotId::MultiCrew(_, _))
+            && self.web_link_blocks_aircraft(ucid);
         let player = match self.persisted.players.get_mut_cow(ucid) {
             Some(player) => player,
             None => {
@@ -959,6 +1129,9 @@ impl Db {
                 }
             }
             SlotId::Unit(_) | SlotId::MultiCrew(_, _) => {
+                if aircraft_blocked {
+                    return SlotAuth::WebLinkRequired;
+                }
                 if self.ephemeral.slot_info.contains_key(&slot) {
                     self.try_occupy_slot_deferred(lua, time, ucid, slot)
                 } else if self.ephemeral.dep_farp_pool_slot_ids.contains(&slot) {
@@ -979,6 +1152,9 @@ impl Db {
         ucid: &Ucid,
         slot: SlotId,
     ) -> SlotAuth {
+        if self.web_link_blocks_aircraft(ucid) {
+            return SlotAuth::WebLinkRequired;
+        }
         let sifo = match self.ephemeral.slot_info.get(&slot) {
             None => return SlotAuth::Denied,
             Some(sifo) => sifo,

@@ -20,7 +20,7 @@
 -- DCS dxgui Window/WebViewWidget have no LuaLS stubs; calls are guarded with pcall.
 ---@diagnostic disable: undefined-field, need-check-nil
 
-local ATTRITION_COCKPIT_VERSION = "1.0.32"
+local ATTRITION_COCKPIT_VERSION = "1.0.33"
 
 local net = require('net')
 
@@ -54,7 +54,9 @@ local DEFAULTS = {
     -- Public dashboard origin that serves /cockpit (Caddy + bfweb). Not bfdb :8880.
     url = "https://stats.attrition.cz/cockpit",
     opacity = 0.75,
-    open_on_radio_menu = true,
+    -- Never tie overlay show/hide to the DCS radio menu (LAlt+\) — Control Panel
+    -- uses only its own hotkeys (toggle / opacity / click-through).
+    open_on_radio_menu = false,
     open_on_start = true,
     -- Overlay only on Attrition DCS hosts. Match net.get_server_host() against
     -- allowed_hosts (IP / host / host:port, or suffix like ".attrition.cz"),
@@ -68,8 +70,9 @@ local DEFAULTS = {
         "attrition",
     },
     hotkeys = {
+        -- Show / hide / wake-from-sleep (same chord). Empty hide = no Esc steal.
         toggle = "Ctrl+Shift+J",
-        hide = "Escape",
+        hide = "",
         opacity_up = "Ctrl+Shift+O",
         opacity_down = "Ctrl+Shift+L",
         click_through = "Ctrl+Shift+T",
@@ -214,10 +217,12 @@ load_config()
 -- Legacy compact mode removed — sleep is the only minimize path.
 cfg.compacted = nil
 cfg.compact_size = nil
--- Reload is toolbar-only (no Ctrl+Alt+R).
-if type(cfg.hotkeys) == "table" then
-    cfg.hotkeys.reload = nil
-end
+-- 1.0.33+: Control Panel must not share radio-menu / Escape with DCS.
+cfg.open_on_radio_menu = false
+if type(cfg.hotkeys) ~= "table" then cfg.hotkeys = {} end
+cfg.hotkeys.reload = nil
+cfg.hotkeys.hide = ""
+save_config()
 
 local function detect_vr()
     if cfg.vr == "on" then return true end

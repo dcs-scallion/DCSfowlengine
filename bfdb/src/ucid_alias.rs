@@ -279,6 +279,7 @@ pub fn apply_to_stat(stat: &mut Stat, table: &UcidAliasTable, event_ts: DateTime
         | Stat::Life { id, .. }
         | Stat::Points { id, .. }
         | Stat::Bind { id, .. }
+        | Stat::WebClaim { id, .. }
         | Stat::PilotXp { id, .. } => map_ucid(id, table, event_ts),
         Stat::PointsTransfer { from, to, .. } => {
             map_ucid(from, table, event_ts);

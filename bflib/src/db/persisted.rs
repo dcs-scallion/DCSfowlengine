@@ -20,7 +20,7 @@ use super::{
     dynamic_cargo::DynamicCargoCrate,
     group::{SpawnedGroup, SpawnedUnit},
     objective::Objective,
-    player::Player,
+    player::{Player, WebLinkGate},
     Map, MapM, MapS, Set, SetM, SetS,
 };
 use bfprotocols::db::{
@@ -51,6 +51,9 @@ pub struct Persisted {
     pub objectives_by_name: MapM<String, ObjectiveId>,
     pub objectives_by_group: MapM<GroupId, ObjectiveId>,
     pub players: Map<Ucid, Player>,
+    /// Dashboard `-linkme` gate (persists across reconnects / mission reloads).
+    #[serde(default)]
+    pub web_link_gates: Map<Ucid, WebLinkGate>,
     #[serde(default)]
     pub logistics_hubs: SetS<ObjectiveId>,
     #[serde(default)]

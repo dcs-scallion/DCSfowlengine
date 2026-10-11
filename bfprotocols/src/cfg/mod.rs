@@ -1171,6 +1171,14 @@ fn default_lock_sides() -> bool {
     true
 }
 
+fn default_web_link_free_joins() -> u32 {
+    10
+}
+
+fn default_web_link_dashboard_url() -> String {
+    String::from("https://stats.attrition.cz/")
+}
+
 fn default_limited_lives() -> bool {
     true
 }
@@ -2406,6 +2414,13 @@ pub struct Cfg {
     /// choose for the duration of the round
     #[serde(default = "default_lock_sides")]
     pub lock_sides: bool,
+    /// Free server joins before dashboard `-linkme` is required for Unit/MultiCrew
+    /// slots. 0 disables the gate. Enforcement is fail-open when bfdb is unreachable.
+    #[serde(default = "default_web_link_free_joins")]
+    pub web_link_free_joins: u32,
+    /// URL shown in chat when the web-link gate blocks an aircraft slot.
+    #[serde(default = "default_web_link_dashboard_url")]
+    pub web_link_dashboard_url: String,
     /// how many times a user may switch sides in a given round,
     /// or None for unlimited side switches
     #[serde(default)]

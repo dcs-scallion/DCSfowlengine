@@ -536,6 +536,13 @@ fn on_player_try_connect(
         return Ok(Some(String::from(format_compact!("{e}"))));
     }
     ctx.db.player_connected(ucid, name.clone());
+    if let Some(msg) = ctx.db.web_link_on_connect(&ucid, name.as_str()) {
+        // After DCSServerBot greetings (restart / unmatched -linkme), typically ~same second.
+        ctx.db.ephemeral.schedule_server_chat(
+            Utc::now() + Duration::seconds(WEB_LINK_CONNECT_MSG_DELAY_SECS),
+            msg,
+        );
+    }
     let side = ctx.db.player(&ucid).map(|p| p.side).filter(|s| matches!(s, Side::Blue | Side::Red));
     ctx.do_bg_task(Task::Stat(Stat::Connect { id: ucid, addr, name, side }));
     record_perf(&mut Arc::make_mut(&mut unsafe { Perf::get_mut() }.inner).dcs_hooks, ts);
@@ -615,6 +622,18 @@ fn process_slot_rejection(ctx: &mut Context, id: PlayerId, ucid: Ucid, rej: Slot
                 format_compact!("cannot switch to observer/spectator slots while airborne")
             };
             ctx.db.ephemeral.msgs().send(MsgTyp::Chat(Some(id)), msg);
+        }
+        SlotAuth::WebLinkRequired => {
+            let url = ctx.db.ephemeral.cfg.web_link_dashboard_url.as_str();
+            let pname = ctx
+                .connected
+                .get(&id)
+                .map(|p| p.name.as_str())
+                .unwrap_or("Pilot");
+            let msg = format_compact!(
+                "{pname}, Aircraft locked — free joins used up. Link first: {url} → Register or Login → copy claim code → DCS chat: -linkme CODE. Combined Arms still OK."
+            );
+            ctx.db.ephemeral.msgs().send(MsgTyp::Chat(None), msg);
         }
         SlotAuth::NotRegistered(_) => warn!("unexpected NotRegistered"),
         SlotAuth::Yes(_) => warn!("slot was not rejected!"),
@@ -845,6 +864,8 @@ fn notify_airborne_observer_penalty(
 }
 
 const AIRBORNE_DESLOT_PENALTY_DEBOUNCE: Duration = Duration::seconds(1);
+/// Let DCSServerBot finish connect greetings before Fowl free-joins chat.
+const WEB_LINK_CONNECT_MSG_DELAY_SECS: i64 = 12;
 
 fn penalize_airborne_exit(
     ctx: &mut Context,
@@ -2948,6 +2969,7 @@ fn run_timed_events(
         error!("failed to run jtac commands {e:?}")
     }
     let now = Utc::now();
+    ctx.db.ephemeral.flush_pending_server_chat(now);
     let max_rate = ctx.db.ephemeral.cfg.max_msgs_per_second;
     if let Err(e) = ctx.db.process_markup_frame(lua, max_rate) {
         error!("could not process markup frame {e:?}");
@@ -3197,6 +3219,13 @@ fn delayed_init_miz(lua: MizLua) -> Result<()> {
             format_compact!("Welcome, {}! Type -help for commands.", name)
         };
         ctx.db.ephemeral.msgs().send(MsgTyp::Chat(Some(id)), welcome);
+        // Status only — do not bump free joins on mission-load reconnect.
+        if let Some(msg) = ctx.db.web_link_status_hint(&ucid, name.as_str()) {
+            ctx.db.ephemeral.schedule_server_chat(
+                Utc::now() + Duration::seconds(WEB_LINK_CONNECT_MSG_DELAY_SECS),
+                msg,
+            );
+        }
     }
     info!("starting timed events");
     ctx.db.refresh_csar_after_load(lua);

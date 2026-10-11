@@ -2,10 +2,9 @@
 # FOWL ENGINE SERVICE STARTER
 # ==========================================================
 
-# DCS instance's Saved Games folder -- the one DCS/bflib actually run under
-# (bflib writes its Logs/state here at runtime). Everything below is a
-# subfolder of this, not the old, unused "server_2" folder.
-$dcsWriteDir = "C:\Users\ATPAdmin\Saved Games\DCS"
+# Primary DCS write dir (S1). bfdb.exe / netidx / campaign branding live here.
+# S2 is `DCS.dcs_serverrelease_2` and is wired via $instancesPath (not this var).
+$dcsWriteDir = "C:\Users\Robo\Saved Games\DCS.dcs_serverrelease"
 
 # Path to the netidx resolver config. Only used when $netidxBase below is
 # non-empty. One-time setup: copy netidx.exe next to bfdb.exe / campaign CFG
@@ -104,17 +103,23 @@ $corsOrigins = @()
 # do NOT put the sortie in this value. Leave blank to run bfdb without
 # netidx (JSONL stats still work; LIVE badge / engine RPC / engine logs will not).
 # One-time setup: netidx.exe in $dcsWriteDir (beside bfdb.exe / CFG), resolver
-# at netidx\netidx-resolver.json, and %APPDATA%\netidx\client.json on BOTH the
-# bfdb account and the DCS account (see netidx\netidx-client.json.example).
+# at netidx\netidx-resolver.json. Prefer a client JSON next to bfdb (set
+# NETIDX_CFG below / instances.json netidx_config). %APPDATA%\netidx\client.json
+# is still required for the DCS account that loads bflib (see
+# netidx\netidx-client.json.example).
 $netidxBase = "/local/fowl/campaign"
+$netidxClientConfig = Join-Path $PSScriptRoot "netidx\netidx-client.json"
+if (-not (Test-Path $netidxClientConfig)) {
+    $netidxClientConfig = Join-Path $dcsWriteDir "netidx-client.json"
+}
 
-# Multi-instance (optional): path to instances.json (see instances.sample.json).
-# When set, bfdb is started with --instances and the flat --base / --stats-jsonl /
-# --stats-dir / --engine-config / --srs-url flags below are NOT passed (those
-# live inside the instances file instead). Leave blank for today's single-server
-# launch (one synthetic instance id "default").
-# $instancesPath = Join-Path $dcsWriteDir "instances.json"
-$instancesPath = ""
+# Multi-instance: S1 + S2 each have their own netidx_base / stats / CFG.
+# Free-joins counters stay per-server (bflib campaign gate + that server's CFG).
+# This file makes admin unlink + web-link-sync reach BOTH engines.
+$instancesPath = Join-Path $PSScriptRoot "instances.json"
+if (-not (Test-Path -LiteralPath $instancesPath)) {
+    $instancesPath = Join-Path $dcsWriteDir "instances.json"
+}
 
 # ==========================================================
 # Secrets: bfsystem.ps1 is tracked in git (public repo). $adminPassword lives
@@ -146,6 +151,11 @@ function Start-FowlStats {
     Write-Host "Cleaning up existing processes..." -ForegroundColor Gray
     Stop-Process -Name "bfdb" -Force -ErrorAction SilentlyContinue
     Get-Job -Name "DBEngine" -ErrorAction SilentlyContinue | Remove-Job -Force -ErrorAction SilentlyContinue
+    $deadline = (Get-Date).AddSeconds(8)
+    while ((Get-Process -Name "bfdb" -ErrorAction SilentlyContinue) -and (Get-Date) -lt $deadline) {
+        Start-Sleep -Milliseconds 250
+        Stop-Process -Name "bfdb" -Force -ErrorAction SilentlyContinue
+    }
 
     # Only recycle the netidx resolver if it's NOT already serving. Killing a
     # healthy resolver drops bflib's publisher inside DCS for ~60s (its
@@ -165,11 +175,20 @@ function Start-FowlStats {
         New-Item -ItemType Directory -Path $dbPath | Out-Null
         Write-Host "Created DB directory: $dbPath" -ForegroundColor Gray
     }
+    if ($netidxBase -ne "" -and -not (Test-Path $netidxClientConfig)) {
+        $example = Join-Path $PSScriptRoot "netidx\netidx-client.json.example"
+        if (Test-Path $example) {
+            Copy-Item $example $netidxClientConfig
+            Write-Host "Wrote $netidxClientConfig from example" -ForegroundColor Gray
+        } else {
+            Write-Host "Missing netidx client config: $netidxClientConfig (and no example at $example)" -ForegroundColor Red
+        }
+    }
 
     # bfdb's --base needs a running netidx resolver to subscribe to, and
     # bflib (inside DCS) needs one to publish to -- start it first so it's
     # up before bfdb tries to connect. netidx.exe lives next to bfdb.exe / CFG
-    # ($dcsWriteDir); %APPDATA%\netidx\client.json must exist for this account.
+    # ($dcsWriteDir). Job sets NETIDX_CFG to $netidxClientConfig.
     if ($netidxBase -ne "" -and $resolverUp) {
         Write-Host "Skipping netidx resolver start -- already up on 127.0.0.1:4564." -ForegroundColor Gray
     }
@@ -199,6 +218,9 @@ function Start-FowlStats {
     Write-Host "Starting bfdb..." -ForegroundColor Cyan
 
     Start-Job -Name "DBEngine" -ScriptBlock {
+        if ($using:netidxClientConfig -ne "" -and (Test-Path -LiteralPath $using:netidxClientConfig)) {
+            $env:NETIDX_CFG = $using:netidxClientConfig
+        }
         $argList = @(
             "--db",             $using:dbPath,
             "--config",         $using:configPath,

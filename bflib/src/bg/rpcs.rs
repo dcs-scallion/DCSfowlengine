@@ -54,6 +54,11 @@ pub struct Rpcs {
     _resolve_player_id: Proc,
     _jtac_list: Proc,
     _jtac_action: Proc,
+    _player_side_info: Proc,
+    _player_side_switch: Proc,
+    _mark_web_linked: Proc,
+    _clear_web_linked: Proc,
+    _web_link_sync: Proc,
 }
 
 async fn wait_task(mut ch: mpsc::Receiver<(RpcCall, oneshot::Receiver<Value>)>) {
@@ -593,6 +598,126 @@ impl Rpcs {
             ucid: Chars = Value::Null; "The calling player's ucid",
             body: Chars = Value::Null; "JSON object with jtac_id, action, and action params"
         )?;
+        let _q = Arc::clone(&q);
+        let player_side_info = define_rpc!(
+            publisher,
+            base.append("player-side-info"),
+            "Return a player's side and remaining side_switches (JSON)",
+            |mut c: RpcCall, ucid: Chars| {
+                let (tx, rx) = oneshot::channel();
+                let ucid = match Ucid::from_str(&ucid) {
+                    Ok(ucid) => ucid,
+                    Err(e) => {
+                        c.reply.send(Value::Error(format!("{e:?}").into()));
+                        return None
+                    }
+                };
+                _q.push((AdminCommand::PlayerSideInfo { ucid }, tx));
+                Some((c, rx))
+            },
+            Some(wait.clone()),
+            ucid: Chars = Value::Null; "Player UCID"
+        )?;
+        let _q = Arc::clone(&q);
+        let player_side_switch = define_rpc!(
+            publisher,
+            base.append("player-side-switch"),
+            "Player self side-switch respecting CFG side_switches limits",
+            |mut c: RpcCall, ucid: Chars, side: Chars| {
+                let (tx, rx) = oneshot::channel();
+                let ucid = match Ucid::from_str(&ucid) {
+                    Ok(ucid) => ucid,
+                    Err(e) => {
+                        c.reply.send(Value::Error(format!("{e:?}").into()));
+                        return None
+                    }
+                };
+                let side = match Side::from_str(&side) {
+                    Ok(side) => side,
+                    Err(e) => {
+                        c.reply.send(Value::Error(format!("{e:?}").into()));
+                        return None
+                    }
+                };
+                _q.push((AdminCommand::PlayerSideSwitch { ucid, side }, tx));
+                Some((c, rx))
+            },
+            Some(wait.clone()),
+            ucid: Chars = Value::Null; "Player UCID",
+            side: Chars = Value::Null; "Blue or Red"
+        )?;
+        let _q = Arc::clone(&q);
+        let mark_web_linked = define_rpc!(
+            publisher,
+            base.append("mark-web-linked"),
+            "Mark a UCID as dashboard-linked (from bfdb after -linkme)",
+            |mut c: RpcCall, ucid: Chars| {
+                let (tx, rx) = oneshot::channel();
+                let ucid = match Ucid::from_str(&ucid) {
+                    Ok(ucid) => ucid,
+                    Err(e) => {
+                        c.reply.send(Value::Error(format!("{e:?}").into()));
+                        return None
+                    }
+                };
+                _q.push((AdminCommand::MarkWebLinked { ucid }, tx));
+                Some((c, rx))
+            },
+            Some(wait.clone()),
+            ucid: Chars = Value::Null; "Player UCID"
+        )?;
+        let _q = Arc::clone(&q);
+        let clear_web_linked = define_rpc!(
+            publisher,
+            base.append("clear-web-linked"),
+            "Admin: clear dashboard-linked flag and free-join counter for a UCID",
+            |mut c: RpcCall, ucid: Chars| {
+                let (tx, rx) = oneshot::channel();
+                let ucid = match Ucid::from_str(&ucid) {
+                    Ok(ucid) => ucid,
+                    Err(e) => {
+                        c.reply.send(Value::Error(format!("{e:?}").into()));
+                        return None
+                    }
+                };
+                _q.push((AdminCommand::ClearWebLinked { ucid }, tx));
+                Some((c, rx))
+            },
+            Some(wait.clone()),
+            ucid: Chars = Value::Null; "Player UCID"
+        )?;
+        let _q = Arc::clone(&q);
+        let web_link_sync = define_rpc!(
+            publisher,
+            base.append("web-link-sync"),
+            "Heartbeat: JSON array of linked UCIDs; enables web-link enforcement",
+            |mut c: RpcCall, ucids: Chars| {
+                let (tx, rx) = oneshot::channel();
+                let parsed: Result<Vec<std::string::String>, _> =
+                    serde_json::from_str(ucids.as_ref());
+                let list = match parsed {
+                    Ok(v) => v,
+                    Err(e) => {
+                        c.reply.send(Value::Error(format!("invalid ucids json: {e}").into()));
+                        return None
+                    }
+                };
+                let mut out = Vec::with_capacity(list.len());
+                for s in list {
+                    match Ucid::from_str(&s) {
+                        Ok(u) => out.push(u),
+                        Err(e) => {
+                            c.reply.send(Value::Error(format!("bad ucid {s}: {e:?}").into()));
+                            return None
+                        }
+                    }
+                }
+                _q.push((AdminCommand::WebLinkSync { ucids: out }, tx));
+                Some((c, rx))
+            },
+            Some(wait.clone()),
+            ucids: Chars = Value::Null; "JSON array of linked UCID strings"
+        )?;
         Ok(Self {
             _reduce_inventory: reduce_inventory,
             _transfer_supply: transfer_supply,
@@ -627,6 +752,11 @@ impl Rpcs {
             _resolve_player_id: resolve_player_id,
             _jtac_list: jtac_list,
             _jtac_action: jtac_action,
+            _player_side_info: player_side_info,
+            _player_side_switch: player_side_switch,
+            _mark_web_linked: mark_web_linked,
+            _clear_web_linked: clear_web_linked,
+            _web_link_sync: web_link_sync,
         })
     }
 }

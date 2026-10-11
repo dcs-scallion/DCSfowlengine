@@ -2159,6 +2159,8 @@ impl Default for Cfg {
             calcm_mission_range: 600000,
             calcm_mission: true,
             lock_sides: true,
+            web_link_free_joins: 10,
+            web_link_dashboard_url: String::from("https://stats.attrition.cz/"),
             airborne_deslot_block: true,
             airborne_deslot_penalty_secs: 300,
             airborne_deslot_penalty_points: 0,

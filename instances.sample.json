@@ -10,6 +10,8 @@
 
       "//base": "netidx_base from THIS instance's engine CFG. Two instances must never share one.",
       "base": "/local/fowl/campaign",
+      "//netidx_config": "Optional. Absolute path to netidx client JSON (see netidx/netidx-client.json.example). Prefer this over %APPDATA%\\netidx\\client.json so Start-Job / services do not depend on the interactive profile.",
+      "netidx_config": "C:\\Users\\Robo\\Saved Games\\DCS.dcs_serverrelease\\netidx-client.json",
       "//sortie": "Leave null. Hint only until the engine reports in.",
       "sortie": null,
 
@@ -24,14 +26,15 @@
       "srs_url": "http://127.0.0.1:8081",
 
       "//dcs_server_name": "DCSServerBot server name for ?server=<name> addressing.",
-      "dcs_server_name": "[Attrition] Caucasus 1985 SARH",
+      "dcs_server_name": "▌ATTRITION▐ Persistent 24/7 Strategic PvP | BETA▐",
       "//server_ip": "Public DCS connect address shown in the dashboard top bar.",
       "server_ip": "78.80.144.178:10308"
     },
     {
       "id": "attrition2",
       "label": "Attrition #2 (staging)",
-      "base": "/local/fowl/campaign2",
+      "base": "/local/fowl/campaign-ta",
+      "netidx_config": "C:\\Users\\Robo\\Saved Games\\DCS.dcs_serverrelease\\netidx-client.json",
       "sortie": null,
       "stats_jsonl": "C:\\Users\\Robo\\Saved Games\\DCS.dcs_serverrelease_2\\Logs\\stats.jsonl",
       "stats_dir": "C:\\Users\\Robo\\Saved Games\\DCS.dcs_serverrelease_2\\Logs\\stats",
@@ -40,7 +43,7 @@
       "srs_url": "http://127.0.0.1:8082",
       "//public": "false = test/staging: hidden from public GET /api/instances for non-admins.",
       "public": true,
-      "dcs_server_name": "[Attrition] Caucasus 1985 TA",
+      "dcs_server_name": "▌ATTRITION▐ Persistent 24/7 Strategic PvE | TA | BETA▐",
       "server_ip": "78.80.144.178:10309"
     }
   ]

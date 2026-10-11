@@ -27,7 +27,10 @@ use warp::{
 mod db;
 mod db_id;
 mod instance;
+mod pilot_public;
+mod squadrons;
 mod ucid_alias;
+mod web_auth;
 
 use crate::db::InstanceState;
 use crate::instance::{InstanceCfg, InstanceId, Registry, DEFAULT_INSTANCE};
@@ -549,58 +552,73 @@ async fn api_rounds(
 }
 
 /// GET /api/leaderboard — all-time pilot aggregates for one instance (`?instance=`).
+/// Requires login + completed -linkme (UCID), or admin.
 async fn api_leaderboard(
+    session_id: Option<Uuid>,
     db: StatsDb,
     inst: Inst,
 ) -> std::result::Result<impl warp::Reply, Error> {
+    let Some(id) = session_id else {
+        return Err(anyhow::anyhow!("not logged in").into());
+    };
+    let session = task::block_in_place(|| db.get_session(id))?
+        .ok_or_else(|| anyhow::anyhow!("session expired"))?;
+    if !session.is_admin {
+        let _ = session_ucid(&db, &session).ok_or_else(|| {
+            anyhow::anyhow!("account not linked — type -linkme <code> in DCS chat")
+        })?;
+    }
     let data = task::block_in_place(|| -> Result<String> {
         // All-time within the selected DCS server (not merged across instances).
         let pilots = db.pilot_leaderboard(None, Some(&inst.id))?;
-        let entries: Vec<_> = pilots
-            .iter()
-            .map(|(ucid, name, agg)| {
-                let side = db
-                    .pilot_current_side(ucid)
-                    .ok()
-                    .flatten()
-                    .filter(|s| matches!(s, dcso3::coalition::Side::Blue | dcso3::coalition::Side::Red))
-                    .map(|s| format!("{s:?}"));
-                serde_json::json!({
-                    "ucid": ucid.to_string(),
-                    "name": name.to_string(),
-                    "side": side,
-                    "air_kills": agg.air_kills,
-                    "ground_kills": agg.ground_kills,
-                    "ship_kills": agg.ship_kills,
-                    "ground_air_kills": agg.ground_air_kills,
-                    "ground_ground_kills": agg.ground_ground_kills,
-                    "ground_ship_kills": agg.ground_ship_kills,
-                    "csar": agg.csar,
-                    "captures": agg.captures,
-                    "repairs": agg.repairs,
-                    "supply_transfers": agg.supply_transfers,
-                    "troops": agg.troops,
-                    "farps": agg.farps,
-                    "deploys": agg.deploys,
-                    "actions": agg.actions,
-                    "deaths": agg.deaths,
-                    "hours": agg.hours,
-                    "donated_points": agg.donated_points,
-                })
-            })
-            .collect();
+        let mut entries = Vec::with_capacity(pilots.len());
+        for (ucid, name, agg) in &pilots {
+            let side = db
+                .pilot_current_side(ucid)
+                .ok()
+                .flatten()
+                .filter(|s| matches!(s, dcso3::coalition::Side::Blue | dcso3::coalition::Side::Red))
+                .map(|s| format!("{s:?}"));
+            let id = db.public_id_for(ucid)?;
+            entries.push(serde_json::json!({
+                "id": id,
+                "name": name.to_string(),
+                "side": side,
+                "air_kills": agg.air_kills,
+                "ground_kills": agg.ground_kills,
+                "ship_kills": agg.ship_kills,
+                "ground_air_kills": agg.ground_air_kills,
+                "ground_ground_kills": agg.ground_ground_kills,
+                "ground_ship_kills": agg.ground_ship_kills,
+                "csar": agg.csar,
+                "captures": agg.captures,
+                "repairs": agg.repairs,
+                "supply_transfers": agg.supply_transfers,
+                "troops": agg.troops,
+                "farps": agg.farps,
+                "deploys": agg.deploys,
+                "actions": agg.actions,
+                "deaths": agg.deaths,
+                "hours": agg.hours,
+                "donated_points": agg.donated_points,
+            }));
+        }
         Ok(serde_json::to_string(&entries)?)
     })?;
     Ok(json_response(data))
 }
 
-/// GET /api/pilots — all pilot UCIDs + names (all-time, for name resolution)
+/// GET /api/pilots — public pilot ids + names (all-time, for name resolution)
 async fn api_all_pilots(db: StatsDb) -> std::result::Result<impl warp::Reply, Error> {
     let data = task::block_in_place(|| -> Result<String> {
         let pilots = db.all_pilot_names()?;
-        let entries: Vec<_> = pilots.iter().map(|(ucid, name)| {
-            serde_json::json!({ "ucid": ucid.to_string(), "name": name.to_string() })
-        }).collect();
+        let mut entries = Vec::with_capacity(pilots.len());
+        for (ucid, name) in &pilots {
+            entries.push(serde_json::json!({
+                "id": db.public_id_for(ucid)?,
+                "name": name.to_string(),
+            }));
+        }
         Ok(serde_json::to_string(&entries)?)
     })?;
     Ok(json_response(data))
@@ -939,6 +957,13 @@ async fn api_briefing(
     }
 }
 
+fn public_id_opt(db: &StatsDb, ucid: Option<&dcso3::net::Ucid>) -> Result<Option<std::string::String>> {
+    match ucid {
+        Some(u) => Ok(Some(db.public_id_for(u)?)),
+        None => Ok(None),
+    }
+}
+
 async fn api_kills(
     db: StatsDb,
     inst: Inst,
@@ -951,59 +976,57 @@ async fn api_kills(
         };
         let kills = db.recent_kills(rid, limit.unwrap_or(50))?;
         let static_kills = db.recent_static_kills(rid, limit.unwrap_or(50))?;
-        let mut entries: Vec<_> = kills
-            .iter()
-            .map(|dead| {
-                let victim_name = dead.victim.ucid().map(|u| u.to_string());
-                let victim_side = format!("{:?}", dead.victim.side());
-                // Same classification as air_kills/ground_kills in the stats
-                // aggregator (record_kill) -- lets API consumers (e.g. the
-                // Discord kill-streak/achievement poller) filter on air kills
-                // specifically instead of guessing from target_type's raw DCS
-                // unit-type string.
-                let is_air = db.victim_is_air(rid, &dead.victim).unwrap_or(false);
-                let is_ship = db
-                    .victim_is_ship(rid, &dead.victim, Some(dead))
-                    .unwrap_or(false);
-                // Last non-self hit = finishing blow (ignore DCS self-hit noise).
-                let killer = dead
-                    .shots
-                    .iter()
-                    .filter(|s| s.hit && s.shooter.unit() != dead.victim.unit())
-                    .max_by_key(|s| s.time)
-                    .or_else(|| dead.shots.iter().filter(|s| s.hit).max_by_key(|s| s.time))
-                    .or_else(|| dead.shots.last())
-                    .map(|s| {
-                        serde_json::json!({
-                            "ucid": s.shooter.ucid().map(|u| u.to_string()),
-                            "side": format!("{:?}", s.shooter.side()),
-                            "weapon": display_weapon(s.weapon_name.as_ref()),
-                            "airframe": shot_airframe(dead, s),
-                        })
-                    });
-                serde_json::json!({
-                    "time": dead.time.to_rfc3339(),
-                    "victim": {
-                        "ucid": victim_name,
-                        "side": victim_side,
-                    },
-                    "killer": killer,
-                    "target_type": dead.shots.first().map(|s| s.target_typ.to_string()),
-                    "is_air": is_air,
-                    "is_ship": is_ship,
-                    "static_kill": false,
-                })
-            })
-            .collect();
+        let mut entries = Vec::with_capacity(kills.len() + static_kills.len());
+        for dead in &kills {
+            let victim_side = format!("{:?}", dead.victim.side());
+            // Same classification as air_kills/ground_kills in the stats
+            // aggregator (record_kill) -- lets API consumers (e.g. the
+            // Discord kill-streak/achievement poller) filter on air kills
+            // specifically instead of guessing from target_type's raw DCS
+            // unit-type string.
+            let is_air = db.victim_is_air(rid, &dead.victim).unwrap_or(false);
+            let is_ship = db
+                .victim_is_ship(rid, &dead.victim, Some(dead))
+                .unwrap_or(false);
+            // Last non-self hit = finishing blow (ignore DCS self-hit noise).
+            let killer = match dead
+                .shots
+                .iter()
+                .filter(|s| s.hit && s.shooter.unit() != dead.victim.unit())
+                .max_by_key(|s| s.time)
+                .or_else(|| dead.shots.iter().filter(|s| s.hit).max_by_key(|s| s.time))
+                .or_else(|| dead.shots.last())
+            {
+                Some(s) => Some(serde_json::json!({
+                    "id": public_id_opt(&db, s.shooter.ucid())?,
+                    "side": format!("{:?}", s.shooter.side()),
+                    "weapon": display_weapon(s.weapon_name.as_ref()),
+                    "airframe": shot_airframe(dead, s),
+                })),
+                None => None,
+            };
+            entries.push(serde_json::json!({
+                "time": dead.time.to_rfc3339(),
+                "victim": {
+                    "id": public_id_opt(&db, dead.victim.ucid())?,
+                    "side": victim_side,
+                },
+                "killer": killer,
+                "target_type": dead.shots.first().map(|s| s.target_typ.to_string()),
+                "is_air": is_air,
+                "is_ship": is_ship,
+                "static_kill": false,
+            }));
+        }
         for sk in &static_kills {
             entries.push(serde_json::json!({
                 "time": sk.time.to_rfc3339(),
                 "victim": {
-                    "ucid": serde_json::Value::Null,
+                    "id": serde_json::Value::Null,
                     "side": format!("{:?}", sk.owner),
                 },
                 "killer": {
-                    "ucid": sk.by.to_string(),
+                    "id": db.public_id_for(&sk.by)?,
                     "side": format!("{:?}", sk.side),
                     "weapon": display_weapon(sk.weapon_name.as_ref()),
                     "airframe": sk.shooter_typ,
@@ -1029,15 +1052,16 @@ async fn api_kills(
 }
 
 async fn api_pilot(
-    ucid: String,
+    pilot_key: String,
     db: StatsDb,
 ) -> std::result::Result<impl warp::Reply, Error> {
     let data = task::block_in_place(|| -> Result<String> {
-        let ucid: dcso3::net::Ucid = ucid.parse().map_err(|e| anyhow::anyhow!("{e:?}"))?;
+        let ucid = db.resolve_pilot_key(&pilot_key)?;
+        let id = db.public_id_for(&ucid)?;
         match db.pilot_detail(&ucid)? {
             None => Ok(serde_json::json!({ "error": "not found" }).to_string()),
             Some((name, agg)) => Ok(serde_json::to_string(&serde_json::json!({
-                "ucid": ucid.to_string(),
+                "id": id,
                 "name": name.to_string(),
                 "air_kills": agg.air_kills,
                 "ground_kills": agg.ground_kills,
@@ -1062,13 +1086,13 @@ async fn api_pilot(
     Ok(json_response(data))
 }
 
-/// GET /api/pilot/:ucid/sorties — all sorties for a pilot
+/// GET /api/pilot/:id/sorties — all sorties for a pilot (public id; legacy UCID accepted)
 async fn api_pilot_sorties(
-    ucid: String,
+    pilot_key: String,
     db: StatsDb,
 ) -> std::result::Result<impl warp::Reply, Error> {
     let data = task::block_in_place(|| -> Result<String> {
-        let ucid: dcso3::net::Ucid = ucid.parse().map_err(|e| anyhow::anyhow!("{e:?}"))?;
+        let ucid = db.resolve_pilot_key(&pilot_key)?;
         let sorties = db.pilot_sorties(&ucid)?;
         let entries: Vec<_> = sorties.iter().rev().map(|(round_id, _sortie_id, s, crashed, restart)| {
             let duration_secs = s.land
@@ -1090,13 +1114,13 @@ async fn api_pilot_sorties(
     Ok(json_response(data))
 }
 
-/// GET /api/pilot/:ucid/breakdown — per-round aggregates for a pilot
+/// GET /api/pilot/:id/breakdown — per-round aggregates for a pilot
 async fn api_pilot_breakdown(
-    ucid: String,
+    pilot_key: String,
     db: StatsDb,
 ) -> std::result::Result<impl warp::Reply, Error> {
     let data = task::block_in_place(|| -> Result<String> {
-        let ucid: dcso3::net::Ucid = ucid.parse().map_err(|e| anyhow::anyhow!("{e:?}"))?;
+        let ucid = db.resolve_pilot_key(&pilot_key)?;
         let rounds = db.pilot_round_breakdown(&ucid)?;
         let entries: Vec<_> = rounds.iter().map(|(scenario, rid, agg)| serde_json::json!({
             "round_id": rid.0,
@@ -1123,16 +1147,17 @@ async fn api_pilot_breakdown(
     Ok(json_response(data))
 }
 
-/// GET /api/pilot/:ucid/kills — all kills made by a pilot
+/// GET /api/pilot/:id/kills — all kills made by a pilot
 async fn api_pilot_kills(
-    ucid: String,
+    pilot_key: String,
     db: StatsDb,
 ) -> std::result::Result<impl warp::Reply, Error> {
     let data = task::block_in_place(|| -> Result<String> {
-        let ucid: dcso3::net::Ucid = ucid.parse().map_err(|e| anyhow::anyhow!("{e:?}"))?;
+        let ucid = db.resolve_pilot_key(&pilot_key)?;
         let kills = db.pilot_kills_for(&ucid)?;
         let static_kills = db.pilot_static_kills_for(&ucid)?;
-        let mut entries: Vec<_> = kills.iter().map(|(round_id, dead)| {
+        let mut entries = Vec::with_capacity(kills.len() + static_kills.len());
+        for (round_id, dead) in &kills {
             // Same as Kill Feed: finishing blow (latest non-self hit).
             let shot = dead
                 .shots
@@ -1144,24 +1169,23 @@ async fn api_pilot_kills(
             let weapon = shot.and_then(|s| display_weapon(s.weapon_name.as_ref()));
             let airframe = shot.and_then(|s| shot_airframe(dead, s));
             let target_type = shot.map(|s| s.target_typ.to_string());
-            let victim_ucid = dead.victim.ucid().map(|u| u.to_string());
             let victim_side = format!("{:?}", dead.victim.side());
-            serde_json::json!({
+            entries.push(serde_json::json!({
                 "round_id": round_id.0,
                 "time": dead.time.to_rfc3339(),
-                "victim_ucid": victim_ucid,
+                "victim_id": public_id_opt(&db, dead.victim.ucid())?,
                 "victim_side": victim_side,
                 "target_type": target_type,
                 "weapon": weapon,
                 "killer_airframe": airframe,
                 "static_kill": false,
-            })
-        }).collect();
+            }));
+        }
         for (round_id, sk) in &static_kills {
             entries.push(serde_json::json!({
                 "round_id": round_id.0,
                 "time": sk.time.to_rfc3339(),
-                "victim_ucid": serde_json::Value::Null,
+                "victim_id": serde_json::Value::Null,
                 "victim_side": format!("{:?}", sk.owner),
                 "target_type": sk.target_typ,
                 "weapon": display_weapon(sk.weapon_name.as_ref()),
@@ -1182,13 +1206,13 @@ async fn api_pilot_kills(
     Ok(json_response(data))
 }
 
-/// GET /api/pilot/:ucid/deploys — all deployable-crate deploys done by a pilot
+/// GET /api/pilot/:id/deploys — all deployable-crate deploys done by a pilot
 async fn api_pilot_deploys(
-    ucid: String,
+    pilot_key: String,
     db: StatsDb,
 ) -> std::result::Result<impl warp::Reply, Error> {
     let data = task::block_in_place(|| -> Result<String> {
-        let ucid: dcso3::net::Ucid = ucid.parse().map_err(|e| anyhow::anyhow!("{e:?}"))?;
+        let ucid = db.resolve_pilot_key(&pilot_key)?;
         let deploys = db.pilot_deploys_for(&ucid)?;
         let entries: Vec<_> = deploys.iter().map(|(round_id, rec)| {
             serde_json::json!({
@@ -1414,21 +1438,22 @@ async fn api_capture_events(
             return Ok("[]".to_string());
         };
         let entries = db.recent_captures(rid, limit.unwrap_or(50))?;
-        let json: Vec<_> = entries
-            .iter()
-            .map(|c| {
-                serde_json::json!({
-                    "time": c.time.to_rfc3339(),
-                    "objective": c.objective_name,
-                    "side": format!("{:?}", c.side),
-                    // pilot display names (fall back to ucid only if unknown)
-                    "by": c.by.iter()
-                        .map(|u| db.pilot_name(u).unwrap_or_else(|| u.to_string()))
-                        .collect::<Vec<_>>(),
-                    "by_ucid": c.by.iter().map(|u| u.to_string()).collect::<Vec<_>>(),
-                })
-            })
-            .collect();
+        let mut json = Vec::with_capacity(entries.len());
+        for c in &entries {
+            let mut by_ids = Vec::with_capacity(c.by.len());
+            for u in &c.by {
+                by_ids.push(db.public_id_for(u)?);
+            }
+            json.push(serde_json::json!({
+                "time": c.time.to_rfc3339(),
+                "objective": c.objective_name,
+                "side": format!("{:?}", c.side),
+                "by": c.by.iter()
+                    .map(|u| db.pilot_name(u).unwrap_or_else(|| "Unknown".into()))
+                    .collect::<Vec<_>>(),
+                "by_id": by_ids,
+            }));
+        }
         Ok(serde_json::to_string(&json)?)
     })?;
     Ok(json_response(data))
@@ -1457,20 +1482,39 @@ async fn api_aircraft_usage(
     Ok(json_response(data))
 }
 
-async fn api_online(db: StatsDb, inst: Inst) -> std::result::Result<impl warp::Reply, Error> {
+async fn api_online(
+    session_id: Option<Uuid>,
+    db: StatsDb,
+    inst: Inst,
+) -> std::result::Result<impl warp::Reply, Error> {
+    let admin = match session_id {
+        Some(id) => task::block_in_place(|| db.get_session(id))?
+            .map(|s| s.is_admin)
+            .unwrap_or(false),
+        None => false,
+    };
     let data = task::block_in_place(|| -> Result<String> {
         let Some(rid) = db.resolve_round_id(&inst.id, None)? else {
             return Ok("[]".to_string());
         };
         let pilots = db.connected_pilots(rid)?;
-        let entries: Vec<_> = pilots.iter().map(|(ucid, name, side, aircraft)| {
-            serde_json::json!({
-                "ucid": ucid,
+        let mut entries = Vec::with_capacity(pilots.len());
+        for (ucid_s, name, side, aircraft) in &pilots {
+            let ucid: dcso3::net::Ucid = ucid_s
+                .parse()
+                .map_err(|e| anyhow::anyhow!("bad connected pilot ucid: {e:?}"))?;
+            let mut row = serde_json::json!({
+                "id": db.public_id_for(&ucid)?,
                 "name": name,
                 "side": format!("{:?}", side),
                 "aircraft": aircraft,
-            })
-        }).collect();
+            });
+            // UCID only for dashboard admins (ban / kick / merge tools).
+            if admin {
+                row["ucid"] = serde_json::Value::String(ucid.to_string());
+            }
+            entries.push(row);
+        }
         Ok(serde_json::to_string(&entries)?)
     })?;
     Ok(json_response(data))
@@ -1525,39 +1569,26 @@ struct LoginQuery {
     return_to: Option<std::string::String>,
 }
 
-/// GET /api/auth/login  — redirect to Discord OAuth
+/// GET /api/auth/login  — Discord OAuth disabled (Attrition web accounts)
 async fn api_auth_login(
-    q: LoginQuery,
-    cfg: AuthConfig,
-    db: StatsDb,
-    allowed_origins: Arc<Vec<std::string::String>>,
+    _q: LoginQuery,
+    _cfg: AuthConfig,
+    _db: StatsDb,
+    _allowed_origins: Arc<Vec<std::string::String>>,
 ) -> std::result::Result<impl warp::Reply, Error> {
-    let state = Uuid::new_v4();
-    let return_to = q.return_to
-        .filter(|rt| allowed_origins.iter().any(|o| rt == &format!("{o}/")));
-    task::block_in_place(|| db.store_oauth_state(state, return_to))?;
-    let url = format!(
-        "https://discord.com/oauth2/authorize?client_id={}&redirect_uri={}&response_type=code&scope=identify+guilds.members.read&state={}",
-        cfg.client_id,
-        urlencoding::encode(&cfg.redirect_uri),
-        state,
-    );
-    Ok(warp::redirect::temporary(url.parse::<warp::http::Uri>().unwrap()))
+    Ok(warp::http::Response::builder()
+        .status(410)
+        .header("content-type", "application/json")
+        .body(
+            r#"{"error":"Discord login is disabled — use Register / Sign in with username and password"}"#
+                .to_string(),
+        )
+        .unwrap())
 }
 
 #[derive(Deserialize)]
 struct CallbackQuery { code: String, state: String }
 
-#[derive(Deserialize)]
-struct DiscordUser { id: String, username: String, avatar: Option<String> }
-
-#[derive(Deserialize)]
-struct GuildMember { roles: Vec<String> }
-
-#[derive(Deserialize)]
-struct TokenResponse { access_token: String }
-
-/// GET /api/auth/callback?code=&state=  — exchange code, create session
 /// Session cookie attributes. SameSite=None (needed for cross-origin fetch/XHR
 /// with credentials) requires Secure, which requires bfdb to be served over
 /// TLS — so we only opt into it when --cors-origin was actually configured.
@@ -1565,94 +1596,60 @@ fn session_cookie_attrs(cross_origin: bool) -> &'static str {
     if cross_origin { "SameSite=None; Secure" } else { "SameSite=Lax" }
 }
 
+/// GET /api/auth/callback — Discord OAuth disabled (Attrition web accounts)
 async fn api_auth_callback(
-    q: CallbackQuery,
-    cfg: AuthConfig,
-    db: StatsDb,
-    cross_origin: bool,
+    _q: CallbackQuery,
+    _cfg: AuthConfig,
+    _db: StatsDb,
+    _cross_origin: bool,
 ) -> std::result::Result<impl warp::Reply, Error> {
-    // Validate state, recovering which frontend origin to send the browser
-    // back to (falls back to bfdb's own "/" for embedded-mode deployments
-    // that never passed a return_to at /api/auth/login).
-    let state_uuid = q.state.parse::<Uuid>().map_err(|e| anyhow::anyhow!("bad state: {e}"))?;
-    let Some(return_to) = task::block_in_place(|| db.take_oauth_state(state_uuid))? else {
-        return Err(anyhow::anyhow!("invalid or expired OAuth state").into());
-    };
-    let redirect_location = return_to.unwrap_or_else(|| "/".to_string());
-
-    let http = reqwest::Client::new();
-
-    // Exchange code for access token
-    let token_res: TokenResponse = http
-        .post("https://discord.com/api/oauth2/token")
-        .form(&[
-            ("client_id",     cfg.client_id.as_str()),
-            ("client_secret", cfg.client_secret.as_str()),
-            ("grant_type",    "authorization_code"),
-            ("code",          q.code.as_str()),
-            ("redirect_uri",  cfg.redirect_uri.as_str()),
-        ])
-        .send()
-        .await
-        .map_err(|e| anyhow::anyhow!("token exchange failed: {e}"))?
-        .json()
-        .await
-        .map_err(|e| anyhow::anyhow!("token parse failed: {e}"))?;
-
-    // Fetch Discord user
-    let user: DiscordUser = http
-        .get("https://discord.com/api/users/@me")
-        .bearer_auth(&token_res.access_token)
-        .send()
-        .await
-        .map_err(|e| anyhow::anyhow!("user fetch failed: {e}"))?
-        .json()
-        .await
-        .map_err(|e| anyhow::anyhow!("user parse failed: {e}"))?;
-
-    // Check guild role for admin
-    let is_admin = match http
-        .get(format!("https://discord.com/api/users/@me/guilds/{}/member", cfg.guild_id))
-        .bearer_auth(&token_res.access_token)
-        .send()
-        .await
-    {
-        Ok(r) => r.json::<GuildMember>().await.ok()
-            .map(|m| m.roles.contains(&cfg.admin_role_id))
-            .unwrap_or(false),
-        Err(_) => false,
-    };
-
-    let session_id = Uuid::new_v4();
-    let session = SessionData {
-        discord_id: user.id.clone(),
-        username:   user.username.clone(),
-        avatar:     user.avatar.clone(),
-        is_admin,
-        expires:    chrono::Utc::now() + chrono::Duration::days(7),
-    };
-    task::block_in_place(|| db.create_session(session_id, session))?;
-
-    let cookie = format!(
-        "session={}; Path=/; HttpOnly; {}; Max-Age=604800",
-        session_id, session_cookie_attrs(cross_origin)
-    );
     Ok(warp::http::Response::builder()
-        .status(302)
-        .header("location", redirect_location)
-        .header("set-cookie", cookie)
-        .body("")
+        .status(410)
+        .header("content-type", "application/json")
+        .body(
+            r#"{"error":"Discord login is disabled — use Register / Sign in with username and password"}"#
+                .to_string(),
+        )
         .unwrap())
 }
 
+fn session_ucid(db: &StatsDb, s: &SessionData) -> Option<dcso3::net::Ucid> {
+    if let Some(ref u) = s.ucid {
+        if let Ok(ucid) = u.parse() {
+            return Some(ucid);
+        }
+    }
+    if let Some(ref user) = s.account_username {
+        if let Ok(Some(acc)) = db.web_auth().get_account(user) {
+            if let Some(ref u) = acc.ucid {
+                return u.parse().ok();
+            }
+        }
+    }
+    None
+}
+
+fn player_session_from_account(account: &crate::web_auth::WebAccount, must_set_password: bool) -> SessionData {
+    SessionData {
+        discord_id: format!("account:{}", account.username),
+        username: account.username.clone(),
+        avatar: None,
+        is_admin: false,
+        expires: chrono::Utc::now() + chrono::Duration::days(7),
+        account_username: Some(account.username.clone()),
+        ucid: account.ucid.clone(),
+        must_set_password,
+    }
+}
+
 /// GET /api/auth/me  — return current user (reads session cookie)
+/// `side` is for the selected `?instance=` / `?server=` (per-server coalition).
 async fn api_auth_me(
     session_id: Option<Uuid>,
     db: StatsDb,
-    bot_cfg: Arc<Option<BotLinkConfig>>,
+    inst: Inst,
+    _bot_cfg: Arc<Option<BotLinkConfig>>,
 ) -> std::result::Result<impl warp::Reply, Error> {
-    // Return 200 with null user when not logged in — avoids browser console errors
-    // since this endpoint is polled on every page load to check auth state
     let Some(id) = session_id else {
         return Ok(json_response(r#"{"user":null}"#.to_string()));
     };
@@ -1660,12 +1657,51 @@ async fn api_auth_me(
     let Some(s) = session else {
         return Ok(json_response(r#"{"user":null}"#.to_string()));
     };
-    let ucid = resolve_ucid_via_bot(&bot_cfg, &s.discord_id).await;
-    // Coalition in the active round — gates TACMAP (and future coalition pages).
-    let side = match &ucid {
-        Some(u) => task::block_in_place(|| db.pilot_current_side(u))?
-            .filter(|s| matches!(s, dcso3::coalition::Side::Blue | dcso3::coalition::Side::Red))
-            .map(|s| format!("{s:?}")),
+    // Drop unlinked accounts whose link codes expired; invalidate orphan sessions.
+    let _ = task::block_in_place(|| db.web_auth().purge_stale());
+    if let Some(ref user) = s.account_username {
+        let still_there = task::block_in_place(|| db.web_auth().get_account(user))?
+            .is_some();
+        if !still_there {
+            let _ = task::block_in_place(|| db.delete_session(id));
+            return Ok(json_response(r#"{"user":null}"#.to_string()));
+        }
+    }
+    // Refresh UCID from web account if present (claim may complete after login).
+    let mut ucid = session_ucid(&db, &s);
+    if s.account_username.is_some() {
+        if let Some(ref user) = s.account_username {
+            if let Ok(Some(acc)) = task::block_in_place(|| db.web_auth().get_account(user)) {
+                ucid = acc.ucid.as_ref().and_then(|u| u.parse().ok());
+            }
+        }
+    }
+    let (side, sides) = match &ucid {
+        Some(u) => {
+            let side = task::block_in_place(|| db.pilot_side_for_instance(u, &inst.id))?
+                .filter(|s| matches!(s, dcso3::coalition::Side::Blue | dcso3::coalition::Side::Red))
+                .map(|s| format!("{s:?}"));
+            let map: serde_json::Map<std::string::String, serde_json::Value> =
+                task::block_in_place(|| db.pilot_sides_by_instance(u))?
+                    .into_iter()
+                    .map(|(id, s)| {
+                        (
+                            id.to_string(),
+                            serde_json::Value::String(format!("{s:?}")),
+                        )
+                    })
+                    .collect();
+            (side, serde_json::Value::Object(map))
+        }
+        None => (None, serde_json::json!({})),
+    };
+    let squadron = match &ucid {
+        Some(u) => task::block_in_place(|| db.squadrons().active_for_ucid(&u.to_string()))?
+            .map(|(sq, _)| crate::squadrons::SquadronStore::public_summary(&sq)),
+        None => None,
+    };
+    let public_id = match &ucid {
+        Some(u) => Some(task::block_in_place(|| db.public_id_for(u))?),
         None => None,
     };
     Ok(json_response(serde_json::to_string(&serde_json::json!({
@@ -1674,9 +1710,152 @@ async fn api_auth_me(
             "username":   s.username,
             "avatar":     s.avatar,
             "is_admin":   s.is_admin,
-            "ucid":       ucid.map(|u| u.to_string()),
+            // Public dashboard identity (opaque). UCID only for the signed-in user.
+            "id":         public_id,
+            "ucid":       ucid.as_ref().map(|u| u.to_string()),
             "side":       side,
+            "sides":      sides,
+            "squadron":   squadron,
+            "must_set_password": s.must_set_password,
+            "claim_pending": ucid.is_none() && s.account_username.is_some(),
+            "instance": inst.id.to_string(),
         }
+    })).map_err(anyhow::Error::from)?))
+}
+
+#[derive(Deserialize)]
+struct RegisterBody {
+    username: String,
+    password: String,
+}
+
+/// POST /api/auth/register — create player web account + claim code
+async fn api_auth_register(
+    body: RegisterBody,
+    db: StatsDb,
+    cross_origin: bool,
+) -> std::result::Result<impl warp::Reply, Error> {
+    let (account, code) = task::block_in_place(|| db.web_auth().register(&body.username, &body.password))?;
+    let session_id = Uuid::new_v4();
+    let session = player_session_from_account(&account, false);
+    task::block_in_place(|| db.create_session(session_id, session))?;
+    let cookie = format!(
+        "session={}; Path=/; HttpOnly; {}; Max-Age=604800",
+        session_id,
+        session_cookie_attrs(cross_origin)
+    );
+    Ok(warp::http::Response::builder()
+        .status(200)
+        .header("set-cookie", cookie)
+        .header("content-type", "application/json")
+        .body(
+            serde_json::to_string(&serde_json::json!({
+                "ok": true,
+                "username": account.username,
+                "claim_code": code,
+                "claim_ttl_days": crate::web_auth::CLAIM_TTL_DAYS,
+                "ingame": format!("-linkme {code}"),
+            }))
+            .unwrap(),
+        )
+        .unwrap())
+}
+
+/// POST /api/auth/login — player username/password
+async fn api_auth_player_login(
+    body: LocalLoginBody,
+    db: StatsDb,
+    cross_origin: bool,
+) -> std::result::Result<impl warp::Reply, Error> {
+    let account = task::block_in_place(|| db.web_auth().verify_login(&body.username, &body.password))?;
+    let session_id = Uuid::new_v4();
+    let session = player_session_from_account(&account, false);
+    task::block_in_place(|| db.create_session(session_id, session))?;
+    let cookie = format!(
+        "session={}; Path=/; HttpOnly; {}; Max-Age=604800",
+        session_id,
+        session_cookie_attrs(cross_origin)
+    );
+    Ok(warp::http::Response::builder()
+        .status(200)
+        .header("set-cookie", cookie)
+        .header("content-type", "application/json")
+        .body(r#"{"ok":true}"#)
+        .unwrap())
+}
+
+#[derive(Deserialize)]
+struct ForgotBody {
+    username: String,
+}
+
+/// POST /api/auth/forgot — issue recovery claim code (no email)
+async fn api_auth_forgot(
+    body: ForgotBody,
+    db: StatsDb,
+) -> std::result::Result<impl warp::Reply, Error> {
+    let code = task::block_in_place(|| db.web_auth().forgot(&body.username))?;
+    Ok(json_response(serde_json::to_string(&serde_json::json!({
+        "ok": true,
+        "found": code.is_some(),
+        "claim_code": code,
+        "claim_ttl_days": crate::web_auth::CLAIM_TTL_DAYS,
+        "ingame": code.as_ref().map(|c| format!("-linkme {c}")),
+        "hint": "Enter the code in DCS chat while flying with your linked UCID, then set a new password.",
+    })).map_err(anyhow::Error::from)?))
+}
+
+#[derive(Deserialize)]
+struct ResetPasswordBody {
+    username: String,
+    password: String,
+}
+
+/// POST /api/auth/reset-password — after recovery `-linkme` unlocked the account
+async fn api_auth_reset_password(
+    body: ResetPasswordBody,
+    db: StatsDb,
+    cross_origin: bool,
+) -> std::result::Result<impl warp::Reply, Error> {
+    let account = task::block_in_place(|| {
+        db.web_auth()
+            .set_password_after_recovery(&body.username, &body.password)
+    })?;
+    let session_id = Uuid::new_v4();
+    let session = player_session_from_account(&account, false);
+    task::block_in_place(|| db.create_session(session_id, session))?;
+    let cookie = format!(
+        "session={}; Path=/; HttpOnly; {}; Max-Age=604800",
+        session_id,
+        session_cookie_attrs(cross_origin)
+    );
+    Ok(warp::http::Response::builder()
+        .status(200)
+        .header("set-cookie", cookie)
+        .header("content-type", "application/json")
+        .body(r#"{"ok":true}"#)
+        .unwrap())
+}
+
+/// POST /api/auth/claim-code — issue a new link code for the logged-in account
+async fn api_auth_claim_code(
+    session_id: Option<Uuid>,
+    db: StatsDb,
+) -> std::result::Result<impl warp::Reply, Error> {
+    let Some(id) = session_id else {
+        return Err(anyhow::anyhow!("not logged in").into());
+    };
+    let session = task::block_in_place(|| db.get_session(id))?
+        .ok_or_else(|| anyhow::anyhow!("session expired"))?;
+    let user = session
+        .account_username
+        .ok_or_else(|| anyhow::anyhow!("not a player web account"))?;
+    let code = task::block_in_place(|| db.web_auth().issue_link_code(&user))?;
+    Ok(json_response(serde_json::to_string(&serde_json::json!({
+        "ok": true,
+        "claim_code": code,
+        "claim_ttl_days": crate::web_auth::CLAIM_TTL_DAYS,
+        "ingame": format!("-linkme {code}"),
     })).map_err(anyhow::Error::from)?))
 }
 
@@ -1719,6 +1898,9 @@ async fn api_auth_local_login(
         avatar:     None,
         is_admin:   true,
         expires:    chrono::Utc::now() + chrono::Duration::days(7),
+        account_username: None,
+        ucid: None,
+        must_set_password: false,
     };
     task::block_in_place(|| db.create_session(session_id, session))?;
     let cookie = format!(
@@ -1731,6 +1913,396 @@ async fn api_auth_local_login(
         .header("content-type", "application/json")
         .body(r#"{"ok":true}"#)
         .unwrap())
+}
+
+// ── Profile / side-switch / squadrons ────────────────────────────────
+
+async fn require_claimed_ucid(
+    session_id: Option<Uuid>,
+    db: &StatsDb,
+) -> std::result::Result<(SessionData, dcso3::net::Ucid), Error> {
+    let Some(id) = session_id else {
+        return Err(anyhow::anyhow!("not logged in").into());
+    };
+    let session = task::block_in_place(|| db.get_session(id))?
+        .ok_or_else(|| anyhow::anyhow!("session expired"))?;
+    let ucid = session_ucid(db, &session).ok_or_else(|| {
+        anyhow::anyhow!("account not linked — type -linkme <code> in DCS chat")
+    })?;
+    Ok((session, ucid))
+}
+
+/// GET /api/profile — MY PROFILE payload (claim, sides, squadron, live side_switches).
+async fn api_profile(
+    session_id: Option<Uuid>,
+    db: StatsDb,
+    inst: Inst,
+) -> std::result::Result<impl warp::Reply, Error> {
+    let (session, ucid) = require_claimed_ucid(session_id, &db).await?;
+    let sides: Vec<serde_json::Value> = task::block_in_place(|| -> Result<_, anyhow::Error> {
+        let mut rows = Vec::new();
+        for cfg in db.instances().all() {
+            let id: crate::instance::InstanceId = std::sync::Arc::from(cfg.id.as_str());
+            let side = db
+                .pilot_side_for_instance(&ucid, &id)?
+                .filter(|s| matches!(s, dcso3::coalition::Side::Blue | dcso3::coalition::Side::Red))
+                .map(|s| format!("{s:?}"));
+            rows.push(serde_json::json!({
+                "instance": cfg.id,
+                "label": cfg.label(),
+                "side": side,
+            }));
+        }
+        Ok(rows)
+    })?;
+    let live = match call_engine_rpc_str_for(
+        &db,
+        &inst,
+        "player-side-info",
+        vec![("ucid", netidx::publisher::Value::from(ucid.to_string()))],
+    )
+    .await
+    {
+        Ok(json) => serde_json::from_str::<serde_json::Value>(&json).ok(),
+        Err(_) => None,
+    };
+    let squadron = task::block_in_place(|| db.squadrons().active_for_ucid(&ucid.to_string()))?
+        .map(|(sq, mem)| {
+            serde_json::json!({
+                "squadron": crate::squadrons::SquadronStore::public_summary(&sq),
+                "joined_at": mem.joined_at.to_rfc3339(),
+                "is_commander": sq.commander_ucid == ucid.to_string(),
+            })
+        });
+    let public_id = task::block_in_place(|| db.public_id_for(&ucid))?;
+    Ok(json_response(serde_json::to_string(&serde_json::json!({
+        "username": session.account_username.clone().unwrap_or(session.username.clone()),
+        "id": public_id,
+        "ucid": ucid.to_string(),
+        "display_name": task::block_in_place(|| db.pilot_name(&ucid)),
+        "sides": sides,
+        "selected_instance": inst.id.to_string(),
+        "live": live,
+        "squadron": squadron,
+    })).map_err(anyhow::Error::from)?))
+}
+
+#[derive(Deserialize)]
+struct SideSwitchBody {
+    side: String,
+}
+
+/// POST /api/profile/side-switch — player self side-switch on selected instance (engine CFG limits).
+async fn api_profile_side_switch(
+    session_id: Option<Uuid>,
+    body: SideSwitchBody,
+    db: StatsDb,
+    inst: Inst,
+) -> std::result::Result<impl warp::Reply, Error> {
+    let (_session, ucid) = require_claimed_ucid(session_id, &db).await?;
+    let side = body.side.trim().to_string();
+    if !matches!(side.to_ascii_lowercase().as_str(), "blue" | "red") {
+        return Err(anyhow::anyhow!("side must be Blue or Red").into());
+    }
+    use netidx::publisher::Value;
+    let msg = call_engine_rpc_str_for(
+        &db,
+        &inst,
+        "player-side-switch",
+        vec![
+            ("ucid", Value::from(ucid.to_string())),
+            ("side", Value::from(side)),
+        ],
+    )
+    .await?;
+    Ok(json_response(serde_json::to_string(&serde_json::json!({
+        "ok": true,
+        "message": msg,
+    })).map_err(anyhow::Error::from)?))
+}
+
+/// GET /api/squadrons?dissolved=0|1
+async fn api_squadrons_list(
+    query: std::collections::HashMap<std::string::String, std::string::String>,
+    db: StatsDb,
+) -> std::result::Result<impl warp::Reply, Error> {
+    let include = query.get("dissolved").map(|s| s == "1" || s == "true").unwrap_or(false);
+    let list = task::block_in_place(|| db.squadrons().list(include))?;
+    let json: Vec<_> = list
+        .iter()
+        .map(crate::squadrons::SquadronStore::public_summary)
+        .collect();
+    Ok(json_response(serde_json::to_string(&json).map_err(anyhow::Error::from)?))
+}
+
+/// GET /api/squadrons/:id
+async fn api_squadron_get(
+    id: Uuid,
+    db: StatsDb,
+) -> std::result::Result<impl warp::Reply, Error> {
+    let sq = task::block_in_place(|| db.squadrons().get(&id))?
+        .ok_or_else(|| anyhow::anyhow!("squadron not found"))?;
+    let members = task::block_in_place(|| db.squadrons().members(&id))?;
+    let mut member_rows = Vec::with_capacity(members.len());
+    for m in &members {
+        let ucid = m
+            .ucid
+            .parse::<dcso3::net::Ucid>()
+            .map_err(|e| anyhow::anyhow!("bad member ucid: {e:?}"))?;
+        let name = db
+            .pilot_name(&ucid)
+            .unwrap_or_else(|| "Unknown".into());
+        member_rows.push(serde_json::json!({
+            "id": db.public_id_for(&ucid)?,
+            "name": name,
+            "joined_at": m.joined_at.to_rfc3339(),
+            "is_commander": m.ucid == sq.commander_ucid,
+        }));
+    }
+    Ok(json_response(serde_json::to_string(&serde_json::json!({
+        "squadron": crate::squadrons::SquadronStore::public_summary(&sq),
+        "members": member_rows,
+        "member_count": member_rows.len(),
+    })).map_err(anyhow::Error::from)?))
+}
+
+/// GET /api/squadrons/:id/icon.png
+async fn api_squadron_icon(
+    id: Uuid,
+    db: StatsDb,
+) -> std::result::Result<impl warp::Reply, Error> {
+    let sq = task::block_in_place(|| db.squadrons().get(&id))?
+        .ok_or_else(|| anyhow::anyhow!("squadron not found"))?;
+    let png = sq.icon_png.ok_or_else(|| anyhow::anyhow!("no icon"))?;
+    Ok(warp::http::Response::builder()
+        .status(200)
+        .header("content-type", "image/png")
+        .header("cache-control", "public, max-age=300")
+        .body(png)
+        .unwrap())
+}
+
+#[derive(Deserialize)]
+struct SquadronNameBody {
+    name: String,
+}
+
+/// POST /api/squadrons — create (founder = CO)
+async fn api_squadron_create(
+    session_id: Option<Uuid>,
+    body: SquadronNameBody,
+    db: StatsDb,
+) -> std::result::Result<impl warp::Reply, Error> {
+    let (_s, ucid) = require_claimed_ucid(session_id, &db).await?;
+    let sq = task::block_in_place(|| db.squadrons().create(&body.name, &ucid.to_string()))?;
+    Ok(json_response(serde_json::to_string(&serde_json::json!({
+        "ok": true,
+        "squadron": crate::squadrons::SquadronStore::public_summary(&sq),
+    })).map_err(anyhow::Error::from)?))
+}
+
+/// POST /api/squadrons/:id/join
+async fn api_squadron_join(
+    id: Uuid,
+    session_id: Option<Uuid>,
+    db: StatsDb,
+) -> std::result::Result<impl warp::Reply, Error> {
+    let (_s, ucid) = require_claimed_ucid(session_id, &db).await?;
+    let req = task::block_in_place(|| db.squadrons().request_join(&id, &ucid.to_string()))?;
+    Ok(json_response(serde_json::to_string(&serde_json::json!({
+        "ok": true,
+        "request_id": req.id.to_string(),
+    })).map_err(anyhow::Error::from)?))
+}
+
+#[derive(Deserialize)]
+struct JoinDecideBody {
+    approve: bool,
+}
+
+/// POST /api/squadrons/requests/:id/decide
+async fn api_squadron_decide(
+    request_id: Uuid,
+    session_id: Option<Uuid>,
+    body: JoinDecideBody,
+    db: StatsDb,
+) -> std::result::Result<impl warp::Reply, Error> {
+    let (_s, ucid) = require_claimed_ucid(session_id, &db).await?;
+    let req = task::block_in_place(|| {
+        db.squadrons()
+            .decide_join(&request_id, &ucid.to_string(), body.approve)
+    })?;
+    Ok(json_response(serde_json::to_string(&serde_json::json!({
+        "ok": true,
+        "status": format!("{:?}", req.status),
+    })).map_err(anyhow::Error::from)?))
+}
+
+/// POST /api/squadrons/leave
+async fn api_squadron_leave(
+    session_id: Option<Uuid>,
+    db: StatsDb,
+) -> std::result::Result<impl warp::Reply, Error> {
+    let (_s, ucid) = require_claimed_ucid(session_id, &db).await?;
+    let result = task::block_in_place(|| db.squadrons().leave(&ucid.to_string()))?;
+    Ok(json_response(serde_json::to_string(&serde_json::json!({
+        "ok": true,
+        "result": result,
+    })).map_err(anyhow::Error::from)?))
+}
+
+/// POST /api/squadrons/:id/rename
+async fn api_squadron_rename(
+    id: Uuid,
+    session_id: Option<Uuid>,
+    body: SquadronNameBody,
+    db: StatsDb,
+) -> std::result::Result<impl warp::Reply, Error> {
+    let (_s, ucid) = require_claimed_ucid(session_id, &db).await?;
+    let sq = task::block_in_place(|| db.squadrons().rename(&id, &body.name, &ucid.to_string()))?;
+    Ok(json_response(serde_json::to_string(&serde_json::json!({
+        "ok": true,
+        "squadron": crate::squadrons::SquadronStore::public_summary(&sq),
+    })).map_err(anyhow::Error::from)?))
+}
+
+#[derive(Deserialize)]
+struct TransferBody {
+    /// Public pilot id (`p_…`); legacy raw UCID still accepted by resolve.
+    id: String,
+}
+
+/// POST /api/squadrons/:id/transfer
+async fn api_squadron_transfer(
+    id: Uuid,
+    session_id: Option<Uuid>,
+    body: TransferBody,
+    db: StatsDb,
+) -> std::result::Result<impl warp::Reply, Error> {
+    let (_s, ucid) = require_claimed_ucid(session_id, &db).await?;
+    let new_co = task::block_in_place(|| db.resolve_pilot_key(body.id.trim()))?;
+    let sq = task::block_in_place(|| {
+        db.squadrons()
+            .transfer_command(&id, &ucid.to_string(), &new_co.to_string())
+    })?;
+    Ok(json_response(serde_json::to_string(&serde_json::json!({
+        "ok": true,
+        "squadron": crate::squadrons::SquadronStore::public_summary(&sq),
+    })).map_err(anyhow::Error::from)?))
+}
+
+/// GET /api/squadrons/:id/requests — pending (CO only)
+async fn api_squadron_requests(
+    id: Uuid,
+    session_id: Option<Uuid>,
+    db: StatsDb,
+) -> std::result::Result<impl warp::Reply, Error> {
+    let (_s, ucid) = require_claimed_ucid(session_id, &db).await?;
+    let sq = task::block_in_place(|| db.squadrons().get(&id))?
+        .ok_or_else(|| anyhow::anyhow!("squadron not found"))?;
+    if sq.commander_ucid != ucid.to_string() {
+        return Err(anyhow::anyhow!("only the commander can view join requests").into());
+    }
+    let pending = task::block_in_place(|| db.squadrons().pending_for_squadron(&id))?;
+    let mut rows = Vec::with_capacity(pending.len());
+    for r in &pending {
+        let ucid = r
+            .ucid
+            .parse::<dcso3::net::Ucid>()
+            .map_err(|e| anyhow::anyhow!("bad request ucid: {e:?}"))?;
+        let name = db
+            .pilot_name(&ucid)
+            .unwrap_or_else(|| "Unknown".into());
+        rows.push(serde_json::json!({
+            "id": r.id.to_string(),
+            "pilot_id": db.public_id_for(&ucid)?,
+            "name": name,
+            "requested_at": r.requested_at.to_rfc3339(),
+        }));
+    }
+    Ok(json_response(serde_json::to_string(&rows).map_err(anyhow::Error::from)?))
+}
+
+/// POST /api/squadrons/:id/icon — raw PNG body
+async fn api_squadron_set_icon(
+    id: Uuid,
+    session_id: Option<Uuid>,
+    body: bytes::Bytes,
+    db: StatsDb,
+) -> std::result::Result<impl warp::Reply, Error> {
+    let (_s, ucid) = require_claimed_ucid(session_id, &db).await?;
+    let sq = task::block_in_place(|| db.squadrons().set_icon(&id, &body, &ucid.to_string()))?;
+    Ok(json_response(serde_json::to_string(&serde_json::json!({
+        "ok": true,
+        "squadron": crate::squadrons::SquadronStore::public_summary(&sq),
+    })).map_err(anyhow::Error::from)?))
+}
+
+/// DELETE /api/squadrons/:id/icon
+async fn api_squadron_clear_icon(
+    id: Uuid,
+    session_id: Option<Uuid>,
+    db: StatsDb,
+) -> std::result::Result<impl warp::Reply, Error> {
+    let (_s, ucid) = require_claimed_ucid(session_id, &db).await?;
+    let sq = task::block_in_place(|| db.squadrons().clear_icon(&id, &ucid.to_string()))?;
+    Ok(json_response(serde_json::to_string(&serde_json::json!({
+        "ok": true,
+        "squadron": crate::squadrons::SquadronStore::public_summary(&sq),
+    })).map_err(anyhow::Error::from)?))
+}
+
+/// GET /api/squadron-members — active membership map for pilot list icons (keyed by public pilot id)
+async fn api_squadron_members(db: StatsDb) -> std::result::Result<impl warp::Reply, Error> {
+    let list = task::block_in_place(|| db.squadrons().list(false))?;
+    let mut map = serde_json::Map::new();
+    for sq in list {
+        let members = task::block_in_place(|| db.squadrons().members(&sq.id))?;
+        let summary = crate::squadrons::SquadronStore::public_summary(&sq);
+        for m in members {
+            if let Ok(ucid) = m.ucid.parse::<dcso3::net::Ucid>() {
+                if let Ok(pid) = task::block_in_place(|| db.public_id_for(&ucid)) {
+                    map.insert(pid, summary.clone());
+                }
+            }
+        }
+    }
+    Ok(json_response(
+        serde_json::to_string(&serde_json::Value::Object(map)).map_err(anyhow::Error::from)?,
+    ))
+}
+
+/// GET /api/squadron-stats — aggregates for active (or all) squadrons
+async fn api_squadron_stats(
+    query: std::collections::HashMap<std::string::String, std::string::String>,
+    db: StatsDb,
+) -> std::result::Result<impl warp::Reply, Error> {
+    let include = query.get("dissolved").map(|s| s == "1" || s == "true").unwrap_or(false);
+    let list = task::block_in_place(|| db.squadrons().list(include))?;
+    let mut out = Vec::new();
+    for sq in list {
+        let members = task::block_in_place(|| db.squadrons().members(&sq.id))?;
+        let mut air_kills = 0u32;
+        let mut ground_kills = 0u32;
+        for m in &members {
+            if let Ok(ucid) = m.ucid.parse::<dcso3::net::Ucid>() {
+                if let Ok((a, g)) = task::block_in_place(|| db.pilot_career_kills(&ucid)) {
+                    air_kills = air_kills.saturating_add(a);
+                    ground_kills = ground_kills.saturating_add(g);
+                }
+            }
+        }
+        out.push(serde_json::json!({
+            "id": sq.id.to_string(),
+            "name": sq.name,
+            "dissolved": sq.dissolved_at.is_some(),
+            "has_icon": sq.icon_png.is_some(),
+            "member_count": members.len(),
+            "air_kills": air_kills,
+            "ground_kills": ground_kills,
+        }));
+    }
+    Ok(json_response(serde_json::to_string(&out).map_err(anyhow::Error::from)?))
 }
 
 // ── Admin handlers ───────────────────────────────────────────────────
@@ -1755,8 +2327,7 @@ async fn require_admin(session_id: Option<Uuid>, db: StatsDb) -> std::result::Re
 //    current connection, resolved to a ucid via the live connected-player
 //    table (bflib's "resolve-player-id" RPC). No manual step: it's only
 //    valid while that player is actually connected.
-//  - a browser session cookie linked to a Discord account, for testing the
-//    standalone /cockpit page outside DCS.
+//  - a browser session cookie with a claimed web account (Login + -linkme).
 
 async fn resolve_by_player_id(
     id: i64,
@@ -1858,10 +2429,74 @@ fn attrition_cockpit_plugin_version() -> &'static str {
         .unwrap_or("unknown")
 }
 
+/// Oldest in-DCS overlay allowed to call Cockpit RPCs (forces upgrade from 1.0.32).
+const MIN_COCKPIT_PLUGIN_VERSION: &str = "1.0.33";
+
+fn parse_semver_triple(s: &str) -> Option<(u32, u32, u32)> {
+    let mut parts = s.trim().split('.');
+    let a = parts.next()?.parse().ok()?;
+    let b = parts.next()?.parse().ok()?;
+    let c = parts.next()?.parse().ok()?;
+    Some((a, b, c))
+}
+
+fn cockpit_plugin_version_ok(plugin: &str) -> bool {
+    match (
+        parse_semver_triple(plugin),
+        parse_semver_triple(MIN_COCKPIT_PLUGIN_VERSION),
+    ) {
+        (Some(have), Some(need)) => have >= need,
+        _ => false,
+    }
+}
+
+fn require_min_cockpit_plugin(
+    query: &std::collections::HashMap<std::string::String, std::string::String>,
+) -> std::result::Result<(), Error> {
+    let in_dcs = query
+        .get("playerid")
+        .map(|s| !s.trim().is_empty())
+        .unwrap_or(false);
+    let plugin = query
+        .get("plugin")
+        .map(|s| s.trim())
+        .filter(|s| !s.is_empty());
+    // Browser session testing (no playerid, no plugin) skips the overlay version gate.
+    if !in_dcs && plugin.is_none() {
+        return Ok(());
+    }
+    let Some(v) = plugin else {
+        return Err(anyhow::anyhow!(
+            "Attrition Control {MIN_COCKPIT_PLUGIN_VERSION}+ required — download the new plugin from the dashboard"
+        )
+        .into());
+    };
+    if !cockpit_plugin_version_ok(v) {
+        return Err(anyhow::anyhow!(
+            "Attrition Control {v} is obsolete — install {MIN_COCKPIT_PLUGIN_VERSION}+ from the dashboard Download page"
+        )
+        .into());
+    }
+    Ok(())
+}
+
+fn require_ucid_web_claimed(db: &StatsDb, ucid: &dcso3::net::Ucid) -> std::result::Result<(), Error> {
+    let linked = task::block_in_place(|| db.web_auth().account_for_ucid(ucid))?
+        .is_some();
+    if !linked {
+        return Err(anyhow::anyhow!(
+            "account not linked — 1) dashboard Login → Register 2) copy claim code 3) DCS chat: -linkme <code> 4) if Control Panel stays locked, fully restart DCS and rejoin"
+        )
+        .into());
+    }
+    Ok(())
+}
+
 /// GET /api/cockpit/plugin — metadata for the downloadable Hooks overlay.
 async fn api_cockpit_plugin_info() -> std::result::Result<impl warp::Reply, Error> {
     Ok(warp::reply::json(&serde_json::json!({
         "version": attrition_cockpit_plugin_version(),
+        "min_version": MIN_COCKPIT_PLUGIN_VERSION,
         "filename": "attrition_cockpit.lua",
     })))
 }
@@ -1882,17 +2517,80 @@ async fn require_linked_player(
     bot_cfg: &Arc<Option<BotLinkConfig>>,
     inst: &Inst,
 ) -> std::result::Result<dcso3::net::Ucid, Error> {
-    if let Some(id) = query.get("playerid").and_then(|s| s.parse::<i64>().ok()) {
-        return resolve_by_player_id(id, &db, inst).await;
-    }
-    let Some(id) = session_id else {
-        return Err(anyhow::anyhow!("not logged in").into());
+    require_min_cockpit_plugin(query)?;
+    let _ = bot_cfg; // bot Discord link is no longer used for Cockpit auth
+    let ucid = if let Some(id) = query.get("playerid").and_then(|s| s.parse::<i64>().ok()) {
+        resolve_by_player_id(id, &db, inst).await?
+    } else {
+        let Some(id) = session_id else {
+            return Err(anyhow::anyhow!("not logged in").into());
+        };
+        let session = task::block_in_place(|| db.get_session(id))?
+            .ok_or_else(|| anyhow::anyhow!("session expired"))?;
+        session_ucid(&db, &session).ok_or_else(|| {
+            anyhow::anyhow!(
+                "account not linked — 1) dashboard Login → Register 2) copy claim code 3) DCS chat: -linkme <code> 4) if Control Panel stays locked, fully restart DCS and rejoin"
+            )
+        })?
     };
-    let session = task::block_in_place(|| db.get_session(id))?
-        .ok_or_else(|| anyhow::anyhow!("session expired"))?;
-    let ucid = resolve_ucid_via_bot(bot_cfg, &session.discord_id).await
-        .ok_or_else(|| anyhow::anyhow!("account not linked -- type -linkme <token> in DCS chat (get the token with /linkme in Discord)"))?;
+    require_ucid_web_claimed(&db, &ucid)?;
     Ok(ucid)
+}
+
+/// GET /api/cockpit/whoami — plugin version + claim status for the in-DCS overlay.
+async fn api_cockpit_whoami(
+    session_id: Option<Uuid>,
+    query: std::collections::HashMap<std::string::String, std::string::String>,
+    inst: Inst,
+    db: StatsDb,
+) -> std::result::Result<impl warp::Reply, Error> {
+    if let Err(e) = require_min_cockpit_plugin(&query) {
+        return Ok(json_response(serde_json::to_string(&serde_json::json!({
+            "ok": false,
+            "plugin_ok": false,
+            "claimed": false,
+            "error": e.0.to_string(),
+            "min_plugin": MIN_COCKPIT_PLUGIN_VERSION,
+        })).map_err(anyhow::Error::from)?));
+    }
+    let ucid = if let Some(id) = query.get("playerid").and_then(|s| s.parse::<i64>().ok()) {
+        match resolve_by_player_id(id, &db, &inst).await {
+            Ok(u) => Some(u),
+            Err(e) => {
+                return Ok(json_response(serde_json::to_string(&serde_json::json!({
+                    "ok": false,
+                    "plugin_ok": true,
+                    "claimed": false,
+                    "error": e.0.to_string(),
+                    "min_plugin": MIN_COCKPIT_PLUGIN_VERSION,
+                })).map_err(anyhow::Error::from)?));
+            }
+        }
+    } else if let Some(id) = session_id {
+        task::block_in_place(|| db.get_session(id))?
+            .and_then(|s| session_ucid(&db, &s))
+    } else {
+        None
+    };
+    let claimed = match &ucid {
+        Some(u) => task::block_in_place(|| db.web_auth().account_for_ucid(u))?
+            .is_some(),
+        None => false,
+    };
+    Ok(json_response(serde_json::to_string(&serde_json::json!({
+        "ok": claimed,
+        "plugin_ok": true,
+        "claimed": claimed,
+        "ucid": ucid.map(|u| u.to_string()),
+        "min_plugin": MIN_COCKPIT_PLUGIN_VERSION,
+        "error": if claimed {
+            serde_json::Value::Null
+        } else {
+            serde_json::json!(
+                "account not linked — 1) dashboard Login → Register 2) copy claim code 3) DCS chat: -linkme <code> 4) if Control Panel stays locked, fully restart DCS and rejoin"
+            )
+        },
+    })).map_err(anyhow::Error::from)?))
 }
 
 async fn api_cockpit_ewr_report(
@@ -2077,6 +2775,161 @@ async fn api_admin_sessions(
     Ok(json_response(data))
 }
 
+/// GET /api/admin/web-accounts — registered dashboard accounts + linkme status
+async fn api_admin_web_accounts(
+    session_id: Option<Uuid>,
+    db: StatsDb,
+    inst: Inst,
+) -> std::result::Result<impl warp::Reply, Error> {
+    require_admin(session_id, db.clone()).await?;
+    let data = task::block_in_place(|| -> Result<String> {
+        let accounts = db.web_auth().list_for_admin()?;
+        let online_ucids: std::collections::HashSet<String> =
+            match db.resolve_round_id(&inst.id, None).ok().flatten() {
+                Some(rid) => db
+                    .connected_pilots(rid)
+                    .unwrap_or_default()
+                    .into_iter()
+                    .map(|(ucid, _, _, _)| ucid)
+                    .collect(),
+                None => std::collections::HashSet::new(),
+            };
+        let banned_ucids: std::collections::HashSet<String> = db
+            .list_admin_bans()
+            .unwrap_or_default()
+            .into_iter()
+            .map(|(u, _)| u.to_string())
+            .chain(
+                db.session_bans_from_cfg()
+                    .unwrap_or_default()
+                    .into_iter()
+                    .map(|(u, _, _)| u.to_string()),
+            )
+            .collect();
+
+        let mut entries = Vec::with_capacity(accounts.len());
+        for a in accounts {
+            let (id, display_name, online, banned) = match a.ucid.as_deref() {
+                Some(ucid_s) => {
+                    let Ok(ucid) = ucid_s.parse::<dcso3::net::Ucid>() else {
+                        entries.push(serde_json::json!({
+                            "username": a.username,
+                            "ucid": a.ucid,
+                            "id": null,
+                            "display_name": null,
+                            "created_at": a.created_at.to_rfc3339(),
+                            "linked": a.linked,
+                            "link_status": "linked",
+                            "recovery_unlocked": a.recovery_unlocked,
+                            "pending_claim": a.pending_claim,
+                            "pending_claim_kind": a.pending_claim_kind,
+                            "pending_claim_expires": a.pending_claim_expires.map(|t| t.to_rfc3339()),
+                            "online": false,
+                            "banned": false,
+                        }));
+                        continue;
+                    };
+                    (
+                        db.public_id_for(&ucid).ok(),
+                        db.pilot_name(&ucid),
+                        online_ucids.contains(ucid_s),
+                        banned_ucids.contains(ucid_s),
+                    )
+                }
+                None => (None, None, false, false),
+            };
+            let link_status = if a.linked {
+                if a.recovery_unlocked {
+                    "recovery"
+                } else {
+                    "linked"
+                }
+            } else if a.pending_claim {
+                "pending"
+            } else {
+                "unlinked"
+            };
+            entries.push(serde_json::json!({
+                "username": a.username,
+                "ucid": a.ucid,
+                "id": id,
+                "display_name": display_name,
+                "created_at": a.created_at.to_rfc3339(),
+                "linked": a.linked,
+                "link_status": link_status,
+                "recovery_unlocked": a.recovery_unlocked,
+                "pending_claim": a.pending_claim,
+                "pending_claim_kind": a.pending_claim_kind,
+                "pending_claim_expires": a.pending_claim_expires.map(|t| t.to_rfc3339()),
+                "online": online,
+                "banned": banned,
+            }));
+        }
+        Ok(serde_json::to_string(&entries)?)
+    })?;
+    Ok(json_response(data))
+}
+
+/// GET /api/admin/unregistered-pilots — stats pilots with no linked web account
+async fn api_admin_unregistered_pilots(
+    session_id: Option<Uuid>,
+    db: StatsDb,
+    inst: Inst,
+) -> std::result::Result<impl warp::Reply, Error> {
+    require_admin(session_id, db.clone()).await?;
+    let data = task::block_in_place(|| -> Result<String> {
+        let linked = db.web_auth().linked_ucids()?;
+        let online_ucids: std::collections::HashSet<String> =
+            match db.resolve_round_id(&inst.id, None).ok().flatten() {
+                Some(rid) => db
+                    .connected_pilots(rid)
+                    .unwrap_or_default()
+                    .into_iter()
+                    .map(|(ucid, _, _, _)| ucid)
+                    .collect(),
+                None => std::collections::HashSet::new(),
+            };
+        let banned_ucids: std::collections::HashSet<String> = db
+            .list_admin_bans()
+            .unwrap_or_default()
+            .into_iter()
+            .map(|(u, _)| u.to_string())
+            .chain(
+                db.session_bans_from_cfg()
+                    .unwrap_or_default()
+                    .into_iter()
+                    .map(|(u, _, _)| u.to_string()),
+            )
+            .collect();
+
+        let mut entries = Vec::new();
+        for (ucid, name) in db.all_pilot_names()? {
+            let ucid_s = ucid.to_string();
+            if linked.contains(&ucid_s) {
+                continue;
+            }
+            let (air_kills, ground_kills, hours) = db.pilot_career_summary(&ucid)?;
+            entries.push(serde_json::json!({
+                "id": db.public_id_for(&ucid)?,
+                "name": name,
+                "ucid": ucid_s.clone(),
+                "air_kills": air_kills,
+                "ground_kills": ground_kills,
+                "hours": hours,
+                "online": online_ucids.contains(&ucid_s),
+                "banned": banned_ucids.contains(&ucid_s),
+            }));
+        }
+        entries.sort_by(|a, b| {
+            let an = a.get("name").and_then(|v| v.as_str()).unwrap_or("");
+            let bn = b.get("name").and_then(|v| v.as_str()).unwrap_or("");
+            an.to_ascii_lowercase().cmp(&bn.to_ascii_lowercase())
+        });
+        Ok(serde_json::to_string(&entries)?)
+    })?;
+    Ok(json_response(data))
+}
+
 
 /// POST /api/admin/reset  — wipe all campaign data, keep auth & Discord links
 async fn api_admin_reset(
@@ -2215,6 +3068,61 @@ async fn api_admin_kick(
     Ok(warp::reply::json(&serde_json::json!({
         "ok": true,
         "message": msg,
+    })))
+}
+
+#[derive(Deserialize)]
+struct WebUnlinkBody {
+    username: std::string::String,
+}
+
+/// POST /api/admin/web-accounts/unlink — detach UCID from web account + clear bflib gate
+async fn api_admin_web_account_unlink(
+    session_id: Option<Uuid>,
+    body: WebUnlinkBody,
+    db: StatsDb,
+) -> std::result::Result<impl warp::Reply, Error> {
+    require_admin(session_id, db.clone()).await?;
+    let username = body.username.trim().to_string();
+    if username.is_empty() {
+        return Err(Error(anyhow::anyhow!("username required")));
+    }
+    let prev_ucid = task::block_in_place(|| db.web_auth().unlink_account(&username))
+        .map_err(Error)?;
+    let sessions_cleared = task::block_in_place(|| {
+        db.clear_session_link(&username, prev_ucid.as_deref())
+    })
+    .map_err(Error)?;
+
+    let mut engine: Vec<std::string::String> = Vec::new();
+    if let Some(ref ucid) = prev_ucid {
+        use netidx::publisher::Value;
+        for cfg in db.instances().all() {
+            let id: crate::instance::InstanceId = std::sync::Arc::from(cfg.id.as_str());
+            let st = db.state(&id);
+            match call_engine_rpc_str_for(
+                &db,
+                &st,
+                "clear-web-linked",
+                vec![("ucid", Value::from(ucid.clone()))],
+            )
+            .await
+            {
+                Ok(msg) => engine.push(format!("{}: {msg}", cfg.id)),
+                Err(e) => engine.push(format!("{}: {}", cfg.id, e.0)),
+            }
+        }
+    }
+
+    log::info!(
+        "ADMIN: web-unlink username={username} ucid={prev_ucid:?} sessions={sessions_cleared} engine={engine:?}"
+    );
+    Ok(warp::reply::json(&serde_json::json!({
+        "ok": true,
+        "username": username,
+        "ucid": prev_ucid,
+        "sessions_cleared": sessions_cleared,
+        "engine": engine,
     })))
 }
 
@@ -2886,8 +3794,8 @@ async fn api_admin_banned(
 ) -> std::result::Result<impl warp::Reply, Error> {
     require_admin(session_id, db.clone()).await?;
     let data = task::block_in_place(|| -> Result<String> {
-        let web_bans = db.list_admin_bans()?;
-        let cfg_bans = db.session_bans_from_cfg()?;
+        let web_bans = db.list_admin_bans().unwrap_or_default();
+        let cfg_bans = db.session_bans_from_cfg().unwrap_or_default();
         let entries: Vec<_> = web_bans.iter().map(|(ucid, rec)| serde_json::json!({
             "ucid":      ucid.to_string(),
             "name":      rec.name,
@@ -3907,6 +4815,7 @@ async fn main() -> Result<()> {
         .then(api_rounds);
 
     let leaderboard = warp::path!("api" / "leaderboard")
+        .and(extract_session_cookie())
         .and(with_db(db.clone()))
         .and(with_instance(db.clone()))
         .then(api_leaderboard);
@@ -4002,6 +4911,7 @@ async fn main() -> Result<()> {
         .then(api_units);
 
     let online = warp::path!("api" / "online")
+        .and(extract_session_cookie())
         .and(with_db(db.clone()))
         .and(with_instance(db.clone()))
         .then(api_online);
@@ -4073,6 +4983,7 @@ async fn main() -> Result<()> {
     let auth_me = warp::path!("api" / "auth" / "me")
         .and(extract_session_cookie())
         .and(with_db(db.clone()))
+        .and(with_instance(db.clone()))
         .and(with_bot_link_cfg(bot_link_cfg.clone()))
         .then(api_auth_me);
 
@@ -4090,6 +5001,141 @@ async fn main() -> Result<()> {
         .and(warp::any().map(move || cross_origin))
         .then(api_auth_local_login);
 
+    let auth_register = warp::path!("api" / "auth" / "register")
+        .and(warp::post())
+        .and(warp::body::json::<RegisterBody>())
+        .and(with_db(db.clone()))
+        .and(warp::any().map(move || cross_origin))
+        .then(api_auth_register);
+
+    let auth_player_login = warp::path!("api" / "auth" / "player-login")
+        .and(warp::post())
+        .and(warp::body::json::<LocalLoginBody>())
+        .and(with_db(db.clone()))
+        .and(warp::any().map(move || cross_origin))
+        .then(api_auth_player_login);
+
+    let auth_forgot = warp::path!("api" / "auth" / "forgot")
+        .and(warp::post())
+        .and(warp::body::json::<ForgotBody>())
+        .and(with_db(db.clone()))
+        .then(api_auth_forgot);
+
+    let auth_reset_password = warp::path!("api" / "auth" / "reset-password")
+        .and(warp::post())
+        .and(warp::body::json::<ResetPasswordBody>())
+        .and(with_db(db.clone()))
+        .and(warp::any().map(move || cross_origin))
+        .then(api_auth_reset_password);
+
+    let auth_claim_code = warp::path!("api" / "auth" / "claim-code")
+        .and(warp::post())
+        .and(extract_session_cookie())
+        .and(with_db(db.clone()))
+        .then(api_auth_claim_code);
+
+    let profile = warp::path!("api" / "profile")
+        .and(warp::get())
+        .and(extract_session_cookie())
+        .and(with_db(db.clone()))
+        .and(with_instance(db.clone()))
+        .then(api_profile);
+
+    let profile_side_switch = warp::path!("api" / "profile" / "side-switch")
+        .and(warp::post())
+        .and(extract_session_cookie())
+        .and(warp::body::json::<SideSwitchBody>())
+        .and(with_db(db.clone()))
+        .and(with_instance(db.clone()))
+        .then(api_profile_side_switch);
+
+    let squadrons_list = warp::path!("api" / "squadrons")
+        .and(warp::get())
+        .and(warp::query::<std::collections::HashMap<std::string::String, std::string::String>>())
+        .and(with_db(db.clone()))
+        .then(api_squadrons_list);
+
+    let squadron_create = warp::path!("api" / "squadrons")
+        .and(warp::post())
+        .and(extract_session_cookie())
+        .and(warp::body::json::<SquadronNameBody>())
+        .and(with_db(db.clone()))
+        .then(api_squadron_create);
+
+    let squadron_leave = warp::path!("api" / "squadrons" / "leave")
+        .and(warp::post())
+        .and(extract_session_cookie())
+        .and(with_db(db.clone()))
+        .then(api_squadron_leave);
+
+    let squadron_decide = warp::path!("api" / "squadrons" / "requests" / Uuid / "decide")
+        .and(warp::post())
+        .and(extract_session_cookie())
+        .and(warp::body::json::<JoinDecideBody>())
+        .and(with_db(db.clone()))
+        .then(api_squadron_decide);
+
+    let squadron_get = warp::path!("api" / "squadrons" / Uuid)
+        .and(warp::get())
+        .and(with_db(db.clone()))
+        .then(api_squadron_get);
+
+    let squadron_icon_get = warp::path!("api" / "squadrons" / Uuid / "icon.png")
+        .and(warp::get())
+        .and(with_db(db.clone()))
+        .then(api_squadron_icon);
+
+    let squadron_join = warp::path!("api" / "squadrons" / Uuid / "join")
+        .and(warp::post())
+        .and(extract_session_cookie())
+        .and(with_db(db.clone()))
+        .then(api_squadron_join);
+
+    let squadron_rename = warp::path!("api" / "squadrons" / Uuid / "rename")
+        .and(warp::post())
+        .and(extract_session_cookie())
+        .and(warp::body::json::<SquadronNameBody>())
+        .and(with_db(db.clone()))
+        .then(api_squadron_rename);
+
+    let squadron_transfer = warp::path!("api" / "squadrons" / Uuid / "transfer")
+        .and(warp::post())
+        .and(extract_session_cookie())
+        .and(warp::body::json::<TransferBody>())
+        .and(with_db(db.clone()))
+        .then(api_squadron_transfer);
+
+    let squadron_requests = warp::path!("api" / "squadrons" / Uuid / "requests")
+        .and(warp::get())
+        .and(extract_session_cookie())
+        .and(with_db(db.clone()))
+        .then(api_squadron_requests);
+
+    let squadron_set_icon = warp::path!("api" / "squadrons" / Uuid / "icon")
+        .and(warp::post())
+        .and(extract_session_cookie())
+        .and(warp::body::content_length_limit(20 * 1024 + 64))
+        .and(warp::body::bytes())
+        .and(with_db(db.clone()))
+        .then(api_squadron_set_icon);
+
+    let squadron_clear_icon = warp::path!("api" / "squadrons" / Uuid / "icon")
+        .and(warp::delete())
+        .and(extract_session_cookie())
+        .and(with_db(db.clone()))
+        .then(api_squadron_clear_icon);
+
+    let squadron_stats = warp::path!("api" / "squadron-stats")
+        .and(warp::get())
+        .and(warp::query::<std::collections::HashMap<std::string::String, std::string::String>>())
+        .and(with_db(db.clone()))
+        .then(api_squadron_stats);
+
+    let squadron_members = warp::path!("api" / "squadron-members")
+        .and(warp::get())
+        .and(with_db(db.clone()))
+        .then(api_squadron_members);
+
     // Tells the frontend whether local admin login is available
     let local_admin_enabled = local_admin_cfg.is_some();
     let auth_local_enabled = warp::path!("api" / "auth" / "local-enabled")
@@ -4100,6 +5146,27 @@ async fn main() -> Result<()> {
         .and(extract_session_cookie())
         .and(with_db(db.clone()))
         .then(api_admin_sessions);
+
+    let admin_web_accounts = warp::path!("api" / "admin" / "web-accounts")
+        .and(warp::get())
+        .and(extract_session_cookie())
+        .and(with_db(db.clone()))
+        .and(with_instance(db.clone()))
+        .then(api_admin_web_accounts);
+
+    let admin_web_account_unlink = warp::path!("api" / "admin" / "web-accounts" / "unlink")
+        .and(warp::post())
+        .and(extract_session_cookie())
+        .and(warp::body::json::<WebUnlinkBody>())
+        .and(with_db(db.clone()))
+        .then(api_admin_web_account_unlink);
+
+    let admin_unregistered_pilots = warp::path!("api" / "admin" / "unregistered-pilots")
+        .and(warp::get())
+        .and(extract_session_cookie())
+        .and(with_db(db.clone()))
+        .and(with_instance(db.clone()))
+        .then(api_admin_unregistered_pilots);
 
     let admin_reset = warp::path!("api" / "admin" / "reset")
         .and(warp::post())
@@ -4326,6 +5393,14 @@ async fn main() -> Result<()> {
         .and(with_bot_link_cfg(bot_link_cfg.clone()))
         .then(api_cockpit_cargo_spawn);
 
+    let cockpit_whoami_route = warp::path!("api" / "cockpit" / "whoami")
+        .and(warp::get())
+        .and(extract_session_cookie())
+        .and(warp::query::<std::collections::HashMap<std::string::String, std::string::String>>())
+        .and(with_instance(db.clone()))
+        .and(with_db(db.clone()))
+        .then(api_cockpit_whoami);
+
     let cockpit_jtac_list_route = warp::path!("api" / "cockpit" / "jtac")
         .and(warp::get())
         .and(extract_session_cookie())
@@ -4463,6 +5538,7 @@ async fn main() -> Result<()> {
         .or(cockpit_ewr_intel_route)
         .or(cockpit_carp_solve_route)
         .or(cockpit_carp_solve_latlon_route)
+        .or(cockpit_whoami_route)
         .or(cockpit_jtac_list_route)
         .or(cockpit_plugin_download_route)
         .or(cockpit_plugin_info_route)
@@ -4476,7 +5552,16 @@ async fn main() -> Result<()> {
         .or(auth_me)
         .or(auth_logout)
         .or(auth_local_enabled)
+        .or(profile)
+        .or(squadrons_list)
+        .or(squadron_stats)
+        .or(squadron_members)
+        .or(squadron_get)
+        .or(squadron_icon_get)
+        .or(squadron_requests)
         .or(admin_sessions)
+        .or(admin_web_accounts)
+        .or(admin_unregistered_pilots)
         .or(admin_perf)
         .or(admin_perf_history)
         .or(admin_banned)
@@ -4498,6 +5583,20 @@ async fn main() -> Result<()> {
                 .or(api_root_route),
         )
         .or(auth_local_login)
+        .or(auth_register)
+        .or(auth_player_login)
+        .or(auth_forgot)
+        .or(auth_reset_password)
+        .or(auth_claim_code)
+        .or(profile_side_switch)
+        .or(squadron_create)
+        .or(squadron_leave)
+        .or(squadron_decide)
+        .or(squadron_join)
+        .or(squadron_rename)
+        .or(squadron_transfer)
+        .or(squadron_set_icon)
+        .or(squadron_clear_icon)
         .or(admin_reset)
         .or(admin_empty_rounds)
         .or(admin_purge_empty_rounds)
@@ -4505,6 +5604,7 @@ async fn main() -> Result<()> {
         .or(admin_rebuild_stats)
         .or(admin_rebuild_status)
         .or(admin_kick)
+        .or(admin_web_account_unlink)
         .or(admin_ban_route)
         .or(admin_unban_route)
         .or(admin_ucid_merge_route)

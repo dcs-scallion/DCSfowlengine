@@ -162,6 +162,15 @@ pub(crate) struct SessionData {
     pub(crate) avatar:     Option<std::string::String>,
     pub(crate) is_admin:   bool,
     pub(crate) expires:    DateTime<Utc>,
+    /// Player web account username (bfdb Register/Login).
+    #[serde(default)]
+    pub(crate) account_username: Option<std::string::String>,
+    /// Linked UCID cached on the session (from web account).
+    #[serde(default)]
+    pub(crate) ucid: Option<std::string::String>,
+    /// After recovery claim — client must set a new password.
+    #[serde(default)]
+    pub(crate) must_set_password: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -768,6 +777,9 @@ pub(crate) struct StatsDbInner {
     round_instance: Tree<RoundId, std::string::String>,
     auth_sessions: Tree<Uuid, SessionData>,
     auth_states: Tree<Uuid, OAuthState>,
+    web_auth: crate::web_auth::WebAuthStore,
+    squadrons: crate::squadrons::SquadronStore,
+    pilot_public: crate::pilot_public::PilotPublicIds,
     trail_points: Tree<(RoundId, std::string::String, i64), (f64, f64, f64, f64)>,
     objective_captures: Tree<(RoundId, ObjectiveId), u32>,
     captures: Tree<(RoundId, CaptureId), CaptureRecord>,
@@ -923,6 +935,7 @@ fn stat_variant_name(s: &Stat) -> &'static str {
         Stat::PointsTransfer { .. } => "PointsTransfer",
         Stat::PointsTransferToObjective { .. } => "PointsTransferToObjective",
         Stat::Bind { .. } => "Bind",
+        Stat::WebClaim { .. } => "WebClaim",
         Stat::ConvoyDestroyed { .. } => "ConvoyDestroyed",
         Stat::CampaignEvent { .. } => "CampaignEvent",
         Stat::PilotXp { .. } => "PilotXp",
@@ -1022,6 +1035,9 @@ impl StatsDb {
             round_instance: Tree::open(&db, "round_instance")?,
             auth_sessions: Tree::open(&db, "auth_sessions")?,
             auth_states: Tree::open(&db, "auth_states")?,
+            web_auth: crate::web_auth::WebAuthStore::open(&db)?,
+            squadrons: crate::squadrons::SquadronStore::open(&db)?,
+            pilot_public: crate::pilot_public::PilotPublicIds::open(&db)?,
             trail_points: Tree::open(&db, "trail_points")?,
             objective_captures: Tree::open(&db, "objective_captures")?,
             captures: Tree::open(&db, "captures")?,
@@ -1042,6 +1058,7 @@ impl StatsDb {
         }));
         t.migrate_legacy_cursors()?;
         t.migrate_legacy_sealed_keys()?;
+        t.migrate_pilot_public_ids()?;
         t.seed_wiki_if_empty()?;
         t.seed_wiki_images_if_empty()?;
         t.reconcile_flight_hours_from_sorties_once()?;
@@ -1345,6 +1362,64 @@ impl StatsDb {
         proc.call(args).await
     }
 
+    /// Push linked-UCID set to bflib (fail-open heartbeat for aircraft-slot gate).
+    pub(crate) async fn push_web_link_sync(&self, inst: &InstanceState) {
+        use netidx::publisher::Value;
+        let linked = match self.0.web_auth.linked_ucids() {
+            Ok(s) => s,
+            Err(e) => {
+                warn!("[{}] web-link-sync: list linked failed: {e:?}", inst.id);
+                return;
+            }
+        };
+        let list: Vec<std::string::String> = linked.into_iter().collect();
+        let json = match serde_json::to_string(&list) {
+            Ok(j) => j,
+            Err(e) => {
+                warn!("[{}] web-link-sync: serialize failed: {e:?}", inst.id);
+                return;
+            }
+        };
+        match self
+            .call_engine_rpc(inst, "web-link-sync", vec![("ucids", Value::from(json))])
+            .await
+        {
+            Ok(_) => debug!("[{}] web-link-sync ok ({} ucids)", inst.id, list.len()),
+            Err(e) => debug!("[{}] web-link-sync skipped (fail-open): {e}", inst.id),
+        }
+    }
+
+    pub(crate) async fn push_mark_web_linked(&self, inst: &InstanceState, ucid: &Ucid) {
+        use netidx::publisher::Value;
+        match self
+            .call_engine_rpc(
+                inst,
+                "mark-web-linked",
+                vec![("ucid", Value::from(ucid.to_string()))],
+            )
+            .await
+        {
+            Ok(_) => info!("[{}] mark-web-linked {ucid}", inst.id),
+            Err(e) => warn!("[{}] mark-web-linked {ucid} failed: {e}", inst.id),
+        }
+    }
+
+    fn spawn_web_link_sync(&self, inst: &InstanceState) {
+        let db = self.clone();
+        let inst = self.state(&inst.id);
+        tokio::spawn(async move {
+            db.push_web_link_sync(&inst).await;
+        });
+    }
+
+    fn spawn_mark_web_linked(&self, inst: &InstanceState, ucid: Ucid) {
+        let db = self.clone();
+        let inst = self.state(&inst.id);
+        tokio::spawn(async move {
+            db.push_mark_web_linked(&inst, &ucid).await;
+        });
+    }
+
     async fn background_loop(self, inst: Arc<InstanceState>) -> Result<()> {
         if let Some(jsonl_path) = inst.stats_jsonl.clone() {
             return self.jsonl_loop(inst, jsonl_path).await;
@@ -1382,9 +1457,14 @@ impl StatsDb {
         let mut total_batches = 0u64;
         let mut total_items = 0u64;
         let mut last_seen_ts: Option<DateTime<Utc>> = resume_from;
+        let mut web_link_sync_ticks: u32 = 0;
 
         loop {
             timer.tick().await;
+            web_link_sync_ticks = web_link_sync_ticks.wrapping_add(1);
+            if web_link_sync_ticks % 12 == 0 {
+                self.push_web_link_sync(&inst).await;
+            }
             let new_index = task::block_in_place(|| ArchiveIndex::new(&archive_cfg, &shard)).ok();
             let new_head = task::block_in_place(|| {
                 match copy_locked_file(&head_path, &head_copy_path) {
@@ -1511,8 +1591,13 @@ impl StatsDb {
             inst.id
         );
 
+        let mut web_link_sync_ticks: u32 = 0;
         loop {
             timer.tick().await;
+            web_link_sync_ticks = web_link_sync_ticks.wrapping_add(1);
+            if web_link_sync_ticks % 12 == 0 {
+                self.push_web_link_sync(&inst).await;
+            }
 
             if inst.jsonl_reset.swap(false, Ordering::SeqCst) {
                 warn!(
@@ -2439,14 +2524,26 @@ impl StatsDb {
 
     /// Active-round side if registered, else most recent Blue/Red on record.
     pub(crate) fn pilot_current_side(&self, ucid: &Ucid) -> Result<Option<Side>> {
+        self.pilot_side_for_instance(ucid, self.instances().default_id())
+    }
+
+    /// Side for one Attrition server instance (active round preferred, else latest Blue/Red).
+    pub(crate) fn pilot_side_for_instance(
+        &self,
+        ucid: &Ucid,
+        inst: &InstanceId,
+    ) -> Result<Option<Side>> {
         let active = self
-            .latest_rounds()?
+            .latest_rounds_for(inst)?
             .into_iter()
             .find(|(_, _, r)| r.end.is_none())
             .map(|(_, rid, _)| rid);
         let mut best: Option<(DateTime<Utc>, Side)> = None;
         for r in self.pilots.round_info.scan_prefix(ucid)? {
             let ((_, rid), ri) = r?;
+            if &self.round_instance_of(rid) != inst {
+                continue;
+            }
             if !matches!(ri.side.1, Side::Blue | Side::Red) {
                 continue;
             }
@@ -2458,6 +2555,21 @@ impl StatsDb {
             }
         }
         Ok(best.map(|(_, s)| s))
+    }
+
+    /// Per-instance Blue/Red sides for dashboard gating / MY PROFILE.
+    pub(crate) fn pilot_sides_by_instance(
+        &self,
+        ucid: &Ucid,
+    ) -> Result<Vec<(InstanceId, Side)>> {
+        let mut out = Vec::new();
+        for cfg in self.instances().all() {
+            let id: InstanceId = Arc::from(cfg.id.as_str());
+            if let Some(side) = self.pilot_side_for_instance(ucid, &id)? {
+                out.push((id, side));
+            }
+        }
+        Ok(out)
     }
 
     /// Get all pilot UCIDs and their most recent names (all-time, for name resolution)
@@ -2697,12 +2809,20 @@ impl StatsDb {
         Ok(out)
     }
 
-    /// Bans recorded by bflib in the latest session's Cfg (read-only mirror)
+    /// Bans recorded by bflib in the latest session's Cfg (read-only mirror).
+    /// Skips sessions that fail to deserialize (e.g. Cfg gained fields since
+    /// the row was written) so admin lists stay available.
     pub(crate) fn session_bans_from_cfg(&self) -> Result<Vec<(Ucid, std::string::String, Option<DateTime<Utc>>)>> {
         let mut latest_cfg: Option<Cfg> = None;
         for r in self.session.iter() {
-            let (_, s) = r?;
-            latest_cfg = Some(s.cfg);
+            let session = match r {
+                Ok((_, session)) => session,
+                Err(e) => {
+                    warn!("session_bans_from_cfg: skipping unreadable session: {e:?}");
+                    continue;
+                }
+            };
+            latest_cfg = Some(session.cfg);
         }
         let mut out = Vec::new();
         if let Some(cfg) = latest_cfg {
@@ -3094,8 +3214,14 @@ impl StatsDb {
     pub(crate) fn session_perf_history(&self, limit: usize) -> Result<Vec<SessionEnd>> {
         let mut ends: Vec<SessionEnd> = Vec::new();
         for r in self.session.iter() {
-            let (_, s) = r?;
-            if let Some(end) = s.end {
+            let session = match r {
+                Ok((_, session)) => session,
+                Err(e) => {
+                    warn!("session_perf_history: skipping unreadable session: {e:?}");
+                    continue;
+                }
+            };
+            if let Some(end) = session.end {
                 ends.push(end);
             }
         }
@@ -4007,6 +4133,7 @@ impl StatsDb {
                     self.pilots
                         .with_pilot_round_info(ucid, ctx.round, |ri| ri.connected = None)?;
                 }
+                self.spawn_web_link_sync(inst);
             }
             Stat::SessionEnd {
                 api_perf,
@@ -4497,6 +4624,15 @@ impl StatsDb {
                     self.pilots.by_token.remove(&token)?;
                 }
             }
+            Stat::WebClaim { id, code } => match self.0.web_auth.apply_web_claim(&id, &code) {
+                Ok(msg) => {
+                    info!("WebClaim ucid={id} -> {msg}");
+                    if msg == "linked" {
+                        self.spawn_mark_web_linked(inst, id);
+                    }
+                }
+                Err(e) => warn!("WebClaim ucid={id} rejected: {e}"),
+            },
             Stat::PointsTransferToObjective { from: _, to: _, points: _ } => {
                 // Not currently tracked in database
             }
@@ -4531,6 +4667,53 @@ impl StatsDb {
     }
 
     // ── Auth session methods ─────────────────────────────────────────
+
+    pub(crate) fn web_auth(&self) -> &crate::web_auth::WebAuthStore {
+        &self.0.web_auth
+    }
+
+    pub(crate) fn squadrons(&self) -> &crate::squadrons::SquadronStore {
+        &self.0.squadrons
+    }
+
+    pub(crate) fn public_id_for(&self, ucid: &Ucid) -> Result<std::string::String> {
+        self.0.pilot_public.id_for(ucid)
+    }
+
+    pub(crate) fn resolve_pilot_key(&self, key: &str) -> Result<Ucid> {
+        self.0.pilot_public.resolve(key)
+    }
+
+    fn migrate_pilot_public_ids(&self) -> Result<()> {
+        let ucids: Vec<Ucid> = self
+            .0
+            .pilots
+            .pilots
+            .iter()
+            .filter_map(|r| r.ok().map(|(u, _)| u))
+            .collect();
+        let n = self.0.pilot_public.ensure_all(ucids)?;
+        if n > 0 {
+            info!("assigned public pilot ids for {n} existing pilot(s)");
+        }
+        Ok(())
+    }
+
+    /// Career air / ground kills from the pilot total row (for squadron stats).
+    pub(crate) fn pilot_career_kills(&self, ucid: &Ucid) -> Result<(u32, u32)> {
+        Ok(match self.0.pilots.pilots.get(ucid)? {
+            Some(p) => (p.total.air_kills, p.total.ground_kills),
+            None => (0, 0),
+        })
+    }
+
+    /// Career air/ground kills + flight hours from the pilot total row.
+    pub(crate) fn pilot_career_summary(&self, ucid: &Ucid) -> Result<(u32, u32, f32)> {
+        Ok(match self.0.pilots.pilots.get(ucid)? {
+            Some(p) => (p.total.air_kills, p.total.ground_kills, p.total.hours),
+            None => (0, 0, 0.0),
+        })
+    }
 
     pub(crate) fn create_session(&self, id: Uuid, data: SessionData) -> Result<()> {
         self.auth_sessions.insert(&id, &data)?;
@@ -4580,6 +4763,31 @@ impl StatsDb {
             }
         }
         Ok(out)
+    }
+
+    /// Clear cached UCID on browser sessions for this web account / UCID.
+    pub(crate) fn clear_session_link(
+        &self,
+        account_username: &str,
+        ucid: Option<&str>,
+    ) -> Result<usize> {
+        let mut n = 0usize;
+        for item in self.auth_sessions.iter() {
+            let (id, mut data) = item?;
+            let match_user = data.account_username.as_deref() == Some(account_username);
+            let match_ucid = ucid.is_some() && data.ucid.as_deref() == ucid;
+            if !(match_user || match_ucid) {
+                continue;
+            }
+            if data.ucid.is_none() && !data.must_set_password {
+                continue;
+            }
+            data.ucid = None;
+            data.must_set_password = false;
+            self.auth_sessions.insert(&id, &data)?;
+            n += 1;
+        }
+        Ok(n)
     }
 
     // ── Trail point methods ──────────────────────────────────────────

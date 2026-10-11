@@ -275,6 +275,11 @@ pub enum Stat {
         id: Ucid,
         token: String,
     },
+    /// Dashboard web-account claim / password-recovery code (`-linkme <code>`).
+    WebClaim {
+        id: Ucid,
+        code: String,
+    },
     ConvoyDestroyed {
         from: ObjectiveId,
         to: ObjectiveId,

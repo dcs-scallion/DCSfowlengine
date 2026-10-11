@@ -556,6 +556,34 @@ fn bind_command(ctx: &mut Context, id: PlayerId, s: &str) {
     }
 }
 
+/// Dashboard web-account claim / password recovery (`-linkme <4-digit code>`).
+fn linkme_command(ctx: &mut Context, id: PlayerId, s: &str) {
+    match ctx.connected.get(&id) {
+        None => ctx.db.ephemeral.msgs().send(
+            MsgTyp::Chat(Some(id)),
+            "You must join a team first. Select Blue or Red in the DCS lobby, then occupy a slot.",
+        ),
+        Some(ifo) => {
+            let code = s.trim();
+            if code.len() != 4 || !code.chars().all(|c| c.is_ascii_digit()) {
+                ctx.db.ephemeral.msgs().send(
+                    MsgTyp::Chat(Some(id)),
+                    "Invalid claim code. Use the 4-digit code from the dashboard (e.g. -linkme 4821).",
+                );
+                return;
+            }
+            ctx.db.ephemeral.msgs().send(
+                MsgTyp::Chat(Some(id)),
+                "Claim submitted. Refresh the dashboard after a few seconds (Login) to confirm.",
+            );
+            ctx.do_bg_task(Task::Stat(Stat::WebClaim {
+                id: ifo.ucid,
+                code: code.into(),
+            }));
+        }
+    }
+}
+
 fn jtac_command(ctx: &mut Context, id: PlayerId, s: &str) {
     if s.trim().eq_ignore_ascii_case("help") {
         ctx.db
@@ -779,7 +807,8 @@ fn help_command(ctx: &mut Context, id: PlayerId) {
         " -transfer <amount> [<player> | objective:<objective>]: transfer points to another player or objective",
         " -delete <groupid>: delete a group you deployed for a partial refund",
         " -action <name> <args>: perform an action, -action help for a list of actions",
-        " -bind <token>: bind your ucid to the specified token (for the web gui)",
+        " -linkme <code>: link your UCID to your dashboard account (code from Register / Forgot password)",
+        " -bind <token>: bind your ucid to a legacy UUID token",
         " -jtac <jtid> <cmd>",
         " -help: show this help message",
     ] {
@@ -826,6 +855,9 @@ pub(super) fn process(
         Ok("".into())
     } else if let Some(s) = msg.strip_prefix("-delete ") {
         delete_command(ctx, id, s);
+        Ok("".into())
+    } else if let Some(s) = msg.strip_prefix("-linkme ") {
+        linkme_command(ctx, id, s);
         Ok("".into())
     } else if let Some(s) = msg.strip_prefix("-bind ") {
         bind_command(ctx, id, s);

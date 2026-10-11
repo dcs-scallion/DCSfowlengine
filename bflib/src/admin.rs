@@ -197,6 +197,27 @@ pub enum AdminCommand {
         ucid: Ucid,
         body: std::string::String,
     },
+    /// Dashboard MY PROFILE: side + remaining side_switches for a UCID
+    PlayerSideInfo {
+        ucid: Ucid,
+    },
+    /// Dashboard MY PROFILE: player self side-switch (respects CFG side_switches)
+    PlayerSideSwitch {
+        ucid: Ucid,
+        side: Side,
+    },
+    /// bfdb: mark one UCID as dashboard-linked (after successful -linkme claim)
+    MarkWebLinked {
+        ucid: Ucid,
+    },
+    /// bfdb admin: clear linked flag + free-join counter for a UCID
+    ClearWebLinked {
+        ucid: Ucid,
+    },
+    /// bfdb heartbeat: full linked-UCID set (JSON); enables fail-open enforcement
+    WebLinkSync {
+        ucids: Vec<Ucid>,
+    },
 }
 
 impl AdminCommand {
@@ -1787,6 +1808,37 @@ pub(super) fn run_admin_commands(ctx: &mut Context, lua: MizLua) -> Result<Admin
                     Ok(msg) => replies.push(NetIdxValue::from(msg)),
                     Err(e) => reply_err!("{e:#}"),
                 }
+            }
+            AdminCommand::PlayerSideInfo { ucid } => match ctx.db.player(&ucid) {
+                Some(p) => {
+                    let json = serde_json::json!({
+                        "ucid": ucid.to_string(),
+                        "side": format!("{:?}", p.side),
+                        "side_switches": p.side_switches,
+                        "name": p.name.to_string(),
+                    });
+                    replies.push(NetIdxValue::from(json.to_string()));
+                }
+                None => reply_err!("player not registered on this server"),
+            },
+            AdminCommand::PlayerSideSwitch { ucid, side } => {
+                match ctx.db.sideswitch_player(&ucid, side) {
+                    Ok(()) => reply_ok!("switched to {side}"),
+                    Err(e) => reply_err!("{e}"),
+                }
+            }
+            AdminCommand::MarkWebLinked { ucid } => {
+                ctx.db.mark_web_linked(&ucid);
+                reply_ok!("web-linked {ucid}");
+            }
+            AdminCommand::ClearWebLinked { ucid } => {
+                ctx.db.clear_web_linked(&ucid);
+                reply_ok!("web-unlinked {ucid}");
+            }
+            AdminCommand::WebLinkSync { ucids } => {
+                let n = ucids.len();
+                ctx.db.sync_web_linked(&ucids);
+                reply_ok!("web-link-sync {n} linked");
             }
         }
         match caller {
