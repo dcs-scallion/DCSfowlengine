@@ -1685,11 +1685,12 @@ fn on_event(lua: MizLua, ev: Event) -> Result<()> {
                     }
                 }
                 let dead = target.get_life()? < 1;
+                let wpn = e.weapon_name.as_ref().map(|s| s.as_str());
                 if let Some(shooter) =
-                    crate::shots::who_from_initiator(&ctx.db, e.initiator.as_ref())
+                    crate::shots::who_from_initiator(&ctx.db, e.initiator.as_ref(), wpn)
                 {
                     let shooter_typ =
-                        crate::shots::shooter_typ_from_initiator(e.initiator.as_ref());
+                        crate::shots::shooter_typ_from_initiator(e.initiator.as_ref(), wpn);
                     if let Err(e) = ctx.shots_out.hit_by_who(
                         &ctx.db,
                         start_ts,
@@ -1729,8 +1730,9 @@ fn on_event(lua: MizLua, ev: Event) -> Result<()> {
             {
                 let static_id = target.object_id()?;
                 let weapon_name = e.weapon_name.clone();
+                let wpn = weapon_name.as_ref().map(|s| s.as_str());
                 if let Some(who) =
-                    crate::shots::who_from_initiator(&ctx.db, e.initiator.as_ref())
+                    crate::shots::who_from_initiator(&ctx.db, e.initiator.as_ref(), wpn)
                 {
                     ctx.db
                         .note_static_hit(static_id.clone(), who, weapon_name.clone());
@@ -1745,6 +1747,7 @@ fn on_event(lua: MizLua, ev: Event) -> Result<()> {
                     let (killer, hit_weapon) = match crate::shots::who_from_initiator(
                         &ctx.db,
                         e.initiator.as_ref(),
+                        wpn,
                     ) {
                         Some(who) => (Some(who), weapon_name),
                         None => match ctx.db.take_static_hit(&static_id) {

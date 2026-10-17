@@ -1291,7 +1291,12 @@ impl StatsDb {
                         continue;
                     };
                     let full: &str = chars.as_ref();
-                    let start = if full.len() >= seen_len { seen_len } else { 0 };
+                    // seen_len is bytes; Windows/netidx error text is UTF-8 — never slice mid-char
+                    let start = if full.len() >= seen_len && full.is_char_boundary(seen_len) {
+                        seen_len
+                    } else {
+                        0
+                    };
                     let new_part = &full[start..];
                     seen_len = full.len();
                     for line in new_part.lines().filter(|l| !l.is_empty()) {
@@ -4958,6 +4963,12 @@ impl StatsDb {
                 *w = None;
             }
         }
+        Ok(())
+    }
+
+    /// Flush sled to disk (graceful shutdown / deploy stop).
+    pub(crate) fn flush(&self) -> Result<()> {
+        self.0.db.flush()?;
         Ok(())
     }
 

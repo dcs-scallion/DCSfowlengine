@@ -1,4 +1,4 @@
-# ==========================================================
+﻿# ==========================================================
 # FOWL ENGINE SERVICE STARTER
 # ==========================================================
 
@@ -16,7 +16,7 @@ $netidxResolverConfig = Join-Path $PSScriptRoot "netidx\netidx-resolver.json"
 # Path to bfdb.exe (copy it here from target\release\bfdb.exe)
 $bfdbExe = Join-Path $dcsWriteDir "bfdb.exe"
 
-# netidx resolver CLI — always next to bfdb.exe and the campaign CFG
+# netidx resolver CLI -- always next to bfdb.exe and the campaign CFG
 $netidxExe = Join-Path $dcsWriteDir "netidx.exe"
 
 # Path where the Sled database will be stored (dedicated folder)
@@ -32,7 +32,7 @@ $configPath = Join-Path $dcsWriteDir "campaign.json"
 $engineConfigPath = Join-Path $dcsWriteDir "Caucasus1985-SARH_CFG"
 
 # Path to the stats JSONL file written by bflib
-# bflib writes this file as missions run — e.g. DCS\Logs\stats.jsonl
+# bflib writes this file as missions run -- e.g. DCS\Logs\stats.jsonl
 $statsJsonl = Join-Path $dcsWriteDir "Logs\stats.jsonl"
 
 # Path to the netidx-archive stats directory bflib writes alongside
@@ -50,7 +50,7 @@ $listenAddress = "127.0.0.1:8880"
 # Public hostname users type (obscure URL; not linked from the website yet).
 $publicStatsUrl = "https://stats.attrition.cz"
 
-# Admin panel local login (username + password — no Discord required)
+# Admin panel local login (username + password -- no Discord required)
 # Leave blank to disable local login (Discord-only)
 $adminUsername = "admin"
 
@@ -70,7 +70,7 @@ $discordGuildId      = ""
 # Right-click the role that should grant dashboard admin access -> Copy Role ID.
 $discordAdminRoleId  = ""
 
-# SRS radio panel — Ciribob HTTP API base (bfdb GETs {url}/clients + X-API-KEY).
+# SRS radio panel -- Ciribob HTTP API base (bfdb GETs {url}/clients + X-API-KEY).
 # Voice clients still use :5002; this is only the localhost HTTP port (often 8081).
 # Leave blank to disable (or set srsUrl in campaign.json instead).
 $srsUrl = "http://localhost:8081"
@@ -78,11 +78,11 @@ $srsUrl = "http://localhost:8081"
 # (bfdb still sends the X-API-KEY header). Put a real secret in bfsystem.local.ps1.
 $srsApiKey = ""
 
-# DCSServerBot's RestAPI plugin — bfdb has no Discord-link database of its
+# DCSServerBot's RestAPI plugin -- bfdb has no Discord-link database of its
 # own; it resolves a Discord user's ucid by querying the bot's own player
 # database here (POST {url}/getuser), and sources the dashboard's restart
 # countdown from here too (GET {url}/servers). MUST include whatever
-# `prefix` is set to in the bot's restapi.yaml — e.g. if that file has
+# `prefix` is set to in the bot's restapi.yaml -- e.g. if that file has
 # `prefix: stats`, this needs to be "http://127.0.0.1:9876/stats", NOT
 # just "http://127.0.0.1:9876" (the API doesn't live at the bare root).
 # No trailing slash. Leave blank to disable linking entirely (dashboard
@@ -99,7 +99,7 @@ $dcsServerBotUrl = ""
 $corsOrigins = @()
 
 # Must match "netidx_base" in the engine CFG ($engineConfigPath). bflib and
-# bfdb both append the mission Sortie themselves (…/<sortie>/api/…, …/log);
+# bfdb both append the mission Sortie themselves (.../<sortie>/api/..., .../log);
 # do NOT put the sortie in this value. Leave blank to run bfdb without
 # netidx (JSONL stats still work; LIVE badge / engine RPC / engine logs will not).
 # One-time setup: netidx.exe in $dcsWriteDir (beside bfdb.exe / CFG), resolver
@@ -147,15 +147,51 @@ if ([string]::IsNullOrWhiteSpace($adminPassword)) {
 
 # ==========================================================
 
+# Ask bfdb to flush sled via POST /api/admin/shutdown, wait for exit,
+# then Force only if it is still alive (old builds without the endpoint).
+function Stop-BfdbGraceful {
+    param([int]$TimeoutSec = 25)
+    $procs = @(Get-Process -Name "bfdb" -ErrorAction SilentlyContinue)
+    if ($procs.Count -eq 0) { return $true }
+
+    Write-Host "Requesting bfdb graceful shutdown (sled flush)..." -ForegroundColor Gray
+    try {
+        $base = "http://$listenAddress"
+        $web = New-Object Microsoft.PowerShell.Commands.WebRequestSession
+        $body = @{ username = $adminUsername; password = $adminPassword } | ConvertTo-Json
+        $null = Invoke-WebRequest -Uri "$base/api/auth/local-login" -Method POST -Body $body `
+            -ContentType "application/json" -WebSession $web -UseBasicParsing -TimeoutSec 5
+        $null = Invoke-WebRequest -Uri "$base/api/admin/shutdown" -Method POST `
+            -WebSession $web -UseBasicParsing -TimeoutSec 5
+    } catch {
+        Write-Host "Graceful API shutdown unavailable ($($_.Exception.Message)) -- short wait / force fallback." -ForegroundColor Yellow
+        # Old bfdb without /api/admin/shutdown -- don't sit for the full timeout.
+        $TimeoutSec = [Math]::Min($TimeoutSec, 3)
+    }
+
+    $deadline = (Get-Date).AddSeconds($TimeoutSec)
+    while ((Get-Date) -lt $deadline) {
+        if (-not (Get-Process -Name "bfdb" -ErrorAction SilentlyContinue)) {
+            Write-Host "bfdb exited cleanly." -ForegroundColor Green
+            return $true
+        }
+        Start-Sleep -Milliseconds 250
+    }
+
+    Write-Host "bfdb still running after ${TimeoutSec}s -- Stop-Process -Force." -ForegroundColor Yellow
+    Stop-Process -Name "bfdb" -Force -ErrorAction SilentlyContinue
+    Start-Sleep -Milliseconds 500
+    return -not [bool](Get-Process -Name "bfdb" -ErrorAction SilentlyContinue)
+}
+
 function Start-FowlStats {
     Write-Host "Cleaning up existing processes..." -ForegroundColor Gray
-    Stop-Process -Name "bfdb" -Force -ErrorAction SilentlyContinue
-    Get-Job -Name "DBEngine" -ErrorAction SilentlyContinue | Remove-Job -Force -ErrorAction SilentlyContinue
-    $deadline = (Get-Date).AddSeconds(8)
-    while ((Get-Process -Name "bfdb" -ErrorAction SilentlyContinue) -and (Get-Date) -lt $deadline) {
-        Start-Sleep -Milliseconds 250
-        Stop-Process -Name "bfdb" -Force -ErrorAction SilentlyContinue
+    if (-not (Stop-BfdbGraceful)) {
+        Write-Host "bfdb.exe still running after stop -- kill it manually, then retry." -ForegroundColor Red
+        exit 1
     }
+    Get-Job -Name "DBEngine" -ErrorAction SilentlyContinue | Stop-Job -ErrorAction SilentlyContinue
+    Get-Job -Name "DBEngine" -ErrorAction SilentlyContinue | Remove-Job -Force -ErrorAction SilentlyContinue
 
     # Only recycle the netidx resolver if it's NOT already serving. Killing a
     # healthy resolver drops bflib's publisher inside DCS for ~60s (its
@@ -309,9 +345,12 @@ function Start-FowlStats {
 
 function Stop-FowlStats {
     Write-Host "`nShutting down..." -ForegroundColor Red
-    Get-Job | Stop-Job  -ErrorAction SilentlyContinue
-    Get-Job | Remove-Job -Force -ErrorAction SilentlyContinue
-    Stop-Process -Name "bfdb" -Force -ErrorAction SilentlyContinue
+    # Flush sled before tearing down the job host (Stop-Job alone is hard-kill).
+    $null = Stop-BfdbGraceful
+    Get-Job -Name "DBEngine" -ErrorAction SilentlyContinue | Stop-Job -ErrorAction SilentlyContinue
+    Get-Job -Name "DBEngine" -ErrorAction SilentlyContinue | Remove-Job -Force -ErrorAction SilentlyContinue
+    Get-Job -Name "NetidxResolver" -ErrorAction SilentlyContinue | Stop-Job -ErrorAction SilentlyContinue
+    Get-Job -Name "NetidxResolver" -ErrorAction SilentlyContinue | Remove-Job -Force -ErrorAction SilentlyContinue
     Stop-Process -Name "netidx" -Force -ErrorAction SilentlyContinue
     Write-Host "Stopped." -ForegroundColor Green
     Start-Sleep -Seconds 1

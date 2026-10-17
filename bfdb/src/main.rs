@@ -15,7 +15,10 @@ use std::{
     path::PathBuf,
     sync::{Arc, Mutex},
 };
-use tokio::{sync::broadcast, task};
+use tokio::{
+    sync::{broadcast, Notify},
+    task,
+};
 use uuid::Uuid;
 use warp::{
     http::Method,
@@ -3026,6 +3029,21 @@ async fn api_admin_rebuild_stats(
     })))
 }
 
+/// POST /api/admin/shutdown — flush sled and stop the HTTP server (bfsystem Q / redeploy)
+async fn api_admin_shutdown(
+    session_id: Option<Uuid>,
+    db: StatsDb,
+    shutdown: Arc<Notify>,
+) -> std::result::Result<impl warp::Reply, Error> {
+    require_admin(session_id, db).await?;
+    log::info!("ADMIN: shutdown requested");
+    shutdown.notify_waiters();
+    Ok(warp::reply::json(&serde_json::json!({
+        "ok": true,
+        "message": "shutting down",
+    })))
+}
+
 /// GET /api/admin/rebuild-status — queued / rebuilding / complete / idle
 async fn api_admin_rebuild_status(
     session_id: Option<Uuid>,
@@ -4405,6 +4423,12 @@ fn api_root() -> Response {
 
 // ── Server setup ────────────────────────────────────────────────────
 
+fn with_shutdown(
+    shutdown: Arc<Notify>,
+) -> impl Filter<Extract = (Arc<Notify>,), Error = std::convert::Infallible> + Clone {
+    warp::any().map(move || shutdown.clone())
+}
+
 fn with_db(db: StatsDb) -> impl Filter<Extract = (StatsDb,), Error = std::convert::Infallible> + Clone {
     warp::any().map(move || db.clone())
 }
@@ -4682,6 +4706,36 @@ async fn main() -> Result<()> {
         args.include,
         args.exclude,
     )?;
+
+    let shutdown = Arc::new(Notify::new());
+    {
+        let shutdown = shutdown.clone();
+        task::spawn(async move {
+            #[cfg(windows)]
+            {
+                let mut ctrl_break = match tokio::signal::windows::ctrl_break() {
+                    Ok(s) => s,
+                    Err(e) => {
+                        log::warn!("ctrl_break unavailable: {e}");
+                        let _ = tokio::signal::ctrl_c().await;
+                        log::info!("shutdown signal received (ctrl_c)");
+                        shutdown.notify_waiters();
+                        return;
+                    }
+                };
+                tokio::select! {
+                    _ = tokio::signal::ctrl_c() => log::info!("shutdown signal received (ctrl_c)"),
+                    _ = ctrl_break.recv() => log::info!("shutdown signal received (ctrl_break)"),
+                }
+            }
+            #[cfg(not(windows))]
+            {
+                let _ = tokio::signal::ctrl_c().await;
+                log::info!("shutdown signal received (ctrl_c)");
+            }
+            shutdown.notify_waiters();
+        });
+    }
 
     let auth_cfg: Option<AuthConfig> = match (
         args.discord_client_id,
@@ -5204,6 +5258,13 @@ async fn main() -> Result<()> {
         .and(with_db(db.clone()))
         .then(api_admin_rebuild_status);
 
+    let admin_shutdown = warp::path!("api" / "admin" / "shutdown")
+        .and(warp::post())
+        .and(extract_session_cookie())
+        .and(with_db(db.clone()))
+        .and(with_shutdown(shutdown.clone()))
+        .then(api_admin_shutdown);
+
     let admin_kick = warp::path!("api" / "admin" / "kick")
         .and(warp::post())
         .and(extract_session_cookie())
@@ -5603,6 +5664,7 @@ async fn main() -> Result<()> {
         .or(admin_delete_round)
         .or(admin_rebuild_stats)
         .or(admin_rebuild_status)
+        .or(admin_shutdown)
         .or(admin_kick)
         .or(admin_web_account_unlink)
         .or(admin_ban_route)
@@ -5635,15 +5697,30 @@ async fn main() -> Result<()> {
         log::warn!("--site-address is deprecated and ignored (no embedded marketing site)");
     }
 
+    let db_flush = db.clone();
+    let shutdown_wait = shutdown.clone();
+    let on_shutdown = async move {
+        shutdown_wait.notified().await;
+        log::info!("flushing sled before exit");
+        match task::block_in_place(|| db_flush.flush()) {
+            Ok(()) => log::info!("sled flush complete"),
+            Err(e) => log::error!("sled flush failed: {e:?}"),
+        }
+    };
+
     match (&args.cert, &args.key) {
-        (_, None) | (None, _) => warp::serve(routes).run(args.listen_address).await,
+        (_, None) | (None, _) => {
+            let (_addr, fut) = warp::serve(routes)
+                .bind_with_graceful_shutdown(args.listen_address, on_shutdown);
+            fut.await;
+        }
         (Some(cert), Some(key)) => {
-            warp::serve(routes)
+            let (_addr, fut) = warp::serve(routes)
                 .tls()
                 .cert_path(cert)
                 .key_path(key)
-                .run(args.listen_address)
-                .await
+                .bind_with_graceful_shutdown(args.listen_address, on_shutdown);
+            fut.await;
         }
     }
     Ok(())

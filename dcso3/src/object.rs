@@ -152,22 +152,24 @@ fn is_likely_scenery_unit_type(ut: &str) -> bool {
         || lower.contains("tower")
         || lower.contains("bridge")
         || lower.contains("fence")
+        || lower.contains("fance") // DCS typo: BARBEDFANCE
+        || lower.contains("barbed")
         || lower.contains("wall")
         || lower.contains("hangar")
+        || lower.contains("airbase")
 }
 
 fn event_object_class_candidates(desc: &EventObjectDescriptor) -> &'static [&'static str] {
     match desc.unit_type.as_deref() {
         Some(ut) if ut.starts_with("weapons.") => &["Weapon"],
         Some(ut) if ut.is_empty() && desc.coalition == Some(-1) => &["Weapon"],
-        Some(ut) if ut.is_empty() => &["Unit", "Static", "Weapon"],
-        // Never try Unit: DCS isExist can succeed with a Unit metatable on scenery ids
-        // and later Unit API calls ACCESS_VIOLATION (airframe vs tower).
+        Some(ut) if ut.is_empty() => &["Unit", "Static", "Scenery"],
+        // Never try Unit/Weapon: isExist can succeed with wrong metatable; later API crashes DCS.
         Some(ut) if is_likely_scenery_unit_type(ut) => &["Scenery", "Static"],
-        // Prefer Scenery before Unit when type is ambiguous.
-        Some(_) => &["Static", "Scenery", "Weapon", "Unit"],
+        // Typed non-weapon: never Weapon (e.g. BARBEDFANCE passes Weapon.isExist).
+        Some(_) => &["Static", "Scenery", "Unit"],
         None if desc.coalition == Some(-1) => &["Weapon"],
-        None => &["Static", "Scenery", "Weapon", "Unit"],
+        None => &["Static", "Scenery", "Unit"],
     }
 }
 
@@ -330,5 +332,37 @@ impl<'lua> DcsObject<'lua> for Object<'lua> {
             bail!("{} is an invalid object", id.id)
         }
         Ok(self)
+    }
+}
+
+#[cfg(test)]
+mod event_object_resolve_tests {
+    use super::*;
+
+    fn candidates(unit_type: Option<&str>, coalition: Option<i64>) -> &'static [&'static str] {
+        event_object_class_candidates(&EventObjectDescriptor {
+            id: 1,
+            unit_type: unit_type.map(String::from),
+            coalition,
+        })
+    }
+
+    #[test]
+    fn barbedfance_is_scenery_only() {
+        assert!(is_likely_scenery_unit_type("BARBEDFANCE"));
+        assert_eq!(candidates(Some("BARBEDFANCE"), Some(-1)), &["Scenery", "Static"]);
+    }
+
+    #[test]
+    fn typed_non_weapon_never_tries_weapon() {
+        assert!(!candidates(Some("Su-25T"), Some(1)).contains(&"Weapon"));
+        assert!(!candidates(Some("airbase_vor"), Some(-1)).contains(&"Weapon"));
+    }
+
+    #[test]
+    fn real_weapon_paths_still_allow_weapon() {
+        assert_eq!(candidates(Some("weapons.missiles.R_73"), Some(-1)), &["Weapon"]);
+        assert_eq!(candidates(Some(""), Some(-1)), &["Weapon"]);
+        assert_eq!(candidates(None, Some(-1)), &["Weapon"]);
     }
 }

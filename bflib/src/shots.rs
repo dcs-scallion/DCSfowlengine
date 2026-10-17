@@ -105,13 +105,22 @@ pub(crate) fn who(db: &Db, id: DcsOid<ClassUnit>) -> Option<Who> {
     }
 }
 
-pub(crate) fn who_from_initiator(db: &Db, initiator: Option<&Object>) -> Option<Who> {
+/// Prefer Unit; Weapon→launcher only when the event names a munition.
+/// Scenery mis-resolved as Weapon + getLauncher can hard-crash DCS.
+pub(crate) fn who_from_initiator(
+    db: &Db,
+    initiator: Option<&Object>,
+    weapon_name: Option<&str>,
+) -> Option<Who> {
     initiator
         .filter(|o| matches!(o.get_category().ok(), Some(ObjectCategory::Unit)))
         .and_then(|i| i.as_unit().ok())
         .and_then(|u| u.object_id().ok())
         .and_then(|id| who(db, id))
         .or_else(|| {
+            if weapon_name.map(|s| s.is_empty()).unwrap_or(true) {
+                return None;
+            }
             initiator
                 .filter(|o| matches!(o.get_category().ok(), Some(ObjectCategory::Weapon)))
                 .and_then(|i| i.as_weapon().ok())
@@ -122,12 +131,18 @@ pub(crate) fn who_from_initiator(db: &Db, initiator: Option<&Object>) -> Option<
 }
 
 /// Unit type of shooter; Hit/Kill often has Weapon as initiator — use launcher.
-pub(crate) fn shooter_typ_from_initiator(initiator: Option<&Object>) -> Option<String> {
+pub(crate) fn shooter_typ_from_initiator(
+    initiator: Option<&Object>,
+    weapon_name: Option<&str>,
+) -> Option<String> {
     initiator
         .filter(|o| matches!(o.get_category().ok(), Some(ObjectCategory::Unit)))
         .and_then(|o| o.as_unit().ok())
         .and_then(|u| u.get_type_name().ok())
         .or_else(|| {
+            if weapon_name.map(|s| s.is_empty()).unwrap_or(true) {
+                return None;
+            }
             initiator
                 .filter(|o| matches!(o.get_category().ok(), Some(ObjectCategory::Weapon)))
                 .and_then(|o| o.as_weapon().ok())
