@@ -258,6 +258,9 @@ pub struct Ephemeral {
     /// Previous tick slung crates (gid → carrier) for drop-transition detection.
     pub(super) shared_ed_prev_slung: FxHashMap<GroupId, Ucid>,
     /// Warehouse dynamic cargo name → register time (brief prune grace during F8 fill/load).
+    /// Crate names whose source-checkout debit has already been settled (snapshot delta or registered this session).
+    /// Persisted crates loaded from disk are NOT in this set until they receive a fill-delta debit.
+    pub(super) dynamic_cargo_checkout_settled: FxHashSet<String>,
     pub(super) dynamic_cargo_registered_at: FxHashMap<String, DateTime<Utc>>,
     /// Consecutive slow-tick world misses before prune treats cargo as gone.
     pub(super) dynamic_cargo_miss_count: FxHashMap<String, u8>,
@@ -268,6 +271,7 @@ pub struct Ephemeral {
     /// Slot/deslot airframe: re-clamp DCS count after engine warehouse apply.
     /// `(due_utc, oid, typ_name, target_stored)`.
     pub(super) pending_deslot_airframe_fix: Vec<(DateTime<Utc>, ObjectiveId, String, u32)>,
+    pub(super) pending_deslot_weapon_fix: Vec<(DateTime<Utc>, ObjectiveId, Vec<(String, u32)>)>,
     /// Aircraft inst snapshot when MP slot change (FO/observer) overwrites `current_slot` before LeaveUnit.
     pub(super) pending_aircraft_deslot: FxHashMap<dcso3::net::SlotId, super::player::InstancedPlayer>,
     /// `life_return` already played at TryChangeSlot (player still in aircraft).
@@ -387,11 +391,13 @@ impl Default for Ephemeral {
             shared_ed_fowl_load_order: FxHashMap::default(),
             shared_ed_sling_landed: FxHashSet::default(),
             shared_ed_prev_slung: FxHashMap::default(),
+            dynamic_cargo_checkout_settled: FxHashSet::default(),
             dynamic_cargo_registered_at: FxHashMap::default(),
             dynamic_cargo_miss_count: FxHashMap::default(),
             dynamic_cargo_rehook_in_progress: FxHashSet::default(),
             dynamic_cargo_air_dropped_at: FxHashMap::default(),
             pending_deslot_airframe_fix: Vec::default(),
+            pending_deslot_weapon_fix: Vec::default(),
             pending_aircraft_deslot: FxHashMap::default(),
             life_return_sound_played: FxHashSet::default(),
             pending_airframe_loss_dynamic_cargo: Vec::default(),

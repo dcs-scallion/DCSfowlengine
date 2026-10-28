@@ -39,6 +39,7 @@ use dcso3::{
     land::{Land, SurfaceType},
     object::DcsObject,
     perf::record_perf,
+    unit::Unit,
     warehouse::{self, LiquidType, WSAircraftCategory, WSCategory},
     world::World,
     LuaEnv, LuaVec2, MizLua, String, Vector2,
@@ -1894,6 +1895,60 @@ fn clamp_non_olo_airframe_rows_to_export(
     }
 }
 
+/// Ferried weapon SKUs outside the objective profile keep `capacity >= stored` (OLO autofill gate stays closed).
+fn raise_out_of_profile_weapon_capacity_to_stored(
+    obj: &mut Objective,
+    export: &FowlMizExport,
+    resource_meta: &FxHashMap<String, WarehouseResourceMeta>,
+) {
+    if !export_has_objective_stock(export) {
+        return;
+    }
+    let Some(profile) = objective_coalition_stock_for_objective(export, obj)
+        .filter(|p| p.equipment.values().any(|i| i.baseline > 0))
+    else {
+        return;
+    };
+    for (name, inv) in obj.warehouse.equipment.iter_mut_cow() {
+        if inv.stored <= inv.capacity {
+            continue;
+        }
+        let Some(meta) = resource_meta.get(name) else {
+            continue;
+        };
+        if meta.is_aircraft {
+            continue;
+        }
+        let in_profile = profile_export_equipment_item(profile, name.as_str(), resource_meta)
+            .is_some_and(|i| i.baseline > 0);
+        if !in_profile {
+            inv.capacity = inv.stored;
+        }
+    }
+}
+
+/// Weapon SKU a deslotting unit / absorbed crate may credit: ordnance only (no guns, pods), coalition allowlist applies.
+fn weapon_credit_allowed(export: &FowlMizExport, side: Side, meta: &WarehouseResourceMeta) -> bool {
+    if meta.is_aircraft {
+        return false;
+    }
+    let Some(quad) = meta.quad else {
+        return false;
+    };
+    if quad[0] != 4 || !matches!(quad[1], 4 | 5 | 7 | 8) {
+        return false;
+    }
+    if !export_has_any_weapon_allowlist(export) {
+        return true;
+    }
+    let list = side_allowlist(export, side);
+    if list.is_empty() {
+        return true;
+    }
+    let norm = remap_legacy_kmgu_ws(quad);
+    list.iter().any(|w| *w == quad || *w == norm)
+}
+
 /// DT registration / filler pattern: empty 0/1 (or capacity 1) rows must not skew Supply %.
 /// Warehouse rows are unchanged — this is only for the Supply % average.
 fn equipment_counts_toward_supply_pct(inv: &Inventory) -> bool {
@@ -1942,6 +1997,12 @@ fn equipment_included_in_supply_pct(
     resource_meta: Option<&FxHashMap<String, WarehouseResourceMeta>>,
 ) -> bool {
     if inv.capacity == 0 || !equipment_counts_toward_supply_pct(inv) {
+        return false;
+    }
+    // Ferried weapons outside the owner profile never count toward Supply %.
+    if resource_meta.is_some_and(|m| m.get(name).is_some_and(|x| !x.is_aircraft))
+        && !equipment_autofill_allowed_by_owner_template(export, obj, name, resource_meta)
+    {
         return false;
     }
     let tracked = match dcs_tracked {
@@ -2874,6 +2935,144 @@ impl Db {
                 .as_ref()
                 .expect("warehouse_resource_meta just set"),
         ))
+    }
+
+    /// Deslot at a friendly airbase: credit remaining unit ordnance (any SKU, profile-independent).
+    /// Absolute `set_item(dcs + n)` plus deferred clamp-down, so a late DCS return cannot double-count.
+    pub(super) fn credit_deslot_weapons(
+        &mut self,
+        lua: MizLua,
+        oid: ObjectiveId,
+        unit: &Unit,
+    ) -> Result<()> {
+        let resource_meta = self
+            .warehouse_resource_meta_cache(lua)
+            .context("resource meta for deslot weapons")?;
+        let export = Arc::clone(&self.ephemeral.fowl_miz_export);
+        let side = objective!(self, oid)?.owner;
+        let id = maybe!(self.ephemeral.airbase_by_oid, oid, "airbase")?;
+        let wh = Airbase::get_instance(lua, &id)
+            .context("get airbase for deslot weapons")?
+            .get_warehouse()
+            .context("get warehouse for deslot weapons")?;
+        let mut carried: FxHashMap<String, u32> = FxHashMap::default();
+        let mut skipped: SmallVec<[String; 4]> = smallvec![];
+        for ammo in unit.get_ammo().context("get ammo")? {
+            let ammo = ammo?;
+            let n = ammo.count().context("ammo count")?;
+            if n == 0 {
+                continue;
+            }
+            let typ = ammo.type_name().context("ammo typ")?;
+            match resource_meta.get(typ.as_str()) {
+                Some(meta) if weapon_credit_allowed(export.as_ref(), side, meta) => {
+                    *carried.entry(typ).or_default() += n;
+                }
+                _ => skipped.push(typ),
+            }
+        }
+        if !skipped.is_empty() {
+            debug!("deslot weapons not credited at {oid:?}: {skipped:?}");
+        }
+        if carried.is_empty() {
+            return Ok(());
+        }
+        let mut expected: Vec<(String, u32)> = Vec::with_capacity(carried.len());
+        for (name, n) in carried {
+            let before = wh
+                .get_item_count(name.clone())
+                .context("deslot weapon get_item_count")?;
+            let target = before.saturating_add(n);
+            wh.set_item(name.clone(), target)
+                .context("deslot weapon set_item")?;
+            let obj = objective_mut!(self, oid)?;
+            let inv = obj.warehouse.equipment.get_or_default_cow(name.clone());
+            inv.stored = target;
+            if inv.capacity < target {
+                inv.capacity = target.max(1);
+            }
+            info!("deslot weapon credit {name} at {oid:?}: dcs {before} +{n} -> {target}");
+            expected.push((name, target));
+        }
+        for (_, pend_oid, items) in self.ephemeral.pending_deslot_weapon_fix.iter_mut() {
+            if *pend_oid != oid {
+                continue;
+            }
+            for (name, target) in items.iter_mut() {
+                if let Some((_, new_t)) = expected.iter().find(|(n, _)| n == name) {
+                    *target = (*target).max(*new_t);
+                }
+            }
+        }
+        let now = Utc::now();
+        for secs in [2, 10] {
+            self.ephemeral.pending_deslot_weapon_fix.push((
+                now + Duration::seconds(secs),
+                oid,
+                expected.clone(),
+            ));
+        }
+        self.ephemeral.dirty();
+        Ok(())
+    }
+
+    /// Deferred pass: DCS returned stores on top of the Fowl credit -> clamp back down.
+    pub(super) fn apply_deslot_weapon_clamp(
+        &mut self,
+        lua: MizLua,
+        oid: ObjectiveId,
+        expected: &[(String, u32)],
+    ) -> Result<()> {
+        let id = maybe!(self.ephemeral.airbase_by_oid, oid, "airbase")?;
+        let wh = Airbase::get_instance(lua, &id)
+            .context("get airbase")?
+            .get_warehouse()
+            .context("get warehouse")?;
+        for (name, target) in expected {
+            let dcs = wh
+                .get_item_count(name.clone())
+                .context("deslot weapon clamp get_item_count")?;
+            if dcs > *target {
+                wh.set_item(name.clone(), *target)
+                    .context("deslot weapon clamp set_item")?;
+                info!("deslot weapon clamp {name} at {oid:?} {dcs}->{target}");
+            }
+        }
+        Ok(())
+    }
+
+    /// DCS absorb of a dynamic cargo crate: make sure rows exist for its weapon SKUs so SyncFrom
+    /// reads the real DCS count even when the SKU is outside the objective export profile.
+    pub(super) fn seed_ferried_weapon_rows(
+        &mut self,
+        lua: MizLua,
+        oid: ObjectiveId,
+        equipment: &MapS<String, u32>,
+    ) -> Result<()> {
+        if equipment.len() == 0 {
+            return Ok(());
+        }
+        let resource_meta = self
+            .warehouse_resource_meta_cache(lua)
+            .context("resource meta for ferried weapons")?;
+        let export = Arc::clone(&self.ephemeral.fowl_miz_export);
+        let obj = objective_mut!(self, oid)?;
+        let side = obj.owner;
+        for (name, qty) in equipment {
+            if *qty == 0 || obj.warehouse.equipment.get(name).is_some() {
+                continue;
+            }
+            let Some(meta) = resource_meta.get(name.as_str()) else {
+                continue;
+            };
+            if !weapon_credit_allowed(export.as_ref(), side, meta) {
+                continue;
+            }
+            let inv = obj.warehouse.equipment.get_or_default_cow(name.clone());
+            inv.capacity = (*qty).max(1);
+            info!("ferried weapon row seeded {name} at {oid:?} (capacity {qty})");
+        }
+        Ok(())
     }
 
     /// Drops DCS `initialAmount=1` opposite-DT registration filler A/C rows outside owner export.
@@ -5507,6 +5706,7 @@ impl Db {
                     oid,
                     &self.persisted.dynamic_cargo_crates,
                     self.ephemeral.fowl_miz_export.as_ref(),
+                    Some(&self.ephemeral.dynamic_cargo_checkout_settled),
                 )
             {
                 self.ephemeral.dirty();
@@ -5563,6 +5763,11 @@ impl Db {
                 resource_meta.as_ref(),
             );
         }
+        raise_out_of_profile_weapon_capacity_to_stored(
+            obj,
+            export.as_ref(),
+            resource_meta.as_ref(),
+        );
         canonicalize_virtual_equipment_keys(obj, resource_meta.as_ref());
         record_objective_dcs_equipment_names_from_snapshot(
             &mut self.ephemeral,
@@ -5580,6 +5785,7 @@ impl Db {
                 oid,
                 &self.persisted.dynamic_cargo_crates,
                 self.ephemeral.fowl_miz_export.as_ref(),
+                Some(&self.ephemeral.dynamic_cargo_checkout_settled),
             )
         {
             self.ephemeral.dirty();

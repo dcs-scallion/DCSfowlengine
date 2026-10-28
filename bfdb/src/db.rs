@@ -2562,6 +2562,22 @@ impl StatsDb {
         Ok(best.map(|(_, s)| s))
     }
 
+    /// Latest Connect / activity timestamp for a pilot across all Attrition instances.
+    pub(crate) fn pilot_last_seen_any(&self, ucid: &Ucid) -> Result<Option<DateTime<Utc>>> {
+        let mut best: Option<DateTime<Utc>> = None;
+        for r in self.pilots.round_info.scan_prefix(ucid)? {
+            let (_, ri) = r?;
+            if let Some((ts, _)) = ri.connected {
+                best = Some(best.map_or(ts, |b| b.max(ts)));
+            }
+        }
+        for r in self.pilot_last_activity.scan_prefix(ucid)? {
+            let (_, ts) = r?;
+            best = Some(best.map_or(ts, |b| b.max(ts)));
+        }
+        Ok(best)
+    }
+
     /// Per-instance Blue/Red sides for dashboard gating / MY PROFILE.
     pub(crate) fn pilot_sides_by_instance(
         &self,

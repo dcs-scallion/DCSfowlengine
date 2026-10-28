@@ -1661,10 +1661,9 @@ impl Db {
         Ok(())
     }
 
-    /// Credit airframe (and DEP FARP ammo) to the landing objective warehouse on deslot.
+    /// Credit airframe and remaining unit ordnance to the landing objective warehouse on deslot.
     /// Use absolute `set_item(prev+1)` — DCS often returns the airframe *after* leave-unit,
     /// so `add_item` races and double-counts (seen as 0→2 C-130 on ferry deslot).
-    /// OAB/OFO: DCS already returns remaining stores; Fowl `add_item` would double them.
     fn credit_airframe_on_deslot(
         &mut self,
         lua: MizLua,
@@ -1695,17 +1694,6 @@ impl Db {
             .map(|i| i.stored)
             .unwrap_or(0);
         let target = land_prev.saturating_add(1);
-        let dcs_returns_ammo = {
-            let obj = objective!(self, land_oid)?;
-            obj.kind.is_airbase()
-                || matches!(obj.kind, ObjectiveKind::Fob)
-                || self
-                    .ephemeral
-                    .cfg
-                    .extra_fixed_wing_objectives
-                    .contains(obj.name())
-        };
-
         // Undo DCS return to slot home when ferrying to another pad.
         if let Some(home) = home_oid.filter(|h| *h != land_oid) {
             let home_prev = self
@@ -1751,34 +1739,18 @@ impl Db {
             "deslot airframe: set {typ_name} at {land_oid:?} to {target} (dcs_before={land_dcs} prev={land_prev} dcs_after={land_after})"
         );
 
-        let mut sync: SmallVec<[String; 4]> = smallvec![typ_name.clone()];
-        if !dcs_returns_ammo && let Ok(unit) = Unit::get_instance(lua, objid) {
-            for ammo in unit.get_ammo().context("get ammo")? {
-                let ammo = ammo.context("ammo")?;
-                let count = ammo.count().context("ammo count")?;
-                let ammo_typ = ammo.type_name().context("ammo typ")?;
-                sync.push(ammo_typ.clone());
-                land_wh
-                    .add_item(ammo_typ, count)
-                    .context("add item to warehouse")?;
-            }
-        }
-
         {
             let obj = objective_mut!(self, land_oid).context("get objective")?;
-            for name in &sync {
-                let count = if name.as_str() == typ_name.as_str() {
-                    target
-                } else {
-                    land_wh
-                        .get_item_count(name.clone())
-                        .context("getting item")?
-                };
-                let inv = obj.warehouse.equipment.get_or_default_cow(name.clone());
-                inv.stored = count;
-                if inv.capacity < count {
-                    inv.capacity = count.max(1);
-                }
+            let inv = obj.warehouse.equipment.get_or_default_cow(typ_name.clone());
+            inv.stored = target;
+            if inv.capacity < target {
+                inv.capacity = target.max(1);
+            }
+        }
+        // Log of 2026-10-27 (Beton, Kashuri): DCS did not return stores to the FOB warehouse.
+        if let Ok(unit) = Unit::get_instance(lua, objid) {
+            if let Err(e) = self.credit_deslot_weapons(lua, land_oid, &unit) {
+                warn!("deslot weapon credit at {land_oid:?}: {e:?}");
             }
         }
         // DCS often applies warehouse return a beat after leave-unit — re-clamp once.
@@ -1791,6 +1763,20 @@ impl Db {
     }
 
     pub fn process_pending_deslot_airframe_fixes(&mut self, lua: MizLua, now: DateTime<Utc>) {
+        if !self.ephemeral.pending_deslot_weapon_fix.is_empty() {
+            let pending = std::mem::take(&mut self.ephemeral.pending_deslot_weapon_fix);
+            for (due, oid, items) in pending {
+                if now < due {
+                    self.ephemeral
+                        .pending_deslot_weapon_fix
+                        .push((due, oid, items));
+                    continue;
+                }
+                if let Err(e) = self.apply_deslot_weapon_clamp(lua, oid, &items) {
+                    warn!("deslot weapon deferred clamp {oid:?}: {e:?}");
+                }
+            }
+        }
         if self.ephemeral.pending_deslot_airframe_fix.is_empty() {
             return;
         }

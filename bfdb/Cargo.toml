@@ -59,3 +59,8 @@ nvml-wrapper = "0.10"
 argon2 = "0.5"
 password-hash = "0.5"
 rand = { workspace = true }
+# Squadron icon palette compression (pngquant / TinyPNG-class); GPL-3.0-or-later — AGPL-compatible.
+imagequant = "4.4"
+image = { version = "0.25", default-features = false, features = ["png"] }
+png = "0.17"
+rgb = "0.8"

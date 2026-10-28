@@ -573,9 +573,14 @@ async fn api_leaderboard(
     }
     let data = task::block_in_place(|| -> Result<String> {
         // All-time within the selected DCS server (not merged across instances).
+        // Only pilots with a linked dashboard account (same set as admin "linked").
+        let linked = db.web_auth().linked_ucids()?;
         let pilots = db.pilot_leaderboard(None, Some(&inst.id))?;
-        let mut entries = Vec::with_capacity(pilots.len());
+        let mut entries = Vec::with_capacity(pilots.len().min(linked.len()));
         for (ucid, name, agg) in &pilots {
+            if !linked.contains(&ucid.to_string()) {
+                continue;
+            }
             let side = db
                 .pilot_current_side(ucid)
                 .ok()
@@ -1935,67 +1940,115 @@ async fn require_claimed_ucid(
     Ok((session, ucid))
 }
 
-/// GET /api/profile — MY PROFILE payload (claim, sides, squadron, live side_switches).
+/// GET /api/profile — MY PROFILE payload (claim, sides + side_switches, squadron).
 async fn api_profile(
     session_id: Option<Uuid>,
     db: StatsDb,
     inst: Inst,
 ) -> std::result::Result<impl warp::Reply, Error> {
     let (session, ucid) = require_claimed_ucid(session_id, &db).await?;
-    let sides: Vec<serde_json::Value> = task::block_in_place(|| -> Result<_, anyhow::Error> {
-        let mut rows = Vec::new();
-        for cfg in db.instances().all() {
-            let id: crate::instance::InstanceId = std::sync::Arc::from(cfg.id.as_str());
-            let side = db
-                .pilot_side_for_instance(&ucid, &id)?
-                .filter(|s| matches!(s, dcso3::coalition::Side::Blue | dcso3::coalition::Side::Red))
-                .map(|s| format!("{s:?}"));
-            rows.push(serde_json::json!({
-                "instance": cfg.id,
-                "label": cfg.label(),
-                "side": side,
-            }));
+    let ucid_s = ucid.to_string();
+
+    let base_rows: Vec<(String, String, Option<String>, Inst)> =
+        task::block_in_place(|| -> Result<_, anyhow::Error> {
+            let mut rows = Vec::new();
+            for cfg in db.instances().all() {
+                let id: crate::instance::InstanceId = std::sync::Arc::from(cfg.id.as_str());
+                let side = db
+                    .pilot_side_for_instance(&ucid, &id)?
+                    .filter(|s| matches!(s, dcso3::coalition::Side::Blue | dcso3::coalition::Side::Red))
+                    .map(|s| format!("{s:?}"));
+                rows.push((cfg.id.clone(), cfg.label().to_string(), side, db.state(&id)));
+            }
+            Ok(rows)
+        })?;
+
+    let live_futs = base_rows.iter().map(|(_, _, _, state)| {
+        let db = db.clone();
+        let state = state.clone();
+        let ucid_s = ucid_s.clone();
+        async move {
+            match tokio::time::timeout(
+                std::time::Duration::from_secs(3),
+                call_engine_rpc_str_for(
+                    &db,
+                    &state,
+                    "player-side-info",
+                    vec![("ucid", netidx::publisher::Value::from(ucid_s))],
+                ),
+            )
+            .await
+            {
+                Ok(Ok(json)) => serde_json::from_str::<serde_json::Value>(&json).ok(),
+                _ => None,
+            }
         }
-        Ok(rows)
-    })?;
-    let live = match call_engine_rpc_str_for(
-        &db,
-        &inst,
-        "player-side-info",
-        vec![("ucid", netidx::publisher::Value::from(ucid.to_string()))],
-    )
-    .await
-    {
-        Ok(json) => serde_json::from_str::<serde_json::Value>(&json).ok(),
-        Err(_) => None,
-    };
-    let squadron = task::block_in_place(|| db.squadrons().active_for_ucid(&ucid.to_string()))?
+    });
+    let live_infos = futures::future::join_all(live_futs).await;
+
+    let mut sides = Vec::with_capacity(base_rows.len());
+    let mut live_selected: Option<serde_json::Value> = None;
+    for ((instance_id, label, persisted_side, _), live) in base_rows.into_iter().zip(live_infos) {
+        let engine_side = live
+            .as_ref()
+            .and_then(|v| v.get("side"))
+            .and_then(|v| v.as_str())
+            .filter(|s| *s == "Blue" || *s == "Red")
+            .map(|s| s.to_string());
+        let side = engine_side.or(persisted_side);
+        // live=false → SPA hides SWITCH; null switches + live = unlimited CFG.
+        let side_switches = live.as_ref().map(|v| {
+            v.get("side_switches")
+                .cloned()
+                .unwrap_or(serde_json::Value::Null)
+        });
+        if instance_id == inst.id.as_ref() {
+            live_selected = live.clone();
+        }
+        sides.push(serde_json::json!({
+            "instance": instance_id,
+            "label": label,
+            "side": side,
+            "side_switches": side_switches,
+            "live": live.is_some(),
+        }));
+    }
+
+    let squadron = task::block_in_place(|| db.squadrons().active_for_ucid(&ucid_s))?
         .map(|(sq, mem)| {
             serde_json::json!({
                 "squadron": crate::squadrons::SquadronStore::public_summary(&sq),
                 "joined_at": mem.joined_at.to_rfc3339(),
-                "is_commander": sq.commander_ucid == ucid.to_string(),
+                "is_commander": sq.commander_ucid == ucid_s,
             })
         });
+    let pending_join_squadron_ids: Vec<String> = task::block_in_place(|| {
+        db.squadrons()
+            .pending_join_squadron_ids_for_ucid(&ucid_s)
+            .map(|ids| ids.into_iter().map(|id| id.to_string()).collect())
+    })?;
     let public_id = task::block_in_place(|| db.public_id_for(&ucid))?;
     Ok(json_response(serde_json::to_string(&serde_json::json!({
         "username": session.account_username.clone().unwrap_or(session.username.clone()),
         "id": public_id,
-        "ucid": ucid.to_string(),
+        "ucid": ucid_s,
         "display_name": task::block_in_place(|| db.pilot_name(&ucid)),
         "sides": sides,
         "selected_instance": inst.id.to_string(),
-        "live": live,
+        "live": live_selected,
         "squadron": squadron,
+        "pending_join_squadron_ids": pending_join_squadron_ids,
     })).map_err(anyhow::Error::from)?))
 }
 
 #[derive(Deserialize)]
 struct SideSwitchBody {
     side: String,
+    #[serde(default)]
+    instance: Option<String>,
 }
 
-/// POST /api/profile/side-switch — player self side-switch on selected instance (engine CFG limits).
+/// POST /api/profile/side-switch — player self side-switch (engine CFG limits).
 async fn api_profile_side_switch(
     session_id: Option<Uuid>,
     body: SideSwitchBody,
@@ -2007,10 +2060,16 @@ async fn api_profile_side_switch(
     if !matches!(side.to_ascii_lowercase().as_str(), "blue" | "red") {
         return Err(anyhow::anyhow!("side must be Blue or Red").into());
     }
+    let target = match body.instance.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
+        Some(id) => db
+            .resolve_state(Some(id))
+            .map_err(|e| Error(anyhow::anyhow!("unknown instance: {e}")))?,
+        None => inst,
+    };
     use netidx::publisher::Value;
     let msg = call_engine_rpc_str_for(
         &db,
-        &inst,
+        &target,
         "player-side-switch",
         vec![
             ("ucid", Value::from(ucid.to_string())),
@@ -2038,35 +2097,68 @@ async fn api_squadrons_list(
     Ok(json_response(serde_json::to_string(&json).map_err(anyhow::Error::from)?))
 }
 
-/// GET /api/squadrons/:id
+/// Overall SCORE — same weights as bfweb `computeScore` / RANKINGS.
+fn overall_score(a: &db::Aggregates) -> f64 {
+    (a.air_kills as f64) * 3.0
+        + (a.ground_air_kills as f64) * 3.0
+        + (a.ground_kills as f64) * 2.0
+        + (a.ground_ground_kills as f64) * 2.0
+        + (a.ship_kills as f64) * 3.0
+        + (a.ground_ship_kills as f64) * 3.0
+        + (a.captures as f64) * 5.0
+        + (a.repairs as f64)
+        + (a.supply_transfers as f64)
+        + (a.troops as f64) * 0.5
+        + (a.farps as f64) * 4.0
+        + (a.deploys as f64) * 2.0
+        + (a.actions as f64)
+        - (a.deaths as f64) * 2.0
+}
+
+/// GET /api/squadrons/:id — members + Overall score for selected `?instance=`.
 async fn api_squadron_get(
     id: Uuid,
     db: StatsDb,
+    inst: Inst,
 ) -> std::result::Result<impl warp::Reply, Error> {
-    let sq = task::block_in_place(|| db.squadrons().get(&id))?
-        .ok_or_else(|| anyhow::anyhow!("squadron not found"))?;
-    let members = task::block_in_place(|| db.squadrons().members(&id))?;
-    let mut member_rows = Vec::with_capacity(members.len());
-    for m in &members {
-        let ucid = m
-            .ucid
-            .parse::<dcso3::net::Ucid>()
-            .map_err(|e| anyhow::anyhow!("bad member ucid: {e:?}"))?;
-        let name = db
-            .pilot_name(&ucid)
-            .unwrap_or_else(|| "Unknown".into());
-        member_rows.push(serde_json::json!({
-            "id": db.public_id_for(&ucid)?,
-            "name": name,
-            "joined_at": m.joined_at.to_rfc3339(),
-            "is_commander": m.ucid == sq.commander_ucid,
-        }));
-    }
-    Ok(json_response(serde_json::to_string(&serde_json::json!({
-        "squadron": crate::squadrons::SquadronStore::public_summary(&sq),
-        "members": member_rows,
-        "member_count": member_rows.len(),
-    })).map_err(anyhow::Error::from)?))
+    let data = task::block_in_place(|| -> Result<String, anyhow::Error> {
+        let sq = db
+            .squadrons()
+            .get(&id)?
+            .ok_or_else(|| anyhow::anyhow!("squadron not found"))?;
+        let members = db.squadrons().members(&id)?;
+        let board = db.pilot_leaderboard(None, Some(&inst.id))?;
+        let mut score_by_ucid = std::collections::HashMap::new();
+        for (ucid, _, agg) in &board {
+            score_by_ucid.insert(ucid.clone(), overall_score(agg));
+        }
+        let mut member_rows = Vec::with_capacity(members.len());
+        for m in &members {
+            let ucid = m
+                .ucid
+                .parse::<dcso3::net::Ucid>()
+                .map_err(|e| anyhow::anyhow!("bad member ucid: {e:?}"))?;
+            let name = db
+                .pilot_name(&ucid)
+                .unwrap_or_else(|| "Unknown".into());
+            let last = db.pilot_last_seen_any(&ucid)?;
+            member_rows.push(serde_json::json!({
+                "id": db.public_id_for(&ucid)?,
+                "name": name,
+                "joined_at": m.joined_at.to_rfc3339(),
+                "is_commander": m.ucid == sq.commander_ucid,
+                "score": score_by_ucid.get(&ucid).copied().unwrap_or(0.0),
+                "last_connected": last.map(|t| t.to_rfc3339()),
+            }));
+        }
+        Ok(serde_json::to_string(&serde_json::json!({
+            "squadron": crate::squadrons::SquadronStore::public_summary(&sq),
+            "members": member_rows,
+            "member_count": member_rows.len(),
+            "instance": inst.id.to_string(),
+        }))?)
+    })?;
+    Ok(json_response(data))
 }
 
 /// GET /api/squadrons/:id/icon.png
@@ -2191,6 +2283,24 @@ async fn api_squadron_transfer(
     Ok(json_response(serde_json::to_string(&serde_json::json!({
         "ok": true,
         "squadron": crate::squadrons::SquadronStore::public_summary(&sq),
+    })).map_err(anyhow::Error::from)?))
+}
+
+/// POST /api/squadrons/:id/kick — CO removes a member (`id` = public pilot id).
+async fn api_squadron_kick(
+    id: Uuid,
+    session_id: Option<Uuid>,
+    body: TransferBody,
+    db: StatsDb,
+) -> std::result::Result<impl warp::Reply, Error> {
+    let (_s, actor) = require_claimed_ucid(session_id, &db).await?;
+    let target = task::block_in_place(|| db.resolve_pilot_key(body.id.trim()))?;
+    task::block_in_place(|| {
+        db.squadrons()
+            .kick(&id, &actor.to_string(), &target.to_string())
+    })?;
+    Ok(json_response(serde_json::to_string(&serde_json::json!({
+        "ok": true,
     })).map_err(anyhow::Error::from)?))
 }
 
@@ -5132,6 +5242,7 @@ async fn main() -> Result<()> {
     let squadron_get = warp::path!("api" / "squadrons" / Uuid)
         .and(warp::get())
         .and(with_db(db.clone()))
+        .and(with_instance(db.clone()))
         .then(api_squadron_get);
 
     let squadron_icon_get = warp::path!("api" / "squadrons" / Uuid / "icon.png")
@@ -5159,6 +5270,13 @@ async fn main() -> Result<()> {
         .and(with_db(db.clone()))
         .then(api_squadron_transfer);
 
+    let squadron_kick = warp::path!("api" / "squadrons" / Uuid / "kick")
+        .and(warp::post())
+        .and(extract_session_cookie())
+        .and(warp::body::json::<TransferBody>())
+        .and(with_db(db.clone()))
+        .then(api_squadron_kick);
+
     let squadron_requests = warp::path!("api" / "squadrons" / Uuid / "requests")
         .and(warp::get())
         .and(extract_session_cookie())
@@ -5168,7 +5286,7 @@ async fn main() -> Result<()> {
     let squadron_set_icon = warp::path!("api" / "squadrons" / Uuid / "icon")
         .and(warp::post())
         .and(extract_session_cookie())
-        .and(warp::body::content_length_limit(20 * 1024 + 64))
+        .and(warp::body::content_length_limit(50 * 1024 + 64))
         .and(warp::body::bytes())
         .and(with_db(db.clone()))
         .then(api_squadron_set_icon);
@@ -5656,6 +5774,7 @@ async fn main() -> Result<()> {
         .or(squadron_join)
         .or(squadron_rename)
         .or(squadron_transfer)
+        .or(squadron_kick)
         .or(squadron_set_icon)
         .or(squadron_clear_icon)
         .or(admin_reset)

@@ -5,8 +5,10 @@ use serde_derive::{Deserialize, Serialize};
 use uuid::Uuid;
 use yats::Tree;
 
-const MAX_ICON_BYTES: usize = 20 * 1024;
-const MAX_ICON_PX: u32 = 150;
+const MAX_ICON_BYTES: usize = 50 * 1024;
+const MAX_ICON_PX: u32 = 200;
+/// Apply libimagequant palette compression when upload exceeds this size.
+const ICON_COMPRESS_THRESHOLD: usize = 20 * 1024;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Squadron {
@@ -152,7 +154,9 @@ impl SquadronStore {
             bail!("only the commander can set the icon");
         }
         validate_png(png)?;
-        sq.icon_png = Some(png.to_vec());
+        let stored = prepare_icon_png(png)?;
+        validate_png(&stored)?;
+        sq.icon_png = Some(stored);
         self.squadrons.insert(&id.to_string(), &sq)?;
         Ok(sq)
     }
@@ -273,6 +277,30 @@ impl SquadronStore {
         Ok("left")
     }
 
+    /// CO removes a non-commander member (force leave). Does not dissolve.
+    pub fn kick(&self, id: &Uuid, actor_ucid: &str, target_ucid: &str) -> Result<()> {
+        let sq = self.require_active(id)?;
+        if sq.commander_ucid != actor_ucid {
+            bail!("only the commander can kick members");
+        }
+        if target_ucid == actor_ucid {
+            bail!("cannot kick yourself — leave or transfer command first");
+        }
+        if target_ucid == sq.commander_ucid {
+            bail!("cannot kick the commander");
+        }
+        let Some(mut mem) = self.active_member.get(&target_ucid.to_string())? else {
+            bail!("pilot is not in a squadron");
+        };
+        if mem.squadron_id != *id {
+            bail!("pilot is not a member of this squadron");
+        }
+        mem.left_at = Some(Utc::now());
+        self.history.insert(&Uuid::new_v4().to_string(), &mem)?;
+        let _ = self.active_member.remove(&target_ucid.to_string());
+        Ok(())
+    }
+
     pub fn pending_for_squadron(&self, id: &Uuid) -> Result<Vec<JoinRequest>> {
         let mut out = Vec::new();
         for r in self.requests.iter() {
@@ -282,6 +310,20 @@ impl SquadronStore {
             }
         }
         out.sort_by_key(|r| r.requested_at);
+        Ok(out)
+    }
+
+    /// Squadron ids with a pending join request from this UCID.
+    pub fn pending_join_squadron_ids_for_ucid(&self, ucid: &str) -> Result<Vec<Uuid>> {
+        let mut out = Vec::new();
+        for r in self.requests.iter() {
+            let (_, req) = r?;
+            if req.ucid == ucid && req.status == JoinRequestStatus::Pending {
+                out.push(req.squadron_id);
+            }
+        }
+        out.sort();
+        out.dedup();
         Ok(out)
     }
 
@@ -365,7 +407,7 @@ fn normalize_name(name: &str) -> Result<String> {
 
 fn validate_png(png: &[u8]) -> Result<()> {
     if png.len() > MAX_ICON_BYTES {
-        bail!("icon must be at most 20 KB");
+        bail!("icon must be at most {} KB", MAX_ICON_BYTES / 1024);
     }
     if png.len() < 24 {
         bail!("invalid PNG");
@@ -398,4 +440,95 @@ fn validate_png(png: &[u8]) -> Result<()> {
         i = next;
     }
     Ok(())
+}
+
+/// Keep original under threshold; otherwise try libimagequant and keep the smaller PNG.
+fn prepare_icon_png(png: &[u8]) -> Result<Vec<u8>> {
+    if png.len() <= ICON_COMPRESS_THRESHOLD {
+        return Ok(png.to_vec());
+    }
+    match compress_png_palette(png) {
+        Ok(out) if !out.is_empty() && out.len() < png.len() && out.len() <= MAX_ICON_BYTES => {
+            log::info!(
+                "squadron icon compressed {} → {} bytes (libimagequant)",
+                png.len(),
+                out.len()
+            );
+            Ok(out)
+        }
+        Ok(out) => {
+            log::debug!(
+                "squadron icon compress skipped (out {} B vs in {} B)",
+                out.len(),
+                png.len()
+            );
+            Ok(png.to_vec())
+        }
+        Err(e) => {
+            log::warn!("squadron icon compress failed, keeping original: {e:#}");
+            Ok(png.to_vec())
+        }
+    }
+}
+
+fn compress_png_palette(png: &[u8]) -> Result<Vec<u8>> {
+    let rgba = image::load_from_memory(png)
+        .map_err(|e| anyhow::anyhow!("png decode: {e}"))?
+        .to_rgba8();
+    let w = rgba.width() as usize;
+    let h = rgba.height() as usize;
+    if w == 0 || h == 0 {
+        bail!("empty image");
+    }
+
+    let pixels: Vec<rgb::RGBA8> = rgba
+        .pixels()
+        .map(|p| rgb::RGBA8 {
+            r: p.0[0],
+            g: p.0[1],
+            b: p.0[2],
+            a: p.0[3],
+        })
+        .collect();
+
+    let mut attr = imagequant::Attributes::new();
+    // Quality band similar to typical TinyPNG / pngquant defaults for badges.
+    attr.set_quality(20, 80)
+        .map_err(|e| anyhow::anyhow!("imagequant quality: {e}"))?;
+    attr.set_speed(3)
+        .map_err(|e| anyhow::anyhow!("imagequant speed: {e}"))?;
+
+    let mut iq_img = attr
+        .new_image(&pixels[..], w, h, 0.0)
+        .map_err(|e| anyhow::anyhow!("imagequant image: {e}"))?;
+    let mut quantized = attr
+        .quantize(&mut iq_img)
+        .map_err(|e| anyhow::anyhow!("imagequant quantize: {e}"))?;
+    quantized
+        .set_dithering_level(0.8)
+        .map_err(|e| anyhow::anyhow!("imagequant dither: {e}"))?;
+    let (palette, indices) = quantized
+        .remapped(&mut iq_img)
+        .map_err(|e| anyhow::anyhow!("imagequant remap: {e}"))?;
+
+    let mut out = Vec::new();
+    {
+        let mut encoder = png::Encoder::new(&mut out, w as u32, h as u32);
+        encoder.set_color(png::ColorType::Indexed);
+        encoder.set_depth(png::BitDepth::Eight);
+        let rgb_pal: Vec<u8> = palette.iter().flat_map(|c| [c.r, c.g, c.b]).collect();
+        encoder.set_palette(rgb_pal);
+        let trns: Vec<u8> = palette.iter().map(|c| c.a).collect();
+        if trns.iter().any(|&a| a < 255) {
+            encoder.set_trns(trns);
+        }
+        encoder.set_compression(png::Compression::Best);
+        let mut writer = encoder
+            .write_header()
+            .map_err(|e| anyhow::anyhow!("png header: {e}"))?;
+        writer
+            .write_image_data(&indices)
+            .map_err(|e| anyhow::anyhow!("png data: {e}"))?;
+    }
+    Ok(out)
 }
