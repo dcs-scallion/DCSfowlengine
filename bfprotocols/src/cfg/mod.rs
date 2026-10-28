@@ -2155,12 +2155,12 @@ pub struct DynamicCargoDeliveryCfg {
     #[serde(default = "default_to_stock_dynamic_crate_distance")]
     pub to_stock_dynamic_crate_distance: u32,
     /// Points per ton (1000 kg) to the deliverer on cross-objective To stock / DCS absorb.
-    /// Final award is `round(max(kg/1000, 1) * rate)`.
+    /// Final award is `round(max(kg/1000, 1) * rate)` (fractional rates allowed).
     #[serde(default = "default_to_stock_points_per_ton")]
-    pub to_stock_points_per_ton: u32,
+    pub to_stock_points_per_ton: f64,
     /// Points per ton to the registered spawner on cross-objective To stock / DCS absorb.
     #[serde(default = "default_source_spawner_points_per_ton")]
-    pub source_spawner_points_per_ton: u32,
+    pub source_spawner_points_per_ton: f64,
     /// DCS type names that use ED F8/bay for Fowl crates (no Fowl Load/Unload) when `enabled`.
     /// ED still enforces bay geometry/weight; CFG `cargo` slot limits apply to Fowl crates + troops
     /// (excess Fowl crates are rejected back to the ground). Warehouse ED supply/fuel crates are unaffected.
@@ -2189,12 +2189,12 @@ fn default_to_stock_dynamic_crate_distance() -> u32 {
     50
 }
 
-fn default_to_stock_points_per_ton() -> u32 {
-    5
+fn default_to_stock_points_per_ton() -> f64 {
+    5.
 }
 
-fn default_source_spawner_points_per_ton() -> u32 {
-    15
+fn default_source_spawner_points_per_ton() -> f64 {
+    15.
 }
 
 fn default_supply_transfer_players() -> bool {

@@ -1392,11 +1392,17 @@ impl Db {
             match dest {
                 Some(pad) => {
                     // DCS already wrote warehouse stock; pull into virtual — do not Fowl-credit.
+                    // Seed from crate registry when filled; Birth often leaves equipment empty.
                     if let Err(e) = self.seed_ferried_weapon_rows(lua, pad, &entry.equipment) {
                         warn!("dynamic cargo absorb seed rows {pad:?}: {e:?}");
                     }
                     let synced = match self.sync_warehouse_to_objective(lua, pad) {
                         Ok(_) => {
+                            // Crate snapshots are often empty → seed no-op; pull out-of-profile
+                            // DCS weapons (e.g. R-27 to Kutaisi) into virtual so they persist.
+                            if let Err(e) = self.ingest_ferried_weapons_from_dcs(lua, pad) {
+                                warn!("dynamic cargo absorb ferried ingest {pad:?}: {e:?}");
+                            }
                             sync_from_oids.insert(pad, ());
                             self.clamp_dynamic_cargo_checkout(pad);
                             info!(
@@ -2581,8 +2587,8 @@ fn delivery_tons(weight_kg: f64) -> f64 {
     (weight_kg / 1000.).max(1.)
 }
 
-fn points_from_tons(tons: f64, rate_per_ton: u32) -> i32 {
-    (tons * rate_per_ton as f64).round() as i32
+fn points_from_tons(tons: f64, rate_per_ton: f64) -> i32 {
+    (tons * rate_per_ton).round() as i32
 }
 
 fn carrier_ucid_if_aboard(

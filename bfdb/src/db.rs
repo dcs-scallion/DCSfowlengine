@@ -2202,6 +2202,34 @@ impl StatsDb {
         Ok(())
     }
 
+    /// Clear SITREP `/api/online` presence for a round (connected + slot + player unit).
+    fn clear_round_online_presence(&self, round: RoundId, reason: &str) -> Result<()> {
+        let stale: Vec<Ucid> = self
+            .pilots
+            .round_info
+            .iter()
+            .filter_map(|r| r.ok())
+            .filter(|((_, rid), ri)| {
+                *rid == round && (ri.connected.is_some() || ri.slot.is_some())
+            })
+            .map(|((ucid, _), _)| ucid)
+            .collect();
+        if !stale.is_empty() {
+            info!(
+                "{reason}: clearing {} stale online presence row(s) in round {round:?}",
+                stale.len()
+            );
+        }
+        for ucid in stale {
+            self.pilots.with_pilot_round_info(ucid, round, |ri| {
+                ri.connected = None;
+                ri.slot = None;
+            })?;
+            let _ = self.units.remove(&(round, EnId::Player(ucid)));
+        }
+        Ok(())
+    }
+
     /// SessionEnd only: close airborne legs as Restart (not Lost / not Landed).
     fn finalize_round_open_sorties_restart(
         &self,
@@ -3661,6 +3689,20 @@ impl StatsDb {
         Ok(result)
     }
 
+    /// Blue/Red for a pilot in one round (same source as aircraft_usage).
+    pub(crate) fn pilot_side_in_round(
+        &self,
+        ucid: &Ucid,
+        round: RoundId,
+    ) -> Result<Option<Side>> {
+        Ok(self
+            .pilots
+            .round_info
+            .get(&(*ucid, round))?
+            .map(|ri| ri.side.1)
+            .filter(|s| matches!(s, Side::Blue | Side::Red)))
+    }
+
     /// Per-round aggregates for a pilot, enriched with scenario name
     pub(crate) fn pilot_round_breakdown(&self, ucid: &Ucid) -> Result<Vec<(Scenario, RoundId, Aggregates)>> {
         // Build a round_id → scenario lookup
@@ -4135,25 +4177,7 @@ impl StatsDb {
                 )?;
                 // Fresh DCS session — clear connected left from abrupt shutdowns
                 // (no Disconnect). Bootstrap Connect stats follow SessionStart.
-                let stale: Vec<Ucid> = self
-                    .pilots
-                    .round_info
-                    .iter()
-                    .filter_map(|r| r.ok())
-                    .filter(|((_, rid), ri)| *rid == ctx.round && ri.connected.is_some())
-                    .map(|((ucid, _), _)| ucid)
-                    .collect();
-                if !stale.is_empty() {
-                    info!(
-                        "SessionStart: clearing {} stale connected flag(s) in round {:?}",
-                        stale.len(),
-                        ctx.round
-                    );
-                }
-                for ucid in stale {
-                    self.pilots
-                        .with_pilot_round_info(ucid, ctx.round, |ri| ri.connected = None)?;
-                }
+                self.clear_round_online_presence(ctx.round, "SessionStart")?;
                 self.spawn_web_link_sync(inst);
             }
             Stat::SessionEnd {
@@ -4180,6 +4204,10 @@ impl StatsDb {
                         // Must run before Deslot/Disconnect; already-closed legs stay as-is
                         // (eject/deslot penalty remains Lost).
                         self.finalize_round_open_sorties_restart(ctx.round, time)?;
+                        // Drop online flags now — Disconnect often never arrives during
+                        // mission/server restart. SITREP /api/online must not keep ghosts
+                        // until (or if) SessionStart runs. Discord map uses live DCS list.
+                        self.clear_round_online_presence(ctx.round, "SessionEnd")?;
                     }
                 }
             }

@@ -1062,33 +1062,43 @@ async fn api_kills(
 async fn api_pilot(
     pilot_key: String,
     db: StatsDb,
+    inst: Inst,
 ) -> std::result::Result<impl warp::Reply, Error> {
     let data = task::block_in_place(|| -> Result<String> {
         let ucid = db.resolve_pilot_key(&pilot_key)?;
         let id = db.public_id_for(&ucid)?;
         match db.pilot_detail(&ucid)? {
             None => Ok(serde_json::json!({ "error": "not found" }).to_string()),
-            Some((name, agg)) => Ok(serde_json::to_string(&serde_json::json!({
-                "id": id,
-                "name": name.to_string(),
-                "air_kills": agg.air_kills,
-                "ground_kills": agg.ground_kills,
-                "ship_kills": agg.ship_kills,
-                "ground_air_kills": agg.ground_air_kills,
-                "ground_ground_kills": agg.ground_ground_kills,
-                "ground_ship_kills": agg.ground_ship_kills,
-                "csar": agg.csar,
-                "captures": agg.captures,
-                "repairs": agg.repairs,
-                "supply_transfers": agg.supply_transfers,
-                "troops": agg.troops,
-                "farps": agg.farps,
-                "deploys": agg.deploys,
-                "actions": agg.actions,
-                "deaths": agg.deaths,
-                "hours": agg.hours,
-                "donated_points": agg.donated_points,
-            }))?),
+            Some((name, agg)) => {
+                let side = db
+                    .pilot_side_for_instance(&ucid, &inst.id)
+                    .ok()
+                    .flatten()
+                    .filter(|s| matches!(s, dcso3::coalition::Side::Blue | dcso3::coalition::Side::Red))
+                    .map(|s| format!("{s:?}"));
+                Ok(serde_json::to_string(&serde_json::json!({
+                    "id": id,
+                    "name": name.to_string(),
+                    "side": side,
+                    "air_kills": agg.air_kills,
+                    "ground_kills": agg.ground_kills,
+                    "ship_kills": agg.ship_kills,
+                    "ground_air_kills": agg.ground_air_kills,
+                    "ground_ground_kills": agg.ground_ground_kills,
+                    "ground_ship_kills": agg.ground_ship_kills,
+                    "csar": agg.csar,
+                    "captures": agg.captures,
+                    "repairs": agg.repairs,
+                    "supply_transfers": agg.supply_transfers,
+                    "troops": agg.troops,
+                    "farps": agg.farps,
+                    "deploys": agg.deploys,
+                    "actions": agg.actions,
+                    "deaths": agg.deaths,
+                    "hours": agg.hours,
+                    "donated_points": agg.donated_points,
+                }))?)
+            }
         }
     })?;
     Ok(json_response(data))
@@ -1102,21 +1112,30 @@ async fn api_pilot_sorties(
     let data = task::block_in_place(|| -> Result<String> {
         let ucid = db.resolve_pilot_key(&pilot_key)?;
         let sorties = db.pilot_sorties(&ucid)?;
-        let entries: Vec<_> = sorties.iter().rev().map(|(round_id, _sortie_id, s, crashed, restart)| {
-            let duration_secs = s.land
+        let mut entries = Vec::with_capacity(sorties.len());
+        for (round_id, _sortie_id, s, crashed, restart) in sorties.iter().rev() {
+            let duration_secs = s
+                .land
                 .map(|l| (l - s.takeoff).num_seconds().max(0))
                 .unwrap_or(0);
             let restart = *restart && s.land.is_some();
-            serde_json::json!({
+            // Same Blue/Red attribution as /api/aircraft-usage (round_info side).
+            let side = db
+                .pilot_side_in_round(&ucid, *round_id)?
+                .map(|s| format!("{s:?}"));
+            let instance = db.round_instance_of(*round_id).to_string();
+            entries.push(serde_json::json!({
                 "round_id": round_id.0,
+                "instance": instance,
                 "aircraft": s.vehicle.to_string(),
+                "side": side,
                 "takeoff": s.takeoff.to_rfc3339(),
                 "land": s.land.map(|l| l.to_rfc3339()),
                 "duration_secs": duration_secs,
                 "landed": s.land.is_some() && !*crashed && !restart,
                 "restart": restart,
-            })
-        }).collect();
+            }));
+        }
         Ok(serde_json::to_string(&entries)?)
     })?;
     Ok(json_response(data))
@@ -5036,6 +5055,7 @@ async fn main() -> Result<()> {
 
     let pilot = warp::path!("api" / "pilot" / String)
         .and(with_db(db.clone()))
+        .and(with_instance(db.clone()))
         .then(api_pilot);
 
     let pilot_sorties = warp::path!("api" / "pilot" / String / "sorties")

@@ -3075,6 +3075,73 @@ impl Db {
         Ok(())
     }
 
+    /// After DCS absorb / To stock SyncFrom: pull coalition-allowed weapons that sit in DCS but are
+    /// outside the objective export profile into virtual (so they persist across restart).
+    /// In-profile rows are already handled by SyncFrom; empty crate `equipment` snapshots skip seed.
+    pub(super) fn ingest_ferried_weapons_from_dcs(
+        &mut self,
+        lua: MizLua,
+        oid: ObjectiveId,
+    ) -> Result<()> {
+        let resource_meta = self
+            .warehouse_resource_meta_cache(lua)
+            .context("resource meta for ferried DCS ingest")?;
+        let export = Arc::clone(&self.ephemeral.fowl_miz_export);
+        let airbase_oid = maybe!(self.ephemeral.airbase_by_oid, oid, "airbase")?;
+        let warehouse = Airbase::get_instance(lua, &airbase_oid)
+            .context("get airbase for ferried ingest")?
+            .get_warehouse()
+            .context("get warehouse for ferried ingest")?;
+        let snapshot =
+            read_warehouse_snapshot(&warehouse).context("warehouse snapshot for ferried ingest")?;
+        let obj = objective_mut!(self, oid)?;
+        let side = obj.owner;
+        let profile = objective_coalition_stock_for_objective(export.as_ref(), obj)
+            .filter(|p| p.equipment.values().any(|i| i.baseline > 0));
+        let mut ingested = 0u32;
+        for (name, stored) in &snapshot.weapons {
+            if *stored == 0 {
+                continue;
+            }
+            let Some(meta) = resource_meta.get(name.as_str()) else {
+                continue;
+            };
+            if !weapon_credit_allowed(export.as_ref(), side, meta) {
+                continue;
+            }
+            let in_profile = profile.is_some_and(|p| {
+                profile_export_equipment_item(p, name.as_str(), resource_meta.as_ref())
+                    .is_some_and(|i| i.baseline > 0)
+            });
+            if in_profile {
+                continue;
+            }
+            let prev = obj
+                .warehouse
+                .equipment
+                .get(name)
+                .map(|i| i.stored)
+                .unwrap_or(0);
+            let inv = obj.warehouse.equipment.get_or_default_cow(name.clone());
+            inv.stored = *stored;
+            if inv.capacity < *stored {
+                inv.capacity = (*stored).max(1);
+            }
+            if prev != *stored {
+                if ingested < 12 {
+                    info!(
+                        "ferried weapon ingested from DCS {name} at {oid:?}: virtual {prev}->{stored}"
+                    );
+                }
+                ingested += 1;
+            }
+        }
+        if ingested > 0 {
+            self.ephemeral.dirty();
+        }
+        Ok(())
+    }
+
     /// Drops DCS `initialAmount=1` opposite-DT registration filler A/C rows outside owner export.
     /// Shared by fresh (preserve_fill) and loaded (apply_persisted) load paths; capture flow
     /// rebuilds rows from the new-owner export separately.
