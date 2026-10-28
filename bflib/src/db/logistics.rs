@@ -5706,7 +5706,6 @@ impl Db {
                     oid,
                     &self.persisted.dynamic_cargo_crates,
                     self.ephemeral.fowl_miz_export.as_ref(),
-                    Some(&self.ephemeral.dynamic_cargo_checkout_settled),
                 )
             {
                 self.ephemeral.dirty();
@@ -5785,7 +5784,6 @@ impl Db {
                 oid,
                 &self.persisted.dynamic_cargo_crates,
                 self.ephemeral.fowl_miz_export.as_ref(),
-                Some(&self.ephemeral.dynamic_cargo_checkout_settled),
             )
         {
             self.ephemeral.dirty();

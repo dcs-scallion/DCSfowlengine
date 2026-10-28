@@ -588,22 +588,13 @@ impl Db {
         oid: ObjectiveId,
         crates: &MapM<String, DynamicCargoCrate>,
         export: &bfprotocols::fowl_miz_export::FowlMizExport,
-        settled: Option<&FxHashSet<String>>,
     ) -> bool {
         let tons = objective_liquids_stored_as_tons(export, obj);
         let mut eq: FxHashMap<String, u32> = FxHashMap::default();
         let mut liq: FxHashMap<LiquidType, u32> = FxHashMap::default();
-        for (name, c) in crates {
+        for (_, c) in crates {
             if c.source != oid || !c.source_checked_out {
                 continue;
-            }
-            // Only block SyncTo for crates whose debit has been settled this session.
-            // Persisted crates from a previous run have already been debited; they block
-            // only after their first fill-delta debit confirms the crate is still live.
-            if let Some(settled) = settled {
-                if !settled.contains(name.as_str()) {
-                    continue;
-                }
             }
             for (name, qty) in &c.equipment {
                 *eq.entry(name.clone()).or_default() =
@@ -656,7 +647,6 @@ impl Db {
                 oid,
                 &self.persisted.dynamic_cargo_crates,
                 self.ephemeral.fowl_miz_export.as_ref(),
-                Some(&self.ephemeral.dynamic_cargo_checkout_settled),
             )
         };
         if dirty {
@@ -705,10 +695,6 @@ impl Db {
         self.ephemeral
             .dynamic_cargo_registered_at
             .insert(name.clone(), Utc::now());
-        // Mark as settled immediately — debit happened at registration time.
-        self.ephemeral
-            .dynamic_cargo_checkout_settled
-            .insert(name.clone());
         info!("dynamic cargo registered {name} index={next} side={side:?}");
         while self.count_dynamic_cargo_side(side) > max {
             self.evict_oldest_dynamic_cargo(lua, side)?;
@@ -1646,22 +1632,39 @@ impl Db {
                 self.purge_dynamic_cargo_rehooked_ghost(lua, &entry);
                 continue;
             }
-            // Grounded crate sitting inside the source zone has never left the pad.
-            // Credit its contents back and release the checkout so SyncTo is unblocked.
-            if !entry.air_dropped {
-                let in_source_zone = self
-                    .persisted
-                    .objectives
-                    .get(&entry.source)
-                    .is_some_and(|o| {
-                        let crate_pos = Vector2::new(entry.x, entry.y);
-                        o.zone.contains(crate_pos)
-                    });
-                if in_source_zone {
-                    info!(
-                        "dynamic cargo grounded at source on load {} source={:?} - crediting and releasing checkout",
-                        entry.name, entry.source
-                    );
+            let (in_source_zone, dist_m) = self
+                .persisted
+                .objectives
+                .get(&entry.source)
+                .map(|o| {
+                    let c = o.zone.pos();
+                    (
+                        o.zone.contains(Vector2::new(entry.x, entry.y)),
+                        (c.x - entry.x).hypot(c.y - entry.y),
+                    )
+                })
+                .unwrap_or((false, f64::NAN));
+            info!(
+                "dynamic cargo restore eval: {} source={:?} pos=({:.0},{:.0}) in_source_zone={} dist_to_source={:.0}m air_dropped={} rehooked={} checked_out={}",
+                entry.name,
+                entry.source,
+                entry.x,
+                entry.y,
+                in_source_zone,
+                dist_m,
+                entry.air_dropped,
+                entry.airdrop_rehooked,
+                entry.source_checked_out
+            );
+            // Crate parked in its source zone never left the pad: destroy the static, return the
+            // checked-out stock to the source and SyncTo (no static left = no duplicate stock).
+            if in_source_zone {
+                info!(
+                    "dynamic cargo grounded at source on load {} source={:?} - crediting and releasing checkout",
+                    entry.name, entry.source
+                );
+                self.destroy_dynamic_cargo_world_static(lua, entry.name.as_str());
+                if entry.source_checked_out {
                     if let Err(e) = self.credit_objective_from_dynamic_cargo(
                         entry.source,
                         &entry.equipment,
@@ -1669,14 +1672,20 @@ impl Db {
                     ) {
                         warn!("dynamic cargo on-load credit {}: {e:?}", entry.name);
                     }
-                    self.persisted.dynamic_cargo_crates.remove_cow(&entry.name);
-                    sync_source_oids.insert(entry.source);
-                    self.ephemeral.dirty();
-                    continue;
                 }
+                self.remove_dynamic_cargo_registry_entry(entry.name.as_str());
+                sync_source_oids.insert(entry.source);
+                self.ephemeral.dirty();
+                continue;
             }
             match StaticObject::get_by_name(lua, entry.name.as_str()) {
-                Ok(Static::Static(_)) => continue,
+                Ok(Static::Static(_)) => {
+                    info!(
+                        "dynamic cargo restore: {} static already exists - kept, checkout retained",
+                        entry.name
+                    );
+                    continue;
+                }
                 _ => {}
             }
             if let Err(e) = self.respawn_dynamic_cargo_crate(lua, &entry) {
@@ -1687,6 +1696,11 @@ impl Db {
                 self.persisted.dynamic_cargo_crates.remove_cow(&entry.name);
                 self.clamp_dynamic_cargo_checkout(entry.source);
                 self.ephemeral.dirty();
+            } else {
+                info!(
+                    "dynamic cargo restore: {} respawned, checkout retained source={:?}",
+                    entry.name, entry.source
+                );
             }
         }
         // Flush credited contents to DCS for every released checkout.
@@ -1790,10 +1804,6 @@ impl Db {
                 ) {
                     Ok(true) => {
                         debit_sync.push(source);
-                        // Debit settled — persisted crate's checkout now counts for SyncTo.
-                        self.ephemeral
-                            .dynamic_cargo_checkout_settled
-                            .insert(name.clone());
                         info!(
                             "dynamic cargo checkout debit (fill delta): {name} source={source:?}"
                         );
