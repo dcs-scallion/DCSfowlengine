@@ -18,6 +18,20 @@ pub enum ClaimKind {
     Recovery,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "lowercase")]
+pub enum UnitSystem {
+    #[default]
+    Metric,
+    Imperial,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct WebPreferences {
+    #[serde(default)]
+    pub units: UnitSystem,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct WebAccount {
     pub username: String,
@@ -54,6 +68,8 @@ pub struct WebAuthStore {
     accounts: Tree<String, WebAccount>,
     by_ucid: Tree<String, String>,
     codes: Tree<String, ClaimCode>,
+    /// Separate tree: bincode cannot add fields to `WebAccount` without breaking old rows.
+    preferences: Tree<String, WebPreferences>,
 }
 
 impl WebAuthStore {
@@ -62,6 +78,7 @@ impl WebAuthStore {
             accounts: Tree::open(db, "web_accounts")?,
             by_ucid: Tree::open(db, "web_accounts_by_ucid")?,
             codes: Tree::open(db, "web_claim_codes")?,
+            preferences: Tree::open(db, "web_account_preferences")?,
         };
         match store.purge_stale() {
             Ok(n) if n > 0 => info!("web_auth: purged {n} unlinked account(s) with expired link codes"),
@@ -114,7 +131,9 @@ impl WebAuthStore {
         for k in codes {
             let _ = self.codes.remove(&k);
         }
-        let _ = self.accounts.remove(&username.to_string());
+        let key = username.to_string();
+        let _ = self.preferences.remove(&key);
+        let _ = self.accounts.remove(&key);
         Ok(())
     }
 
@@ -172,6 +191,20 @@ impl WebAuthStore {
         self.accounts.insert(&user, &account)?;
         let code = self.issue_code(&user, ClaimKind::Link)?;
         Ok((account, code))
+    }
+
+    pub fn get_preferences(&self, username: &str) -> Result<WebPreferences> {
+        let user = normalize_username(username)?;
+        Ok(self.preferences.get(&user)?.unwrap_or_default())
+    }
+
+    pub fn set_preferences(&self, username: &str, preferences: WebPreferences) -> Result<WebPreferences> {
+        let user = normalize_username(username)?;
+        if self.accounts.get(&user)?.is_none() {
+            bail!("account not found");
+        }
+        self.preferences.insert(&user, &preferences)?;
+        Ok(preferences)
     }
 
     pub fn verify_login(&self, username: &str, password: &str) -> Result<WebAccount> {

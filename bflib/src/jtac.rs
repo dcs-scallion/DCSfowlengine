@@ -702,6 +702,7 @@ impl Jtac {
                 let name = db.group(gid)?.name.clone();
                 let apos = db.group_center(gid)?;
                 let pos = Vector2::new(target.pos.x, target.pos.z);
+                db.ensure_artillery_fire_range(gid, pos)?;
                 adjustment.target = pos;
                 let pos = pos + adjustment.adjust;
                 let task = Task::FireAtPoint {
@@ -795,6 +796,7 @@ impl Jtac {
                     }
                     
                     let pos = Vector2::new(target.pos.x, target.pos.z);
+                    db.ensure_artillery_fire_range(gid, pos)?;
                     adjustment.target = pos;
                     let pos = pos + adjustment.adjust;
                     

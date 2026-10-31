@@ -2921,6 +2921,68 @@ impl Db {
         artillery
     }
 
+    /// Persisted spec, else live CFG by path/template; else `(0, artillery_mission_range)`.
+    pub fn artillery_fire_range_m(&self, gid: &GroupId) -> Result<(u32, u32)> {
+        let group = self.group(gid)?;
+        let fallback = (0u32, self.ephemeral.cfg.artillery_mission_range);
+        let from_spec = match &group.origin {
+            DeployKind::Deployed { spec, .. } => spec.fire_range,
+            DeployKind::Troop { spec, .. } => spec.fire_range,
+            _ => None,
+        };
+        if let Some(r) = from_spec {
+            return Ok((r.min_m, r.max_m));
+        }
+        match &group.origin {
+            DeployKind::Deployed { spec, .. } => {
+                if let Some(deps) = self.ephemeral.cfg.deployables.get(&group.side) {
+                    for d in deps {
+                        if d.path == spec.path {
+                            if let Some(r) = d.fire_range {
+                                return Ok((r.min_m, r.max_m));
+                            }
+                            break;
+                        }
+                    }
+                }
+            }
+            DeployKind::Troop { spec, .. } => {
+                if let Some(troops) = self.ephemeral.cfg.troops.get(&group.side) {
+                    for t in troops {
+                        if t.template == spec.template || t.name == spec.name {
+                            if let Some(r) = t.fire_range {
+                                return Ok((r.min_m, r.max_m));
+                            }
+                            break;
+                        }
+                    }
+                }
+            }
+            _ => {}
+        }
+        Ok(fallback)
+    }
+
+    pub fn artillery_dist_in_fire_range(&self, gid: &GroupId, dist_m: f64) -> Result<bool> {
+        let (min_m, max_m) = self.artillery_fire_range_m(gid)?;
+        Ok(dist_m >= min_m as f64 && dist_m <= max_m as f64)
+    }
+
+    pub fn ensure_artillery_fire_range(&self, gid: &GroupId, target: Vector2) -> Result<()> {
+        let apos = self.group_center(gid)?;
+        let d = na::distance(&apos.into(), &target.into());
+        if self.artillery_dist_in_fire_range(gid, d)? {
+            return Ok(());
+        }
+        let (min_m, max_m) = self.artillery_fire_range_m(gid)?;
+        bail!(
+            "Artillery Abort: {gid} out of fire range ({:.1} km; needs {:.1}–{:.1} km)",
+            d / 1000.0,
+            min_m as f64 / 1000.0,
+            max_m as f64 / 1000.0
+        )
+    }
+
     pub fn calcm_near_point(
         &self,
         side: Side,

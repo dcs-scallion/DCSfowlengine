@@ -19,6 +19,10 @@ Or download from the running dashboard:
 
 Restart DCS. First run writes `Config\AttritionCockpit.lua`.
 
+From **1.0.35**, the hook auto-checks `/api/cockpit/plugin` on Attrition
+connect, downloads a newer script into `Scripts\Hooks` when available, chats a
+restart reminder, and shows an in-panel banner until DCS is fully restarted.
+
 ## Use
 
 - Open with your **Comms / radio-menu** key (default), or **Ctrl+Shift+J**

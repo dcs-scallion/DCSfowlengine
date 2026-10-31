@@ -15,7 +15,7 @@ for more details.
 */
 
 use super::{
-    Db, Map, MapM, MapS, Set,
+    Db, Map, MapM, MapS, Set, SetM,
     group::{DeployKind, SpawnedUnit},
     logistics::{Inventory, LogiStage, Warehouse},
 };
@@ -1760,7 +1760,10 @@ impl Db {
             let dist = na::distance_squared(&center.into(), &unit.pos.into());
             if dist <= ground_cull {
                 near.push(*uid);
-                threatened = true;
+                // CSAR infantry: spawn proximity only, not objective threat
+                if !self.persisted.csar_pilots.contains(&unit.group) {
+                    threatened = true;
+                }
             }
         }
         for uid in near {
@@ -1954,6 +1957,7 @@ impl Db {
         let mut is_close_to_enemies: FxHashSet<UnitId> = FxHashSet::default();
         let mut check_close_units = |units: &Map<UnitId, SpawnedUnit>,
                                      close_units: &FxHashSet<UnitId>,
+                                     csar_pilots: &SetM<GroupId>,
                                      obj: &Objective,
                                      spawn: &mut bool,
                                      threat: &mut bool| {
@@ -1967,6 +1971,7 @@ impl Db {
                     let air = unit.tags.0.contains(UnitTag::Aircraft)
                         || unit.tags.0.contains(UnitTag::Helicopter);
                     let unarmed = unit.tags.0.contains(UnitTag::Unarmed);
+                    let csar = csar_pilots.contains(&unit.group);
                     let cull_dist = if air {
                         cull_distance
                     } else {
@@ -1975,7 +1980,7 @@ impl Db {
                     let dist = na::distance_squared(&obj.zone.pos().into(), &unit.pos.into());
                     if dist <= cull_dist {
                         *spawn = true;
-                        if unarmed {
+                        if unarmed || csar {
                         } else if air {
                             let threat_dist =
                                 (cfg.threatened_distance[unit.typ.as_str()] as f64).powi(2);
@@ -2037,6 +2042,7 @@ impl Db {
             if let Err(e) = check_close_units(
                 &self.persisted.units,
                 &self.ephemeral.units_potentially_close_to_enemies,
+                &self.persisted.csar_pilots,
                 obj,
                 &mut spawn,
                 &mut is_threatened,

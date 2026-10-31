@@ -20,7 +20,7 @@
 -- DCS dxgui Window/WebViewWidget have no LuaLS stubs; calls are guarded with pcall.
 ---@diagnostic disable: undefined-field, need-check-nil
 
-local ATTRITION_COCKPIT_VERSION = "1.0.33"
+local ATTRITION_COCKPIT_VERSION = "1.0.35"
 
 local net = require('net')
 
@@ -49,6 +49,7 @@ if not (dxgui and Window and WebViewWidget) then
 end
 
 local CONFIG_PATH = lfs.writedir() .. "Config\\AttritionCockpit.lua"
+local HOOK_PATH = lfs.writedir() .. "Scripts\\Hooks\\attrition_cockpit.lua"
 
 local DEFAULTS = {
     -- Public dashboard origin that serves /cockpit (Caddy + bfweb). Not bfdb :8880.
@@ -95,10 +96,14 @@ local programmatic_resize = false
 local normal_w, normal_h
 -- Last WebView client size (skip redundant setBounds — CEF crashes if spammed).
 local last_wv_w, last_wv_h
--- Title-bar-only "sleep": hide WebView + shrink chrome; keep CEF page alive.
+-- Title-bar-only "sleep": shrink WebView to 1×1 + hide; keep CEF document.
 -- (Unload/0×0/black-page on sleep corrupted CEF after wake — dead clicks/scroll.)
 local TITLE_H = 20
 local slept = false
+-- Set onNetConnect while slept; wake reloads server/playerid into the URL.
+local reload_after_sleep = false
+-- One auto-update check per DCS process.
+local update_checked = false
 
 local cfg = {}
 
@@ -222,6 +227,27 @@ cfg.open_on_radio_menu = false
 if type(cfg.hotkeys) ~= "table" then cfg.hotkeys = {} end
 cfg.hotkeys.reload = nil
 cfg.hotkeys.hide = ""
+-- Pending update already applied by this running file — drop the flag.
+do
+    local pending = cfg.pending_update
+    if type(pending) == "string" and pending ~= "" then
+        local function parse_ver(s)
+            local a, b, c = string.match(tostring(s), "^(%d+)%.(%d+)%.(%d+)")
+            if not a then return nil end
+            return { tonumber(a), tonumber(b), tonumber(c) }
+        end
+        local cur, pen = parse_ver(ATTRITION_COCKPIT_VERSION), parse_ver(pending)
+        if cur and pen then
+            local done = cur[1] > pen[1]
+                or (cur[1] == pen[1] and cur[2] > pen[2])
+                or (cur[1] == pen[1] and cur[2] == pen[2] and cur[3] >= pen[3])
+            if done then
+                cfg.pending_update = nil
+                cfg.pending_update_notified = nil
+            end
+        end
+    end
+end
 save_config()
 
 local function detect_vr()
@@ -256,6 +282,24 @@ local hide_hotkey_bound = false
 local visible = false
 local click_through = false
 local dirty_geom = false
+
+-- Hidden window: always pass mouse. Awake: honor click_through only.
+-- Sleep keeps the title bar interactive; WebView is shrunk instead.
+local function set_window_input_transparent(transparent)
+    if not window then return end
+    pcall(function()
+        if window.setTransparentForUserInput then
+            window:setTransparentForUserInput(transparent)
+        elseif window.setTransparentForMouse then
+            window:setTransparentForMouse(transparent)
+        end
+    end)
+end
+
+local function apply_window_hit_test()
+    if not window then return end
+    set_window_input_transparent(click_through or (not visible))
+end
 -- True after CEF browser exists (cefLoadUrl before this is a no-op).
 local browser_ready = false
 -- True after a load was issued against a ready browser (or page finished).
@@ -290,6 +334,140 @@ local function current_server_name()
     return nil
 end
 
+local function parse_semver(s)
+    local a, b, c = string.match(tostring(s or ""), "^(%d+)%.(%d+)%.(%d+)")
+    if not a then return nil end
+    return { tonumber(a), tonumber(b), tonumber(c) }
+end
+
+local function version_newer(remote, local_v)
+    local r, l = parse_semver(remote), parse_semver(local_v)
+    if not (r and l) then return false end
+    if r[1] ~= l[1] then return r[1] > l[1] end
+    if r[2] ~= l[2] then return r[2] > l[2] end
+    return r[3] > l[3]
+end
+
+local function pending_update_version()
+    local pending = cfg.pending_update
+    if type(pending) ~= "string" or pending == "" then return nil end
+    if version_newer(pending, ATTRITION_COCKPIT_VERSION) then return pending end
+    return nil
+end
+
+local function dashboard_origin()
+    local base = tostring(cfg.url or DEFAULTS.url)
+    local origin = string.match(base, "^(https?://[^/]+)")
+    return origin
+end
+
+local function apply_window_title()
+    if not window then return end
+    local pending = pending_update_version()
+    local title = "  Attrition Control"
+    if pending then
+        title = "  Attrition Control — RESTART DCS (v" .. pending .. " ready)"
+    end
+    pcall(function() window:setText(title) end)
+end
+
+-- HTTPS via curl.exe (LuaSocket has no TLS in DCS). Windows 10+ ships curl.
+local function http_get(url)
+    if type(url) ~= "string" or url == "" then return nil, "bad url" end
+    if string.sub(url, 1, 8) ~= "https://" and string.sub(url, 1, 7) ~= "http://" then
+        return nil, "url scheme"
+    end
+    local tmp = lfs.writedir() .. "Config\\AttritionCockpitDownload.tmp"
+    os.remove(tmp)
+    local quoted_url = string.gsub(url, '"', '')
+    local quoted_tmp = string.gsub(tmp, '"', '')
+    local cmd = 'curl.exe -fsSL --connect-timeout 8 --max-time 45 -A "AttritionCockpit/'
+        .. ATTRITION_COCKPIT_VERSION .. '" -o "' .. quoted_tmp .. '" "' .. quoted_url .. '"'
+    pcall(os.execute, cmd)
+    local f = io.open(tmp, "rb")
+    if not f then return nil, "curl failed" end
+    local body = f:read("*a")
+    f:close()
+    os.remove(tmp)
+    if type(body) ~= "string" or #body < 8 then return nil, "empty body" end
+    return body
+end
+
+local function install_hook_script(body, remote_ver)
+    if type(body) ~= "string" then return false, "no body" end
+    local embedded = string.match(body, 'local ATTRITION_COCKPIT_VERSION = "([%d%.]+)"')
+    if embedded ~= remote_ver then
+        return false, "version mismatch in script"
+    end
+    if not string.find(body, "ATTRITION_COCKPIT", 1, true) then
+        return false, "not an Attrition cockpit script"
+    end
+    if #body < 500 or #body > 400000 then
+        return false, "unexpected size"
+    end
+    -- Overwrite in place (Windows often locks rename/delete of a just-loaded file).
+    local f, err = io.open(HOOK_PATH, "wb")
+    if not f then return false, tostring(err) end
+    f:write(body)
+    f:close()
+    return true
+end
+
+local function notify_update_chat(remote_ver)
+    if cfg.pending_update_notified == remote_ver then return end
+    local msg = "ATTRITION CONTROL: v" .. tostring(remote_ver)
+        .. " downloaded to Scripts\\Hooks. Fully quit and restart DCS to activate it."
+    pcall(function()
+        net.send_chat(msg, true)
+    end)
+    cfg.pending_update_notified = remote_ver
+    save_config()
+    logmsg(msg)
+end
+
+local function try_auto_update()
+    if update_checked then return end
+    update_checked = true
+    local origin = dashboard_origin()
+    if not origin then
+        logmsg("auto-update skipped — bad dashboard url")
+        return
+    end
+    local meta_body, meta_err = http_get(origin .. "/api/cockpit/plugin")
+    if not meta_body then
+        logmsg("auto-update check failed: " .. tostring(meta_err))
+        return
+    end
+    local remote = string.match(meta_body, '"version"%s*:%s*"([%d%.]+)"')
+    if not remote then
+        logmsg("auto-update: no version in plugin metadata")
+        return
+    end
+    if not version_newer(remote, ATTRITION_COCKPIT_VERSION) then
+        logmsg("auto-update: up to date (" .. ATTRITION_COCKPIT_VERSION .. ")")
+        return
+    end
+    logmsg("auto-update: downloading " .. remote)
+    local script, dl_err = http_get(origin .. "/api/cockpit/plugin/download")
+    if not script then
+        logmsg("auto-update download failed: " .. tostring(dl_err))
+        return
+    end
+    local ok, inst_err = install_hook_script(script, remote)
+    if not ok then
+        logmsg("auto-update install failed: " .. tostring(inst_err))
+        return
+    end
+    cfg.pending_update = remote
+    save_config()
+    apply_window_title()
+    notify_update_chat(remote)
+    -- Refresh CEF so the SPA can show the restart banner (?update_pending=).
+    if webview and browser_ready and visible and not slept then
+        load_webview_url()
+    end
+end
+
 local function build_url()
     local base = tostring(cfg.url or DEFAULTS.url)
     local sep = string.find(base, "?", 1, true) and "&" or "?"
@@ -308,10 +486,16 @@ local function build_url()
     if server and server ~= "" then
         server_q = "&server=" .. urlencode(server)
     end
+    local pending = pending_update_version()
+    local pending_q = ""
+    if pending then
+        pending_q = "&update_pending=" .. urlencode(pending)
+    end
     return base
         .. sep .. "playerid=" .. tostring(pid)
         .. server_q
         .. "&plugin=" .. urlencode(ATTRITION_COCKPIT_VERSION)
+        .. pending_q
         .. (IS_VR and "&vr=1" or "")
         .. "&scale=" .. tostring(UI_SCALE)
         -- Widget setOpacity blanks CEF; page applies this via CSS instead.
@@ -499,13 +683,7 @@ local function register_hotkeys()
             end },
             { hk.click_through, function()
                 click_through = not click_through
-                pcall(function()
-                    if window and window.setTransparentForUserInput then
-                        window:setTransparentForUserInput(click_through)
-                    elseif window and window.setTransparentForMouse then
-                        window:setTransparentForMouse(click_through)
-                    end
-                end)
+                apply_window_hit_test()
                 logmsg("click_through=" .. tostring(click_through))
             end },
         }
@@ -615,9 +793,12 @@ enter_sleep = function()
     local aw = normal_w or w
     if aw < MIN_W then aw = MIN_W end
     slept = true
-    -- Hide only — keep CEF size + document. Black-page/0×0 broke wake.
+    -- Shrink WebView off the cockpit hit area (full-size + setVisible(false)
+    -- still stole mouse / fired CEF buttons). 1×1 keeps the document alive.
     if webview then
         pcall(function() webview:setVisible(false) end)
+        pcall(function() webview:setBounds(0, 0, 1, 1) end)
+        last_wv_w, last_wv_h = 1, 1
     end
     local th = sleep_title_height()
     set_window_size_limits(MIN_W, th)
@@ -625,7 +806,8 @@ enter_sleep = function()
     pcall(function() window:setResizable(false) end)
     pcall(function() window:setBounds(x, y, aw, th) end)
     programmatic_resize = false
-    logmsg("sleep on (title bar only, h=" .. tostring(th) .. ", page kept)")
+    -- Title bar must keep drag / double-click wake — do not pass input here.
+    logmsg("sleep on (title bar only, h=" .. tostring(th) .. ", webview 1x1)")
     dirty_geom = true
     flush_geom()
 end
@@ -649,12 +831,15 @@ wake_from_sleep = function()
     if webview then
         apply_webview_bounds()
         reveal_webview()
-        -- Reload only if the document was lost; normal sleep keeps it.
-        if not page_alive and not page_loading then
+        if reload_after_sleep then
+            reload_after_sleep = false
+            load_webview_url()
+        elseif not page_alive and not page_loading then
             load_webview_url()
         end
     end
     programmatic_resize = false
+    apply_window_hit_test()
     logmsg("sleep off -> " .. tostring(nw) .. "x" .. tostring(nh)
         .. " page_alive=" .. tostring(page_alive))
     dirty_geom = true
@@ -682,6 +867,19 @@ local function handle_cef_query(queryId, jsonRequest)
             or ((DEFAULTS.hotkeys or {}).toggle)
             or "Ctrl+Shift+J"
         local payload = '{"ok":true,"toggle":"' .. tostring(toggle):gsub('\\', '\\\\'):gsub('"', '\\"') .. '"}'
+        pcall(function() webview:edQuerySuccess(queryId, payload) end)
+        return
+    end
+    if string.find(req, "get_update_pending", 1, true) then
+        local pending = pending_update_version()
+        local payload
+        if pending then
+            payload = '{"ok":true,"pending":"'
+                .. tostring(pending):gsub('\\', '\\\\'):gsub('"', '\\"')
+                .. '"}'
+        else
+            payload = '{"ok":true,"pending":null}'
+        end
         pcall(function() webview:edQuerySuccess(queryId, payload) end)
         return
     end
@@ -713,7 +911,7 @@ local function create_window()
 
     window = Window.new()
     -- Leading spaces: default caption skin is left-aligned and sits tight to the edge.
-    window:setText("  Attrition Control")
+    apply_window_title()
     window:setBounds(wx, wy, ww, wh)
     pcall(function() window:setDraggable(true) end)
     pcall(function() window:setResizable(true) end)
@@ -721,6 +919,7 @@ local function create_window()
     pcall(function()
         window:addCloseCallback(function()
             visible = false
+            apply_window_hit_test()
             if slept then
                 -- Keep slept; next show() will wake.
             end
@@ -823,6 +1022,23 @@ local function create_window()
     logmsg("window created, url=" .. build_url())
 end
 
+-- Fresh ?server= / ?playerid= after connect (or when show finds a stale page).
+local function reload_cockpit_for_server()
+    if not window then return end
+    if slept then
+        reload_after_sleep = true
+        logmsg("connect reload deferred until wake")
+        return
+    end
+    if browser_ready then
+        load_webview_url()
+        if visible then reveal_webview() end
+    else
+        pending_load = true
+        logmsg("connect reload deferred (browser not ready)")
+    end
+end
+
 function show()
     if not is_attrition_server() then
         logmsg("show blocked — not Attrition (host="
@@ -837,11 +1053,13 @@ function show()
         window:setVisible(true)
         visible = true
         apply_opacity()
+        apply_window_hit_test()
         return
     end
     visible = true
     window:setVisible(true)
     apply_opacity()
+    apply_window_hit_test()
     if browser_ready then
         if not page_alive and not page_loading then
             load_webview_url()
@@ -859,6 +1077,8 @@ function hide()
     -- Keep the page in memory (theme + React state). Only sleep blanks CEF.
     window:setVisible(false)
     visible = false
+    -- Belt-and-suspenders: invisible chrome must not steal cockpit clicks.
+    apply_window_hit_test()
     flush_geom()
 end
 
@@ -874,9 +1094,12 @@ function handler.onNetConnect(_playerId)
         return
     end
     register_hotkeys()
+    try_auto_update()
     if cfg.open_on_start then
         show()
     end
+    -- Always refresh URL — hide() kept the previous server/playerid in CEF.
+    reload_cockpit_for_server()
 end
 
 function handler.onNetDisconnect()
@@ -891,9 +1114,11 @@ function handler.onMissionLoadEnd()
             .. tostring(current_server_host()) .. " name=" .. tostring(current_server_name()) .. ")")
         return
     end
+    try_auto_update()
     if cfg.open_on_start then
         show()
     end
+    reload_cockpit_for_server()
 end
 
 function handler.onShowRadioMenu()
@@ -909,6 +1134,7 @@ function handler.onShowRadioMenu()
     visible = true
     pcall(function() window:setVisible(true) end)
     apply_opacity()
+    apply_window_hit_test()
     if page_alive then
         reveal_webview()
     end
@@ -920,6 +1146,7 @@ function handler.onSimulationStop()
         pcall(function() window:setVisible(false) end)
     end
     visible = false
+    apply_window_hit_test()
 end
 
 DCS.setUserCallbacks(handler)

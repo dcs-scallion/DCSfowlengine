@@ -4963,20 +4963,22 @@ impl Db {
         let export = Arc::clone(&self.ephemeral.fowl_miz_export);
         let resource_meta = self.ephemeral.warehouse_resource_meta.clone();
         let resource_meta = resource_meta.as_deref();
-        let thresholds_for = |obj: &Objective| -> (u8, u8) {
+        let thresholds_for = |obj: &Objective| -> (u8, u8, u8) {
             let Some(w) = wh else {
-                return (100, 100);
+                return (100, 100, 100);
             };
             if obj.is_occupied_logistics_hub() {
                 return (
                     w.tick_occupiedhub_minimum_global_supply_percentage_clamped(),
                     w.tick_occupiedhub_minimum_airframe_global_supply_percentage_clamped(),
+                    w.tick_occupiedhub_minimum_fuel_supply_percentage_clamped(),
                 );
             }
             let on_water = objective_airbase_on_water(lua, obj).unwrap_or(false);
             (
                 w.tick_minimum_global_supply_percentage_for(&obj.kind, on_water),
                 w.tick_minimum_airframe_global_supply_percentage_for(&obj.kind, on_water),
+                w.tick_minimum_fuel_supply_percentage_for(&obj.kind, on_water),
             )
         };
         let bucket_pct = |oid: &ObjectiveId, obj: &Objective, airframes: bool| -> Option<u8> {
@@ -4989,9 +4991,13 @@ impl Db {
             )
         };
         let needs_bucket = |oid: &ObjectiveId, obj: &Objective, airframes: bool| -> bool {
-            let (min_non_ac, min_ac) = thresholds_for(obj);
+            let (min_non_ac, min_ac, _) = thresholds_for(obj);
             let min = if airframes { min_ac } else { min_non_ac };
             bucket_pct(oid, obj, airframes).is_some_and(|pct| pct < min)
+        };
+        let needs_fuel = |obj: &Objective| -> bool {
+            let (_, _, min_fuel) = thresholds_for(obj);
+            obj.fuel < min_fuel
         };
         let mut transfers: Vec<Transfer> = vec![];
         for lid in &self.persisted.logistics_hubs {
@@ -5037,7 +5043,7 @@ impl Db {
                 if !objective_is_carrier_logistics_dest(lua, self, obj) {
                     continue;
                 }
-                let (_, min_ac) = thresholds_for(obj);
+                let (_, min_ac, _) = thresholds_for(obj);
                 let on_water = objective_airbase_on_water(lua, obj).unwrap_or(false);
                 let ship = objective_dcs_airbase_is_ship(lua, self, *oid);
                 wh_diag(format_compact!(
@@ -5054,7 +5060,7 @@ impl Db {
                 ));
             }
             let mut needed_liquid: SmallVec<[Needed; 64]> = hub_destinations()
-                .filter(|(_, obj)| obj.fuel < 100)
+                .filter(|(_, obj)| needs_fuel(obj))
                 .map(|(oid, obj)| Needed {
                     oid,
                     obj,
@@ -5064,7 +5070,7 @@ impl Db {
                 .collect();
             if needed_non_ac.is_empty() && needed_ac.is_empty() && needed_liquid.is_empty() {
                 wh_diag(format_compact!(
-                    "hub {} supply/fuel: all destinations at/above non-AC and A/C gates and fuel 100% (no outbound demand)",
+                    "hub {} supply/fuel: all destinations at/above non-AC, A/C, and fuel gates (no outbound demand)",
                     logi.name
                 ));
             } else {
@@ -5299,7 +5305,7 @@ impl Db {
                     }
                     None => ("none", false),
                 };
-                let (_, min_ac) = thresholds_for(obj);
+                let (_, min_ac, _) = thresholds_for(obj);
                 wh_diag(format_compact!(
                     "carrier-link {}: on_water={on_water} ship={ship} detached={} supplier={supplier_name} in_dest={in_dest} {}",
                     obj.name,
@@ -5334,7 +5340,7 @@ impl Db {
                     occ.zone.pos(),
                     needs_bucket(&occ_id, occ, false),
                     needs_bucket(&occ_id, occ, true),
-                    occ.fuel < 100,
+                    needs_fuel(occ),
                 )
             };
             if !need_non_ac && !need_ac && !need_fuel {
@@ -5422,7 +5428,15 @@ impl Db {
                         }
                         for n in &$needed {
                             if n.allocated > 0 {
-                                let amount = scale_by_delivery_efficiency(n.allocated, 100);
+                                let amount = scale_by_delivery_efficiency(
+                                    n.allocated,
+                                    virtual_resupply_delivery_efficiency_cached(
+                                        &mut self.ephemeral.hub_delivery_efficiency,
+                                        &self.ephemeral.cfg,
+                                        logi,
+                                        n.obj,
+                                    ),
+                                );
                                 if amount == 0 {
                                     continue;
                                 }
@@ -5483,7 +5497,15 @@ impl Db {
                         }
                         for n in &$needed {
                             if n.allocated > 0 {
-                                let amount = scale_by_delivery_efficiency(n.allocated, 100);
+                                let amount = scale_by_delivery_efficiency(
+                                    n.allocated,
+                                    virtual_resupply_delivery_efficiency_cached(
+                                        &mut self.ephemeral.hub_delivery_efficiency,
+                                        &self.ephemeral.cfg,
+                                        logi,
+                                        n.obj,
+                                    ),
+                                );
                                 if amount == 0 {
                                     continue;
                                 }

@@ -410,6 +410,17 @@ pub struct DeployableJtac {
     pub nolos: bool,
 }
 
+/// Indirect-fire engagement envelope for JTAC artillery missions (meters).
+#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ArtilleryFireRange {
+    /// Minimum engagement range (MLRS dead zone). Omit or 0 = no minimum.
+    #[serde(default)]
+    pub min_m: u32,
+    /// Maximum engagement range.
+    pub max_m: u32,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum DeployableKind {
     Group { template: String },
@@ -474,6 +485,9 @@ pub struct Deployable {
     pub ewr: Option<DeployableEwr>,
     /// Is this unit a jtac
     pub jtac: Option<DeployableJtac>,
+    /// Artillery / MLRS fire envelope for JTAC missions (omit if not applicable).
+    #[serde(default)]
+    pub fire_range: Option<ArtilleryFireRange>,
     #[serde(default)]
     #[serde(rename = "template")]
     pub deprecated_template: Option<String>,
@@ -524,6 +538,9 @@ pub struct Troop {
     pub cost: u32,
     /// Can laser designate and scout
     pub jtac: Option<DeployableJtac>,
+    /// Mortar / troop artillery fire envelope for JTAC missions.
+    #[serde(default)]
+    pub fire_range: Option<ArtilleryFireRange>,
     /// May walk to and detain an enemy downed pilot for CSAR extraction.
     #[serde(default)]
     pub can_capture_csar: bool,
@@ -626,7 +643,7 @@ pub struct WarehouseConfig {
     /// from outside
     pub ticks_per_delivery: u32,
     /// Hub→FARP **non-airframe** Supply % gate (weapons + other; 1–100). Default 100.
-    /// Fuel stays at 100%. Ground DEP FARPs; naval mobile pads use carrier.
+    /// Ground DEP FARPs; naval mobile pads use carrier.
     #[serde(default = "default_tick_kind_minimum_global_supply_percentage")]
     pub tick_farp_minimum_global_supply_percentage: u8,
     /// Hub→FOB (OFO) non-airframe Supply % gate (1–100). Default 100.
@@ -656,6 +673,21 @@ pub struct WarehouseConfig {
     /// Occupied hub airframe Supply % gate (1–100). Default 100.
     #[serde(default = "default_tick_kind_minimum_global_supply_percentage")]
     pub tick_occupiedhub_minimum_airframe_global_supply_percentage: u8,
+    /// Hub→FARP **fuel** Supply % gate (1–100). Default 100.
+    #[serde(default = "default_tick_kind_minimum_global_supply_percentage")]
+    pub tick_farp_minimum_fuel_supply_percentage: u8,
+    /// Hub→FOB fuel Supply % gate (1–100). Default 100.
+    #[serde(default = "default_tick_kind_minimum_global_supply_percentage")]
+    pub tick_fob_minimum_fuel_supply_percentage: u8,
+    /// Hub→carrier fuel Supply % gate (1–100). Default 100.
+    #[serde(default = "default_tick_kind_minimum_global_supply_percentage")]
+    pub tick_carrier_minimum_fuel_supply_percentage: u8,
+    /// Hub→land airbase fuel Supply % gate (1–100). Default 100.
+    #[serde(default = "default_tick_kind_minimum_global_supply_percentage")]
+    pub tick_airbase_minimum_fuel_supply_percentage: u8,
+    /// Occupied hub fuel Supply % gate (1–100). Default 100.
+    #[serde(default = "default_tick_kind_minimum_global_supply_percentage")]
+    pub tick_occupiedhub_minimum_fuel_supply_percentage: u8,
     /// The supply transfer crate
     pub supply_transfer_crate: FxHashMap<Side, Crate>,
     /// The percentage of supply that is transfered by a transfer crate
@@ -768,6 +800,31 @@ impl WarehouseConfig {
         raw.clamp(1, 100)
     }
 
+    /// Fuel destination Supply % gate (clamped 1–100).
+    /// Occupied hubs: use `tick_occupiedhub_minimum_fuel_supply_percentage` via the caller.
+    pub fn tick_minimum_fuel_supply_percentage_for(
+        &self,
+        kind: &ObjectiveKind,
+        airbase_on_water: bool,
+    ) -> u8 {
+        let raw = match kind {
+            ObjectiveKind::Fob => self.tick_fob_minimum_fuel_supply_percentage,
+            ObjectiveKind::Farp { mobile: true, .. } => {
+                self.tick_carrier_minimum_fuel_supply_percentage
+            }
+            ObjectiveKind::Farp { .. } => self.tick_farp_minimum_fuel_supply_percentage,
+            ObjectiveKind::Airbase => {
+                if airbase_on_water {
+                    self.tick_carrier_minimum_fuel_supply_percentage
+                } else {
+                    self.tick_airbase_minimum_fuel_supply_percentage
+                }
+            }
+            ObjectiveKind::Logistics | ObjectiveKind::Production => 100,
+        };
+        raw.clamp(1, 100)
+    }
+
     pub fn tick_occupiedhub_minimum_global_supply_percentage_clamped(&self) -> u8 {
         self.tick_occupiedhub_minimum_global_supply_percentage
             .clamp(1, 100)
@@ -775,6 +832,11 @@ impl WarehouseConfig {
 
     pub fn tick_occupiedhub_minimum_airframe_global_supply_percentage_clamped(&self) -> u8 {
         self.tick_occupiedhub_minimum_airframe_global_supply_percentage
+            .clamp(1, 100)
+    }
+
+    pub fn tick_occupiedhub_minimum_fuel_supply_percentage_clamped(&self) -> u8 {
+        self.tick_occupiedhub_minimum_fuel_supply_percentage
             .clamp(1, 100)
     }
 

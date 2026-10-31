@@ -965,6 +965,22 @@ fn txn_err(e: TransactionError<anyhow::Error>) -> anyhow::Error {
     }
 }
 
+/// Richer than `{e:?}` when the Display is an empty `io error: `.
+fn format_db_err(e: &anyhow::Error) -> std::string::String {
+    let mut s = format!("{e:#}");
+    for cause in e.chain() {
+        if let Some(ioe) = cause.downcast_ref::<std::io::Error>() {
+            s.push_str(&format!(
+                " [io kind={:?}, os={:?}]",
+                ioe.kind(),
+                ioe.raw_os_error()
+            ));
+            break;
+        }
+    }
+    s
+}
+
 impl StatsDb {
     /// Open the DB and start one ingest + engine-log pipeline per instance.
     pub(crate) fn new<P: AsRef<Path>>(
@@ -1552,7 +1568,7 @@ impl StatsDb {
                                 if let Err(e) =
                                     task::block_in_place(|| self.add_stat(&inst, &mut ctx, ts, st))
                                 {
-                                    error!("[{}] failed to add stat {e:?}", inst.id)
+                                    error!("[{}] failed to add stat {}", inst.id, format_db_err(&e))
                                 }
                             }
                         }
@@ -1674,7 +1690,11 @@ impl StatsDb {
                             if let Err(e) =
                                 task::block_in_place(|| self.add_stat(&inst, &mut ctx, ts, st))
                             {
-                                warn!("[{}] failed to add stat from JSONL: {e:?}", inst.id);
+                                warn!(
+                                    "[{}] failed to add stat from JSONL: {}",
+                                    inst.id,
+                                    format_db_err(&e)
+                                );
                             }
                         }
                         info!(
@@ -1738,7 +1758,11 @@ impl StatsDb {
             let count = stats.len();
             for (ts, st) in stats {
                 if let Err(e) = self.add_stat(inst, ctx, ts, st) {
-                    warn!("[{}] failed to add stat from sealed segment: {e:?}", inst.id);
+                    warn!(
+                        "[{}] failed to add stat from sealed segment: {}",
+                        inst.id,
+                        format_db_err(&e)
+                    );
                 }
             }
             self.jsonl_sealed.insert(&sealed_key, &1u8)?;
@@ -2816,25 +2840,37 @@ impl StatsDb {
     }
 
     pub(crate) fn latest_session_end(&self) -> Result<Option<SessionEnd>> {
-        // Walk all sessions, newest last, return the most recent one that has a SessionEnd.
-        // Skip individual records that fail to deserialize (e.g. written by an
-        // older/incompatible build, or left partially-written by an unclean
-        // shutdown) instead of letting one bad entry permanently break
-        // /api/admin/perf for every session that comes after it.
-        let mut latest: Option<SessionEnd> = None;
-        for r in self.session.iter() {
-            let session = match r {
-                Ok((_, session)) => session,
-                Err(e) => {
-                    log::warn!("latest_session_end: skipping unreadable session record: {e:?}");
-                    continue;
+        // Newest-first until a SessionEnd; skip unreadable rows (one summary warn).
+        let mut skipped = 0u64;
+        let mut sample: Option<std::string::String> = None;
+        for r in self.session.iter().rev() {
+            match r {
+                Ok((_, session)) => {
+                    if let Some(end) = session.end {
+                        if skipped > 0 {
+                            warn!(
+                                "latest_session_end: skipped {skipped} unreadable session(s) (e.g. {})",
+                                sample.as_deref().unwrap_or("?")
+                            );
+                        }
+                        return Ok(Some(end));
+                    }
                 }
-            };
-            if let Some(end) = session.end {
-                latest = Some(end);
+                Err(e) => {
+                    skipped += 1;
+                    if sample.is_none() {
+                        sample = Some(format_db_err(&e));
+                    }
+                }
             }
         }
-        Ok(latest)
+        if skipped > 0 {
+            warn!(
+                "latest_session_end: skipped {skipped} unreadable session(s) (e.g. {})",
+                sample.as_deref().unwrap_or("?")
+            );
+        }
+        Ok(None)
     }
 
     // ── Admin ban management ─────────────────────────────────────────────────
@@ -2859,19 +2895,31 @@ impl StatsDb {
     }
 
     /// Bans recorded by bflib in the latest session's Cfg (read-only mirror).
-    /// Skips sessions that fail to deserialize (e.g. Cfg gained fields since
-    /// the row was written) so admin lists stay available.
+    /// Newest-first; stops at the first readable row. Unreadable rows are
+    /// skipped with one summary warn so admin lists stay available.
     pub(crate) fn session_bans_from_cfg(&self) -> Result<Vec<(Ucid, std::string::String, Option<DateTime<Utc>>)>> {
+        let mut skipped = 0u64;
+        let mut sample: Option<std::string::String> = None;
         let mut latest_cfg: Option<Cfg> = None;
-        for r in self.session.iter() {
-            let session = match r {
-                Ok((_, session)) => session,
-                Err(e) => {
-                    warn!("session_bans_from_cfg: skipping unreadable session: {e:?}");
-                    continue;
+        for r in self.session.iter().rev() {
+            match r {
+                Ok((_, session)) => {
+                    latest_cfg = Some(session.cfg);
+                    break;
                 }
-            };
-            latest_cfg = Some(session.cfg);
+                Err(e) => {
+                    skipped += 1;
+                    if sample.is_none() {
+                        sample = Some(format_db_err(&e));
+                    }
+                }
+            }
+        }
+        if skipped > 0 {
+            warn!(
+                "session_bans_from_cfg: skipped {skipped} unreadable session(s) before latest (e.g. {})",
+                sample.as_deref().unwrap_or("?")
+            );
         }
         let mut out = Vec::new();
         if let Some(cfg) = latest_cfg {
@@ -3262,20 +3310,33 @@ impl StatsDb {
 
     pub(crate) fn session_perf_history(&self, limit: usize) -> Result<Vec<SessionEnd>> {
         let mut ends: Vec<SessionEnd> = Vec::new();
-        for r in self.session.iter() {
-            let session = match r {
-                Ok((_, session)) => session,
-                Err(e) => {
-                    warn!("session_perf_history: skipping unreadable session: {e:?}");
-                    continue;
+        let mut skipped = 0u64;
+        let mut sample: Option<std::string::String> = None;
+        // Newest first until we have `limit` ended sessions; one summary warn.
+        for r in self.session.iter().rev() {
+            match r {
+                Ok((_, session)) => {
+                    if let Some(end) = session.end {
+                        ends.push(end);
+                        if ends.len() >= limit {
+                            break;
+                        }
+                    }
                 }
-            };
-            if let Some(end) = session.end {
-                ends.push(end);
+                Err(e) => {
+                    skipped += 1;
+                    if sample.is_none() {
+                        sample = Some(format_db_err(&e));
+                    }
+                }
             }
         }
-        if ends.len() > limit {
-            ends.drain(0..ends.len() - limit);
+        ends.reverse();
+        if skipped > 0 {
+            warn!(
+                "session_perf_history: skipped {skipped} unreadable session(s) (e.g. {})",
+                sample.as_deref().unwrap_or("?")
+            );
         }
         Ok(ends)
     }
@@ -3574,10 +3635,36 @@ impl StatsDb {
 
     /// Get objectives for a given round
     pub(crate) fn objectives_for_round(&self, round: RoundId) -> Result<Vec<(ObjectiveId, Objective)>> {
+        // One bad/corrupt row used to 500 /api/objectives + /api/stats + /api/frontline.
+        let iter = match self.objectives.scan_prefix(&round) {
+            Ok(it) => it,
+            Err(e) => {
+                warn!(
+                    "objectives_for_round: scan failed for {round:?}: {}",
+                    format_db_err(&e)
+                );
+                return Ok(vec![]);
+            }
+        };
         let mut objs = Vec::new();
-        for r in self.objectives.scan_prefix(&round)? {
-            let ((_, oid), obj) = r?;
-            objs.push((oid, obj));
+        let mut skipped = 0u64;
+        let mut sample: Option<std::string::String> = None;
+        for r in iter {
+            match r {
+                Ok(((_, oid), obj)) => objs.push((oid, obj)),
+                Err(e) => {
+                    skipped += 1;
+                    if sample.is_none() {
+                        sample = Some(format_db_err(&e));
+                    }
+                }
+            }
+        }
+        if skipped > 0 {
+            warn!(
+                "objectives_for_round: skipped {skipped} unreadable objective(s) for {round:?} (e.g. {})",
+                sample.as_deref().unwrap_or("?")
+            );
         }
         Ok(objs)
     }

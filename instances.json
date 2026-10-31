@@ -1,35 +1,35 @@
 {
-  "default": "attrition1",
   "instances": [
     {
+      "label": "Attrition #1 PvP Caucasus1985-SARH",
+      "netidx_config": "C:\\bfdb\\netidx-client.json",
+      "engine_config": "C:\\Users\\Robo\\Saved Games\\DCS.dcs_serverrelease\\Caucasus1985-SARH_CFG",
+      "dcs_server_name": "▌ATTRITION▐ Persistent 24/7 Strategic PvP | BETA▐",
       "id": "attrition1",
-      "label": "Attrition S1 (PvP SARH)",
-      "base": "/local/fowl/campaign",
-      "netidx_config": "C:\\Users\\Robo\\Saved Games\\DCS.dcs_serverrelease\\netidx-client.json",
+      "public": true,
+      "srs_url": "http://localhost:8081",
+      "stats_dir": "C:\\Users\\Robo\\Saved Games\\DCS.dcs_serverrelease\\Logs\\stats",
+      "export_port": 42001,
+      "server_ip": "78.80.144.178:10308",
       "sortie": null,
       "stats_jsonl": "C:\\Users\\Robo\\Saved Games\\DCS.dcs_serverrelease\\Logs\\stats.jsonl",
-      "stats_dir": "C:\\Users\\Robo\\Saved Games\\DCS.dcs_serverrelease\\Logs\\stats",
-      "engine_config": "C:\\Users\\Robo\\Saved Games\\DCS.dcs_serverrelease\\Caucasus1985-SARH_CFG",
-      "export_port": 42001,
-      "srs_url": "http://127.0.0.1:8081",
-      "dcs_server_name": "▌ATTRITION▐ Persistent 24/7 Strategic PvP | BETA▐",
-      "server_ip": "78.80.144.178:10308",
-      "public": true
+      "base": "/local/fowl/campaign"
     },
     {
+      "label": "Attrition #2 PvE Caucasus1985-TA",
+      "netidx_config": "C:\\bfdb\\netidx-client.json",
+      "engine_config": "C:\\Users\\Robo\\Saved Games\\DCS.dcs_serverrelease_2\\Caucasus1985-TA_CFG",
+      "dcs_server_name": "▌ATTRITION▐ Persistent 24/7 Strategic PvE | TA | BETA▐",
       "id": "attrition2",
-      "label": "Attrition S2 (PvE TA)",
-      "base": "/local/fowl/campaign-ta",
-      "netidx_config": "C:\\Users\\Robo\\Saved Games\\DCS.dcs_serverrelease\\netidx-client.json",
+      "public": true,
+      "srs_url": "http://localhost:8082",
+      "stats_dir": "C:\\Users\\Robo\\Saved Games\\DCS.dcs_serverrelease_2\\Logs\\stats",
+      "export_port": 42002,
+      "server_ip": "78.80.144.178:10309",
       "sortie": null,
       "stats_jsonl": "C:\\Users\\Robo\\Saved Games\\DCS.dcs_serverrelease_2\\Logs\\stats.jsonl",
-      "stats_dir": "C:\\Users\\Robo\\Saved Games\\DCS.dcs_serverrelease_2\\Logs\\stats",
-      "engine_config": "C:\\Users\\Robo\\Saved Games\\DCS.dcs_serverrelease_2\\Caucasus1985-TA_CFG",
-      "export_port": 42002,
-      "srs_url": "http://127.0.0.1:8082",
-      "dcs_server_name": "▌ATTRITION▐ Persistent 24/7 Strategic PvE | TA | BETA▐",
-      "server_ip": "78.80.144.178:10309",
-      "public": true
+      "base": "/local/fowl/campaign-ta"
     }
-  ]
+  ],
+  "default": "attrition1"
 }

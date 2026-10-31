@@ -748,38 +748,44 @@ async fn api_objectives(
             call_engine_rpc_str_for(&db, &inst, "query-objectives", vec![]),
         ).await {
             Ok(Ok(json)) => {
-                if let Ok(live) = serde_json::from_str::<Vec<bfprotocols::api::ObjectiveInfo>>(&json) {
-                    // The persisted health/logi/supply/fuel can lag the engine
-                    // (e.g. after a mission reload re-emits Stat::Objective at
-                    // 100, or if the archive replay missed a batch), which made
-                    // the tactical map disagree with the in-game markup. For the
-                    // active round, take these straight from the engine.
-                    // Match by ObjectiveId — ME mirrors (OPRR/OPRB Ind.Park.N)
-                    // share display names; a name key collapsed both to one owner.
-                    let by_id: std::collections::HashMap<String, &bfprotocols::api::ObjectiveInfo> =
-                        live.iter()
-                            .map(|o| (format!("{:?}", o.id), o))
-                            .collect();
-                    for entry in entries.iter_mut() {
-                        if let Some(id) = entry.get("id").and_then(|n| n.as_str()) {
-                            if let Some(&o) = by_id.get(id) {
-                                entry["priority"] = serde_json::Value::Bool(o.priority);
-                                entry["health"] = serde_json::json!(o.health);
-                                entry["logi"] = serde_json::json!(o.logi);
-                                entry["supply"] = serde_json::json!(o.supply);
-                                entry["fuel"] = serde_json::json!(o.fuel);
-                                entry["owner"] = serde_json::json!(format!("{:?}", o.owner));
-                                entry["threatened"] = serde_json::Value::Bool(o.threatened);
-                                entry["captureable"] = serde_json::Value::Bool(o.captureable);
-                                if let Some(p) = o.production {
-                                    entry["production"] = serde_json::json!(p);
-                                }
-                                if let Some(ref dn) = o.display_name {
-                                    entry["display_name"] = serde_json::json!(dn);
+                match serde_json::from_str::<Vec<bfprotocols::api::ObjectiveInfo>>(&json) {
+                    Ok(live) => {
+                        // The persisted health/logi/supply/fuel can lag the engine
+                        // (e.g. after a mission reload re-emits Stat::Objective at
+                        // 100, or if the archive replay missed a batch), which made
+                        // the tactical map disagree with the in-game markup. For the
+                        // active round, take these straight from the engine.
+                        // Match by ObjectiveId — ME mirrors (OPRR/OPRB Ind.Park.N)
+                        // share display names; a name key collapsed both to one owner.
+                        let by_id: std::collections::HashMap<String, &bfprotocols::api::ObjectiveInfo> =
+                            live.iter()
+                                .map(|o| (format!("{:?}", o.id), o))
+                                .collect();
+                        for entry in entries.iter_mut() {
+                            if let Some(id) = entry.get("id").and_then(|n| n.as_str()) {
+                                if let Some(&o) = by_id.get(id) {
+                                    entry["priority"] = serde_json::Value::Bool(o.priority);
+                                    entry["health"] = serde_json::json!(o.health);
+                                    entry["logi"] = serde_json::json!(o.logi);
+                                    entry["supply"] = serde_json::json!(o.supply);
+                                    entry["fuel"] = serde_json::json!(o.fuel);
+                                    entry["owner"] = serde_json::json!(format!("{:?}", o.owner));
+                                    entry["threatened"] = serde_json::Value::Bool(o.threatened);
+                                    entry["captureable"] = serde_json::Value::Bool(o.captureable);
+                                    if let Some(p) = o.production {
+                                        entry["production"] = serde_json::json!(p);
+                                    }
+                                    if let Some(ref dn) = o.display_name {
+                                        entry["display_name"] = serde_json::json!(dn);
+                                    }
                                 }
                             }
                         }
                     }
+                    Err(e) => log::warn!(
+                        "api_objectives: query-objectives JSON parse failed: {e}; body_prefix={:?}",
+                        json.chars().take(180).collect::<String>()
+                    ),
                 }
             }
             Ok(Err(e)) => log::warn!("api_objectives: query-objectives RPC failed: {}", e.0),
@@ -1349,10 +1355,9 @@ async fn api_stats(
     // back to whatever bflib published only when the bot has nothing.
     // See BotWeather for the unit conversions this needs (feet->meters,
     // mmHg->hPa).
-    let mut bot_weather_json: Option<serde_json::Value> = None;
     if let Some(w) = bot_info.as_ref().and_then(|s| s.weather.as_ref()) {
         if w.wind_speed.is_some() || w.temperature.is_some() || w.pressure.is_some() {
-            let wx = serde_json::json!({
+            value["weather"] = serde_json::json!({
                 "temp_c": w.temperature,
                 "wind_speed_kts": w.wind_speed,
                 "wind_from_deg": w.wind_direction,
@@ -1361,32 +1366,7 @@ async fn api_stats(
                 "cloud_density": w.clouds_density,
                 "visibility_m": w.visibility,
             });
-            value["weather"] = wx.clone();
-            bot_weather_json = Some(wx);
         }
-    }
-
-    // Push the bot-derived restart time + weather into the running engine so
-    // the in-game F10 Info menu matches the dashboard. Fire-and-forget with a
-    // short timeout -- a missing/slow engine must not hold up /api/stats. Only
-    // the bot's own weather is pushed (never bflib's calm-mission reading
-    // echoed back).
-    if bot_info.is_some() {
-        let payload = serde_json::json!({
-            "restart_at": value["restart_at"].as_str(),
-            "weather": bot_weather_json,
-        })
-        .to_string();
-        let _ = tokio::time::timeout(
-            std::time::Duration::from_secs(2),
-            call_engine_rpc_str_for(
-                &db,
-                &inst,
-                "set-server-info",
-                vec![("info", netidx::publisher::Value::from(payload))],
-            ),
-        )
-        .await;
     }
 
     // Live factory counts + hub Production % (same math as Discord HTML map).
@@ -1398,21 +1378,27 @@ async fn api_stats(
         .await
         {
             Ok(Ok(json)) => {
-                if let Ok(cs) = serde_json::from_str::<bfprotocols::api::CampaignState>(&json) {
-                    value["factories_blue"] = serde_json::json!(cs.factories_blue);
-                    value["factories_red"] = serde_json::json!(cs.factories_red);
-                    value["production_blue"] = serde_json::json!(cs.production_blue);
-                    value["production_red"] = serde_json::json!(cs.production_red);
-                    if let (Some(count), Some(index)) =
-                        (cs.weather_preset_count, cs.weather_preset_index)
-                    {
-                        if count > 0 {
-                            value["weather_preset"] = serde_json::json!({
-                                "count": count,
-                                "index": index,
-                            });
+                match serde_json::from_str::<bfprotocols::api::CampaignState>(&json) {
+                    Ok(cs) => {
+                        value["factories_blue"] = serde_json::json!(cs.factories_blue);
+                        value["factories_red"] = serde_json::json!(cs.factories_red);
+                        value["production_blue"] = serde_json::json!(cs.production_blue);
+                        value["production_red"] = serde_json::json!(cs.production_red);
+                        if let (Some(count), Some(index)) =
+                            (cs.weather_preset_count, cs.weather_preset_index)
+                        {
+                            if count > 0 {
+                                value["weather_preset"] = serde_json::json!({
+                                    "count": count,
+                                    "index": index,
+                                });
+                            }
                         }
                     }
+                    Err(e) => log::warn!(
+                        "api_stats: query-campaign-state JSON parse failed: {e}; body_prefix={:?}",
+                        json.chars().take(180).collect::<String>()
+                    ),
                 }
             }
             Ok(Err(e)) => log::warn!("api_stats: query-campaign-state failed: {}", e.0),
@@ -1694,12 +1680,16 @@ async fn api_auth_me(
             return Ok(json_response(r#"{"user":null}"#.to_string()));
         }
     }
-    // Refresh UCID from web account if present (claim may complete after login).
+    // Refresh UCID + prefs from web account if present (claim may complete after login).
     let mut ucid = session_ucid(&db, &s);
+    let mut preferences = serde_json::json!({ "units": "metric" });
     if s.account_username.is_some() {
         if let Some(ref user) = s.account_username {
             if let Ok(Some(acc)) = task::block_in_place(|| db.web_auth().get_account(user)) {
                 ucid = acc.ucid.as_ref().and_then(|u| u.parse().ok());
+            }
+            if let Ok(prefs) = task::block_in_place(|| db.web_auth().get_preferences(user)) {
+                preferences = serde_json::to_value(&prefs).unwrap_or(preferences);
             }
         }
     }
@@ -1746,6 +1736,7 @@ async fn api_auth_me(
             "must_set_password": s.must_set_password,
             "claim_pending": ucid.is_none() && s.account_username.is_some(),
             "instance": inst.id.to_string(),
+            "preferences": preferences,
         }
     })).map_err(anyhow::Error::from)?))
 }
@@ -2047,6 +2038,15 @@ async fn api_profile(
             .map(|ids| ids.into_iter().map(|id| id.to_string()).collect())
     })?;
     let public_id = task::block_in_place(|| db.public_id_for(&ucid))?;
+    let preferences = session
+        .account_username
+        .as_ref()
+        .and_then(|user| {
+            task::block_in_place(|| db.web_auth().get_preferences(user))
+                .ok()
+                .and_then(|p| serde_json::to_value(&p).ok())
+        })
+        .unwrap_or_else(|| serde_json::json!({ "units": "metric" }));
     Ok(json_response(serde_json::to_string(&serde_json::json!({
         "username": session.account_username.clone().unwrap_or(session.username.clone()),
         "id": public_id,
@@ -2057,6 +2057,7 @@ async fn api_profile(
         "live": live_selected,
         "squadron": squadron,
         "pending_join_squadron_ids": pending_join_squadron_ids,
+        "preferences": preferences,
     })).map_err(anyhow::Error::from)?))
 }
 
@@ -2065,6 +2066,36 @@ struct SideSwitchBody {
     side: String,
     #[serde(default)]
     instance: Option<String>,
+}
+
+#[derive(Deserialize)]
+struct PreferencesBody {
+    units: String,
+}
+
+/// POST /api/profile/preferences — account settings (units, …).
+async fn api_profile_preferences(
+    session_id: Option<Uuid>,
+    body: PreferencesBody,
+    db: StatsDb,
+) -> std::result::Result<impl warp::Reply, Error> {
+    let (session, _ucid) = require_claimed_ucid(session_id, &db).await?;
+    let username = session
+        .account_username
+        .as_deref()
+        .filter(|s| !s.is_empty())
+        .ok_or_else(|| anyhow::anyhow!("web account required"))?;
+    let units = match body.units.trim().to_ascii_lowercase().as_str() {
+        "metric" => crate::web_auth::UnitSystem::Metric,
+        "imperial" => crate::web_auth::UnitSystem::Imperial,
+        _ => return Err(anyhow::anyhow!("units must be metric or imperial").into()),
+    };
+    let prefs = crate::web_auth::WebPreferences { units };
+    let preferences = task::block_in_place(|| db.web_auth().set_preferences(username, prefs))?;
+    Ok(json_response(serde_json::to_string(&serde_json::json!({
+        "ok": true,
+        "preferences": preferences,
+    })).map_err(anyhow::Error::from)?))
 }
 
 /// POST /api/profile/side-switch — player self side-switch (engine CFG limits).
@@ -2562,7 +2593,7 @@ fn attrition_cockpit_plugin_version() -> &'static str {
 }
 
 /// Oldest in-DCS overlay allowed to call Cockpit RPCs (forces upgrade from 1.0.32).
-const MIN_COCKPIT_PLUGIN_VERSION: &str = "1.0.33";
+const MIN_COCKPIT_PLUGIN_VERSION: &str = "1.0.35";
 
 fn parse_semver_triple(s: &str) -> Option<(u32, u32, u32)> {
     let mut parts = s.trim().split('.');
@@ -5233,6 +5264,13 @@ async fn main() -> Result<()> {
         .and(with_instance(db.clone()))
         .then(api_profile_side_switch);
 
+    let profile_preferences = warp::path!("api" / "profile" / "preferences")
+        .and(warp::post())
+        .and(extract_session_cookie())
+        .and(warp::body::json::<PreferencesBody>())
+        .and(with_db(db.clone()))
+        .then(api_profile_preferences);
+
     let squadrons_list = warp::path!("api" / "squadrons")
         .and(warp::get())
         .and(warp::query::<std::collections::HashMap<std::string::String, std::string::String>>())
@@ -5788,6 +5826,7 @@ async fn main() -> Result<()> {
         .or(auth_reset_password)
         .or(auth_claim_code)
         .or(profile_side_switch)
+        .or(profile_preferences)
         .or(squadron_create)
         .or(squadron_leave)
         .or(squadron_decide)

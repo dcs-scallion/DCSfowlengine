@@ -52,7 +52,7 @@ const SUPPLY_CONNECTION_ALPHA: f32 = 0.6;
 /// OPR→OLO feed shaft: half the supply-line shaft width; alpha at 100% Production.
 const PRODUCTION_FEED_SHAFT_HALF_WIDTH_M: f64 = SUPPLY_ARROW_SHAFT_HALF_WIDTH_M / 2.;
 const PRODUCTION_FEED_LINE_ALPHA: f32 = 0.5;
-/// Normal OLO → occupied OLO resupply link (virtual, 100% delivery).
+/// Normal OLO → occupied OLO resupply link (virtual; delivery uses distance decay).
 const OCCUPIED_HUB_SUPPLY_LINE_ALPHA: f32 = 0.5;
 const OCCUPIED_HUB_SUPPLY_SHAFT_HALF_WIDTH_M: f64 = PRODUCTION_FEED_SHAFT_HALF_WIDTH_M * 2.;
 /// Ignore sub-meter DCS/FARP position jitter when deciding to recreate underlay lines.

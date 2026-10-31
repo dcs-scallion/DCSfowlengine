@@ -16,7 +16,12 @@ fn main() -> anyhow::Result<()> {
     let old = sled::open(&from)?;
     let new = sled::open(&to)?;
 
-    for name in ["web_accounts", "web_accounts_by_ucid", "web_claim_codes"] {
+    for name in [
+        "web_accounts",
+        "web_accounts_by_ucid",
+        "web_claim_codes",
+        "web_account_preferences",
+    ] {
         let src = old.open_tree(name)?;
         let dst = new.open_tree(name)?;
         dst.clear()?;

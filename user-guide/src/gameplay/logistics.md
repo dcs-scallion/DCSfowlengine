@@ -78,8 +78,8 @@ A logistics hub is **occupied** when its **current owner** differs from the **de
 | OPR link / black feed line | Yes | **No** — no OPR production into the hub |
 | Hub **Production** from factories | Yes | **No** (stays 0% from OPR) |
 | Stock from `deliver_production` | Yes | **No** |
-| **Inbound** resupply | OPR + virtual network | **Virtual only** from the **nearest normal** OLO of the **occupier**, same trigger as other objectives (**supply** or **fuel** &lt; 100%) |
-| Inbound delivery efficiency | N/A (OPR path) | **100%** — no distance decay on that leg |
+| **Inbound** resupply | OPR + virtual network | **Virtual only** from the **nearest normal** OLO of the **occupier**, same trigger as other objectives (non-airframe / airframe / fuel below their kind-specific Supply % gates) |
+| Inbound delivery efficiency | N/A (OPR path) | Same distance decay as hub→objective (`virtual_resupply_decay`) |
 | **Outbound** to frontline objectives | Yes (decay applies) | **Yes** — same as a normal hub for the occupier |
 
 **Re-capture** by the original coalition (`owner` matches the zone name again) restores normal OLO behaviour and OPR links.
@@ -122,7 +122,7 @@ Two **independent** line types are drawn on the F10 map (do not confuse them):
 | Line | Route | Appearance | Meaning |
 |------|-------|------------|---------|
 | **Production feed** | OPR → OLO\* | Narrow **black** shaft (no arrowhead) | Factory link to the hub that receives OPR output |
-| **Occupied hub link** | Normal OLO → occupied OLO | **Solid** shaft (supply-line width), coalition colour, 50% opacity | Captured hub fed virtually from nearest normal hub (100% on that leg) |
+| **Occupied hub link** | Normal OLO → occupied OLO | **Solid** shaft (supply-line width), coalition colour, 50% opacity | Captured hub fed virtually from nearest normal hub (same distance decay as other virtual deliveries) |
 | **Supply connection** | OLO\* → objective | Coloured **arrow** (shaft + head) | Virtual resupply route to a warehouse objective |
 
 **Production feed (OPR → OLO\*)**:
@@ -186,6 +186,13 @@ The system runs on a **tick cycle**:
 2. Calculates supply needs
 3. Distributes from logistics hubs
 4. Updates objective supply levels
+
+Virtual hub deliveries only run when that destination is below its kind-specific Supply % gate:
+- non-airframe weapons/other: `tick_*_minimum_global_supply_percentage`
+- airframes: `tick_*_minimum_airframe_global_supply_percentage`
+- fuel: `tick_*_minimum_fuel_supply_percentage`
+
+Default for each gate is 100% (same as filling until full).
 
 ## Supply & Fuel Levels
 

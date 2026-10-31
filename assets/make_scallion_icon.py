@@ -1,4 +1,4 @@
-"""Compose Scallion squadron icon: CZ flag disc, brushed-gold ring, Su-27 silhouette."""
+"""Compose Scallion squadron icon: CZ flag disc, brushed-aluminum ring, Su-27 silhouette."""
 from __future__ import annotations
 
 import math
@@ -22,13 +22,18 @@ TEXT_RED = (210, 28, 36, 255)
 TEXT_BLACK = (12, 10, 8, 255)
 SHADOW_BLACK = (0, 0, 0, 210)
 SHADOW_WHITE = (255, 255, 255, 230)
-# Brushed / satin gold (not bright lemon yellow)
-BAND_GOLD = (176, 142, 72, 255)
-RIM_HI = (228, 198, 128, 255)
-RIM_MID = (186, 150, 78, 255)
-RIM_LO = (112, 86, 40, 255)
-BRUSH_HI = (236, 210, 145, 255)
-BRUSH_LO = (98, 74, 34, 255)
+# Brushed aircraft aluminum (cool grey, not chrome-white)
+BAND_ALUM = (168, 172, 178, 255)
+RIM_HI = (220, 224, 230, 255)
+RIM_MID = (164, 168, 174, 255)
+RIM_LO = (104, 108, 114, 255)
+BRUSH_HI = (236, 240, 244, 255)
+BRUSH_LO = (88, 92, 98, 255)
+# Side stars stay warm gold accents on the aluminum band
+STAR_LO = (112, 86, 40, 255)
+STAR_MID = (186, 150, 78, 255)
+STAR_HI = (228, 198, 128, 255)
+STAR_BRIGHT = (236, 210, 145, 255)
 
 
 def clean_silhouette(path: Path) -> Image.Image:
@@ -214,18 +219,18 @@ def draw_shaded_gold_star(
 
     # Dark gold body
     body = star_polygon(cx, cy, r, r_in)
-    d.polygon(body, fill=RIM_LO)
+    d.polygon(body, fill=STAR_LO)
 
     # Mid gold inset
     mid = star_polygon(cx - r * 0.02, cy - r * 0.03, r * 0.92, r_in * 0.92)
-    d.polygon(mid, fill=RIM_MID)
+    d.polygon(mid, fill=STAR_MID)
 
     # Bright highlight (upper-left bias)
     hi = star_polygon(cx - r * 0.06, cy - r * 0.08, r * 0.72, r_in * 0.72)
-    d.polygon(hi, fill=(*BRUSH_HI[:3], 200))
+    d.polygon(hi, fill=(*STAR_BRIGHT[:3], 200))
 
     # Crisp rim
-    d.polygon(body, outline=RIM_HI)
+    d.polygon(body, outline=STAR_HI)
 
     blurred = layer.filter(ImageFilter.GaussianBlur(radius=max(1, int(r * 0.04))))
     base.alpha_composite(blurred)
@@ -362,7 +367,7 @@ def donut(size: int, r_out: float, r_in: float, color: tuple[int, int, int, int]
 
 
 def plastic_rim(size: int, r_out: float, r_in: float) -> Image.Image:
-    """Brushed-gold bezel: soft highlight / mid / shade."""
+    """Brushed-aluminum bezel: soft highlight / mid / shade."""
     w = r_out - r_in
     r1 = r_out
     r2 = r_out - w * 0.28
@@ -384,20 +389,27 @@ def plastic_rim(size: int, r_out: float, r_in: float) -> Image.Image:
     return out
 
 
-def brushed_gold_band(size: int, r_out: float, r_in: float) -> Image.Image:
-    """Satin / brushed gold annulus with circumferential metal streaks."""
+def brushed_alum_band(size: int, r_out: float, r_in: float) -> Image.Image:
+    """Satin / brushed aluminum annulus with circumferential metal streaks."""
     cx = cy = size / 2
     layer = Image.new("RGBA", (size, size), (0, 0, 0, 0))
-    layer.alpha_composite(donut(size, r_out, r_in, BAND_GOLD))
+    layer.alpha_composite(donut(size, r_out, r_in, BAND_ALUM))
 
     streaks = Image.new("RGBA", (size, size), (0, 0, 0, 0))
     sd = ImageDraw.Draw(streaks)
-    # Concentric hairlines ≈ brushed metal (light only — no dark inner shade)
+    # Concentric hairlines ≈ brushed metal (light + faint dark for depth)
     for i in range(28):
         t = i / 27.0
         rr = r_in + (r_out - r_in) * t
-        a = 14 + int(18 * abs(math.sin(t * math.pi * 3)))
-        sd.ellipse((cx - rr, cy - rr, cx + rr, cy + rr), outline=(*BRUSH_HI[:3], a), width=1)
+        a_hi = 12 + int(16 * abs(math.sin(t * math.pi * 3)))
+        a_lo = 6 + int(10 * abs(math.sin(t * math.pi * 3 + 0.7)))
+        sd.ellipse((cx - rr, cy - rr, cx + rr, cy + rr), outline=(*BRUSH_HI[:3], a_hi), width=1)
+        if i % 3 == 0:
+            sd.ellipse(
+                (cx - rr - 0.5, cy - rr - 0.5, cx + rr + 0.5, cy + rr + 0.5),
+                outline=(*BRUSH_LO[:3], a_lo),
+                width=1,
+            )
 
     band_mask = Image.new("L", (size, size), 0)
     bmd = ImageDraw.Draw(band_mask)
@@ -422,7 +434,7 @@ def compose() -> Image.Image:
 
     r_after_outer_rim = r_outer - gold_w
     r_after_band = r_after_outer_rim - band_w
-    # Gold band meets the flag disc directly (no shaded inner bevel).
+    # Aluminum band meets the flag disc directly (no shaded inner bevel).
     r_disc = r_after_band
 
     draw_cz_flag_disc(img, cx, cy, r_disc, CZ_FLAG)
@@ -447,7 +459,7 @@ def compose() -> Image.Image:
     )
     img.alpha_composite(shade, (int(cx - side / 2), int(cy - side / 2)))
 
-    img.alpha_composite(brushed_gold_band(s, r_after_outer_rim, r_after_band))
+    img.alpha_composite(brushed_alum_band(s, r_after_outer_rim, r_after_band))
 
     text_r = (r_after_outer_rim + r_after_band) / 2
     band_w = r_after_outer_rim - r_after_band

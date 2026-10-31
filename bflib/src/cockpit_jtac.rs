@@ -20,8 +20,9 @@ use bfprotocols::{
     cfg::{ActionKind, UnitTag},
     db::group::GroupId,
 };
-use dcso3::{coalition::Side, net::Ucid, MizLua};
+use dcso3::{coalition::Side, net::Ucid, MizLua, Vector2};
 use enumflags2::{BitFlag, BitFlags};
+use nalgebra as na;
 use serde::{Deserialize, Serialize};
 use std::str::FromStr;
 
@@ -54,6 +55,9 @@ struct JtacListEntry {
 struct ArtyEntry {
     id: StdString,
     name: StdString,
+    /// `null` when JTAC has no target (distance unknown).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    in_range: Option<bool>,
 }
 
 #[derive(Debug, Serialize)]
@@ -88,30 +92,34 @@ struct JtacActionReq {
     calcm_per: Option<u8>,
 }
 
-/// SELECT JTAC: `1200 (Recon) Player` — unit in (), owner after.
+/// Shared with SELECT JTAC / ARTILLERY: `1200 (Mortar) Player` — unit in (), owner after.
+fn group_display_name(ctx: &Context, gid: GroupId) -> StdString {
+    match ctx.db.group(&gid) {
+        Err(_) => format!("{gid}"),
+        Ok(group) => match &group.origin {
+            DeployKind::Action { name, .. } => format!("{gid} ({name})"),
+            DeployKind::Deployed { player, spec, .. } => {
+                let unit = spec.path.last().unwrap();
+                match ctx.db.player(player) {
+                    Some(player) => format!("{gid} ({unit}) {}", player.name),
+                    None => format!("{gid} ({unit})"),
+                }
+            }
+            DeployKind::Troop { player, spec, .. } => match ctx.db.player(player) {
+                Some(player) => format!("{gid} ({}) {}", spec.name, player.name),
+                None => format!("{gid} ({})", spec.name),
+            },
+            DeployKind::Objective { .. }
+            | DeployKind::ObjectiveDeprecated
+            | DeployKind::Crate { .. }
+            | DeployKind::CsarPilot { .. } => format!("{gid}"),
+        },
+    }
+}
+
 fn jtac_display_name(ctx: &Context, jtac_id: JtId) -> StdString {
     match jtac_id {
-        JtId::Group(gid) => match ctx.db.group(&gid) {
-            Err(_) => format!("{gid}"),
-            Ok(group) => match &group.origin {
-                DeployKind::Action { name, .. } => format!("{gid} ({name})"),
-                DeployKind::Deployed { player, spec, .. } => {
-                    let unit = spec.path.last().unwrap();
-                    match ctx.db.player(player) {
-                        Some(player) => format!("{gid} ({unit}) {}", player.name),
-                        None => format!("{gid} ({unit})"),
-                    }
-                }
-                DeployKind::Troop { player, spec, .. } => match ctx.db.player(player) {
-                    Some(player) => format!("{gid} ({}) {}", spec.name, player.name),
-                    None => format!("{gid} ({})", spec.name),
-                },
-                DeployKind::Objective { .. }
-                | DeployKind::ObjectiveDeprecated
-                | DeployKind::Crate { .. }
-                | DeployKind::CsarPilot { .. } => format!("{gid}"),
-            },
-        },
+        JtId::Group(gid) => group_display_name(ctx, gid),
         JtId::Slot(sl) => {
             let name = match ctx.db.ephemeral.player_in_slot(&sl) {
                 None => StdString::new(),
@@ -136,39 +144,7 @@ fn jtac_display_name(ctx: &Context, jtac_id: JtId) -> StdString {
 }
 
 fn artillery_label(ctx: &Context, gid: GroupId) -> (StdString, StdString) {
-    let id = gid.to_string();
-    let name = match ctx.db.group(&gid) {
-        Err(_) => StdString::new(),
-        Ok(group) => match &group.origin {
-            DeployKind::Action { name, .. } => name.to_string(),
-            DeployKind::Deployed { spec, .. } => spec
-                .path
-                .last()
-                .map(|s| s.to_string())
-                .filter(|s| !s.is_empty())
-                .unwrap_or_else(|| group.template_name.to_string()),
-            DeployKind::Troop { spec, .. } => spec.name.to_string(),
-            _ => {
-                if !group.template_name.is_empty() {
-                    group.template_name.to_string()
-                } else if !group.name.is_empty() {
-                    group.name.to_string()
-                } else {
-                    group
-                        .units
-                        .into_iter()
-                        .find_map(|uid| {
-                            ctx.db
-                                .unit(uid)
-                                .ok()
-                                .map(|u| u.typ.0.to_string())
-                        })
-                        .unwrap_or_default()
-                }
-            }
-        },
-    };
-    (id, name)
+    (gid.to_string(), group_display_name(ctx, gid))
 }
 
 fn filter_tag_names(bits: BitFlags<UnitTag>) -> Vec<StdString> {
@@ -224,14 +200,38 @@ pub(crate) fn list_jtacs_for_ucid(ctx: &Context, ucid: &Ucid) -> Result<StdStrin
             pinned: pinned.contains(&id),
             filter: filter_tag_names(jtac.filter()),
             status,
-            nearby_artillery: jtac
-                .nearby_artillery()
-                .iter()
-                .map(|g| {
-                    let (id, name) = artillery_label(ctx, *g);
-                    ArtyEntry { id, name }
-                })
-                .collect(),
+            nearby_artillery: {
+                let tgt_pos = jtac
+                    .target()
+                    .as_ref()
+                    .map(|t| Vector2::new(t.pos.x, t.pos.z));
+                let mut arty: Vec<(f64, ArtyEntry)> = jtac
+                    .nearby_artillery()
+                    .iter()
+                    .filter_map(|g| {
+                        let (id, base) = artillery_label(ctx, *g);
+                        let (dist_m, name, in_range) = match tgt_pos {
+                            Some(tp) => {
+                                let center = ctx.db.group_center(g).ok()?;
+                                let d = na::distance(&center.into(), &tp.into());
+                                let in_range =
+                                    ctx.db.artillery_dist_in_fire_range(g, d).unwrap_or(false);
+                                (
+                                    d,
+                                    format!("{base} → {:.1} km", d / 1000.),
+                                    Some(in_range),
+                                )
+                            }
+                            None => (f64::INFINITY, base, None),
+                        };
+                        Some((dist_m, ArtyEntry { id, name, in_range }))
+                    })
+                    .collect();
+                arty.sort_by(|a, b| {
+                    a.0.partial_cmp(&b.0).unwrap_or(std::cmp::Ordering::Equal)
+                });
+                arty.into_iter().map(|(_, e)| e).collect()
+            },
             nearby_calcm: jtac
                 .nearby_calcm()
                 .iter()
