@@ -166,6 +166,8 @@ fn event_object_class_candidates(desc: &EventObjectDescriptor) -> &'static [&'st
         Some(ut) if ut.is_empty() => &["Unit", "Static", "Scenery"],
         // Never try Unit/Weapon: isExist can succeed with wrong metatable; later API crashes DCS.
         Some(ut) if is_likely_scenery_unit_type(ut) => &["Scenery", "Static"],
+        // Dead/invalid vehicle: coalition -1 + real type name → never a live game unit.
+        Some(_) if desc.coalition == Some(-1) => &["Static", "Scenery"],
         // Typed non-weapon: never Weapon (e.g. BARBEDFANCE passes Weapon.isExist).
         Some(_) => &["Static", "Scenery", "Unit"],
         None if desc.coalition == Some(-1) => &["Weapon"],

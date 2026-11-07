@@ -46,8 +46,8 @@ use std::sync::Arc;
 
 /// DCS F10 group menu exposes 10 F-keys; paginate before the 9th root entry.
 const JTAC_ROOT_PAGE: usize = 8;
-/// Pin..Code fixed entries occupy the first page before Artillery/CALCM/Bomber.
-const JTAC_MENU_FIXED_SLOTS: usize = 8;
+/// Pin..Code / Target Radius fixed entries occupy the first page before Artillery/CALCM/Bomber.
+const JTAC_MENU_FIXED_SLOTS: usize = 9;
 
 fn jtac_root_submenu(
     mc: &MissionCommands,
@@ -443,6 +443,28 @@ pub fn jtac_set_full_code(lua: MizLua, arg: ArgTriple<JtId, u16, Ucid>) -> Resul
         .set_full_code(lua, &arg.fst, arg.snd)
         .context("setting jtac laser code")?;
     jtac_code_changed_panel(lua, arg.fst, arg.trd)
+}
+
+/// `arg.snd` = target radius in meters (0..=500).
+pub fn jtac_set_target_radius(lua: MizLua, arg: ArgTriple<JtId, u16, Ucid>) -> Result<()> {
+    let ctx = unsafe { Context::get_mut() };
+    ctx.jtac
+        .set_target_radius_m(&arg.fst, arg.snd as f64)
+        .context("setting jtac target radius")?;
+    let jtac = get_jtac_mut(&mut ctx.jtac, &arg.fst)?;
+    let (near, name) = change_info(jtac, &ctx.db, &arg.trd);
+    let msg = format_compact!(
+        "JTAC TARGET RADIUS SET TO {} m\njtac {} near {}\nchanged by {}",
+        jtac.target_radius_m(),
+        arg.fst,
+        near,
+        name
+    );
+    ctx.db
+        .ephemeral
+        .msgs()
+        .panel_to_side(10, false, jtac.side(), msg);
+    Ok(())
 }
 
 fn jtac_code_changed_panel(_lua: MizLua, jtid: JtId, ucid: Ucid) -> Result<()> {
@@ -899,6 +921,32 @@ pub(super) fn add_menu_for_jtac(
                 },
             )?;
         }
+    }
+    let radius_root =
+        mc.add_submenu_for_group(mizgid, "Target Radius".into(), Some(root.clone()))?;
+    const RADIUS_PRESETS_M: [u16; 10] = [0, 50, 100, 150, 200, 250, 300, 350, 400, 500];
+    let mut radius_page = radius_root.clone();
+    for (i, meters) in RADIUS_PRESETS_M.into_iter().enumerate() {
+        if i > 0 && i % 9 == 0 {
+            radius_page =
+                mc.add_submenu_for_group(mizgid, "Next>>".into(), Some(radius_page.clone()))?;
+        }
+        let label = if meters == 0 {
+            format_compact!("0 m (point)")
+        } else {
+            format_compact!("{meters} m")
+        };
+        mc.add_command_for_group(
+            mizgid,
+            label.into(),
+            Some(radius_page.clone()),
+            jtac_set_target_radius,
+            ArgTriple {
+                fst: jtac.gid(),
+                snd: meters,
+                trd: *ucid,
+            },
+        )?;
     }
     let mut root_page_count = JTAC_MENU_FIXED_SLOTS;
     add_artillery_menu_for_jtac(

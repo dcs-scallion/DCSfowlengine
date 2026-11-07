@@ -44,11 +44,12 @@ impl FromStr for Side {
     type Err = anyhow::Error;
 
     fn from_str(s: &str) -> Result<Self, Self::Err> {
-        Ok(match s {
+        let lower = s.to_ascii_lowercase();
+        Ok(match lower.as_str() {
             "blue" => Side::Blue,
             "red" => Side::Red,
-            "neutrals" => Side::Neutral,
-            s => bail!("unknown side {s}"),
+            "neutrals" | "neutral" => Side::Neutral,
+            _ => bail!("unknown side {s}"),
         })
     }
 }

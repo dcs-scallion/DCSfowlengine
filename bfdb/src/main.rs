@@ -1119,15 +1119,15 @@ async fn api_pilot_sorties(
         let ucid = db.resolve_pilot_key(&pilot_key)?;
         let sorties = db.pilot_sorties(&ucid)?;
         let mut entries = Vec::with_capacity(sorties.len());
-        for (round_id, _sortie_id, s, crashed, restart) in sorties.iter().rev() {
+        for (round_id, sortie_id, s, crashed, restart) in sorties.iter().rev() {
             let duration_secs = s
                 .land
                 .map(|l| (l - s.takeoff).num_seconds().max(0))
                 .unwrap_or(0);
             let restart = *restart && s.land.is_some();
-            // Same Blue/Red attribution as /api/aircraft-usage (round_info side).
+            // Takeoff-stamped side when present; legacy rows fall back to round_info.
             let side = db
-                .pilot_side_in_round(&ucid, *round_id)?
+                .pilot_sortie_side(&ucid, *round_id, *sortie_id)?
                 .map(|s| format!("{s:?}"));
             let instance = db.round_instance_of(*round_id).to_string();
             entries.push(serde_json::json!({
@@ -2106,8 +2106,9 @@ async fn api_profile_side_switch(
     inst: Inst,
 ) -> std::result::Result<impl warp::Reply, Error> {
     let (_session, ucid) = require_claimed_ucid(session_id, &db).await?;
-    let side = body.side.trim().to_string();
-    if !matches!(side.to_ascii_lowercase().as_str(), "blue" | "red") {
+    // Engine Side::from_str expects lowercase ("blue"/"red"); dashboard sends "Blue"/"Red".
+    let side = body.side.trim().to_ascii_lowercase();
+    if !matches!(side.as_str(), "blue" | "red") {
         return Err(anyhow::anyhow!("side must be Blue or Red").into());
     }
     let target = match body.instance.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
@@ -2543,6 +2544,8 @@ struct JtacActionBody {
     #[serde(default)]
     code_part: Option<u16>,
     #[serde(default)]
+    target_radius_m: Option<f64>,
+    #[serde(default)]
     filter_tag: Option<std::string::String>,
     #[serde(default)]
     bomber: Option<std::string::String>,
@@ -2569,6 +2572,135 @@ async fn api_cockpit_jtac_action(
         &db,
         &inst,
         "jtac-action",
+        vec![
+            ("ucid", Value::from(ucid.to_string())),
+            ("body", Value::from(payload)),
+        ],
+    )
+    .await?;
+    Ok(warp::reply::json(&serde_json::json!({ "message": message })))
+}
+
+/// GET /api/cockpit/cargo — spawnable crates / troops catalogue for the caller.
+async fn api_cockpit_cargo_list(
+    session_id: Option<Uuid>,
+    query: std::collections::HashMap<std::string::String, std::string::String>,
+    inst: Inst,
+    db: StatsDb,
+    bot_cfg: Arc<Option<BotLinkConfig>>,
+) -> std::result::Result<impl warp::Reply, Error> {
+    let ucid = require_linked_player(&query, session_id, db.clone(), &bot_cfg, &inst).await?;
+    use netidx::publisher::Value;
+    let json = call_engine_rpc_str_for(
+        &db,
+        &inst,
+        "cargo-list",
+        vec![("ucid", Value::from(ucid.to_string()))],
+    )
+    .await?;
+    let data: serde_json::Value = serde_json::from_str(&json)
+        .map_err(|e| anyhow::anyhow!("bad cargo list from engine: {e:?}"))?;
+    Ok(warp::reply::json(&data))
+}
+
+#[derive(serde::Deserialize, serde::Serialize)]
+struct CargoActionBody {
+    action: std::string::String,
+    #[serde(default)]
+    crate_name: Option<std::string::String>,
+    #[serde(default)]
+    troop_name: Option<std::string::String>,
+    #[serde(default)]
+    qty: Option<u32>,
+}
+
+/// POST /api/cockpit/cargo/action — one F10-parity cargo/troops command.
+async fn api_cockpit_cargo_action(
+    session_id: Option<Uuid>,
+    query: std::collections::HashMap<std::string::String, std::string::String>,
+    body: CargoActionBody,
+    inst: Inst,
+    db: StatsDb,
+    bot_cfg: Arc<Option<BotLinkConfig>>,
+) -> std::result::Result<impl warp::Reply, Error> {
+    let ucid = require_linked_player(&query, session_id, db.clone(), &bot_cfg, &inst).await?;
+    let payload = serde_json::to_string(&body)
+        .map_err(|e| anyhow::anyhow!("serialize cargo action: {e}"))?;
+    use netidx::publisher::Value;
+    let message = call_engine_rpc_str_for(
+        &db,
+        &inst,
+        "cargo-action",
+        vec![
+            ("ucid", Value::from(ucid.to_string())),
+            ("body", Value::from(payload)),
+        ],
+    )
+    .await?;
+    Ok(warp::reply::json(&serde_json::json!({ "message": message })))
+}
+
+/// GET /api/cockpit/main — identity, lives, balance, time, transfer targets.
+async fn api_cockpit_main(
+    session_id: Option<Uuid>,
+    query: std::collections::HashMap<std::string::String, std::string::String>,
+    inst: Inst,
+    db: StatsDb,
+    bot_cfg: Arc<Option<BotLinkConfig>>,
+) -> std::result::Result<impl warp::Reply, Error> {
+    let ucid = require_linked_player(&query, session_id, db.clone(), &bot_cfg, &inst).await?;
+    use netidx::publisher::Value;
+    let json = call_engine_rpc_str_for(
+        &db,
+        &inst,
+        "main-list",
+        vec![("ucid", Value::from(ucid.to_string()))],
+    )
+    .await?;
+    let mut data: serde_json::Value = serde_json::from_str(&json)
+        .map_err(|e| anyhow::anyhow!("bad main panel from engine: {e:?}"))?;
+
+    // Prefer DCSServerBot scheduler restart (same rule as /api/stats).
+    let bot_info = fetch_bot_server_info(&bot_cfg, inst.cfg.dcs_server_name.as_deref()).await;
+    if let Some(bot_restart_at) = bot_info
+        .as_ref()
+        .and_then(|s| s.restart_time.as_deref())
+        .and_then(parse_bot_datetime)
+    {
+        if bot_restart_at > chrono::Utc::now() {
+            data["restart_at"] = serde_json::json!(bot_restart_at.to_rfc3339());
+        } else {
+            data["restart_at"] = serde_json::Value::Null;
+        }
+    }
+
+    Ok(warp::reply::json(&data))
+}
+
+#[derive(serde::Deserialize, serde::Serialize)]
+struct MainTransferBody {
+    kind: std::string::String,
+    target: std::string::String,
+    amount: u32,
+}
+
+/// POST /api/cockpit/transfer — points to same-side player or objective.
+async fn api_cockpit_transfer(
+    session_id: Option<Uuid>,
+    query: std::collections::HashMap<std::string::String, std::string::String>,
+    body: MainTransferBody,
+    inst: Inst,
+    db: StatsDb,
+    bot_cfg: Arc<Option<BotLinkConfig>>,
+) -> std::result::Result<impl warp::Reply, Error> {
+    let ucid = require_linked_player(&query, session_id, db.clone(), &bot_cfg, &inst).await?;
+    let payload = serde_json::to_string(&body)
+        .map_err(|e| anyhow::anyhow!("serialize transfer: {e}"))?;
+    use netidx::publisher::Value;
+    let message = call_engine_rpc_str_for(
+        &db,
+        &inst,
+        "main-transfer",
         vec![
             ("ucid", Value::from(ucid.to_string())),
             ("body", Value::from(payload)),
@@ -2697,6 +2829,16 @@ async fn require_linked_player(
         })?
     };
     require_ucid_web_claimed(&db, &ucid)?;
+    if let Some(plugin) = query
+        .get("plugin")
+        .map(|s| s.trim())
+        .filter(|s| !s.is_empty())
+    {
+        let _ = task::block_in_place(|| {
+            db.web_auth()
+                .set_last_cockpit_plugin_for_ucid(&ucid, plugin)
+        });
+    }
     Ok(ucid)
 }
 
@@ -2740,6 +2882,19 @@ async fn api_cockpit_whoami(
             .is_some(),
         None => false,
     };
+    if claimed {
+        if let (Some(u), Some(plugin)) = (
+            &ucid,
+            query
+                .get("plugin")
+                .map(|s| s.trim())
+                .filter(|s| !s.is_empty()),
+        ) {
+            let _ = task::block_in_place(|| {
+                db.web_auth().set_last_cockpit_plugin_for_ucid(u, plugin)
+            });
+        }
+    }
     Ok(json_response(serde_json::to_string(&serde_json::json!({
         "ok": claimed,
         "plugin_ok": true,
@@ -2972,6 +3127,11 @@ async fn api_admin_web_accounts(
 
         let mut entries = Vec::with_capacity(accounts.len());
         for a in accounts {
+            let control_panel_version = db
+                .web_auth()
+                .last_cockpit_plugin(&a.username)
+                .ok()
+                .flatten();
             let (id, display_name, online, banned) = match a.ucid.as_deref() {
                 Some(ucid_s) => {
                     let Ok(ucid) = ucid_s.parse::<dcso3::net::Ucid>() else {
@@ -2989,6 +3149,7 @@ async fn api_admin_web_accounts(
                             "pending_claim_expires": a.pending_claim_expires.map(|t| t.to_rfc3339()),
                             "online": false,
                             "banned": false,
+                            "control_panel_version": control_panel_version,
                         }));
                         continue;
                     };
@@ -3026,6 +3187,7 @@ async fn api_admin_web_accounts(
                 "pending_claim_expires": a.pending_claim_expires.map(|t| t.to_rfc3339()),
                 "online": online,
                 "banned": banned,
+                "control_panel_version": control_panel_version,
             }));
         }
         Ok(serde_json::to_string(&entries)?)
@@ -5657,6 +5819,44 @@ async fn main() -> Result<()> {
         .and(with_bot_link_cfg(bot_link_cfg.clone()))
         .then(api_cockpit_jtac_action);
 
+    let cockpit_cargo_list_route = warp::path!("api" / "cockpit" / "cargo")
+        .and(warp::get())
+        .and(extract_session_cookie())
+        .and(warp::query::<std::collections::HashMap<std::string::String, std::string::String>>())
+        .and(with_instance(db.clone()))
+        .and(with_db(db.clone()))
+        .and(with_bot_link_cfg(bot_link_cfg.clone()))
+        .then(api_cockpit_cargo_list);
+
+    let cockpit_cargo_action_route = warp::path!("api" / "cockpit" / "cargo" / "action")
+        .and(warp::post())
+        .and(extract_session_cookie())
+        .and(warp::query::<std::collections::HashMap<std::string::String, std::string::String>>())
+        .and(warp::body::json::<CargoActionBody>())
+        .and(with_instance(db.clone()))
+        .and(with_db(db.clone()))
+        .and(with_bot_link_cfg(bot_link_cfg.clone()))
+        .then(api_cockpit_cargo_action);
+
+    let cockpit_main_route = warp::path!("api" / "cockpit" / "main")
+        .and(warp::get())
+        .and(extract_session_cookie())
+        .and(warp::query::<std::collections::HashMap<std::string::String, std::string::String>>())
+        .and(with_instance(db.clone()))
+        .and(with_db(db.clone()))
+        .and(with_bot_link_cfg(bot_link_cfg.clone()))
+        .then(api_cockpit_main);
+
+    let cockpit_transfer_route = warp::path!("api" / "cockpit" / "transfer")
+        .and(warp::post())
+        .and(extract_session_cookie())
+        .and(warp::query::<std::collections::HashMap<std::string::String, std::string::String>>())
+        .and(warp::body::json::<MainTransferBody>())
+        .and(with_instance(db.clone()))
+        .and(with_db(db.clone()))
+        .and(with_bot_link_cfg(bot_link_cfg.clone()))
+        .then(api_cockpit_transfer);
+
     // Longer path first — warp matches in .or() order.
     let cockpit_plugin_download_route = warp::path!("api" / "cockpit" / "plugin" / "download")
         .and(warp::get())
@@ -5776,7 +5976,9 @@ async fn main() -> Result<()> {
         .or(cockpit_carp_solve_route)
         .or(cockpit_carp_solve_latlon_route)
         .or(cockpit_whoami_route)
+        .or(cockpit_main_route)
         .or(cockpit_jtac_list_route)
+        .or(cockpit_cargo_list_route)
         .or(cockpit_plugin_download_route)
         .or(cockpit_plugin_info_route)
         .or(wiki_list_route)
@@ -5855,7 +6057,9 @@ async fn main() -> Result<()> {
         .or(cockpit_ewr_toggle_route
             .or(cockpit_ewr_units_route)
             .or(cockpit_cargo_spawn_route)
+            .or(cockpit_cargo_action_route)
             .or(cockpit_jtac_action_route)
+            .or(cockpit_transfer_route)
             .boxed())
         .boxed()
         .or(wiki_save_route.or(wiki_delete_route).or(wiki_upload_image_route).boxed())

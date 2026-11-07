@@ -18,7 +18,9 @@ mod acmi_sanitize;
 mod admin;
 mod bg;
 mod chatcmd;
+mod cockpit_cargo;
 mod cockpit_jtac;
+mod cockpit_main;
 mod db;
 mod ewr;
 mod jtac;
@@ -1176,6 +1178,12 @@ fn spawn_setmission(ctx: &mut Context, lua: MizLua, new_campaign: bool) {
         miz_path: &miz_path,
         new_campaign,
         weather_index,
+        scheduled_restart: ctx
+            .db
+            .ephemeral
+            .cfg
+            .dcsserver_bot_scheduled_restart
+            .as_ref(),
     };
     match crate::setmission::maybe_spawn(args) {
         Ok(Some(outcome)) => {
@@ -1445,6 +1453,18 @@ fn unit_killed(
     let player_ucid = ctx.db.player_in_unit(false, &id);
     if let Some(ref ucid) = player_ucid {
         ctx.db.campaign_record_player_airframe_loss(ucid, &id);
+        // Drop any queued outTextForUnit for this slot before flushing.
+        // Calling outTextForUnit on a dying unit causes ACCESS_VIOLATION inside DCS.
+        if let Some(slot) = ctx.db.ephemeral.slot_for_ucid(ucid) {
+            if let Some(oid) = ctx.db.ephemeral.get_object_id_by_slot(&slot) {
+                if let Some(uid) = ctx.db.ephemeral.get_uid_by_object_id(oid) {
+                    // both are i64 wrappers; pass raw value via Display/parse.
+                    if let Ok(raw) = uid.to_string().parse::<i64>() {
+                        ctx.db.ephemeral.msgs().cancel_unit_panel_msgs(raw);
+                    }
+                }
+            }
+        }
     }
     if ctx.db.ephemeral.cfg.airborne_deslot_block {
         if let Some(ucid) = player_ucid {
@@ -1677,14 +1697,26 @@ fn on_event(lua: MizLua, ev: Event) -> Result<()> {
             }
         }
         Event::Hit(e) | Event::Kill(e) => {
-            if let Some(target) = e.target.as_ref().and_then(|t| t.as_unit().ok()) {
+            if let Some(target) = e.target.as_ref().and_then(|t| {
+                match t.get_category() {
+                    Ok(dcso3::object::ObjectCategory::Unit) => t.as_unit().ok(),
+                    Ok(cat) => {
+                        info!("Hit/Kill target not a unit (cat={:?}), skipping", cat);
+                        None
+                    }
+                    Err(e) => {
+                        info!("Hit/Kill target category unknown, skipping: {:?}", e);
+                        None
+                    }
+                }
+            }) {
                 let target_id = target.object_id()?;
                 if let (Ok(life), Ok(life0)) = (target.get_life(), target.get_life0()) {
                     if life < life0 {
                         clear_airborne_voluntary_eject_on_damage(ctx, &target_id);
                     }
                 }
-                let dead = target.get_life()? < 1;
+                let dead = target.get_life().unwrap_or(1) < 1;
                 let wpn = e.weapon_name.as_ref().map(|s| s.as_str());
                 if let Some(shooter) =
                     crate::shots::who_from_initiator(&ctx.db, e.initiator.as_ref(), wpn)
@@ -1785,14 +1817,38 @@ fn on_event(lua: MizLua, ev: Event) -> Result<()> {
         }
         Event::ShootingStart(e) => {
             // MG/autocannon do not emit Shot (Hoggit); same who() remount as Shot.
-            if let Some(initiator) = e.initiator.as_ref().and_then(|o| o.as_unit().ok()) {
+            if let Some(initiator) = e.initiator.as_ref().and_then(|o| {
+                match o.get_category() {
+                    Ok(dcso3::object::ObjectCategory::Unit) => o.as_unit().ok(),
+                    Ok(cat) => {
+                        info!("ShootingStart initiator not a unit (cat={:?}), skipping", cat);
+                        None
+                    }
+                    Err(e) => {
+                        info!("ShootingStart initiator category unknown, skipping: {:?}", e);
+                        None
+                    }
+                }
+            }) {
                 if let Err(err) = handle_combined_arms_shot(lua, ctx, &initiator, start_ts) {
                     error!("combined arms shooting_start failed: {err:?}");
                 }
             }
         }
         Event::Dead(e) | Event::UnitLost(e) | Event::PilotDead(e) => {
-            if let Some(unit) = e.initiator.as_ref().and_then(|u| u.as_unit().ok()) {
+            if let Some(unit) = e.initiator.as_ref().and_then(|u| {
+                match u.get_category() {
+                    Ok(dcso3::object::ObjectCategory::Unit) => u.as_unit().ok(),
+                    Ok(cat) => {
+                        info!("Dead/UnitLost initiator not a unit (cat={:?}), skipping", cat);
+                        None
+                    }
+                    Err(e) => {
+                        info!("Dead/UnitLost initiator category unknown, skipping: {:?}", e);
+                        None
+                    }
+                }
+            }) {
                 let id = unit.object_id()?;
                 if let Err(e) = unit_killed(lua, ctx, id, start_ts) {
                     error!("1 unit killed failed {:?}", e)
@@ -2589,6 +2645,8 @@ fn update_jtac_contacts(ctx: &mut Context, lua: MizLua) {
     match ctx.jtac.update_contacts(lua, &mut ctx.landcache, &mut ctx.db) {
         Err(e) => error!("could not update jtac contacts {e}"),
         Ok(dirty_menus) => {
+            ctx.jtac
+                .autofire_objective_jtacs(&mut ctx.db, lua, Utc::now());
             let mut dirty_slots: SmallVec<[SlotId; 16]> = smallvec![];
             for (side, oids) in dirty_menus {
                 for (_, player, _) in ctx.db.instanced_players() {
@@ -2897,6 +2955,7 @@ fn run_timed_events(
     process_pending_airborne_deslot_penalties(ctx, ts);
     ctx.db.process_pending_deslot_airframe_fixes(lua, ts);
     ctx.db.process_pending_airframe_loss_dynamic_cargo(lua, ts);
+    ctx.db.process_pending_dynamic_cargo_restore(lua);
 
     match run_slow_timed_events(lua, ctx, perf, path, ts) {
         Ok(AdminResult::Continue) => (),

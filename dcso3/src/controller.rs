@@ -679,18 +679,25 @@ impl<'lua> FromLua<'lua> for Task<'lua> {
                 duration: params.raw_get("duration")?,
                 distribution: params.raw_get("distribution")?,
             }),
-            "FireAtPoint" => Ok(Self::FireAtPoint {
-                point: params.raw_get("point")?,
-                radius: params.raw_get("radius")?,
-                expend_qty: if params.raw_get("expendQtyEnabled")? {
-                    params.raw_get("expendQty")?
-                } else {
-                    None
-                },
-                weapon_type: params.raw_get("weaponType")?,
-                altitude: params.raw_get("altitude")?,
-                altitude_type: params.raw_get("alt_type")?,
-            }),
+            "FireAtPoint" => {
+                // ME uses zoneRadius; scripting often uses radius. Prefer radius, else zoneRadius.
+                let radius: Option<f64> = match params.raw_get::<_, Option<f64>>("radius")? {
+                    Some(r) => Some(r),
+                    None => params.raw_get("zoneRadius")?,
+                };
+                Ok(Self::FireAtPoint {
+                    point: params.raw_get("point")?,
+                    radius,
+                    expend_qty: if params.raw_get("expendQtyEnabled")? {
+                        params.raw_get("expendQty")?
+                    } else {
+                        None
+                    },
+                    weapon_type: params.raw_get("weaponType")?,
+                    altitude: params.raw_get("altitude")?,
+                    altitude_type: params.raw_get("alt_type")?,
+                })
+            }
             "Hold" => Ok(Self::Hold),
             "FAC_AttackGroup" => Ok(Self::FACAttackGroup {
                 group: params.raw_get("groupId")?,
@@ -929,8 +936,10 @@ impl<'lua> IntoLua<'lua> for Task<'lua> {
             } => {
                 root.raw_set("id", "FireAtPoint")?;
                 params.raw_set("point", point)?;
+                // MOOSE sets both; ME serializes zoneRadius.
                 if let Some(radius) = radius {
                     params.raw_set("radius", radius)?;
+                    params.raw_set("zoneRadius", radius)?;
                 }
                 if let Some(qty) = expend_qty {
                     params.raw_set("expendQtyEnabled", true)?;

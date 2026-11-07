@@ -20,7 +20,7 @@
 -- DCS dxgui Window/WebViewWidget have no LuaLS stubs; calls are guarded with pcall.
 ---@diagnostic disable: undefined-field, need-check-nil
 
-local ATTRITION_COCKPIT_VERSION = "1.0.35"
+local ATTRITION_COCKPIT_VERSION = "1.1.7"
 
 local net = require('net')
 
@@ -364,9 +364,11 @@ end
 local function apply_window_title()
     if not window then return end
     local pending = pending_update_version()
-    local title = "  Attrition Control"
+    local title
     if pending then
         title = "  Attrition Control — RESTART DCS (v" .. pending .. " ready)"
+    else
+        title = "  Attrition Control  v" .. ATTRITION_COCKPIT_VERSION
     end
     pcall(function() window:setText(title) end)
 end
@@ -911,11 +913,12 @@ local function create_window()
 
     window = Window.new()
     -- Leading spaces: default caption skin is left-aligned and sits tight to the edge.
-    apply_window_title()
     window:setBounds(wx, wy, ww, wh)
     pcall(function() window:setDraggable(true) end)
     pcall(function() window:setResizable(true) end)
     apply_window_skin()
+    -- After skin — some dxgui skins reset caption text.
+    apply_window_title()
     pcall(function()
         window:addCloseCallback(function()
             visible = false
@@ -1058,6 +1061,7 @@ function show()
     end
     visible = true
     window:setVisible(true)
+    apply_window_title()
     apply_opacity()
     apply_window_hit_test()
     if browser_ready then

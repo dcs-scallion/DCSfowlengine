@@ -214,6 +214,8 @@ pub struct Ephemeral {
     pub(super) warehouse_dcs_equipment_names: FxHashMap<ObjectiveId, FxHashSet<String>>,
     /// Ground DEP FARP after deploy: virtual stock is authoritative; skip DCS hydrate until this time.
     pub(super) dep_farp_authoritative_until: FxHashMap<ObjectiveId, DateTime<Utc>>,
+    /// Objective JTAC autofire: last FireAtPoint time per artillery group.
+    pub(crate) objective_jtac_autofire_at: FxHashMap<GroupId, DateTime<Utc>>,
     pub(super) awacs_stn: u32,
     pub(super) logistics_stage: LogiStage,
     spawnq: VecDeque<GroupId>,
@@ -265,6 +267,8 @@ pub struct Ephemeral {
     pub(super) dynamic_cargo_rehook_in_progress: FxHashSet<String>,
     /// When `air_dropped` was first set (chute grace / rehook timing).
     pub(super) dynamic_cargo_air_dropped_at: FxHashMap<String, DateTime<Utc>>,
+    /// Names waiting for post-init respawn (staggered off the mizinit Lua stack).
+    pub(super) pending_dynamic_cargo_restore: VecDeque<String>,
     /// Slot/deslot airframe: re-clamp DCS count after engine warehouse apply.
     /// `(due_utc, oid, typ_name, target_stored)`.
     pub(super) pending_deslot_airframe_fix: Vec<(DateTime<Utc>, ObjectiveId, String, u32)>,
@@ -361,6 +365,7 @@ impl Default for Ephemeral {
             defer_initial_logistics_sync_to: false,
             warehouse_dcs_equipment_names: FxHashMap::default(),
             dep_farp_authoritative_until: FxHashMap::default(),
+            objective_jtac_autofire_at: FxHashMap::default(),
             awacs_stn: 0o77777,
             spawnq: VecDeque::default(),
             despawnq: VecDeque::default(),
@@ -392,6 +397,7 @@ impl Default for Ephemeral {
             dynamic_cargo_miss_count: FxHashMap::default(),
             dynamic_cargo_rehook_in_progress: FxHashSet::default(),
             dynamic_cargo_air_dropped_at: FxHashMap::default(),
+            pending_dynamic_cargo_restore: VecDeque::default(),
             pending_deslot_airframe_fix: Vec::default(),
             pending_deslot_weapon_fix: Vec::default(),
             pending_aircraft_deslot: FxHashMap::default(),
@@ -432,6 +438,10 @@ impl Ephemeral {
 
     pub fn get_slot_info(&self, slot: &SlotId) -> Option<&SlotInfo> {
         self.slot_info.get(slot)
+    }
+
+    pub fn iter_slot_info(&self) -> impl Iterator<Item = &SlotInfo> {
+        self.slot_info.values()
     }
 
     pub fn get_slot_info_by_miz_gid(&self, gid: &miz::GroupId) -> Option<(SlotId, &SlotInfo)> {

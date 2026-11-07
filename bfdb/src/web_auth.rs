@@ -70,6 +70,8 @@ pub struct WebAuthStore {
     codes: Tree<String, ClaimCode>,
     /// Separate tree: bincode cannot add fields to `WebAccount` without breaking old rows.
     preferences: Tree<String, WebPreferences>,
+    /// Last in-DCS Control Panel (`plugin=`) version seen for this username.
+    cockpit_plugin: Tree<String, String>,
 }
 
 impl WebAuthStore {
@@ -79,6 +81,7 @@ impl WebAuthStore {
             by_ucid: Tree::open(db, "web_accounts_by_ucid")?,
             codes: Tree::open(db, "web_claim_codes")?,
             preferences: Tree::open(db, "web_account_preferences")?,
+            cockpit_plugin: Tree::open(db, "web_account_cockpit_plugin")?,
         };
         match store.purge_stale() {
             Ok(n) if n > 0 => info!("web_auth: purged {n} unlinked account(s) with expired link codes"),
@@ -133,6 +136,7 @@ impl WebAuthStore {
         }
         let key = username.to_string();
         let _ = self.preferences.remove(&key);
+        let _ = self.cockpit_plugin.remove(&key);
         let _ = self.accounts.remove(&key);
         Ok(())
     }
@@ -205,6 +209,35 @@ impl WebAuthStore {
         }
         self.preferences.insert(&user, &preferences)?;
         Ok(preferences)
+    }
+
+    pub fn last_cockpit_plugin(&self, username: &str) -> Result<Option<String>> {
+        let user = normalize_username(username)?;
+        Ok(self.cockpit_plugin.get(&user)?)
+    }
+
+    /// Record last Control Panel version; no-op if account missing. Skips empty version.
+    pub fn set_last_cockpit_plugin(&self, username: &str, version: &str) -> Result<()> {
+        let v = version.trim();
+        if v.is_empty() {
+            return Ok(());
+        }
+        let user = normalize_username(username)?;
+        if self.accounts.get(&user)?.is_none() {
+            return Ok(());
+        }
+        if self.cockpit_plugin.get(&user)?.as_deref() == Some(v) {
+            return Ok(());
+        }
+        self.cockpit_plugin.insert(&user, &v.to_string())?;
+        Ok(())
+    }
+
+    pub fn set_last_cockpit_plugin_for_ucid(&self, ucid: &Ucid, version: &str) -> Result<()> {
+        let Some(user) = self.by_ucid.get(&ucid.to_string())? else {
+            return Ok(());
+        };
+        self.set_last_cockpit_plugin(&user, version)
     }
 
     pub fn verify_login(&self, username: &str, password: &str) -> Result<WebAccount> {

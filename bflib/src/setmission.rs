@@ -3,9 +3,10 @@
 
 use anyhow::{anyhow, bail, Context, Result};
 use bfprotocols::cfg::{
-    MissionDateOnNewCampaign, SetMissionCfg, WeatherProfileCfg, WeatherValueRange,
+    DcsserverBotScheduledRestartCfg, MissionDateOnNewCampaign, SetMissionCfg,
+    WeatherProfileCfg, WeatherValueRange, SETMISSION_IMMINENT_RESTART_WINDOW_MINS,
 };
-use chrono::NaiveDate;
+use chrono::{Duration as ChronoDuration, NaiveDate, Utc};
 use log::{info, warn};
 use rand::Rng;
 use regex::Regex;
@@ -32,6 +33,8 @@ pub struct SpawnArgs<'a> {
     pub new_campaign: bool,
     /// Persisted weather rung; `None` means use CFG `weather_start_index`.
     pub weather_index: Option<u32>,
+    /// When set, ME start time follows wall-clock restart slot (`times[i] % cycle`).
+    pub scheduled_restart: Option<&'a DcsserverBotScheduledRestartCfg>,
 }
 
 pub struct SpawnOutcome {
@@ -90,8 +93,17 @@ pub fn maybe_spawn(args: SpawnArgs<'_>) -> Result<Option<SpawnOutcome>> {
             args.campaign_rounds.saturating_add(1).max(1)
         };
         let cycle = &datetime.mission_start_time_cycle;
-        let time_idx = (next_round.saturating_sub(1) as usize) % cycle.len();
+        let time_idx = select_mission_start_time_index(
+            cycle.len(),
+            next_round,
+            args.scheduled_restart,
+        );
         time_arg = cycle[time_idx].trim().to_string();
+        if args.scheduled_restart.is_some() {
+            info!(
+                "setmission time: wall-clock slot -> cycle[{time_idx}] = {time_arg} (round {next_round})"
+            );
+        }
         date_arg = if args.campaign_stats_enabled {
             compute_next_mission_date(cfg, &args, next_round)?
         } else {
@@ -157,6 +169,24 @@ pub fn maybe_spawn(args: SpawnArgs<'_>) -> Result<Option<SpawnOutcome>> {
     Ok(Some(SpawnOutcome {
         weather_index: new_weather_index,
     }))
+}
+
+fn select_mission_start_time_index(
+    cycle_len: usize,
+    next_round: u32,
+    scheduled: Option<&DcsserverBotScheduledRestartCfg>,
+) -> usize {
+    if cycle_len == 0 {
+        return 0;
+    }
+    if let Some(sched) = scheduled {
+        let window = ChronoDuration::minutes(SETMISSION_IMMINENT_RESTART_WINDOW_MINS);
+        if let Some(slot) = sched.mission_start_slot_index(Utc::now(), window) {
+            return slot % cycle_len;
+        }
+        warn!("setmission: scheduled restart slot unresolved, falling back to round index");
+    }
+    (next_round.saturating_sub(1) as usize) % cycle_len
 }
 
 fn compute_next_mission_date(

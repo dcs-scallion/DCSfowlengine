@@ -172,6 +172,26 @@ impl MsgQ {
         self.send_with_priority(PRI_PANEL, typ, text)
     }
 
+    /// Drop all queued panel messages aimed at a specific unit.
+    /// Call before flush when a unit is being destroyed — outTextForUnit on a
+    /// dying unit causes an ACCESS_VIOLATION inside DCS (regLuaTrigger).
+    pub fn cancel_unit_panel_msgs(&mut self, uid: i64) {
+        for pri in &mut self.0 {
+            pri.retain(|cmd| {
+                !matches!(
+                    cmd,
+                    Cmd::Send(Msg::Message {
+                        typ: MsgTyp::Panel {
+                            to: PanelDest::Unit(u),
+                            ..
+                        },
+                        ..
+                    }) if u.inner() == uid
+                )
+            });
+        }
+    }
+
     fn cancel_pending_mark_cmds(&mut self, did: MarkId) -> bool {
         let mut push = true;
         let mut remove = |pri: usize| {

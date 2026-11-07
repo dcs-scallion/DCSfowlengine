@@ -8,8 +8,8 @@ use crate::{
             call_bomber, init_jtac_menu_for_slot, jtac_artillery_combo_mission,
             jtac_artillery_fire_all, jtac_artillery_mission, jtac_calcm_mission, jtac_clear_filter,
             jtac_filter, jtac_get_artillery_ammo, jtac_relay_target, jtac_set_code,
-            jtac_set_full_code, jtac_shift, jtac_smoke_target, jtac_status, jtac_toggle_auto_shift,
-            jtac_toggle_ir_pointer,
+            jtac_set_full_code, jtac_set_target_radius, jtac_shift, jtac_smoke_target, jtac_status,
+            jtac_toggle_auto_shift, jtac_toggle_ir_pointer,
         },
         ArgQuad, ArgTriple, ArgTuple,
     },
@@ -29,11 +29,19 @@ use std::str::FromStr;
 type StdString = std::string::String;
 
 #[derive(Debug, Serialize)]
+struct BomberMissionEntry {
+    name: StdString,
+    cost: u32,
+}
+
+#[derive(Debug, Serialize)]
 struct JtacListResponse {
     jtacs: Vec<JtacListEntry>,
     filter_tags: Vec<StdString>,
     calcm_enabled: bool,
-    bomber_missions: Vec<StdString>,
+    bomber_missions: Vec<BomberMissionEntry>,
+    /// Calling player's campaign points (bomber affordability).
+    points: i32,
 }
 
 #[derive(Debug, Serialize)]
@@ -42,6 +50,8 @@ struct JtacListEntry {
     name: StdString,
     objective: StdString,
     code: u16,
+    /// Artillery FireAtPoint zone radius (meters), 0..=500.
+    target_radius_m: f64,
     autoshift: bool,
     ir_pointer: bool,
     pinned: bool,
@@ -82,6 +92,8 @@ struct JtacActionReq {
     code: Option<u16>,
     #[serde(default)]
     code_part: Option<u16>,
+    #[serde(default)]
+    target_radius_m: Option<f64>,
     #[serde(default)]
     filter_tag: Option<StdString>,
     #[serde(default)]
@@ -195,6 +207,7 @@ pub(crate) fn list_jtacs_for_ucid(ctx: &Context, ucid: &Ucid) -> Result<StdStrin
             name: jtac_display_name(ctx, id),
             objective,
             code: jtac.code(),
+            target_radius_m: jtac.target_radius_m(),
             autoshift: jtac.autoshift(),
             ir_pointer: jtac.ir_pointer(),
             pinned: pinned.contains(&id),
@@ -244,7 +257,7 @@ pub(crate) fn list_jtacs_for_ucid(ctx: &Context, ucid: &Ucid) -> Result<StdStrin
     }
     jtacs.sort_by(|a, b| b.pinned.cmp(&a.pinned).then(a.objective.cmp(&b.objective)));
 
-    let bomber_missions: Vec<StdString> = ctx
+    let bomber_missions: Vec<BomberMissionEntry> = ctx
         .db
         .ephemeral
         .cfg
@@ -253,7 +266,10 @@ pub(crate) fn list_jtacs_for_ucid(ctx: &Context, ucid: &Ucid) -> Result<StdStrin
         .into_iter()
         .flat_map(|acts| {
             acts.iter().filter_map(|(n, a)| match a.kind {
-                ActionKind::Bomber(_) => Some(n.to_string()),
+                ActionKind::Bomber(_) => Some(BomberMissionEntry {
+                    name: n.to_string(),
+                    cost: a.cost,
+                }),
                 _ => None,
             })
         })
@@ -263,11 +279,14 @@ pub(crate) fn list_jtacs_for_ucid(ctx: &Context, ucid: &Ucid) -> Result<StdStrin
         .map(|t| format!("{:?}", t))
         .collect();
 
+    let points = ctx.db.player(ucid).map(|p| p.points).unwrap_or(0);
+
     let resp = JtacListResponse {
         jtacs,
         filter_tags,
         calcm_enabled: ctx.db.ephemeral.cfg.calcm_mission,
         bomber_missions,
+        points,
     };
     Ok(serde_json::to_string(&resp)?)
 }
@@ -399,6 +418,28 @@ pub(crate) fn run_jtac_action(
                 },
             )?;
             Ok(format!("code {code}"))
+        }
+        "set_target_radius" => {
+            let meters = req
+                .target_radius_m
+                .ok_or_else(|| anyhow!("target_radius_m required"))?;
+            if !meters.is_finite() {
+                bail!("target radius must be a finite number");
+            }
+            let rounded = meters.round();
+            if rounded < 0.0 || rounded > 500.0 {
+                bail!("target radius {rounded} m out of range 0-500 m");
+            }
+            let meters_u = rounded as u16;
+            jtac_set_target_radius(
+                lua,
+                ArgTriple {
+                    fst: jtid,
+                    snd: meters_u,
+                    trd: ucid,
+                },
+            )?;
+            Ok(format!("target radius {meters_u} m"))
         }
         "set_code_part" => {
             let part = req.code_part.ok_or_else(|| anyhow!("code_part required"))?;

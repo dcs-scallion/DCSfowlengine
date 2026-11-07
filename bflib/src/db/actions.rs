@@ -5,7 +5,7 @@ use crate::{
     db::{cargo::Oldest, group::DeployKind},
     group, group_mut,
     jtac::{JtId, Jtacs},
-    objective,
+    objective, objective_mut,
     spawnctx::{SpawnCtx, SpawnLoc},
     unit,
 };
@@ -2834,10 +2834,64 @@ impl Db {
             bail!("no friendly objective near drop off point")
         }
         let oid = obj.id;
-        if let Some(ucid) = ucid {
-            self.ephemeral.stat(Stat::Repair { id: oid, by: ucid });
+        let name = obj.name.clone();
+        let spawnable_ok = obj.spawnable_logi_repaired;
+        let can_static = obj.can_queue_static_repair_crate();
+        let can_prod = obj.can_queue_production_repair_crate();
+        let is_opr = matches!(obj.kind, ObjectiveKind::Production);
+        let production = obj.production;
+        let static_need = obj.static_repair_need;
+        let now = Utc::now();
+
+        // Same priority as player repair-crate unpack: logi → ME static → OPR.
+        let msg = if !spawnable_ok {
+            self.repair_one_logi_step(side, now, oid)?;
+            let logi = objective!(self, oid)?.logi();
+            format_compact!("repaired logistics at {name} to %{logi}")
+        } else if can_static {
+            let rate = self.ephemeral.cfg.static_repair_rate_seconds;
+            let obj = objective_mut!(self, oid)?;
+            if obj.static_repair == 0 {
+                obj.static_repair_due =
+                    now + Duration::seconds(rate.max(1) as i64);
+            }
+            obj.static_repair += 1;
+            let queued = obj.static_repair;
+            let need = obj.static_repair_need;
+            format_compact!("queued static repair at {name} ({queued}/{need})")
+        } else if can_prod {
+            let rate = self.ephemeral.cfg.production_repair_rate_seconds;
+            let obj = objective_mut!(self, oid)?;
+            if obj.production_repair == 0 {
+                obj.production_repair_due =
+                    now + Duration::seconds(rate.max(1) as i64);
+            }
+            obj.production_repair += 1;
+            format_compact!(
+                "queued production repair at {name} (production {production}%)"
+            )
+        } else if is_opr {
+            if production >= 100 {
+                bail!("OPR production is already at 100%")
+            }
+            bail!("repair queue is full or would exceed OPR damage (100% - Production)")
+        } else if static_need > 0 {
+            bail!("static repair queue is full")
+        } else {
+            bail!("objective logistics are completely repaired")
+        };
+
+        if let Some(ref ucid) = ucid {
+            self.ephemeral.stat(Stat::Repair {
+                id: oid,
+                by: ucid.clone(),
+            });
+            self.ephemeral
+                .panel_to_player(&self.persisted, 10, ucid, msg);
+        } else {
+            self.ephemeral.msgs().panel_to_side(10, false, side, msg);
         }
-        self.repair_one_logi_step(side, Utc::now(), oid)?;
+        self.ephemeral.dirty();
         Ok(())
     }
 

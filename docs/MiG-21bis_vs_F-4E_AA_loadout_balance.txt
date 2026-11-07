@@ -1,0 +1,106 @@
+MiG-21Bis vs F-4E-45MC — vyvážení AA výzbroje AI interceptorů
+================================================================
+Shrnutí chatu (2026-11-07)
+
+Cíl: maximální historicky věrohodná AA sestava MiG-21Bis pro polovinu
+80. let a proti ní vyvážená sestava F-4E-45MC pro AI intercept
+v DCS / Fowl mid-1980s kampani.
+
+
+1. Výchozí principy
+-------------------
+- Red: maximální realistická AA pro MiG-21Bis (mid-80s WP), ne inventované zbraně.
+- Blue: ne historický max F-4 CAP, ale vyvážení proti red sestavě a tieringu kampaně.
+- AIM-7F je top SARH a patří na dražší AI fighters — ne na F-4.
+- Počet SARH na F-4 má odpovídat limitu MiGu (max 2× R-3R), ne 4 recechům Phantomu.
+
+
+2. Finální doporučené sestavy
+-----------------------------
+
+MiG-21Bis (Red)
+  SARH:        2× R-3R (vnitřní pylony)
+  IR WVR:      4× R-60M na twin APU-60-2M (vnější pylony)
+  Kanón:       GSh-23L
+  Palivo CAP:  volitelně 1× PTB
+  Celkem:      6 raket (2 SARH + 4 IR)
+
+F-4E-45MC (Blue)
+  SARH:        2× AIM-7E-2 (dva recey; zbylé prázdné)
+  IR WVR:      4× AIM-9P (2L/2R + 8L/8R)
+  Kanón:       M61A1 Vulcan
+  Palivo CAP:  1× 600 gal centerline; křídla prázdná
+  Celkem:      6 raket (2 SARH + 4 IR)
+
+
+3. Proč tyto zbraně — Red (MiG-21Bis)
+------------------------------------
+
+R-60M (4×, twin rails)
+  V polovině 80. let už běžný standard WP. Lepší seeker a omezené
+  all-aspect oproti základnímu R-60. Nejsilnější WVR zbraň, kterou
+  bis v DCS reálně má. Twin závěsy na vnějších pylonech dávají
+  historické maximum 6 raket.
+
+R-3R (2×, vnitřní pylony)
+  Jediná smysluplná čelní (SARH) zbraň proti Phantomu. R-13M/M1 jsou
+  silnější IR, ale jen zezadu — pro roli interceptoru horší volba.
+  R-3S / RS-2US / R-55 jsou zastaralé. R-73 na bisu mid-80s / v DCS
+  MiG-21 není.
+
+Alternativa (pouze pokud nechcete SARH)
+  2× R-13M1 + 4× R-60M — silnější merge, ale bez head-on shotu.
+
+
+4. Proč tyto zbraně — Blue (F-4E-45MC)
+-------------------------------------
+
+AIM-7E-2 (2×), ne AIM-7F / 7M / plain E
+  - AIM-7F: top SARH tier → dražší AI fighters, ne F-4.
+  - AIM-7M: pozdější / frontline F-15–16 charakter; na F-4 AI příliš silné.
+  - AIM-7E-2: „dogfight Sparrow“ — horší dosah/energie než 7F, ale
+    použitelnější než plain E; dává F-4 slabší SARH výhodu nad R-3R.
+  - Počet 2× (ne 4×): parita počtu SARH proti max 2× R-3R na MiGu.
+
+AIM-9P (4×), ne AIM-9L / 9M
+  Typické pro USAF F-4E v mid-80s (rear / omezený aspect). AIM-9L/M
+  by WVR přebily i R-60M. Asymetrie: Phantom má slabší BVR karty (E-2),
+  MiG má WVR přes Aphidy.
+
+
+5. Jak se sparring chová
+------------------------
+BVR / první shot   Mírně F-4E (lepší radar + E-2 vs krátký R-3R),
+                   bez přesily počtem
+Merge / dogfight   MiG-21 (R-60M + turn rate; AIM-9P hlavně zezadu)
+Počet střel        Obě strany 6 raket — vyrovnaný budget
+
+
+6. Evoluce návrhu v chatu
+-------------------------
+V1: Red 2×R-3R+4×R-60M; Blue 4×AIM-7F+4×AIM-9P (historický F-4 CAP).
+V2: Blue SARH → AIM-7E-2 (7F reserved pro dražší AI).
+V3 (finále): Blue SARH počet 4→2 kvůli paritě s max 2× R-3R na MiGu.
+
+
+7. Poznámka k Fowl / Caucasus payload allowlist
+----------------------------------------------
+V Caucasus1985 fowl_weapon_payload_ws.json měl MiG-21Bis spíš
+R-13M / R-3S / RS-2US / R-55; R-60M a R-3R jsou v bridge katalogu,
+ale v allowlistu mohou chybět. F-4E naopak často dovoluje
+AIM-7M / AIM-9M. Před nasazením do mise srovnat warehouse / payload
+allowlist s finálními zbraněmi výše.
+
+
+8. Zdroje (orientační)
+----------------------
+- MiG-21 armament / mid-80s WP praxe (R-3R, R-60/R-60M, twin Aphid).
+- DCS MiG-21Bis weapon reference (pylony, R-3R / R-60M kombinace).
+- Heatblur F-4E stores (AIM-7E / E-2 / F / M, AIM-9P / L / M, stanice).
+- USAF F-4E mid-80s: Sparrow + Sidewinder CAP; 9L/M spíš frontline / později.
+
+
+Finální verdikt
+---------------
+Red:  2× R-3R + 4× R-60M + GSh-23L
+Blue: 2× AIM-7E-2 + 4× AIM-9P + M61 (+ 600 gal CL pro CAP)

@@ -193,7 +193,7 @@ pub struct NearbyCrate<'a> {
 pub enum Unpakistan {
     Unpacked(String, u32),
     UnpackedFarp(String, u32),
-    Repaired(String),
+    Repaired(String, u32),
     RepairedBase(String, u8),
     RepairedProduction(String, u8),
     RepairedStaticQueue(String, u16, u16),
@@ -219,7 +219,11 @@ impl fmt::Display for Unpakistan {
                 f,
                 "unpacked {loc}, units will spawn in {secs} seconds get clear"
             ),
-            Self::Repaired(unit) => write!(f, "repaired a {unit}"),
+            Self::Repaired(unit, 0) => write!(f, "repaired a {unit}"),
+            Self::Repaired(unit, secs) => write!(
+                f,
+                "repaired a {unit}, units will respawn in {secs} seconds get clear"
+            ),
             Self::RepairedBase(base, logi) => write!(f, "repaired logistics at {base} to %{logi}"),
             Self::RepairedProduction(opr, pct) => {
                 write!(f, "queued production repair at {opr} (production {pct}%)")
@@ -509,7 +513,8 @@ impl Db {
             ed_carrier: None,
         };
         if let Some(gid) = to_delete {
-            self.delete_group(&gid)?;
+            // UnloadCargo before despawn — raw destroy while loaded leaves F8 ghosts (ED).
+            self.delete_fowl_crate_clearing_ed_bay(lua, gid)?;
         }
         let gid = self.add_and_queue_group(
             &SpawnCtx::new(lua)?,
@@ -1353,6 +1358,77 @@ impl Db {
                 info!("crate {gid}: bay ghost scrub still pending ({old_name})");
             }
         }
+    }
+
+    /// max_crates overflow delete: UnloadCargo first, then despawn, then scrub F8 leftovers.
+    /// Destroying a loaded crate without unload leaves stuck F8 UNLOAD ghosts (ED bug).
+    pub(super) fn delete_fowl_crate_clearing_ed_bay(
+        &mut self,
+        lua: MizLua,
+        gid: GroupId,
+    ) -> Result<()> {
+        let unit_name = self
+            .persisted
+            .groups
+            .get(&gid)
+            .and_then(|g| g.units.into_iter().next())
+            .and_then(|uid| self.persisted.units.get(uid))
+            .map(|u| u.name.clone());
+
+        if let Some(name) = unit_name.as_ref() {
+            for (slot, _) in self.ephemeral.players_by_slot.clone() {
+                let Ok(ac) = self.ephemeral.slot_instance_unit(lua, &slot) else {
+                    continue;
+                };
+                if !crate::db::dynamic_cargo::unit_has_cargo_named(&ac, name.as_str()) {
+                    continue;
+                }
+                let _ = ac.open_ramp(true);
+                let mut matched: SmallVec<[StaticObject; 4]> = smallvec![];
+                if let Ok(Some(cargos)) = ac.get_cargos_on_board() {
+                    let _ = cargos.for_each(|c| {
+                        let Ok(c) = c else {
+                            return Ok(());
+                        };
+                        if c.get_name()
+                            .map(|n| n.as_str() == name.as_str())
+                            .unwrap_or(false)
+                        {
+                            matched.push(c);
+                        }
+                        Ok(())
+                    });
+                }
+                for cargo in matched {
+                    if let Err(e) = ac.unload_cargo(&cargo) {
+                        warn!("crate {gid}: max_crates UnloadCargo failed for {name}: {e:?}");
+                    }
+                    if crate::db::dynamic_cargo::unit_has_cargo_named(&ac, name.as_str()) {
+                        self.ephemeral.shared_ed_place_ignore_dead.insert(gid);
+                        let _ = ac.open_ramp(true);
+                        let _ = cargo.destroy();
+                    }
+                }
+            }
+            self.ephemeral
+                .shared_ed_bay_ghost_names
+                .insert(gid, name.clone());
+            self.ephemeral
+                .shared_ed_fowl_load_order
+                .values_mut()
+                .for_each(|order| order.retain(|g| *g != gid));
+        }
+
+        self.delete_group(&gid)?;
+
+        if let Some(name) = unit_name {
+            if !self.try_clear_ed_bay_cargo_named(lua, gid, name.as_str()) {
+                self.ephemeral.shared_ed_bay_ghost_names.remove(&gid);
+            } else {
+                info!("crate {gid}: max_crates delete left F8 bay ghost ({name}); queued for scrub");
+            }
+        }
+        Ok(())
     }
 
     /// Returns true when a bay ghost for `name` is still listed on some player ED bay.
@@ -2779,7 +2855,13 @@ impl Db {
                     for cr in &have {
                         self.delete_group(&cr.group)?
                     }
-                    self.ephemeral.push_spawn(gid);
+                    let delay_secs = spec.repair_rearm_delay_secs;
+                    if delay_secs == 0 {
+                        self.ephemeral.push_spawn(gid);
+                    } else {
+                        let at = Utc::now() + chrono::Duration::seconds(delay_secs as i64);
+                        self.ephemeral.delayspawnq.entry(at).or_default().push(gid);
+                    }
                     if spec.repair_cost > 0 {
                         self.adjust_points(
                             &st.ucid,
@@ -2788,7 +2870,7 @@ impl Db {
                         );
                     }
                     self.ephemeral.dirty();
-                    return Ok(Unpakistan::Repaired(dep));
+                    return Ok(Unpakistan::Repaired(dep, delay_secs));
                 }
             }
         }

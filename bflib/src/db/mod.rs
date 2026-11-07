@@ -394,9 +394,40 @@ impl Db {
                         spec: *jtac,
                         air: true,
                     }),
+                    DeployKind::Objective { .. } => {
+                        // Only while spawned in DCS (culled groups stay out of the scan).
+                        if !self.group_instanced(gid) {
+                            return None;
+                        }
+                        let mut observer = None;
+                        let mut spec = None;
+                        for uid in &group.units {
+                            let Some(u) = self.persisted.units.get(uid) else {
+                                continue;
+                            };
+                            if u.dead {
+                                continue;
+                            }
+                            if let Some(jt) = self.ephemeral.cfg.objective_jtacs.get(&u.typ) {
+                                observer = Some(u.position.p.0);
+                                spec = Some(*jt);
+                                break;
+                            }
+                        }
+                        let (pos, spec) = match (observer, spec) {
+                            (Some(p), Some(s)) => (p, s),
+                            _ => return None,
+                        };
+                        Some(JtDesc {
+                            pos,
+                            id: JtId::Group(*gid),
+                            side: group.side,
+                            spec,
+                            air: false,
+                        })
+                    }
                     DeployKind::Crate { .. }
                     | DeployKind::Action { .. }
-                    | DeployKind::Objective { .. }
                     | DeployKind::ObjectiveDeprecated
                     | DeployKind::Troop { .. }
                     | DeployKind::CsarPilot { .. }

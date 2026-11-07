@@ -110,7 +110,23 @@ pub struct CampaignStatsView {
 }
 
 impl CampaignStats {
-    pub fn duration_days(&self, rounds_per_day: u32) -> u32 {
+    /// Discord map Duration: real calendar days since `campaign_start_date` (not round count).
+    pub fn duration_days(&self, today: NaiveDate) -> u32 {
+        match self.campaign_start_date {
+            Some(start) => {
+                let days = (today - start).num_days();
+                if days < 0 {
+                    1
+                } else {
+                    1 + days as u32
+                }
+            }
+            None => 1,
+        }
+    }
+
+    /// ME-style day index from round count (`discord_map.rounds_per_day`).
+    pub fn rounds_based_duration_days(&self, rounds_per_day: u32) -> u32 {
         let rpd = rounds_per_day.max(1);
         let restarts = self.campaign_rounds.saturating_sub(1);
         1 + restarts / rpd
@@ -118,7 +134,7 @@ impl CampaignStats {
 
     pub fn current_date(&self, rounds_per_day: u32) -> Option<NaiveDate> {
         let start = self.campaign_start_date?;
-        let days = self.duration_days(rounds_per_day);
+        let days = self.rounds_based_duration_days(rounds_per_day);
         start.checked_add_signed(chrono::Duration::days((days.saturating_sub(1)) as i64))
     }
 
@@ -795,14 +811,14 @@ impl Db {
         if !self.campaign_stats_active() {
             return None;
         }
-        let rpd = self.ephemeral.cfg.discord_map.rounds_per_day.max(1);
         let stats = self.persisted.campaign_stats.clone();
-        let duration_days = stats.duration_days(rpd);
+        let today = Utc::now().date_naive();
+        let duration_days = stats.duration_days(today);
         let start = stats
             .campaign_start_date
             .map(format_campaign_date_short)
             .unwrap_or_else(|| "—".into());
-        let current = format_campaign_date_short(Utc::now().date_naive());
+        let current = format_campaign_date_short(today);
         Some(CampaignStatsView {
             theatre: theatre.to_string(),
             start_date: start,
@@ -1080,4 +1096,20 @@ pub fn deployable_invest_bucket(template: &str, cfg: &bfprotocols::cfg::Cfg) -> 
         }
     }
     InvestBucket::Ground
+}
+
+#[cfg(test)]
+mod duration_days_tests {
+    use super::CampaignStats;
+    use chrono::NaiveDate;
+
+    #[test]
+    fn wall_clock_duration_ignores_round_count() {
+        let mut s = CampaignStats::default();
+        s.campaign_start_date = Some(NaiveDate::from_ymd_opt(2026, 6, 1).unwrap());
+        s.campaign_rounds = 99;
+        let today = NaiveDate::from_ymd_opt(2026, 6, 10).unwrap();
+        assert_eq!(s.duration_days(today), 10);
+        assert_eq!(s.rounds_based_duration_days(4), 1 + 98 / 4);
+    }
 }

@@ -475,6 +475,10 @@ pub struct Deployable {
     /// How much does the damaged deployable cost to repair
     #[serde(default)]
     pub repair_cost: u32,
+    /// Seconds after unpacking a repair/rearm crate before the DEP group respawns. `0` = immediate.
+    /// Meaningful only when `repair_crate` is set.
+    #[serde(default)]
+    pub repair_rearm_delay_secs: u32,
     /// How many points does this deployable cost (if any)
     #[serde(default)]
     pub cost: u32,
@@ -866,6 +870,10 @@ fn default_tk_window() -> u32 {
     24
 }
 
+fn default_objective_static_repair_crates() -> u16 {
+    1
+}
+
 /// ME static in OFO / OLO / OAB zones (`objective_static_units` CFG map key = DCS unit type).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -877,6 +885,9 @@ pub struct ObjectiveStaticUnitCfg {
     /// DCS max HP (`getLife0`); ME static repair queue orders lowest first when not cached on unit.
     #[serde(default)]
     pub max_life: Option<i64>,
+    /// Repair crates required to respawn this static (each crate = one `static_repair_rate_seconds` tick).
+    #[serde(default = "default_objective_static_repair_crates")]
+    pub repair_crates: u16,
 }
 
 impl ObjectiveStaticUnitCfg {
@@ -1221,6 +1232,10 @@ fn default_deployable_unpack_min_base_distance_m() -> u32 {
     0
 }
 
+fn default_deployable_delete_min_enemy_distance_m() -> u32 {
+    20000
+}
+
 fn default_production_logistics_exclusion() -> u32 {
     10000
 }
@@ -1398,7 +1413,8 @@ pub struct DiscordMapCfg {
     pub campaign_top10_G2S_closed: u32,
     #[serde(default = "default_top10_g2_open")]
     pub campaign_top10_G2S_open: u32,
-    /// Campaign day length: `1 + (campaign_rounds - 1) / rounds_per_day`.
+    /// ME calendar step for `setmission` date: `1 + (campaign_rounds - 1) / rounds_per_day`.
+    /// Discord map Duration uses wall-clock days from `campaign_start_date`, not this value.
     #[serde(default = "default_rounds_per_day")]
     pub rounds_per_day: u32,
 }
@@ -2085,7 +2101,58 @@ impl DcsserverBotScheduledRestartCfg {
         }
         best
     }
+
+    /// Index into `times` for the mission about to load after MissionEnd.
+    /// Prefer an imminent upcoming slot (within `imminent_window`); else the last past slot.
+    pub fn mission_start_slot_index(
+        &self,
+        now: DateTime<Utc>,
+        imminent_window: chrono::Duration,
+    ) -> Option<usize> {
+        let tz = chrono_tz::Tz::from_str(self.timezone.trim()).ok()?;
+        let now_local = now.with_timezone(&tz);
+        let today = now_local.date_naive();
+        let mut slots: Vec<(usize, DateTime<chrono_tz::Tz>)> = Vec::new();
+        for day_offset in [-1i64, 0, 1] {
+            let day = today + chrono::Duration::days(day_offset);
+            for (i, t) in self.times.iter().enumerate() {
+                let (h, m) = parse_scheduled_restart_hh_mm(t).ok()?;
+                let time = chrono::NaiveTime::from_hms_opt(h, m, 0)?;
+                let naive = day.and_time(time);
+                let local = tz
+                    .from_local_datetime(&naive)
+                    .single()
+                    .or_else(|| tz.from_local_datetime(&naive).earliest())?;
+                slots.push((i, local));
+            }
+        }
+
+        let mut imminent: Option<(usize, DateTime<chrono_tz::Tz>)> = None;
+        for &(i, local) in &slots {
+            if local >= now_local && local - now_local <= imminent_window {
+                if imminent.is_none_or(|(_, t)| local < t) {
+                    imminent = Some((i, local));
+                }
+            }
+        }
+        if let Some((i, _)) = imminent {
+            return Some(i);
+        }
+
+        let mut last_past: Option<(usize, DateTime<chrono_tz::Tz>)> = None;
+        for &(i, local) in &slots {
+            if local <= now_local {
+                if last_past.is_none_or(|(_, t)| local > t) {
+                    last_past = Some((i, local));
+                }
+            }
+        }
+        last_past.map(|(i, _)| i)
+    }
 }
+
+/// Default early MissionEnd window for pairing setmission time to a scheduled restart slot.
+pub const SETMISSION_IMMINENT_RESTART_WINDOW_MINS: i64 = 15;
 
 fn parse_scheduled_restart_hh_mm(s: &str) -> Result<(u32, u32)> {
     let s = s.trim();
@@ -2299,6 +2366,18 @@ fn default_jtac_los_observer_air_m() -> i32 {
     -5
 }
 
+fn default_objective_jtac_autofire() -> bool {
+    true
+}
+
+fn default_objective_jtac_autofire_cooldown_secs() -> u32 {
+    90
+}
+
+fn default_objective_jtac_autofire_rounds() -> u8 {
+    5
+}
+
 fn default_calcm_mission() -> bool {
     true
 }
@@ -2429,6 +2508,10 @@ pub struct Cfg {
     /// unpack or deployable unit repair (0 = disabled).
     #[serde(default = "default_deployable_unpack_min_base_distance_m")]
     pub deployable_unpack_min_base_distance_m: u32,
+    /// Min distance from enemy Deployed/Troop or player airframes (air or ground) required to
+    /// `-delete` a player Deployed/Troop for refund (Meters). 0 = disabled.
+    #[serde(default = "default_deployable_delete_min_enemy_distance_m")]
+    pub deployable_delete_min_enemy_distance_m: u32,
     /// an objective will cull it's units if there are no enemy units
     /// within this distance (Meters)
     pub unit_cull_distance: u32,
@@ -2551,6 +2634,19 @@ pub struct Cfg {
     /// airborne jtacs
     #[serde(default)]
     pub airborne_jtacs: FxHashMap<Vehicle, DeployableJtac>,
+    /// ME objective defense units that act as Fowl JTACs while spawned
+    /// (key = DCS unit type, e.g. `"JTAC"`).
+    #[serde(default)]
+    pub objective_jtacs: FxHashMap<Vehicle, DeployableJtac>,
+    /// Auto FireAtPoint from objective JTACs to nearby friendly artillery.
+    #[serde(default = "default_objective_jtac_autofire")]
+    pub objective_jtac_autofire: bool,
+    /// Cooldown between autofire salvos per artillery group (seconds).
+    #[serde(default = "default_objective_jtac_autofire_cooldown_secs")]
+    pub objective_jtac_autofire_cooldown_secs: u32,
+    /// Rounds per autofire salvo.
+    #[serde(default = "default_objective_jtac_autofire_rounds")]
+    pub objective_jtac_autofire_rounds: u8,
     /// The jtac target priority list
     pub jtac_priority: Vec<UnitTags>,
     /// Default laser code for new Blue-coalition JTACs (DCS range 1111–1788).
@@ -3021,5 +3117,81 @@ mod setmissionweather_cfg_tests {
             }
             other => panic!("expected SessionStart, got {other:?}"),
         }
+    }
+}
+
+#[cfg(test)]
+mod scheduled_restart_slot_tests {
+    use super::DcsserverBotScheduledRestartCfg;
+    use chrono::{FixedOffset, TimeZone, Utc};
+
+    fn sched() -> DcsserverBotScheduledRestartCfg {
+        DcsserverBotScheduledRestartCfg {
+            timezone: "Europe/Prague".into(),
+            times: vec![
+                "00:00".into(),
+                "06:00".into(),
+                "12:00".into(),
+                "18:00".into(),
+            ],
+        }
+    }
+
+    /// Prague summer (CEST, UTC+2) local wall time as Utc.
+    fn prague_summer(y: i32, mo: u32, d: u32, h: u32, mi: u32) -> chrono::DateTime<Utc> {
+        FixedOffset::east_opt(2 * 3600)
+            .unwrap()
+            .with_ymd_and_hms(y, mo, d, h, mi, 0)
+            .single()
+            .unwrap()
+            .with_timezone(&Utc)
+    }
+
+    #[test]
+    fn mid_day_uses_last_past_slot() {
+        let s = sched();
+        let window = chrono::Duration::minutes(15);
+        // 14:00 Prague → last past 12:00 → index 2
+        assert_eq!(
+            s.mission_start_slot_index(prague_summer(2026, 6, 15, 14, 0), window),
+            Some(2)
+        );
+    }
+
+    #[test]
+    fn imminent_window_picks_upcoming_slot() {
+        let s = sched();
+        let window = chrono::Duration::minutes(15);
+        // 17:50 → imminent 18:00 → index 3
+        assert_eq!(
+            s.mission_start_slot_index(prague_summer(2026, 6, 15, 17, 50), window),
+            Some(3)
+        );
+    }
+
+    #[test]
+    fn just_after_restart_keeps_that_slot() {
+        let s = sched();
+        let window = chrono::Duration::minutes(15);
+        // 18:05 → last past 18:00 → index 3
+        assert_eq!(
+            s.mission_start_slot_index(prague_summer(2026, 6, 15, 18, 5), window),
+            Some(3)
+        );
+    }
+
+    #[test]
+    fn cycle_modulo_two_entries() {
+        let cycle = ["07:00", "13:00"];
+        let s = sched();
+        let window = chrono::Duration::minutes(15);
+        let i = s
+            .mission_start_slot_index(prague_summer(2026, 6, 15, 18, 5), window)
+            .unwrap();
+        assert_eq!(cycle[i % cycle.len()], "13:00");
+        let i = s
+            .mission_start_slot_index(prague_summer(2026, 6, 15, 0, 30), window)
+            .unwrap();
+        assert_eq!(cycle[i % cycle.len()], "07:00");
     }
 }

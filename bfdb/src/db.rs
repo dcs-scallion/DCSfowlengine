@@ -337,6 +337,9 @@ struct Pilots {
     /// Side table: true = closed by SessionEnd (server/mission restart while airborne).
     /// Distinct from Lost so Flight Log does not treat restart as a kill/deslot.
     sortie_restart: Tree<(Ucid, RoundId, SortieId), bool>,
+    /// Coalition at takeoff (Blue/Red). Separate tree so old `sortie` rows stay readable;
+    /// missing key → callers fall back to round_info.side (pre-fix attribution).
+    sortie_side: Tree<(Ucid, RoundId, SortieId), Side>,
     /// Per-vehicle/round ship kills (parallel to `aggregates.ground_kills` path).
     agg_ship_kills: Tree<(Ucid, Vehicle, RoundId), u32>,
     /// Career ship kills (parallel to `Pilot.total`).
@@ -370,6 +373,7 @@ impl Pilots {
             sortie: Tree::open(db, "sortie")?,
             sortie_crashed: Tree::open(db, "sortie_crashed")?,
             sortie_restart: Tree::open(db, "sortie_restart")?,
+            sortie_side: Tree::open(db, "sortie_side")?,
             agg_ship_kills: Tree::open(db, "agg_ship_kills")?,
             pilot_ship_kills: Tree::open(db, "pilot_ship_kills")?,
             agg_ground_air_kills: Tree::open(db, "agg_ground_air_kills")?,
@@ -2720,7 +2724,8 @@ impl StatsDb {
     }
 
     /// Aircraft usage for a round, optionally filtered by Blue/Red.
-    /// Built from pilot sorties + round side (not the unscoped aircraft_sorties tree).
+    /// Per-sortie side from `sortie_side` (stamped at takeoff); legacy rows fall back
+    /// to round_info.side (not the unscoped aircraft_sorties tree).
     pub(crate) fn aircraft_usage(
         &self,
         round: RoundId,
@@ -2728,33 +2733,29 @@ impl StatsDb {
     ) -> Result<Vec<(std::string::String, u32, f32)>> {
         use std::collections::HashMap;
         let mut map: HashMap<std::string::String, (u32, f32)> = HashMap::new();
-        for r in self.pilots.round_info.iter() {
-            let ((ucid, rid), ri) = r?;
+        for sr in self.pilots.sortie.iter() {
+            let ((ucid, rid, sid), s) = sr?;
             if rid != round {
                 continue;
             }
-            let side = match ri.side.1 {
-                Side::Blue | Side::Red => ri.side.1,
-                _ => self.pilot_current_side(&ucid)?.unwrap_or(Side::Neutral),
+            let Some(side) = self.sortie_coalition(&ucid, round, sid)? else {
+                continue;
             };
             if let Some(want) = side_filter {
                 if side != want {
                     continue;
                 }
             }
-            for sr in self.pilots.sortie.scan_prefix(&(ucid, round))? {
-                let ((_, _, _), s) = sr?;
-                let hours = match s.land {
-                    Some(land) => {
-                        let end = if land < s.takeoff { s.takeoff } else { land };
-                        ((end - s.takeoff).num_seconds().max(0) as f32) / 3600.0
-                    }
-                    None => 0.0,
-                };
-                let e = map.entry(s.vehicle.to_string()).or_insert((0, 0.0));
-                e.0 += 1;
-                e.1 += hours;
-            }
+            let hours = match s.land {
+                Some(land) => {
+                    let end = if land < s.takeoff { s.takeoff } else { land };
+                    ((end - s.takeoff).num_seconds().max(0) as f32) / 3600.0
+                }
+                None => 0.0,
+            };
+            let e = map.entry(s.vehicle.to_string()).or_insert((0, 0.0));
+            e.0 += 1;
+            e.1 += hours;
         }
         let mut result: Vec<_> = map
             .into_iter()
@@ -2766,6 +2767,21 @@ impl StatsDb {
                 .then(b.1.cmp(&a.1))
         });
         Ok(result)
+    }
+
+    /// Blue/Red for one sortie: stamped takeoff side, else round_info (legacy).
+    fn sortie_coalition(
+        &self,
+        ucid: &Ucid,
+        round: RoundId,
+        sid: SortieId,
+    ) -> Result<Option<Side>> {
+        if let Some(side) = self.pilots.sortie_side.get(&(*ucid, round, sid))? {
+            if matches!(side, Side::Blue | Side::Red) {
+                return Ok(Some(side));
+            }
+        }
+        self.pilot_side_in_round(ucid, round)
     }
 
     /// Get connected pilots for a round with name, side, and current aircraft type
@@ -3568,6 +3584,7 @@ impl StatsDb {
             self.pilots.sortie.remove(k)?;
             let _ = self.pilots.sortie_crashed.remove(k)?;
             let _ = self.pilots.sortie_restart.remove(k)?;
+            let _ = self.pilots.sortie_side.remove(k)?;
         }
 
         let mut sk: Vec<(Ucid, RoundId, KillId)> = Vec::new();
@@ -3776,7 +3793,7 @@ impl StatsDb {
         Ok(result)
     }
 
-    /// Blue/Red for a pilot in one round (same source as aircraft_usage).
+    /// Blue/Red for a pilot in one round (legacy fallback for unstamped sorties).
     pub(crate) fn pilot_side_in_round(
         &self,
         ucid: &Ucid,
@@ -3788,6 +3805,16 @@ impl StatsDb {
             .get(&(*ucid, round))?
             .map(|ri| ri.side.1)
             .filter(|s| matches!(s, Side::Blue | Side::Red)))
+    }
+
+    /// Blue/Red for one sortie (takeoff stamp, else round_info).
+    pub(crate) fn pilot_sortie_side(
+        &self,
+        ucid: &Ucid,
+        round: RoundId,
+        sid: SortieId,
+    ) -> Result<Option<Side>> {
+        self.sortie_coalition(ucid, round, sid)
     }
 
     /// Per-round aggregates for a pilot, enriched with scenario name
@@ -4650,7 +4677,9 @@ impl StatsDb {
                 self.finalize_all_open_sorties(id, ctx.round, time, true)?;
                 let sid = SortieId::new(&self.db)?;
                 let mut vehicle = None;
+                let mut takeoff_side = Side::Neutral;
                 self.pilots.with_pilot_round_info(id, ctx.round, |ri| {
+                    takeoff_side = ri.side.1;
                     if let Some(sl) = ri.slot.as_mut() {
                         sl.sortie = Some(sid);
                         vehicle = sl.vehicle.clone()
@@ -4672,6 +4701,12 @@ impl StatsDb {
                         vehicle,
                     },
                 )?;
+                // Stamp coalition at takeoff so side-switch does not recolor past legs.
+                if matches!(takeoff_side, Side::Blue | Side::Red) {
+                    self.pilots
+                        .sortie_side
+                        .insert(&(id, ctx.round, sid), &takeoff_side)?;
+                }
                 self.touch_pilot_activity(id, ctx.round, time)?;
             }
             Stat::Land { id } => {
@@ -4983,6 +5018,7 @@ impl StatsDb {
         self.pilots.sortie.clear()?;
         self.pilots.sortie_crashed.clear()?;
         self.pilots.sortie_restart.clear()?;
+        self.pilots.sortie_side.clear()?;
         self.pilots.agg_ship_kills.clear()?;
         self.pilots.pilot_ship_kills.clear()?;
         self.pilots.agg_ground_air_kills.clear()?;
@@ -5054,6 +5090,7 @@ impl StatsDb {
         self.pilots.sortie.clear()?;
         self.pilots.sortie_crashed.clear()?;
         self.pilots.sortie_restart.clear()?;
+        self.pilots.sortie_side.clear()?;
         self.pilots.agg_ship_kills.clear()?;
         self.pilots.pilot_ship_kills.clear()?;
         self.pilots.agg_ground_air_kills.clear()?;

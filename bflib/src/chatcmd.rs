@@ -291,6 +291,18 @@ fn delete_command(ctx: &mut Context, id: PlayerId, s: &str) {
                         cost_fraction,
                         origin,
                     } => {
+                        let min_m = ctx.db.ephemeral.cfg.deployable_delete_min_enemy_distance_m;
+                        match ctx.db.enemy_blocks_deployable_delete(&id, min_m) {
+                            Err(e) => {
+                                reply!("could not check enemy proximity for {id} {e:?}");
+                                return;
+                            }
+                            Ok(true) => {
+                                reply!("delete denied: enemy units in the area");
+                                return;
+                            }
+                            Ok(false) => {}
+                        }
                         let player = player.clone();
                         let points = (spec.cost as f32 / 2.).ceil() as i32;
                         let cost_fraction = *cost_fraction;
@@ -326,6 +338,18 @@ fn delete_command(ctx: &mut Context, id: PlayerId, s: &str) {
                         cost_fraction,
                         ..
                     } => {
+                        let min_m = ctx.db.ephemeral.cfg.deployable_delete_min_enemy_distance_m;
+                        match ctx.db.enemy_blocks_deployable_delete(&id, min_m) {
+                            Err(e) => {
+                                reply!("could not check enemy proximity for {id} {e:?}");
+                                return;
+                            }
+                            Ok(true) => {
+                                reply!("delete denied: enemy units in the area");
+                                return;
+                            }
+                            Ok(false) => {}
+                        }
                         let player = player.clone();
                         let points = (spec.cost as f32 / 2.).ceil() as i32;
                         let cost_fraction = *cost_fraction;

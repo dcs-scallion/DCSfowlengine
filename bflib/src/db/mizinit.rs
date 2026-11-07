@@ -179,6 +179,7 @@ impl Db {
             static_repair_need: 0,
             static_repair: 0,
             static_repair_due: Utc::now(),
+            static_repair_progress: 0,
             spawnable_logi_repaired: true,
             last_change_ts: Utc::now(),
             last_threatened_ts: Utc::now(),
@@ -769,6 +770,7 @@ impl Db {
             t.ephemeral.defer_initial_hub_distribute = true;
             t.ephemeral.defer_initial_logistics_sync_to = true;
         }
+        t.sync_objective_jtacs_from_cfg();
         t.ephemeral.dirty();
         Ok(t)
     }
@@ -784,6 +786,7 @@ impl Db {
     ) -> Result<()> {
         debug!("init slots");
         self.build_carrier_slot_maps(miz)?;
+        self.sync_objective_jtacs_from_cfg();
         self.sync_production_static_uid_map(lua)
             .context("syncing production factory static object ids after load")?;
         self.apply_persisted_production_factory_statics(lua)

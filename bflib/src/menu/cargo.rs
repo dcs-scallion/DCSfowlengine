@@ -48,7 +48,7 @@ fn unpakistan(lua: MizLua, gid: GroupId) -> Result<()> {
                 Unpakistan::Unpacked(_, _)
                 | Unpakistan::UnpackedFarp(_, _)
                 | Unpakistan::TransferedSupplies(_, _) => "crate_unpack",
-                Unpakistan::Repaired(_)
+                Unpakistan::Repaired(_, _)
                 | Unpakistan::RepairedBase(_, _)
                 | Unpakistan::RepairedProduction(_, _)
                 | Unpakistan::RepairedStaticQueue(_, _, _) => "repair",

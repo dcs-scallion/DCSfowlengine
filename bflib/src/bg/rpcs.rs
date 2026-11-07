@@ -54,6 +54,11 @@ pub struct Rpcs {
     _resolve_player_id: Proc,
     _jtac_list: Proc,
     _jtac_action: Proc,
+    _cargo_list: Proc,
+    _cargo_action: Proc,
+    _cargo_spawn_crate: Proc,
+    _main_list: Proc,
+    _main_transfer: Proc,
     _player_side_info: Proc,
     _player_side_switch: Proc,
     _mark_web_linked: Proc,
@@ -599,6 +604,130 @@ impl Rpcs {
             body: Chars = Value::Null; "JSON object with jtac_id, action, and action params"
         )?;
         let _q = Arc::clone(&q);
+        let cargo_list = define_rpc!(
+            publisher,
+            base.append("cargo-list"),
+            "List spawnable crates / troops for the calling player (JSON)",
+            |mut c: RpcCall, ucid: Chars| {
+                let (tx, rx) = oneshot::channel();
+                let ucid = match Ucid::from_str(&ucid) {
+                    Ok(ucid) => ucid,
+                    Err(e) => {
+                        c.reply.send(Value::Error(format!("{e:?}").into()));
+                        return None
+                    }
+                };
+                _q.push((AdminCommand::CargoList { ucid }, tx));
+                Some((c, rx))
+            },
+            Some(wait.clone()),
+            ucid: Chars = Value::Null; "The calling player's ucid"
+        )?;
+        let _q = Arc::clone(&q);
+        let cargo_action = define_rpc!(
+            publisher,
+            base.append("cargo-action"),
+            "Run one F10-parity cargo/troops action for the calling player (JSON body)",
+            |mut c: RpcCall, ucid: Chars, body: Chars| {
+                let (tx, rx) = oneshot::channel();
+                let ucid = match Ucid::from_str(&ucid) {
+                    Ok(ucid) => ucid,
+                    Err(e) => {
+                        c.reply.send(Value::Error(format!("{e:?}").into()));
+                        return None
+                    }
+                };
+                _q.push((
+                    AdminCommand::CargoAction {
+                        ucid,
+                        body: body.as_ref().into(),
+                    },
+                    tx,
+                ));
+                Some((c, rx))
+            },
+            Some(wait.clone()),
+            ucid: Chars = Value::Null; "The calling player's ucid",
+            body: Chars = Value::Null; "JSON object with action and params"
+        )?;
+        // Alias used by bfdb POST /api/cockpit/cargo/spawn
+        let _q = Arc::clone(&q);
+        let cargo_spawn_crate = define_rpc!(
+            publisher,
+            base.append("cargo-spawn-crate"),
+            "Spawn qty copies of a named crate for the calling player",
+            |mut c: RpcCall, ucid: Chars, crate_name: Chars, qty: i64, _c130: bool| {
+                let (tx, rx) = oneshot::channel();
+                let ucid = match Ucid::from_str(&ucid) {
+                    Ok(ucid) => ucid,
+                    Err(e) => {
+                        c.reply.send(Value::Error(format!("{e:?}").into()));
+                        return None
+                    }
+                };
+                let qty = if qty < 1 { 1u32 } else { qty as u32 };
+                let body = format!(
+                    "{{\"action\":\"spawn\",\"crate_name\":{},\"qty\":{}}}",
+                    serde_json::Value::String(crate_name.as_ref().into()),
+                    qty
+                );
+                _q.push((AdminCommand::CargoAction { ucid, body }, tx));
+                Some((c, rx))
+            },
+            Some(wait.clone()),
+            ucid: Chars = Value::Null; "The calling player's ucid",
+            crate_name: Chars = Value::Null; "Crate name from CFG",
+            qty: i64 = Value::from(1i64); "How many crates to spawn",
+            c130: bool = Value::False; "Ignored (reserved)"
+        )?;
+        let _q = Arc::clone(&q);
+        let main_list = define_rpc!(
+            publisher,
+            base.append("main-list"),
+            "MAIN cockpit panel: identity, lives, points, time, transfer targets (JSON)",
+            |mut c: RpcCall, ucid: Chars| {
+                let (tx, rx) = oneshot::channel();
+                let ucid = match Ucid::from_str(&ucid) {
+                    Ok(ucid) => ucid,
+                    Err(e) => {
+                        c.reply.send(Value::Error(format!("{e:?}").into()));
+                        return None
+                    }
+                };
+                _q.push((AdminCommand::MainList { ucid }, tx));
+                Some((c, rx))
+            },
+            Some(wait.clone()),
+            ucid: Chars = Value::Null; "The calling player's ucid"
+        )?;
+        let _q = Arc::clone(&q);
+        let main_transfer = define_rpc!(
+            publisher,
+            base.append("main-transfer"),
+            "Transfer points to a same-side player or objective (JSON body)",
+            |mut c: RpcCall, ucid: Chars, body: Chars| {
+                let (tx, rx) = oneshot::channel();
+                let ucid = match Ucid::from_str(&ucid) {
+                    Ok(ucid) => ucid,
+                    Err(e) => {
+                        c.reply.send(Value::Error(format!("{e:?}").into()));
+                        return None
+                    }
+                };
+                _q.push((
+                    AdminCommand::MainTransfer {
+                        ucid,
+                        body: body.as_ref().into(),
+                    },
+                    tx,
+                ));
+                Some((c, rx))
+            },
+            Some(wait.clone()),
+            ucid: Chars = Value::Null; "The calling player's ucid",
+            body: Chars = Value::Null; "JSON { kind, target, amount }"
+        )?;
+        let _q = Arc::clone(&q);
         let player_side_info = define_rpc!(
             publisher,
             base.append("player-side-info"),
@@ -752,6 +881,11 @@ impl Rpcs {
             _resolve_player_id: resolve_player_id,
             _jtac_list: jtac_list,
             _jtac_action: jtac_action,
+            _cargo_list: cargo_list,
+            _cargo_action: cargo_action,
+            _cargo_spawn_crate: cargo_spawn_crate,
+            _main_list: main_list,
+            _main_transfer: main_transfer,
             _player_side_info: player_side_info,
             _player_side_switch: player_side_switch,
             _mark_web_linked: mark_web_linked,

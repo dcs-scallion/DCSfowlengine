@@ -121,6 +121,26 @@ fn ui_jtac_dead(db: &mut Db, side: Side, gid: JtId) {
     )
 }
 
+fn objective_jtac_label(db: &Db, gid: JtId) -> Option<CompactString> {
+    match gid {
+        JtId::Group(g) if db.is_objective_jtac_group(&g) => db
+            .objective_name_for_group(&g)
+            .map(|n| format_compact!("{n} JTAC")),
+        _ => None,
+    }
+}
+
+fn objective_jtac_culled(db: &Db, gid: &JtId) -> bool {
+    match gid {
+        JtId::Group(g) => {
+            db.is_objective_jtac_group(g)
+                && db.persisted.groups.get(g).is_some()
+                && !db.group_instanced(g)
+        }
+        JtId::Slot(_) => false,
+    }
+}
+
 simple_enum!(AdjustmentDir, u8, [
     Short => 0,
     Long => 1,
@@ -134,6 +154,18 @@ pub struct ArtilleryAdjustment {
     target: Vector2,
     group: Vec<DcsOid<ClassUnit>>,
     tracked: Option<(Weapon<'static>, Option<Vector3>)>,
+}
+
+/// JTAC artillery FireAtPoint zone radius (meters). CFG later if needed.
+pub const TARGET_RADIUS_MIN_M: f64 = 0.0;
+pub const TARGET_RADIUS_MAX_M: f64 = 500.0;
+pub const TARGET_RADIUS_DEFAULT_M: f64 = 0.0;
+
+fn clamp_target_radius_m(m: f64) -> f64 {
+    if !m.is_finite() {
+        return TARGET_RADIUS_DEFAULT_M;
+    }
+    m.clamp(TARGET_RADIUS_MIN_M, TARGET_RADIUS_MAX_M)
 }
 
 type LocByCode = FxHashMap<Side, FxHashMap<ObjectiveId, FxHashMap<u16, FxHashSet<JtId>>>>;
@@ -244,6 +276,8 @@ pub struct Jtac {
     autoshift: Option<usize>,
     ir_pointer: bool,
     code: u16,
+    /// FireAtPoint radius / zoneRadius (m) for artillery missions from this JTAC.
+    target_radius_m: f64,
     last_smoke: DateTime<Utc>,
     nearby_artillery: SmallVec<[GroupId; 8]>,
     nearby_calcm: SmallVec<[(GroupId, i32); 8]>,
@@ -272,12 +306,37 @@ impl Jtac {
             autoshift: None,
             ir_pointer: false,
             code: default_code,
+            target_radius_m: TARGET_RADIUS_DEFAULT_M,
             last_smoke: DateTime::<Utc>::default(),
             nearby_artillery: smallvec![],
             nearby_calcm: smallvec![],
             menu_dirty: false,
             air,
         }
+    }
+
+    pub fn target_radius_m(&self) -> f64 {
+        clamp_target_radius_m(self.target_radius_m)
+    }
+
+    fn set_target_radius_m(&mut self, meters: f64) -> Result<()> {
+        if !meters.is_finite() {
+            bail!("target radius must be a finite number");
+        }
+        if meters < TARGET_RADIUS_MIN_M || meters > TARGET_RADIUS_MAX_M {
+            bail!(
+                "target radius {meters} m out of range {}-{} m",
+                TARGET_RADIUS_MIN_M,
+                TARGET_RADIUS_MAX_M
+            );
+        }
+        self.target_radius_m = meters;
+        self.menu_dirty = true;
+        Ok(())
+    }
+
+    fn fire_zone_radius(&self) -> Option<f64> {
+        Some(self.target_radius_m())
     }
 
     pub fn status(&self, db: &Db, loc_by_code: &LocByCode) -> Result<CompactString> {
@@ -707,7 +766,7 @@ impl Jtac {
                 let pos = pos + adjustment.adjust;
                 let task = Task::FireAtPoint {
                     point: LuaVec2(pos),
-                    radius: None,
+                    radius: self.fire_zone_radius(),
                     expend_qty: Some(n as i64),
                     weapon_type: None,
                     altitude: Some(0.),
@@ -802,7 +861,7 @@ impl Jtac {
                     
                     let task = Task::FireAtPoint {
                         point: LuaVec2(pos),
-                        radius: None,
+                        radius: self.fire_zone_radius(),
                         expend_qty: Some(rounds_per_target as i64),
                         weapon_type: None,
                         altitude: Some(0.),
@@ -1033,7 +1092,7 @@ impl Jtac {
                     let pos = Vector2::new(target.pos.x, target.pos.z);
                     Task::FireAtPoint {
                         point: LuaVec2(pos),
-                        radius: None,
+                        radius: self.fire_zone_radius(),
                         expend_qty: None,
                         weapon_type: None,
                         altitude: Some(0.),
@@ -1450,6 +1509,10 @@ impl Jtacs {
         Ok(())
     }
 
+    pub fn set_target_radius_m(&mut self, gid: &JtId, meters: f64) -> Result<()> {
+        self.get_mut(gid)?.set_target_radius_m(meters)
+    }
+
     pub fn jtac_targets<'a>(&'a self) -> impl Iterator<Item = EnId> + 'a {
         self.jtacs.values().flat_map(|j| {
             j.values()
@@ -1755,7 +1818,13 @@ impl Jtacs {
             if !unit.tags.contains(jtac.filter) {
                 lost!();
             }
-            if unit.airborne_velocity.is_some() && !unit.tags.contains(UnitTag::Helicopter) {
+            // Fixed-wing: parked / taxi only. Helicopters: air or ground.
+            let airborne = unit.airborne_velocity.is_some();
+            if unit.tags.contains(UnitTag::Aircraft) {
+                if airborne {
+                    lost!();
+                }
+            } else if airborne && !unit.tags.contains(UnitTag::Helicopter) {
                 lost!();
             }
             if let Some(ct) = jtac.contacts.get(&id) {
@@ -1866,7 +1935,12 @@ impl Jtacs {
                 }
                 continue;
             }
-            if inst.in_air && !tags.contains(UnitTag::Helicopter) {
+            // Fixed-wing: parked / taxi only. Helicopters: air or ground.
+            if tags.contains(UnitTag::Aircraft) {
+                if inst.in_air {
+                    continue;
+                }
+            } else if inst.in_air && !tags.contains(UnitTag::Helicopter) {
                 continue;
             }
             let mut aim = inst.position.p.0;
@@ -1914,10 +1988,13 @@ impl Jtacs {
         for (side, jtx) in self.jtacs.iter_mut() {
             jtx.retain(|gid, jt| {
                 saw_jtacs.contains(gid) || {
+                    let silent = objective_jtac_culled(db, gid);
                     if let Err(e) = jt.remove_target(db, lua) {
                         warn!("2 could not remove jtac target {:?}", e)
                     }
-                    ui_jtac_dead(db, *side, *gid);
+                    if !silent {
+                        ui_jtac_dead(db, *side, *gid);
+                    }
                     Self::remove_code_by_location(
                         &mut self.code_by_location,
                         jt.side,
@@ -1962,16 +2039,30 @@ impl Jtacs {
         for (side, gid, uid) in lost_targets {
             match uid {
                 Some(uid) => match self.get_mut(&gid)?.remove_contact(lua, db, &uid) {
-                    Ok(_) => (),
+                    Ok(was_target) => {
+                        if was_target {
+                            let text = match objective_jtac_label(db, gid) {
+                                Some(pfx) => format_compact!("{pfx}: target lost"),
+                                None => format_compact!("JTAC {gid} target lost"),
+                            };
+                            db.ephemeral.msgs().panel_to_side(10, false, side, text);
+                        } else if let Some(pfx) = objective_jtac_label(db, gid) {
+                            db.ephemeral.msgs().panel_to_side(
+                                10,
+                                false,
+                                side,
+                                format_compact!("{pfx}: contact lost"),
+                            );
+                        }
+                    }
                     Err(e) => warn!("3 could not remove jtac target {uid} {:?}", e),
                 },
                 None => {
-                    db.ephemeral.msgs().panel_to_side(
-                        10,
-                        false,
-                        side,
-                        format_compact!("JTAC {gid} target lost"),
-                    );
+                    let text = match objective_jtac_label(db, gid) {
+                        Some(pfx) => format_compact!("{pfx}: target lost"),
+                        None => format_compact!("JTAC {gid} target lost"),
+                    };
+                    db.ephemeral.msgs().panel_to_side(10, false, side, text);
                 }
             }
         }
@@ -1996,6 +2087,10 @@ impl Jtacs {
             let msg = jtac
                 .status(db, &self.code_by_location)
                 .with_context(|| format_compact!("generating jtac status for {}", jtac.gid))?;
+            let msg = match objective_jtac_label(db, jtac.gid) {
+                Some(pfx) => format_compact!("{pfx}\n{msg}"),
+                None => msg,
+            };
             msgs.push((jtac.side, msg))
         }
         for (side, msg) in msgs {
@@ -2013,5 +2108,136 @@ impl Jtacs {
             }
         }
         Ok(std::mem::take(&mut self.menu_dirty))
+    }
+
+    /// Objective defense JTACs: auto FireAtPoint on current ground target.
+    pub fn autofire_objective_jtacs(
+        &mut self,
+        db: &mut Db,
+        lua: MizLua,
+        now: DateTime<Utc>,
+    ) {
+        if !db.ephemeral.cfg.objective_jtac_autofire {
+            return;
+        }
+        let rounds = db.ephemeral.cfg.objective_jtac_autofire_rounds;
+        if rounds == 0 {
+            return;
+        }
+        let cooldown =
+            Duration::seconds(db.ephemeral.cfg.objective_jtac_autofire_cooldown_secs as i64);
+        let mut jobs: SmallVec<[(JtId, Side, GroupId); 16]> = smallvec![];
+        for jtac in self.jtacs() {
+            let JtId::Group(jg) = jtac.gid else {
+                continue;
+            };
+            if !db.is_objective_jtac_group(&jg) {
+                continue;
+            }
+            let Some(target) = jtac.target.as_ref() else {
+                continue;
+            };
+            let Some(ct) = jtac.contacts.get(&target.id) else {
+                continue;
+            };
+            if ct.tags.contains(UnitTag::Helicopter) {
+                continue;
+            }
+            let tpos = Vector2::new(target.pos.x, target.pos.z);
+            for agid in db.artillery_near_point(jtac.side, tpos) {
+                if db
+                    .ephemeral
+                    .objective_jtac_autofire_at
+                    .get(&agid)
+                    .is_some_and(|t| now.signed_duration_since(*t) < cooldown)
+                {
+                    continue;
+                }
+                if db.ensure_artillery_fire_range(&agid, tpos).is_err() {
+                    continue;
+                }
+                jobs.push((jtac.gid, jtac.side, agid));
+                break;
+            }
+        }
+        for (jtid, side, agid) in jobs {
+            let (tpos, radius) = match self.get(&jtid) {
+                Ok(jt) => match jt.target.as_ref() {
+                    Some(t) => (
+                        Vector2::new(t.pos.x, t.pos.z),
+                        jt.fire_zone_radius(),
+                    ),
+                    None => continue,
+                },
+                Err(e) => {
+                    warn!("objective jtac autofire missing {jtid}: {e:?}");
+                    continue;
+                }
+            };
+            let name = match db.group(&agid) {
+                Ok(g) => g.name.clone(),
+                Err(e) => {
+                    warn!("objective jtac autofire arty {agid}: {e:?}");
+                    continue;
+                }
+            };
+            let apos = match db.group_center(&agid) {
+                Ok(p) => p,
+                Err(e) => {
+                    warn!("objective jtac autofire center {agid}: {e:?}");
+                    continue;
+                }
+            };
+            let fire = Task::FireAtPoint {
+                point: LuaVec2(tpos),
+                radius,
+                expend_qty: Some(rounds as i64),
+                weapon_type: None,
+                altitude: Some(0.),
+                altitude_type: Some(AltType::RADIO),
+            };
+            let mission = Task::Mission {
+                airborne: Some(false),
+                route: vec![MissionPoint {
+                    action: Some(ActionTyp::Ground(VehicleFormation::OffRoad)),
+                    typ: PointType::TurningPoint,
+                    airdrome_id: None,
+                    helipad: None,
+                    time_re_fu_ar: None,
+                    link_unit: None,
+                    pos: LuaVec2(apos),
+                    alt: 0.,
+                    alt_typ: Some(AltType::RADIO),
+                    speed: 0.,
+                    speed_locked: None,
+                    eta: None,
+                    eta_locked: None,
+                    name: None,
+                    parking: None,
+                    task: Box::new(fire),
+                }],
+            };
+            let fired = (|| -> Result<()> {
+                let group = Group::get_by_name(lua, &name)
+                    .with_context(|| format_compact!("getting group {name}"))?;
+                let con = group.get_controller().context("getting controller")?;
+                con.set_task(mission)?;
+                Ok(())
+            })();
+            match fired {
+                Ok(()) => {
+                    db.ephemeral.objective_jtac_autofire_at.insert(agid, now);
+                    if let Some(pfx) = objective_jtac_label(db, jtid) {
+                        db.ephemeral.msgs().panel_to_side(
+                            10,
+                            false,
+                            side,
+                            format_compact!("{pfx}: firing on contact"),
+                        );
+                    }
+                }
+                Err(e) => warn!("objective jtac autofire {jtid} -> {agid}: {e:?}"),
+            }
+        }
     }
 }

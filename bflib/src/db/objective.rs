@@ -526,6 +526,9 @@ pub struct Objective {
     /// Queued repair crates for ME static respawn.
     #[serde(default)]
     pub(super) static_repair: u16,
+    /// Crates already applied toward the next dead ME static (multi-crate CFG costs).
+    #[serde(default)]
+    pub(super) static_repair_progress: u16,
     /// Next ME static repair tick (`static_repair` = queued crates).
     #[serde(default)]
     pub(super) static_repair_due: DateTime<Utc>,
@@ -637,6 +640,11 @@ impl Objective {
 
     pub(super) fn show_static_repair_in_markup(&self) -> bool {
         self.spawnable_logi_repaired && self.static_repair_need > 0
+    }
+
+    /// OPR: same gate as ME static Repair on OFO/OAB/OLO — hide when undamaged.
+    pub(super) fn show_production_repair_in_markup(&self) -> bool {
+        matches!(self.kind, ObjectiveKind::Production) && self.production_repair_need > 0
     }
 
     pub fn captureable(&self) -> bool {
@@ -903,8 +911,17 @@ impl Db {
         best_out.map(|(o, _)| o)
     }
 
+    fn objective_static_repair_crate_cost(&self, unit: &SpawnedUnit) -> u16 {
+        self.ephemeral
+            .cfg
+            .objective_static_units
+            .get(unit.typ.as_str())
+            .map(|c| c.repair_crates.max(1))
+            .unwrap_or(1)
+    }
+
     fn compute_static_repair_need(&self, obj: &Objective) -> Result<u16> {
-        let mut need = 0u16;
+        let mut targets: SmallVec<[(UnitId, i64, CompactString, u16); 8]> = smallvec![];
         for (_, groups) in &obj.groups {
             for gid in groups {
                 let group = group!(self, gid)?;
@@ -912,10 +929,25 @@ impl Db {
                     continue;
                 }
                 for uid in &group.units {
-                    if unit!(self, uid)?.dead {
-                        need = need.saturating_add(1);
+                    let unit = unit!(self, uid)?;
+                    if unit.dead {
+                        targets.push((
+                            *uid,
+                            self.objective_static_durability(unit),
+                            CompactString::from(unit.name.as_str()),
+                            self.objective_static_repair_crate_cost(unit),
+                        ));
                     }
                 }
+            }
+        }
+        targets.sort_by(|a, b| a.1.cmp(&b.1).then_with(|| a.2.cmp(&b.2)));
+        let mut need = 0u16;
+        for (i, (_, _, _, cost)) in targets.iter().enumerate() {
+            if i == 0 {
+                need = need.saturating_add(cost.saturating_sub(obj.static_repair_progress));
+            } else {
+                need = need.saturating_add(*cost);
             }
         }
         Ok(need)
@@ -1613,6 +1645,7 @@ impl Db {
             production_repair_due: now,
             static_repair_need: 0,
             static_repair: 0,
+            static_repair_progress: 0,
             static_repair_due: now,
             spawnable_logi_repaired: true,
             spawned: true,
@@ -1841,6 +1874,10 @@ impl Db {
                     || obj.spawnable_logi_repaired != spawnable_ok;
                 obj.static_repair_need = static_need;
                 obj.spawnable_logi_repaired = spawnable_ok;
+                if static_need == 0 && obj.static_repair_progress != 0 {
+                    obj.static_repair_progress = 0;
+                    changed = true;
+                }
                 if obj.static_repair > obj.static_repair_need {
                     obj.static_repair = obj.static_repair_need;
                     changed = true;
@@ -2530,7 +2567,7 @@ impl Db {
             .into_iter()
             .flat_map(|(_, gs)| gs.into_iter().copied())
             .collect();
-        let mut targets: SmallVec<[(UnitId, i64, CompactString); 8]> = smallvec![];
+        let mut targets: SmallVec<[(UnitId, i64, CompactString, u16); 8]> = smallvec![];
         for gid in &gids {
             let group = group!(self, gid)?;
             if group.class != ObjGroupClass::ObjectiveStatic {
@@ -2543,16 +2580,24 @@ impl Db {
                         *uid,
                         self.objective_static_durability(unit),
                         CompactString::from(unit.name.as_str()),
+                        self.objective_static_repair_crate_cost(unit),
                     ));
                 }
             }
         }
         targets.sort_by(|a, b| a.1.cmp(&b.1).then_with(|| a.2.cmp(&b.2)));
-        let Some((uid, _, _)) = targets.first() else {
+        let Some((uid, _, _, cost)) = targets.first().cloned() else {
             return Ok(false);
         };
-        let uid = *uid;
-        self.respawn_objective_static_with_owner(lua, spctx, idx, uid, owner)?;
+        let progress = objective!(self, oid)?
+            .static_repair_progress
+            .saturating_add(1);
+        if progress >= cost {
+            self.respawn_objective_static_with_owner(lua, spctx, idx, uid, owner)?;
+            objective_mut!(self, oid)?.static_repair_progress = 0;
+        } else {
+            objective_mut!(self, oid)?.static_repair_progress = progress;
+        }
         let _ = now;
         Ok(true)
     }
@@ -2709,6 +2754,7 @@ impl Db {
                 if previous_owner != new_owner {
                     // Queued ME static repairs belong to the previous owner; cancel on flip.
                     obj.static_repair = 0;
+                    obj.static_repair_progress = 0;
                     obj.static_repair_due = now;
                 }
                 actually_captured.push((*side, oid));

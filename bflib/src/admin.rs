@@ -197,6 +197,24 @@ pub enum AdminCommand {
         ucid: Ucid,
         body: std::string::String,
     },
+    /// Attrition cockpit: cargo/troops catalogue for the calling player (JSON)
+    CargoList {
+        ucid: Ucid,
+    },
+    /// Attrition cockpit: run one F10-parity cargo/troops action (JSON body)
+    CargoAction {
+        ucid: Ucid,
+        body: std::string::String,
+    },
+    /// Attrition cockpit: MAIN panel (name, lives, points, time, transfer targets)
+    MainList {
+        ucid: Ucid,
+    },
+    /// Attrition cockpit: transfer points to player or objective (JSON body)
+    MainTransfer {
+        ucid: Ucid,
+        body: std::string::String,
+    },
     /// Dashboard MY PROFILE: side + remaining side_switches for a UCID
     PlayerSideInfo {
         ucid: Ucid,
@@ -824,6 +842,12 @@ pub(super) fn admin_shutdown(
                     miz_path: &miz_path,
                     new_campaign,
                     weather_index,
+                    scheduled_restart: ctx
+                        .db
+                        .ephemeral
+                        .cfg
+                        .dcsserver_bot_scheduled_restart
+                        .as_ref(),
                 };
                 match crate::setmission::maybe_spawn(args) {
                     Ok(Some(outcome)) => {
@@ -1805,6 +1829,30 @@ pub(super) fn run_admin_commands(ctx: &mut Context, lua: MizLua) -> Result<Admin
             },
             AdminCommand::JtacAction { ucid, body } => {
                 match crate::cockpit_jtac::run_jtac_action(ctx, lua, ucid, body.as_str()) {
+                    Ok(msg) => replies.push(NetIdxValue::from(msg)),
+                    Err(e) => reply_err!("{e:#}"),
+                }
+            }
+            AdminCommand::CargoList { ucid } => {
+                match crate::cockpit_cargo::list_cargo_panel_for_ucid(ctx, &ucid) {
+                    Ok(json) => replies.push(NetIdxValue::from(json)),
+                    Err(e) => reply_err!("{e:#}"),
+                }
+            }
+            AdminCommand::CargoAction { ucid, body } => {
+                match crate::cockpit_cargo::run_cargo_action(ctx, lua, ucid, body.as_str()) {
+                    Ok(msg) => replies.push(NetIdxValue::from(msg)),
+                    Err(e) => reply_err!("{e:#}"),
+                }
+            }
+            AdminCommand::MainList { ucid } => {
+                match crate::cockpit_main::list_main_panel_for_ucid(ctx, &ucid) {
+                    Ok(json) => replies.push(NetIdxValue::from(json)),
+                    Err(e) => reply_err!("{e:#}"),
+                }
+            }
+            AdminCommand::MainTransfer { ucid, body } => {
+                match crate::cockpit_main::run_main_transfer(ctx, lua, ucid, body.as_str()) {
                     Ok(msg) => replies.push(NetIdxValue::from(msg)),
                     Err(e) => reply_err!("{e:#}"),
                 }

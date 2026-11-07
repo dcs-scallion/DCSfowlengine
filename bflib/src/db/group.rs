@@ -265,6 +265,58 @@ impl Db {
         ))
     }
 
+    /// True if enemy Deployed/Troop or player airframe (air/ground) is within `radius_m` of `gid`.
+    pub fn enemy_blocks_deployable_delete(&self, gid: &GroupId, radius_m: u32) -> Result<bool> {
+        if radius_m == 0 {
+            return Ok(false);
+        }
+        let group = group!(self, gid)?;
+        let side = group.side;
+        let center = self.group_center(gid)?;
+        let radius2 = (radius_m as f64).powi(2);
+        for (other_gid, other) in &self.persisted.groups {
+            if other_gid == gid || other.side == side {
+                continue;
+            }
+            match &other.origin {
+                DeployKind::Deployed { .. } | DeployKind::Troop { .. } => {}
+                _ => continue,
+            }
+            let has_live = other.units.into_iter().any(|uid| {
+                self.persisted
+                    .units
+                    .get(uid)
+                    .is_some_and(|u| !u.dead)
+            });
+            if !has_live {
+                continue;
+            }
+            let other_center = self.group_center(other_gid)?;
+            if na::distance_squared(&center.into(), &other_center.into()) <= radius2 {
+                return Ok(true);
+            }
+        }
+        for (_ucid, player, inst) in self.instanced_players() {
+            if player.side == side {
+                continue;
+            }
+            let is_airframe = match self.ephemeral.cfg.unit_classification.get(&inst.typ) {
+                Some(tags) => {
+                    tags.contains(UnitTag::Aircraft) || tags.contains(UnitTag::Helicopter)
+                }
+                None => false,
+            };
+            if !is_airframe {
+                continue;
+            }
+            let epos = Vector2::new(inst.position.p.x, inst.position.p.z);
+            if na::distance_squared(&center.into(), &epos.into()) <= radius2 {
+                return Ok(true);
+            }
+        }
+        Ok(false)
+    }
+
     #[allow(dead_code)]
     pub fn group_center3(&self, id: &GroupId) -> Result<Vector3> {
         let group = group!(self, id)?;
@@ -571,7 +623,9 @@ impl Db {
         self.persisted.groups_by_name.remove_cow(&group.name);
         self.persisted.groups_by_side.get_mut_cow(&group.side).map(|m| m.remove_cow(gid));
         match &group.origin {
-            DeployKind::ObjectiveDeprecated | DeployKind::Objective { .. } => (),
+            DeployKind::ObjectiveDeprecated | DeployKind::Objective { .. } => {
+                self.persisted.jtacs.remove_cow(gid);
+            }
             DeployKind::Action { marks, .. } => {
                 for id in marks {
                     self.ephemeral.msgs().delete_mark(*id);
@@ -1089,7 +1143,16 @@ impl Db {
             self.persisted.units_by_name.insert_cow(unit_name, uid);
         }
         match &mut spawned.origin {
-            DeployKind::ObjectiveDeprecated | DeployKind::Objective { .. } => (),
+            DeployKind::ObjectiveDeprecated | DeployKind::Objective { .. } => {
+                let is_obj_jtac = spawned.units.into_iter().any(|uid| {
+                    self.persisted.units.get(uid).is_some_and(|u| {
+                        self.ephemeral.cfg.objective_jtacs.contains_key(&u.typ)
+                    })
+                });
+                if is_obj_jtac {
+                    self.persisted.jtacs.insert_cow(gid);
+                }
+            }
             DeployKind::Action { spec, .. } => {
                 self.persisted.actions.insert_cow(gid);
                 match &spec.kind {
@@ -2897,13 +2960,74 @@ impl Db {
         group_health!(self, gid)
     }
 
+    /// Insert / refresh `persisted.jtacs` for objective groups with CFG spotter unit types.
+    pub fn sync_objective_jtacs_from_cfg(&mut self) {
+        if self.ephemeral.cfg.objective_jtacs.is_empty() {
+            return;
+        }
+        let mut dirty = false;
+        let gids: SmallVec<[GroupId; 64]> = self
+            .persisted
+            .groups
+            .into_iter()
+            .filter_map(|(gid, g)| {
+                matches!(g.origin, DeployKind::Objective { .. }).then_some(*gid)
+            })
+            .collect();
+        for gid in gids {
+            let Some(group) = self.persisted.groups.get(&gid) else {
+                continue;
+            };
+            let is_jtac = group.units.into_iter().any(|uid| {
+                self.persisted.units.get(uid).is_some_and(|u| {
+                    self.ephemeral.cfg.objective_jtacs.contains_key(&u.typ)
+                })
+            });
+            if is_jtac && !self.persisted.jtacs.contains(&gid) {
+                self.persisted.jtacs.insert_cow(gid);
+                dirty = true;
+            }
+        }
+        if dirty {
+            self.ephemeral.dirty();
+        }
+    }
+
+    pub fn objective_name_for_group(&self, gid: &GroupId) -> Option<CompactString> {
+        let group = self.persisted.groups.get(gid)?;
+        match &group.origin {
+            DeployKind::Objective { origin } => self
+                .persisted
+                .objectives
+                .get(origin)
+                .map(|o| CompactString::from(o.name())),
+            _ => None,
+        }
+    }
+
+    pub fn is_objective_jtac_group(&self, gid: &GroupId) -> bool {
+        let Some(group) = self.persisted.groups.get(gid) else {
+            return false;
+        };
+        matches!(group.origin, DeployKind::Objective { .. })
+            && group.units.into_iter().any(|uid| {
+                self.persisted.units.get(uid).is_some_and(|u| {
+                    self.ephemeral.cfg.objective_jtacs.contains_key(&u.typ)
+                })
+            })
+    }
+
+    pub fn group_instanced(&self, gid: &GroupId) -> bool {
+        self.ephemeral.object_id_by_gid.contains_key(gid)
+    }
+
     pub fn artillery_near_point(
         &self,
         side: Side,
         pos: Vector2,
     ) -> SmallVec<[GroupId; 8]> {
         let range2 = (self.ephemeral.cfg.artillery_mission_range as f64).powi(2);
-        let artillery = self
+        let mut artillery: SmallVec<[GroupId; 8]> = self
             .deployed()
             .filter_map(|group| {
                 if group.tags.contains(UnitTag::Artillery) && group.side == side {
@@ -2917,7 +3041,33 @@ impl Db {
                     None
                 }
             })
-            .collect::<SmallVec<[GroupId; 8]>>();
+            .collect();
+        // Spawned objective batteries (base defense SPH / MLRS).
+        if let Some(gids) = self.persisted.groups_by_side.get(&side) {
+            for gid in gids {
+                if artillery.contains(gid) {
+                    continue;
+                }
+                let Some(group) = self.persisted.groups.get(gid) else {
+                    continue;
+                };
+                if !matches!(group.origin, DeployKind::Objective { .. }) {
+                    continue;
+                }
+                if !group.tags.contains(UnitTag::Artillery) {
+                    continue;
+                }
+                if !self.group_instanced(gid) {
+                    continue;
+                }
+                let Ok(center) = self.group_center(gid) else {
+                    continue;
+                };
+                if na::distance_squared(&center.into(), &pos.into()) <= range2 {
+                    artillery.push(*gid);
+                }
+            }
+        }
         artillery
     }
 

@@ -117,7 +117,12 @@ pub(super) struct ObjectiveMarkup {
     owner_ring: MarkId,
     capturable_ring: MarkId,
     threatened_ring: MarkId,
-    label: MarkId,
+    /// Single name mark (FARP — owner only).
+    label: Option<MarkId>,
+    /// Name for Red when overlay is `SideFilter::All` (repair hidden if enemy).
+    label_red: Option<MarkId>,
+    /// Name for Blue when overlay is `SideFilter::All` (repair hidden if enemy).
+    label_blue: Option<MarkId>,
     /// Jedna statistika (FARP — vidí jen vlastník) nebo žádná při split.
     stats_label: Option<MarkId>,
     /// Statistika jen pro červenou stranu (když je markup `SideFilter::All`).
@@ -191,29 +196,81 @@ fn stat_value_column(value: &str) -> CompactString {
     }
 }
 
+/// Queued crates = filled checkbox; remaining need = empty (e.g. 2/4 → ☑☑☐☐).
 fn stat_repair_field(queued: u16, need: u16) -> CompactString {
-    format_compact!("{}/{}", queued, need)
+    let filled = queued.min(need) as usize;
+    let empty = need.saturating_sub(queued.min(need)) as usize;
+    let mut s = CompactString::with_capacity(filled + empty);
+    for _ in 0..filled {
+        s.push('☑');
+    }
+    for _ in 0..empty {
+        s.push('☐');
+    }
+    s
 }
 
 fn stat_plain_row(label: &'static str, value: &str) -> CompactString {
     format_compact!("{label}{STAT_PLAIN_LABEL_GAP}{value}")
 }
 
-fn stat_plain_repair_row(queued: u16, need: u16) -> CompactString {
-    stat_plain_row("Repair", stat_repair_field(queued, need).as_str())
+fn stat_plain_repair_row(label: &'static str, queued: u16, need: u16) -> CompactString {
+    stat_plain_row(label, stat_repair_field(queued, need).as_str())
+}
+
+/// Under name (after a blank line); None when undamaged. ⚠ = idle queue, ※ = crates queued.
+fn objective_repair_markup_line(obj: &Objective) -> Option<CompactString> {
+    let (label, queued, need) = if obj.show_production_repair_in_markup() {
+        (
+            "repair",
+            obj.production_repair,
+            obj.production_repair_slots_needed(),
+        )
+    } else if obj.show_static_repair_in_markup() {
+        (
+            "repair static",
+            obj.static_repair,
+            obj.static_repair_need,
+        )
+    } else {
+        return None;
+    };
+    let marker = if queued == 0 { "⚠ " } else { "※ " };
+    Some(format_compact!(
+        " {marker}{} ",
+        stat_plain_repair_row(label, queued, need)
+    ))
+}
+
+fn objective_name_markup_text(name: &str, obj: &Objective, include_repair: bool) -> CompactString {
+    if include_repair {
+        if let Some(repair) = objective_repair_markup_line(obj) {
+            // DCS F10: em dash is ~2x a Latin letter; match longer of name/repair visually.
+            let cols = name.chars().count().max(repair.chars().count()).max(1);
+            let width = (cols + 1) / 2;
+            let divider: CompactString = "—".repeat(width).into();
+            return format_compact!("{name}\n{divider}\n{repair}");
+        }
+    }
+    CompactString::from(name)
+}
+
+fn objective_shows_repair_under_name(obj: &Objective) -> bool {
+    obj.show_production_repair_in_markup() || obj.show_static_repair_in_markup()
+}
+
+/// Skip name (+ divider + repair when friendly viewer sees them) so infobars sit below.
+fn objective_stats_leading_newlines(obj: &Objective, limited: bool) -> &'static str {
+    if !limited && objective_shows_repair_under_name(obj) {
+        "\n\n\n\n"
+    } else {
+        "\n\n"
+    }
 }
 
 fn base_stats_points_and_static_repair(obj: &Objective) -> CompactString {
-    let points = stat_plain_row("Points", &format_compact!("{}", obj.points));
-    if obj.show_static_repair_in_markup() {
-        format_compact!(
-            "{}\n{}",
-            points,
-            stat_plain_repair_row(obj.static_repair, obj.static_repair_need),
-        )
-    } else {
-        points
-    }
+    // Repair line lives on the name mark (colored fill), not in transparent stats.
+    stat_plain_row("Points", &format_compact!("{}", obj.points))
 }
 
 /// Infobar row: `{bar}{gap}{value}{gap}{label}`.
@@ -253,26 +310,33 @@ fn objective_stats_text(
 ) -> CompactString {
     let get_idx = |val: u8| -> usize { (val as usize * 12 / 100).min(12) };
     let production = production_pct_for_display(cfg, persisted, obj);
+    let lead = objective_stats_leading_newlines(obj, limited);
     match (&obj.kind, limited) {
         (ObjectiveKind::Production, true) => {
-            format_compact!("\n\n{}", stat_infobar_row(BAR_LOOKUP[get_idx(production)], production, "Production"))
+            format_compact!(
+                "{}{}",
+                lead,
+                stat_infobar_row(BAR_LOOKUP[get_idx(production)], production, "Production")
+            )
         }
         (ObjectiveKind::Production, false) => {
             format_compact!(
-                "\n\n{}\n{}\n{}",
+                "{}{}\n{}",
+                lead,
                 stat_infobar_row(BAR_LOOKUP[get_idx(production)], production, "Production"),
-                stat_plain_row("Points", &format_compact!("{}", obj.points)),
-                stat_plain_repair_row(obj.production_repair, obj.production_repair_slots_needed()),
+                base_stats_points_and_static_repair(obj),
             )
         }
         (ObjectiveKind::Logistics, true) if !obj.is_occupied_logistics_hub() => format_compact!(
-            "\n\n{}\n{}\n{}",
+            "{}{}\n{}\n{}",
+            lead,
             stat_infobar_row(BAR_LOOKUP[get_idx(production)], production, "Production"),
             stat_infobar_row(BAR_LOOKUP[get_idx(obj.health)], obj.health, "Health"),
             stat_infobar_row(BAR_LOOKUP[get_idx(obj.logi)], obj.logi, "Logi"),
         ),
         (ObjectiveKind::Logistics, false) if !obj.is_occupied_logistics_hub() => format_compact!(
-            "\n\n{}\n{}\n{}\n{}\n{}\n{}",
+            "{}{}\n{}\n{}\n{}\n{}\n{}",
+            lead,
             stat_infobar_row(BAR_LOOKUP[get_idx(production)], production, "Production"),
             stat_infobar_row(BAR_LOOKUP[get_idx(obj.health)], obj.health, "Health"),
             stat_infobar_row(BAR_LOOKUP[get_idx(obj.logi)], obj.logi, "Logi"),
@@ -288,12 +352,14 @@ fn objective_stats_text(
             base_stats_points_and_static_repair(obj),
         ),
         (_, true) => format_compact!(
-            "\n\n{}\n{}",
+            "{}{}\n{}",
+            lead,
             stat_infobar_row(BAR_LOOKUP[get_idx(obj.health)], obj.health, "Health"),
             stat_infobar_row(BAR_LOOKUP[get_idx(obj.logi)], obj.logi, "Logi"),
         ),
         (_, false) => format_compact!(
-            "\n\n{}\n{}\n{}\n{}\n{}",
+            "{}{}\n{}\n{}\n{}\n{}",
+            lead,
             stat_infobar_row(BAR_LOOKUP[get_idx(obj.health)], obj.health, "Health"),
             stat_infobar_row(BAR_LOOKUP[get_idx(obj.logi)], obj.logi, "Logi"),
             stat_infobar_row(BAR_LOOKUP[get_idx(obj.supply)], obj.supply, "Supply"),
@@ -608,6 +674,38 @@ fn refresh_objective_stats_labels(
     }
 }
 
+fn refresh_objective_name_labels(msgq: &mut MsgQ, t: &ObjectiveMarkup, obj: &Objective) {
+    if let Some(id) = t.label {
+        msgq.set_overlay_markup_text(
+            id,
+            objective_name_markup_text(t.name.as_str(), obj, true).into(),
+        );
+    } else {
+        if let Some(id) = t.label_red {
+            msgq.set_overlay_markup_text(
+                id,
+                objective_name_markup_text(
+                    t.name.as_str(),
+                    obj,
+                    !enemy_objective_view(obj.owner, Side::Red),
+                )
+                .into(),
+            );
+        }
+        if let Some(id) = t.label_blue {
+            msgq.set_overlay_markup_text(
+                id,
+                objective_name_markup_text(
+                    t.name.as_str(),
+                    obj,
+                    !enemy_objective_view(obj.owner, Side::Blue),
+                )
+                .into(),
+            );
+        }
+    }
+}
+
 fn arrow_coords(obj: &Objective, dst: &Objective) -> (Vector2, Vector2) {
     let pos = obj.zone.pos();
     let dpos = dst.zone.pos();
@@ -738,7 +836,15 @@ fn overlay_side_filter(obj: &Objective) -> SideFilter {
 }
 
 fn remove_objective_overlay_marks(msgq: &mut MsgQ, t: &mut ObjectiveMarkup) {
-    msgq.delete_mark(t.label);
+    if let Some(id) = t.label.take() {
+        msgq.delete_mark(id);
+    }
+    if let Some(id) = t.label_red.take() {
+        msgq.delete_mark(id);
+    }
+    if let Some(id) = t.label_blue.take() {
+        msgq.delete_mark(id);
+    }
     if let Some(id) = t.stats_label.take() {
         msgq.delete_mark(id);
     }
@@ -763,16 +869,16 @@ fn install_objective_overlay_marks(
     let all_spec = overlay_side_filter(obj);
     let pos3 = Vector3::new(t.pos.x, 0., t.pos.y);
     let (name_color, name_fill) = objective_name_label_colors(obj);
-    t.label = MarkId::new();
-    msgq.text_to_overlay(all_spec, t.label, TextSpec {
-        pos: LuaVec3(Vector3::new(pos3.x + 1500., 1., pos3.z + 2500.)),
+    let name_pos = LuaVec3(Vector3::new(pos3.x + 1500., 1., pos3.z + 2500.));
+    let make_name_spec = |text: CompactString| TextSpec {
+        pos: name_pos,
         color: name_color,
         fill_color: name_fill,
         font_size: 11,
         read_only: true,
-        text: t.name.clone().into(),
-    });
-    let stats_pos = LuaVec3(Vector3::new(pos3.x + 1500., 1., pos3.z + 2500.));
+        text: text.into(),
+    };
+    let stats_pos = name_pos;
     let make_stats_spec = |text: CompactString| TextSpec {
         pos: stats_pos,
         color: color_func(1.0),
@@ -782,6 +888,29 @@ fn install_objective_overlay_marks(
         text: text.into(),
     };
     if all_spec == SideFilter::All {
+        let name_r = MarkId::new();
+        let name_b = MarkId::new();
+        msgq.text_to_overlay(
+            SideFilter::Red,
+            name_r,
+            make_name_spec(objective_name_markup_text(
+                t.name.as_str(),
+                obj,
+                !enemy_objective_view(obj.owner, Side::Red),
+            )),
+        );
+        msgq.text_to_overlay(
+            SideFilter::Blue,
+            name_b,
+            make_name_spec(objective_name_markup_text(
+                t.name.as_str(),
+                obj,
+                !enemy_objective_view(obj.owner, Side::Blue),
+            )),
+        );
+        t.label_red = Some(name_r);
+        t.label_blue = Some(name_b);
+        t.label = None;
         let id_r = MarkId::new();
         let id_b = MarkId::new();
         msgq.text_to_overlay(
@@ -810,6 +939,15 @@ fn install_objective_overlay_marks(
         t.stats_label_blue = Some(id_b);
         t.stats_label = None;
     } else {
+        let name_id = MarkId::new();
+        msgq.text_to_overlay(
+            all_spec,
+            name_id,
+            make_name_spec(objective_name_markup_text(t.name.as_str(), obj, true)),
+        );
+        t.label = Some(name_id);
+        t.label_red = None;
+        t.label_blue = None;
         let id = MarkId::new();
         msgq.text_to_overlay(
             all_spec,
@@ -857,6 +995,8 @@ impl ObjectiveMarkup {
             production_feed_line,
             occupied_supply_line,
             label,
+            label_red,
+            label_blue,
             stats_label,
             stats_label_red,
             stats_label_blue,
@@ -865,7 +1005,15 @@ impl ObjectiveMarkup {
         msgq.delete_mark(owner_ring);
         msgq.delete_mark(threatened_ring);
         msgq.delete_mark(capturable_ring);
-        msgq.delete_mark(label);
+        if let Some(id) = label {
+            msgq.delete_mark(id);
+        }
+        if let Some(id) = label_red {
+            msgq.delete_mark(id);
+        }
+        if let Some(id) = label_blue {
+            msgq.delete_mark(id);
+        }
         if let Some(id) = stats_label {
             msgq.delete_mark(id);
         }
@@ -904,8 +1052,13 @@ impl ObjectiveMarkup {
             let color_func = |a| text_color(obj.owner, a);
             self.side = obj.owner;
             let (name_color, name_fill) = objective_name_label_colors(obj);
-            msgq.set_overlay_markup_color(self.label, name_color);
-            msgq.set_overlay_markup_fill_color(self.label, name_fill);
+            for id in [self.label, self.label_red, self.label_blue]
+                .into_iter()
+                .flatten()
+            {
+                msgq.set_overlay_markup_color(id, name_color);
+                msgq.set_overlay_markup_fill_color(id, name_fill);
+            }
             if let Some(id) = self.stats_label {
                 msgq.set_overlay_markup_color(id, color_func(1.));
             }
@@ -916,7 +1069,9 @@ impl ObjectiveMarkup {
                 msgq.set_overlay_markup_color(id, color_func(1.));
             }
             msgq.set_markup_color(self.owner_ring, color_func(1.));
-            
+            refresh_objective_name_labels(msgq, self, obj);
+            refresh_objective_stats_labels(cfg, msgq, self, obj, persisted, export);
+
             if !self.supply_connections.is_empty() {
                 underlay_dirty = true;
             }
@@ -993,23 +1148,8 @@ impl ObjectiveMarkup {
             self.static_repair = obj.static_repair;
             self.spawnable_logi_repaired = obj.spawnable_logi_repaired;
             self.points = obj.points;
-            if let Some(id) = self.stats_label {
-                msgq.set_overlay_markup_text(
-                    id,
-                    objective_stats_text(cfg, persisted, obj, false, export).into(),
-                );
-            } else if let (Some(id_r), Some(id_b)) = (self.stats_label_red, self.stats_label_blue) {
-                msgq.set_overlay_markup_text(
-                    id_r,
-                    objective_stats_text(cfg, persisted, obj, enemy_objective_view(obj.owner, Side::Red), export)
-                        .into(),
-                );
-                msgq.set_overlay_markup_text(
-                    id_b,
-                    objective_stats_text(cfg, persisted, obj, enemy_objective_view(obj.owner, Side::Blue), export)
-                        .into(),
-                );
-            }
+            refresh_objective_name_labels(msgq, self, obj);
+            refresh_objective_stats_labels(cfg, msgq, self, obj, persisted, export);
             if matches!(obj.kind, ObjectiveKind::Logistics | ObjectiveKind::Production) {
                 self.display_production = production_pct_for_display(cfg, persisted, obj);
             }
@@ -1021,16 +1161,20 @@ impl ObjectiveMarkup {
                 msgq.set_markup_pos_start(self.owner_ring, v3);
                 msgq.set_markup_pos_start(self.capturable_ring, v3);
                 msgq.set_markup_pos_start(self.threatened_ring, v3);
-                msgq.set_overlay_markup_pos_start(self.label, LuaVec3(Vector3::new(pos.x + 1500., 1., pos.y + 2500.)));
-                let stats_pos = LuaVec3(Vector3::new(pos.x + 1500., 1., pos.y + 2500.));
-                if let Some(id) = self.stats_label {
-                    msgq.set_overlay_markup_pos_start(id, stats_pos);
-                }
-                if let Some(id) = self.stats_label_red {
-                    msgq.set_overlay_markup_pos_start(id, stats_pos);
-                }
-                if let Some(id) = self.stats_label_blue {
-                    msgq.set_overlay_markup_pos_start(id, stats_pos);
+                let overlay_pos =
+                    LuaVec3(Vector3::new(pos.x + 1500., 1., pos.y + 2500.));
+                for id in [
+                    self.label,
+                    self.label_red,
+                    self.label_blue,
+                    self.stats_label,
+                    self.stats_label_red,
+                    self.stats_label_blue,
+                ]
+                .into_iter()
+                .flatten()
+                {
+                    msgq.set_overlay_markup_pos_start(id, overlay_pos);
                 }
             }
         }

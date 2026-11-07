@@ -263,6 +263,7 @@ impl Db {
         if !self.dynamic_cargo_enabled() {
             if self.persisted.dynamic_cargo_crates.len() > 0
                 || self.persisted.dynamic_cargo_next_index.len() > 0
+                || !self.ephemeral.pending_dynamic_cargo_restore.is_empty()
             {
                 self.persisted.dynamic_cargo_crates = MapM::default();
                 self.persisted.dynamic_cargo_next_index = MapS::default();
@@ -270,6 +271,7 @@ impl Db {
                 self.ephemeral.dynamic_cargo_miss_count.clear();
                 self.ephemeral.dynamic_cargo_rehook_in_progress.clear();
                 self.ephemeral.dynamic_cargo_air_dropped_at.clear();
+                self.ephemeral.pending_dynamic_cargo_restore.clear();
                 self.ephemeral.dirty();
             }
         }
@@ -817,6 +819,7 @@ impl Db {
         last_carrier: Option<&Ucid>,
         spawner: &Ucid,
         air_dropped: bool,
+        prev_airborne: bool,
     ) -> Option<(Ucid, EdBayCarrier)> {
         if air_dropped {
             return None;
@@ -828,8 +831,8 @@ impl Db {
             if !c.is_ed_transport {
                 continue;
             }
-            // L2: bay occupied (named or ghost). L3: airborne API gap with empty list.
-            if c.bay_count > 0 || c.in_air {
+            // L2: bay occupied. L3: airborne API gap only if last pos was already airborne.
+            if c.bay_count > 0 || (c.in_air && prev_airborne) {
                 return Some((ucid, c.clone()));
             }
         }
@@ -1198,6 +1201,11 @@ impl Db {
                 .ephemeral
                 .dynamic_cargo_rehook_in_progress
                 .contains(name.as_str())
+                || self
+                    .ephemeral
+                    .pending_dynamic_cargo_restore
+                    .iter()
+                    .any(|n| n == &name)
             {
                 continue;
             }
@@ -1254,12 +1262,19 @@ impl Db {
                 .get(&name)
                 .map(|e| (e.last_carrier.clone(), e.spawner, e.air_dropped))
                 .unwrap_or((None, Ucid::default(), false));
-            // Soft-hold: name miss but bay occupied (L2) or carrier airborne (L3).
+            let prev_airborne = self
+                .persisted
+                .dynamic_cargo_crates
+                .get(&name)
+                .and_then(|e| cargo_agl_m(lua, e.x, e.y, e.alt))
+                .is_some_and(|a| a > AIR_DROP_AGL_M);
+            // Soft-hold: name miss but bay occupied (L2) or airborne gap (L3, last pos airborne).
             if let Some((carrier, info)) = Self::bay_soft_hold_carrier(
                 &bay_scan,
                 carrier_ucid.as_ref(),
                 &spawner,
                 already_dropped,
+                prev_airborne,
             ) {
                 self.apply_dynamic_cargo_bay_hold(&name, carrier, info.pos);
                 continue;
@@ -1593,6 +1608,58 @@ impl Db {
         Ok(())
     }
 
+    fn snap_dynamic_cargo_alt_to_ground(lua: MizLua, entry: &mut DynamicCargoCrate) {
+        let Ok(land) = Land::singleton(lua) else {
+            return;
+        };
+        let Ok(ground) = land.get_height(LuaVec2(Vector2::new(entry.x, entry.y))) else {
+            return;
+        };
+        entry.alt = ground + 1.0;
+    }
+
+    fn return_dynamic_cargo_to_source_on_load(
+        &mut self,
+        lua: MizLua,
+        entry: &DynamicCargoCrate,
+        sync_source_oids: &mut FxHashSet<ObjectiveId>,
+    ) {
+        self.destroy_dynamic_cargo_world_static(lua, entry.name.as_str());
+        if entry.source_checked_out {
+            if let Err(e) = self.credit_objective_from_dynamic_cargo(
+                entry.source,
+                &entry.equipment,
+                &entry.liquids,
+            ) {
+                warn!("dynamic cargo on-load credit {}: {e:?}", entry.name);
+            }
+        }
+        self.remove_dynamic_cargo_registry_entry(entry.name.as_str());
+        sync_source_oids.insert(entry.source);
+        self.ephemeral.dirty();
+    }
+
+    fn queue_dynamic_cargo_restore_spawn(&mut self, lua: MizLua, mut entry: DynamicCargoCrate) {
+        let high = cargo_agl_m(lua, entry.x, entry.y, entry.alt).is_some_and(|a| a > GROUND_AGL_M);
+        if high || (entry.air_dropped && !entry.airdrop_rehooked) {
+            Self::snap_dynamic_cargo_alt_to_ground(lua, &mut entry);
+        }
+        if entry.air_dropped && !entry.airdrop_rehooked {
+            entry.airdrop_rehooked = true;
+        }
+        let name = entry.name.clone();
+        if let Some(e) = self.persisted.dynamic_cargo_crates.get_mut_cow(&name) {
+            e.alt = entry.alt;
+            e.airdrop_rehooked = entry.airdrop_rehooked;
+        }
+        self.ephemeral
+            .dynamic_cargo_registered_at
+            .insert(name.clone(), Utc::now());
+        self.ephemeral.pending_dynamic_cargo_restore.push_back(name);
+        self.ephemeral.dirty();
+    }
+
+    /// Bookkeeping only. World spawns run in `process_pending_dynamic_cargo_restore` (≤3/tick).
     pub fn restore_dynamic_cargo_after_load(&mut self, lua: MizLua) -> Result<()> {
         if !self.dynamic_cargo_enabled() {
             self.clear_dynamic_cargo_if_disabled();
@@ -1605,8 +1672,8 @@ impl Db {
             .map(|(_, c)| c.clone())
             .collect();
         let mut sync_source_oids: FxHashSet<ObjectiveId> = FxHashSet::default();
+        self.ephemeral.pending_dynamic_cargo_restore.clear();
         for entry in entries {
-            // Orphan: source objective changed sides → purge instead of respawn
             let source_owner = self
                 .persisted
                 .objectives
@@ -1622,15 +1689,16 @@ impl Db {
                 self.ephemeral.dirty();
                 continue;
             }
-            // Mid-air airdrop state cannot survive mission restart (no chute / carrier).
-            if entry.air_dropped && !entry.airdrop_rehooked {
+            // Aboard flying airframe at save: cancel delivery, stock back to source.
+            if !entry.air_dropped
+                && cargo_agl_m(lua, entry.x, entry.y, entry.alt)
+                    .is_some_and(|a| a > AIR_DROP_AGL_M)
+            {
                 info!(
-                    "dynamic cargo mid-air airdrop ghost on load {} source={:?} - removing (checkout released)",
-                    entry.name, entry.source
+                    "dynamic cargo aboard airborne on load {} source={:?} pos=({:.0},{:.0}) alt={:.0} - returning stock to source",
+                    entry.name, entry.source, entry.x, entry.y, entry.alt
                 );
-                self.persisted.dynamic_cargo_crates.remove_cow(&entry.name);
-                self.clamp_dynamic_cargo_checkout(entry.source);
-                self.ephemeral.dirty();
+                self.return_dynamic_cargo_to_source_on_load(lua, &entry, &mut sync_source_oids);
                 continue;
             }
             // Rehooked + missing/high AGL: do not respawn (was locking SyncTo forever).
@@ -1662,26 +1730,14 @@ impl Db {
                 entry.airdrop_rehooked,
                 entry.source_checked_out
             );
-            // Crate parked in its source zone never left the pad: destroy the static, return the
-            // checked-out stock to the source and SyncTo (no static left = no duplicate stock).
-            if in_source_zone {
+            let parachuting = entry.air_dropped && !entry.airdrop_rehooked;
+            // Still on the source pad (and not a chute in progress): credit back.
+            if in_source_zone && !parachuting {
                 info!(
                     "dynamic cargo grounded at source on load {} source={:?} - crediting and releasing checkout",
                     entry.name, entry.source
                 );
-                self.destroy_dynamic_cargo_world_static(lua, entry.name.as_str());
-                if entry.source_checked_out {
-                    if let Err(e) = self.credit_objective_from_dynamic_cargo(
-                        entry.source,
-                        &entry.equipment,
-                        &entry.liquids,
-                    ) {
-                        warn!("dynamic cargo on-load credit {}: {e:?}", entry.name);
-                    }
-                }
-                self.remove_dynamic_cargo_registry_entry(entry.name.as_str());
-                sync_source_oids.insert(entry.source);
-                self.ephemeral.dirty();
+                self.return_dynamic_cargo_to_source_on_load(lua, &entry, &mut sync_source_oids);
                 continue;
             }
             match StaticObject::get_by_name(lua, entry.name.as_str()) {
@@ -1694,28 +1750,61 @@ impl Db {
                 }
                 _ => {}
             }
-            if let Err(e) = self.respawn_dynamic_cargo_crate(lua, &entry) {
-                warn!(
-                    "dynamic cargo restore failed for {}: {e:?} (dropping registry entry)",
-                    entry.name
-                );
-                self.persisted.dynamic_cargo_crates.remove_cow(&entry.name);
-                self.clamp_dynamic_cargo_checkout(entry.source);
-                self.ephemeral.dirty();
-            } else {
+            if parachuting {
                 info!(
-                    "dynamic cargo restore: {} respawned, checkout retained source={:?}",
-                    entry.name, entry.source
+                    "dynamic cargo parachute on load {} source={:?} - queue ground restore at ({:.0},{:.0})",
+                    entry.name, entry.source, entry.x, entry.y
                 );
             }
+            self.queue_dynamic_cargo_restore_spawn(lua, entry);
         }
-        // Flush credited contents to DCS for every released checkout.
         for oid in sync_source_oids {
             if let Err(e) = self.sync_objective_to_warehouse(lua, oid, false) {
                 warn!("dynamic cargo on-load SyncTo {oid:?}: {e:?}");
             }
         }
         Ok(())
+    }
+
+    /// ≤3 `addStaticObject` per timed tick (keeps Birth off the mizinit stack).
+    pub fn process_pending_dynamic_cargo_restore(&mut self, lua: MizLua) {
+        if !self.dynamic_cargo_enabled()
+            || self.ephemeral.pending_dynamic_cargo_restore.is_empty()
+        {
+            return;
+        }
+        const PER_TICK: usize = 3;
+        for _ in 0..PER_TICK {
+            let Some(name) = self.ephemeral.pending_dynamic_cargo_restore.pop_front() else {
+                break;
+            };
+            let Some(entry) = self.persisted.dynamic_cargo_crates.get(&name).cloned() else {
+                continue;
+            };
+            match StaticObject::get_by_name(lua, name.as_str()) {
+                Ok(Static::Static(_)) => {
+                    info!(
+                        "dynamic cargo restore: {} static already exists - kept, checkout retained",
+                        name
+                    );
+                    continue;
+                }
+                _ => {}
+            }
+            if let Err(e) = self.respawn_dynamic_cargo_crate(lua, &entry) {
+                warn!(
+                    "dynamic cargo restore failed for {name}: {e:?} (dropping registry entry)"
+                );
+                self.persisted.dynamic_cargo_crates.remove_cow(&name);
+                self.clamp_dynamic_cargo_checkout(entry.source);
+                self.ephemeral.dirty();
+            } else {
+                info!(
+                    "dynamic cargo restore: {name} respawned, checkout retained source={:?}",
+                    entry.source
+                );
+            }
+        }
     }
 
     fn respawn_dynamic_cargo_crate(&self, lua: MizLua, entry: &DynamicCargoCrate) -> Result<()> {
@@ -1823,12 +1912,16 @@ impl Db {
             let spawner_pos = self.player_instance_world_pos(&spawner);
 
             if let Some(entry) = self.persisted.dynamic_cargo_crates.get_mut_cow(&name) {
-                // Prefer carrier aircraft pos while aboard — cargo get_point can stay at source.
+                // Prefer carrier pos while aboard. Spawner proxy only if this crate was already airborne.
                 if let Some((x, y, alt)) = carrier_pos {
                     entry.x = x;
                     entry.y = y;
                     entry.alt = alt;
-                } else if spawner_air {
+                } else if spawner_air
+                    && (entry.air_dropped
+                        || cargo_agl_m(lua, entry.x, entry.y, entry.alt)
+                            .is_some_and(|a| a > AIR_DROP_AGL_M))
+                {
                     if let Some((x, y, alt)) = spawner_pos {
                         entry.x = x;
                         entry.y = y;
