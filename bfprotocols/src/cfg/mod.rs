@@ -2371,11 +2371,11 @@ fn default_objective_jtac_autofire() -> bool {
 }
 
 fn default_objective_jtac_autofire_cooldown_secs() -> u32 {
-    90
+    210
 }
 
 fn default_objective_jtac_autofire_rounds() -> u8 {
-    5
+    15
 }
 
 fn default_calcm_mission() -> bool {

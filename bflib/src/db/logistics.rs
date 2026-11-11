@@ -2018,7 +2018,30 @@ fn equipment_included_in_supply_pct(
     equipment_autofill_allowed_by_owner_template(Some(export), obj, name, resource_meta)
 }
 
-/// Average Supply % for airframe or non-airframe rows (same filters as `update_supply_status`).
+/// Markup Supply % after a DCS snapshot: qty-0 rows do not count (template ghosts, forced production keys).
+/// Logistics auto-fill still uses `equipment_included_in_supply_pct`. No snapshot yet: same as that filter.
+fn equipment_counts_toward_displayed_supply(
+    name: &str,
+    inv: &Inventory,
+    dcs_tracked: Option<&FxHashSet<String>>,
+    export: Option<&FowlMizExport>,
+    obj: &Objective,
+    resource_meta: Option<&FxHashMap<String, WarehouseResourceMeta>>,
+) -> bool {
+    if !equipment_included_in_supply_pct(
+        name,
+        inv,
+        dcs_tracked,
+        export,
+        obj,
+        resource_meta,
+    ) {
+        return false;
+    }
+    dcs_tracked.is_none() || inv.stored > 0
+}
+
+/// Average Supply % for airframe or non-airframe rows (logistics gate, includes template qty-0).
 /// `None` when the bucket has no countable rows.
 fn equipment_bucket_supply_pct(
     obj: &Objective,
@@ -3885,6 +3908,85 @@ impl Db {
         Ok(())
     }
 
+    /// Clean start only: DCS often leaves ME `initialAmount` (esp. wsType-only rows) at 0.
+    /// After SyncFrom, set owner-template holes to export baseline; caller SyncTo to DCS.
+    fn heal_me_template_gaps_after_sync_from(
+        &mut self,
+        resource_meta: &FxHashMap<String, WarehouseResourceMeta>,
+    ) -> Result<Vec<ObjectiveId>> {
+        let export = Arc::clone(&self.ephemeral.fowl_miz_export);
+        if !export_has_objective_stock(export.as_ref()) {
+            return Ok(vec![]);
+        }
+        let oids: Vec<ObjectiveId> = self.ephemeral.airbase_by_oid.keys().copied().collect();
+        let mut healed: Vec<ObjectiveId> = Vec::new();
+        let mut objs_touched = 0u32;
+        let mut rows_filled = 0u32;
+        for oid in oids {
+            let (obj_name, profile_items) = {
+                let obj = objective!(self, oid)?;
+                if matches!(obj.kind, ObjectiveKind::Production) || objective_is_ground_dep_farp(obj)
+                {
+                    continue;
+                }
+                if !matches!(obj.owner, Side::Blue | Side::Red) {
+                    continue;
+                }
+                let Some(profile) =
+                    objective_coalition_stock_for_objective(export.as_ref(), obj)
+                else {
+                    continue;
+                };
+                let items: Vec<(std::string::String, u32)> = profile
+                    .equipment
+                    .iter()
+                    .filter(|(_, item)| item.baseline > 1)
+                    .map(|(name, item)| (name.clone(), item.baseline))
+                    .collect();
+                if items.is_empty() {
+                    continue;
+                }
+                (obj.name.clone(), items)
+            };
+            let mut filled_here = 0u32;
+            {
+                let obj = objective_mut!(self, oid)?;
+                for (export_name, baseline) in profile_items {
+                    let dcs_name =
+                        resolve_export_equipment_dcs_name(export_name.as_str(), resource_meta);
+                    let row = obj.warehouse.equipment.get_or_default_cow(dcs_name);
+                    if row.stored != 0 {
+                        continue;
+                    }
+                    // DT registration fillers (0/1) stay empty until ferry / capture refill.
+                    if row.capacity <= 1 && baseline <= 1 {
+                        continue;
+                    }
+                    if baseline > row.capacity {
+                        row.capacity = baseline;
+                    }
+                    row.stored = baseline;
+                    filled_here = filled_here.saturating_add(1);
+                }
+            }
+            if filled_here > 0 {
+                objs_touched = objs_touched.saturating_add(1);
+                rows_filled = rows_filled.saturating_add(filled_here);
+                healed.push(oid);
+                wh_diag(format_compact!(
+                    "ME gap heal {obj_name}: filled_rows={filled_here}"
+                ));
+            }
+        }
+        if objs_touched > 0 {
+            info!(
+                "new campaign: ME gap heal on {objs_touched} objective(s), {rows_filled} row(s)"
+            );
+            self.ephemeral.dirty();
+        }
+        Ok(healed)
+    }
+
     pub(super) fn setup_warehouses_after_load(&mut self, lua: MizLua) -> Result<()> {
         self.init_resource_map(lua)
             .context("initializing resource map")?;
@@ -4392,8 +4494,34 @@ impl Db {
             );
         } else if preserve_fill {
             self.ephemeral.preserve_initial_warehouse_fill = false;
+            let healed = self
+                .heal_me_template_gaps_after_sync_from(resource_meta.as_ref())
+                .context("ME template gap heal after SyncFrom")?;
+            for oid in healed {
+                let (owner, is_hub) = {
+                    let obj = objective!(self, oid)?;
+                    (obj.owner, matches!(obj.kind, ObjectiveKind::Logistics))
+                };
+                let (_, wh) = self
+                    .sync_objective_to_warehouse(lua, oid, false)
+                    .with_context(|| {
+                        format_compact!("ME gap heal SyncTo DCS for {:?}", oid)
+                    })?;
+                record_objective_dcs_equipment_names(&mut self.ephemeral, oid, &wh)
+                    .context("recording DCS warehouse equipment after ME gap heal SyncTo")?;
+                if is_hub {
+                    if let Some(prod) = self.ephemeral.production_by_side.get(&owner).map(Arc::clone)
+                    {
+                        mark_production_equipment_dcs_tracked(
+                            &mut self.ephemeral,
+                            oid,
+                            prod.as_ref(),
+                        );
+                    }
+                }
+            }
             info!(
-                "new campaign: preserved bftools ME warehouse stock (virtual sync from DCS only, no prune/sync-to)"
+                "new campaign: preserved bftools ME warehouse stock (SyncFrom + ME gap heal SyncTo)"
             );
         }
         let mut dep_farp_restore: SmallVec<[(ObjectiveId, String); 8]> = smallvec![];
@@ -5665,7 +5793,7 @@ impl Db {
             let mut n = 0;
             let mut sum: u32 = 0;
             for (name, inv) in &obj.warehouse.equipment {
-                if !equipment_included_in_supply_pct(
+                if !equipment_counts_toward_displayed_supply(
                     name.as_str(),
                     inv,
                     dcs_tracked,

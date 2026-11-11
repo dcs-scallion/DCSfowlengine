@@ -640,6 +640,7 @@ impl Db {
             }
             DeployKind::Deployed { spec, .. } => {
                 self.persisted.deployed.remove_cow(gid);
+                self.persisted.pending_repair_respawn.remove_cow(gid);
                 if spec.jtac.is_some() {
                     self.persisted.jtacs.remove_cow(gid);
                 }
@@ -660,6 +661,10 @@ impl Db {
         if let Some(id) = self.ephemeral.group_marks.remove(gid) {
             self.ephemeral.msgs.delete_mark(id);
         }
+        for gids in self.ephemeral.delayspawnq.values_mut() {
+            gids.retain(|g| g != gid);
+        }
+        self.ephemeral.delayspawnq.retain(|_, gids| !gids.is_empty());
         let mut units: SmallVec<[String; 16]> = smallvec![];
         for uid in &group.units {
             self.ephemeral.units_potentially_close_to_enemies.remove(uid);

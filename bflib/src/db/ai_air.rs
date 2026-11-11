@@ -404,6 +404,9 @@ pub struct AiAirState {
     /// Consecutive failed DCS rehydrate/spawn attempts; delete group when high.
     #[serde(default)]
     pub rehydrate_fail_streak: u8,
+    /// Stuck RTB land recoveries pushed (behavior-based; not hub-name specific).
+    #[serde(default)]
+    pub rtb_land_recovery_count: u8,
 }
 
 #[derive(Debug, Clone)]
@@ -2809,6 +2812,14 @@ const AIRFIELD_GROUND_RADIUS_M: f64 = 3_000.;
 const CYCLIC_PARK_HOLD_MIN: i64 = 10;
 /// One-shot RTB: wait on parking with engines off before despawn (seconds).
 const ONE_SHOT_SHUTDOWN_PARK_SEC: i64 = 90;
+/// One-shot taxi: allow this long before treating as stuck (large hubs need more than 3 min).
+const ONE_SHOT_TAXI_MAX_SEC: i64 = 900;
+/// Ground speed below this (m/s) counts as stopped for park/despawn decisions.
+const GROUND_STOPPED_SPEED_M: f64 = 1.5;
+/// RtbInbound airborne this long without touchdown → one simplified Land recovery (any map/hub).
+const RTB_LAND_STUCK_RECOVERY_SEC: i64 = 600;
+/// Still airborne after this in RtbInbound (duration shutdown) → force remove.
+const RTB_LAND_STUCK_DESPAWN_SEC: i64 = 1080;
 /// Ghost rehydrate: remove AI after this many failed spawn attempts.
 const REHYDRATE_FAIL_MAX: u8 = 3;
 
@@ -3031,17 +3042,16 @@ fn duration_shutdown_park(lua: MizLua, dcs_name: &str) -> Result<()> {
     Ok(())
 }
 
+/// Terminal Land + Hold — taxi to parking without TakeOffParking (runway departure).
 fn parking_await_route<'lua>(
     lua: MizLua<'lua>,
-    db: &Db,
     hub: &HubPick,
     slot: &HubSlot,
 ) -> Result<Vec<MissionPoint<'lua>>> {
-    let mut route = bootstrap_route(lua, db, hub, slot, BootstrapMode::PostService, false)?;
-    if let Some(wpt) = route.first_mut() {
-        wpt.task = Box::new(Task::Hold);
-    }
-    Ok(route)
+    let mut land = landing_hub_mission_point(lua, hub, slot, HubLandMode::DurationShutdown)?;
+    land.name = Some(String::from("park-hold"));
+    land.task = Box::new(Task::Hold);
+    Ok(vec![land])
 }
 
 fn push_parking_await(
@@ -3058,8 +3068,28 @@ fn push_parking_await(
     if !group.is_exist()? {
         return Ok(());
     }
-    let route = parking_await_route(lua, db, hub, slot)?;
+    let route = parking_await_route(lua, hub, slot)?;
     db.ai_air_push_mission_to_name(spctx, dcs_name, route, false)
+}
+
+fn begin_one_shot_shutdown_parked(
+    lua: MizLua,
+    db: &mut Db,
+    spctx: &SpawnCtx,
+    gid: GroupId,
+    hub_pick: &HubPick,
+    dcs_names: &[String],
+) -> Result<()> {
+    if flight_all_on_parking_slots(lua, dcs_names, &hub_pick.slots) {
+        park_shutdown_all(lua, dcs_names)?;
+    } else {
+        ensure_ground_parking_task(lua, db, spctx, hub_pick, &hub_pick.slots, dcs_names)?;
+    }
+    let group = group_mut!(db, gid)?;
+    if let DeployKind::Action { ai_air, .. } = &mut group.origin {
+        set_phase(ai_air, AiAirPhase::ShutdownParked);
+    }
+    Ok(())
 }
 
 fn push_drone_refuel_missions(
@@ -4177,7 +4207,7 @@ pub(super) fn landing_hub_mission_point<'lua>(
     lua: MizLua<'lua>,
     hub: &HubPick,
     slot: &HubSlot,
-    _mode: HubLandMode,
+    mode: HubLandMode,
 ) -> Result<MissionPoint<'lua>> {
     let land_alt = hub_slot_baro_alt(lua, slot, hub.baro_alt)?;
     if let Some(ship_id) = slot.link_unit {
@@ -4214,10 +4244,14 @@ pub(super) fn landing_hub_mission_point<'lua>(
             0.,
         ),
     };
-    let (typ, time_re_fu_ar) = (
-        PointType::LandingReFuAr,
-        Some(ME_PARKING_REFUEL_REARM),
-    );
+    // One-shot / duration shutdown: terminal Land. Cyclic: LandingReFuAr then relaunch.
+    let (typ, time_re_fu_ar) = match mode {
+        HubLandMode::DurationShutdown => (PointType::Land, None),
+        HubLandMode::CycleRtb => (
+            PointType::LandingReFuAr,
+            Some(ME_PARKING_REFUEL_REARM),
+        ),
+    };
     Ok(MissionPoint {
         typ,
         airdrome_id,
@@ -4315,6 +4349,19 @@ pub(super) fn land_at_hub_route<'lua>(
     mode: HubLandMode,
 ) -> Result<Vec<MissionPoint<'lua>>> {
     Ok(vec![landing_hub_mission_point(lua, hub, slot, mode)?])
+}
+
+/// Fallback when normal RTB approach never touches down: single Land, no parking id.
+fn rtb_land_recovery_route<'lua>(
+    lua: MizLua<'lua>,
+    hub: &HubPick,
+    slot: &HubSlot,
+    mode: HubLandMode,
+) -> Result<Vec<MissionPoint<'lua>>> {
+    let mut land = landing_hub_mission_point(lua, hub, slot, mode)?;
+    land.parking = None;
+    land.name = Some(String::from("rtb-land-recovery"));
+    Ok(vec![land])
 }
 
 pub(super) fn group_on_ground(lua: MizLua, group_name: &str) -> Result<bool> {
@@ -4415,6 +4462,23 @@ fn unit_on_assigned_parking_slot(lua: MizLua, name: &str, hub_slots: &[HubSlot])
         return false;
     };
     hub_slots.iter().any(|s| near_point(pos, s.pos, PARKING_SLOT_RADIUS_M))
+}
+
+fn unit_ground_speed_m(lua: MizLua, name: &str) -> Option<f64> {
+    let g = Group::get_by_name(lua, name).ok()?;
+    let u = g.get_unit(1).ok()?;
+    let v = u.get_velocity().ok()?.0;
+    Some((v.x * v.x + v.z * v.z).sqrt())
+}
+
+fn flight_nearly_stopped_on_ground(lua: MizLua, names: &[String]) -> bool {
+    !names.is_empty()
+        && names.iter().all(|n| {
+            group_on_ground(lua, n).unwrap_or(false)
+                && unit_ground_speed_m(lua, n)
+                    .map(|s| s <= GROUND_STOPPED_SPEED_M)
+                    .unwrap_or(false)
+        })
 }
 
 fn flight_all_on_airfield_ground(
@@ -5314,15 +5378,22 @@ fn ensure_ground_parking_task(
         if !group_on_ground(lua, dcs_name).unwrap_or(false) {
             continue;
         }
-        if controller_has_active_task(lua, dcs_name) {
-            continue;
-        }
         let slot = slots
             .get(i)
             .or(slots.first())
             .ok_or_else(|| anyhow!("no hub slot"))?;
+        if unit_on_assigned_parking_slot(lua, dcs_name, slots) {
+            if !controller_has_active_task(lua, dcs_name) {
+                hold_drone_on_parking(lua, dcs_name)?;
+            }
+            idle_ground_engine_off(lua, dcs_name)?;
+            continue;
+        }
+        if controller_has_active_task(lua, dcs_name) {
+            continue;
+        }
+        // Land+Hold to parking — never TakeOffParking (that taxis to the runway).
         push_parking_await(lua, db, spctx, hub, slot, dcs_name)?;
-        idle_ground_engine_off(lua, dcs_name)?;
     }
     Ok(())
 }
@@ -5338,15 +5409,68 @@ fn ensure_rtb_inbound_task(
     inbound_alt: f64,
     inbound_alt_typ: AltType,
     now: DateTime<Utc>,
+    duration_shutdown: bool,
 ) -> Result<()> {
-    let (phase, last_push) = {
+    let (phase, last_push, phase_since, recovery_count) = {
         let group = group!(db, gid)?;
         let DeployKind::Action { ai_air, .. } = &group.origin else {
             return Ok(());
         };
-        (ai_air.phase, ai_air.last_airborne_task_push)
+        (
+            ai_air.phase,
+            ai_air.last_airborne_task_push,
+            ai_air.phase_since,
+            ai_air.rtb_land_recovery_count,
+        )
     };
     if phase != AiAirPhase::RtbInbound {
+        return Ok(());
+    }
+    let airborne = flight_any_in_air(lua, dcs_names).unwrap_or(false);
+    let on_ground = flight_on_ground(lua, dcs_names).unwrap_or(false);
+    if airborne
+        && !on_ground
+        && duration_shutdown
+        && now - phase_since >= Duration::seconds(RTB_LAND_STUCK_DESPAWN_SEC)
+    {
+        log::warn!(
+            "ai air {gid}: RTB land stuck {}s airborne -> force remove",
+            (now - phase_since).num_seconds()
+        );
+        db.delete_group(&gid)?;
+        return Ok(());
+    }
+    // Exceptional recovery: active task that never lands (any theatre/hub).
+    if airborne
+        && !on_ground
+        && recovery_count == 0
+        && now - phase_since >= Duration::seconds(RTB_LAND_STUCK_RECOVERY_SEC)
+    {
+        let mut pushed = false;
+        for (i, dcs_name) in dcs_names.iter().enumerate() {
+            if group_on_ground(lua, dcs_name).unwrap_or(false) {
+                continue;
+            }
+            let slot = hub_pick
+                .slots
+                .get(i)
+                .or(hub_pick.slots.first())
+                .ok_or_else(|| anyhow!("hub has no landing slot"))?;
+            let route = rtb_land_recovery_route(lua, hub_pick, slot, land_mode)?;
+            db.ai_air_push_mission_to_name(spctx, dcs_name, route, true)?;
+            pushed = true;
+        }
+        if pushed {
+            let group = group_mut!(db, gid)?;
+            if let DeployKind::Action { ai_air, .. } = &mut group.origin {
+                ai_air.rtb_land_recovery_count = 1;
+                ai_air.last_airborne_task_push = Some(now);
+            }
+            log::info!(
+                "ai air {gid}: RTB land stuck {}s -> recovery Land (no approach/parking)",
+                (now - phase_since).num_seconds()
+            );
+        }
         return Ok(());
     }
     let repush_due = last_push
@@ -5358,7 +5482,11 @@ fn ensure_rtb_inbound_task(
         if group_on_ground(lua, dcs_name).unwrap_or(false) {
             continue;
         }
-        if controller_has_active_task(lua, dcs_name) && !repush_due {
+        // Never overwrite an active land/approach — periodic setTask resets the pattern.
+        if controller_has_active_task(lua, dcs_name) {
+            continue;
+        }
+        if !repush_due {
             continue;
         }
         let slot = hub_pick
@@ -5366,17 +5494,21 @@ fn ensure_rtb_inbound_task(
             .get(i)
             .or(hub_pick.slots.first())
             .ok_or_else(|| anyhow!("hub has no landing slot"))?;
-        let route = rtb_inbound_route(
-            lua,
-            hub_pick,
-            slot,
-            inbound_alt,
-            inbound_alt_typ.clone(),
-            land_mode,
-            from_pos,
-        )?;
+        let route = if recovery_count > 0 {
+            rtb_land_recovery_route(lua, hub_pick, slot, land_mode)?
+        } else {
+            rtb_inbound_route(
+                lua,
+                hub_pick,
+                slot,
+                inbound_alt,
+                inbound_alt_typ.clone(),
+                land_mode,
+                from_pos,
+            )?
+        };
         db.ai_air_push_mission_to_name(spctx, dcs_name, route, true)?;
-        log::info!("ai air {gid}: re-pushed RTB inbound (no active DCS task)");
+        log::info!("ai air {gid}: re-pushed RTB inbound (DCS lost task)");
         pushed = true;
     }
     if pushed {
@@ -7138,10 +7270,13 @@ pub(super) fn advance_ai_air(
             };
             if flight_all_on_parking_slots(lua, &dcs_names, &hub_pick.slots) {
                 if duration_shutdown {
-                    log::info!("ai air {gid}: on parking -> shutdown servicing");
-                } else {
-                    log::info!("ai air {gid}: on parking -> servicing");
+                    log::info!("ai air {gid}: on parking -> shutdown parked");
+                    begin_one_shot_shutdown_parked(
+                        lua, db, spctx, gid, &hub_pick, &dcs_names,
+                    )?;
+                    return Ok(());
                 }
+                log::info!("ai air {gid}: on parking -> servicing");
                 let group = group_mut!(db, gid)?;
                 if let DeployKind::Action { ai_air, .. } = &mut group.origin {
                     ai_air.servicing_handoff = false;
@@ -7150,6 +7285,13 @@ pub(super) fn advance_ai_air(
                 return Ok(());
             }
             if flight_all_on_airfield_ground(lua, &dcs_names, &hub_pick, hub_pos) {
+                if duration_shutdown && flight_nearly_stopped_on_ground(lua, &dcs_names) {
+                    log::info!("ai air {gid}: landed stopped at hub -> shutdown parked");
+                    begin_one_shot_shutdown_parked(
+                        lua, db, spctx, gid, &hub_pick, &dcs_names,
+                    )?;
+                    return Ok(());
+                }
                 log::info!("ai air {gid}: landed at hub -> taxi to parking");
                 ensure_ground_parking_task(lua, db, spctx, &hub_pick, &hub_pick.slots, &dcs_names)?;
                 let group = group_mut!(db, gid)?;
@@ -7169,34 +7311,16 @@ pub(super) fn advance_ai_air(
                 inbound_alt,
                 inbound_alt_typ,
                 now,
+                duration_shutdown,
             )?;
         }
         AiAirPhase::Servicing => {
+            // Legacy / mid-mission duration expiry: one-shot never services — park and despawn.
             if duration_shutdown {
-                let phase_since = {
-                    let group = group!(db, gid)?;
-                    let DeployKind::Action { ai_air, .. } = &group.origin else {
-                        return Ok(());
-                    };
-                    ai_air.phase_since
-                };
-                if !flight_all_on_ground_at_hub(lua, &dcs_names, &hub_pick, hub_pos, &hub_pick.slots) {
-                    ensure_ground_parking_task(lua, db, spctx, &hub_pick, &hub_pick.slots, &dcs_names)?;
-                    return Ok(());
-                }
-                ensure_ground_parking_task(lua, db, spctx, &hub_pick, &hub_pick.slots, &dcs_names)?;
-                if now - phase_since < servicing_complete_wait() {
-                    return Ok(());
-                }
-                if let Err(e) = db.sync_warehouse_to_objective(lua, hub) {
-                    log::warn!("ai air {gid}: warehouse sync after shutdown servicing failed: {e:#}");
-                }
-                log::info!("ai air {gid}: shutdown servicing complete -> parked engine off");
-                park_shutdown_all(lua, &dcs_names)?;
-                let group = group_mut!(db, gid)?;
-                if let DeployKind::Action { ai_air, .. } = &mut group.origin {
-                    set_phase(ai_air, AiAirPhase::ShutdownParked);
-                }
+                log::info!("ai air {gid}: duration shutdown left servicing -> shutdown parked");
+                begin_one_shot_shutdown_parked(
+                    lua, db, spctx, gid, &hub_pick, &dcs_names,
+                )?;
                 return Ok(());
             }
             let (phase_since, already_handoff) = {
@@ -7423,12 +7547,19 @@ pub(super) fn advance_ai_air(
                 };
                 (ai_air.phase_since, ai_air.rtb_hold)
             };
-            if flight_all_on_parking_slots(lua, &dcs_names, &hub_pick.slots) {
-                if duration_shutdown {
-                    log::info!("ai air {gid}: taxi complete -> shutdown servicing");
-                } else {
-                    log::info!("ai air {gid}: taxi complete -> servicing");
-                }
+            let on_parking = flight_all_on_parking_slots(lua, &dcs_names, &hub_pick.slots);
+            let on_field = flight_all_on_airfield_ground(lua, &dcs_names, &hub_pick, hub_pos);
+            let stopped = flight_nearly_stopped_on_ground(lua, &dcs_names);
+            // DCS often taxis to a different pad than our assigned slot — stopped on field = arrived.
+            if duration_shutdown && (on_parking || (on_field && stopped)) {
+                log::info!("ai air {gid}: taxi complete -> shutdown parked");
+                begin_one_shot_shutdown_parked(
+                    lua, db, spctx, gid, &hub_pick, &dcs_names,
+                )?;
+                return Ok(());
+            }
+            if on_parking {
+                log::info!("ai air {gid}: taxi complete -> servicing");
                 let group = group_mut!(db, gid)?;
                 if let DeployKind::Action { ai_air, .. } = &mut group.origin {
                     ai_air.servicing_handoff = false;
@@ -7436,9 +7567,17 @@ pub(super) fn advance_ai_air(
                 }
                 return Ok(());
             }
-            let on_field = flight_all_on_airfield_ground(lua, &dcs_names, &hub_pick, hub_pos);
             if on_field && now - phase_since >= servicing_complete_wait() {
-                if mission_kind_cycles(mission_kind) && !rtb_hold && !duration_shutdown {
+                if duration_shutdown {
+                    // Still moving: wait up to ONE_SHOT_TAXI_MAX_SEC before forcing park/despawn path.
+                    if now - phase_since >= Duration::seconds(ONE_SHOT_TAXI_MAX_SEC) {
+                        log::info!("ai air {gid}: taxi timeout on field -> shutdown parked");
+                        begin_one_shot_shutdown_parked(
+                            lua, db, spctx, gid, &hub_pick, &dcs_names,
+                        )?;
+                        return Ok(());
+                    }
+                } else if mission_kind_cycles(mission_kind) && !rtb_hold {
                     log::info!(
                         "ai air {gid}: taxi stuck on field (damage?) -> cycle respawn + bootstrap"
                     );
@@ -7455,37 +7594,24 @@ pub(super) fn advance_ai_air(
                         perf,
                     )?;
                     return Ok(());
-                }
-                if duration_shutdown {
-                    log::info!("ai air {gid}: taxi stuck on field -> shutdown servicing");
                 } else {
                     log::info!("ai air {gid}: taxi stuck on field -> servicing (rtb hold)");
+                    let group = group_mut!(db, gid)?;
+                    if let DeployKind::Action { ai_air, .. } = &mut group.origin {
+                        ai_air.servicing_handoff = false;
+                        set_phase(ai_air, AiAirPhase::Servicing);
+                    }
+                    return Ok(());
                 }
-                let group = group_mut!(db, gid)?;
-                if let DeployKind::Action { ai_air, .. } = &mut group.origin {
-                    ai_air.servicing_handoff = false;
-                    set_phase(ai_air, AiAirPhase::Servicing);
-                }
+            }
+            // One-shot: while still rolling, do not re-task (interrupts DCS taxi to parking).
+            if duration_shutdown && !stopped {
                 return Ok(());
             }
             ensure_ground_parking_task(lua, db, spctx, &hub_pick, &hub_pick.slots, &dcs_names)?;
         }
         AiAirPhase::Legacy => (),
         AiAirPhase::ShutdownParked => {
-            if !flight_all_on_parking_slots(lua, &dcs_names, &hub_pick.slots) {
-                if flight_all_on_airfield_ground(lua, &dcs_names, &hub_pick, hub_pos) {
-                    ensure_ground_parking_task(
-                        lua,
-                        db,
-                        spctx,
-                        &hub_pick,
-                        &hub_pick.slots,
-                        &dcs_names,
-                    )?;
-                }
-                return Ok(());
-            }
-            park_shutdown_all(lua, &dcs_names)?;
             let (phase_since, cyclic_handoff) = {
                 let group = group!(db, gid)?;
                 let DeployKind::Action { ai_air, .. } = &group.origin else {
@@ -7493,6 +7619,36 @@ pub(super) fn advance_ai_air(
                 };
                 (ai_air.phase_since, ai_air.servicing_handoff)
             };
+            let on_parking = flight_all_on_parking_slots(lua, &dcs_names, &hub_pick.slots);
+            let on_field = flight_all_on_airfield_ground(lua, &dcs_names, &hub_pick, hub_pos);
+            let stopped = flight_nearly_stopped_on_ground(lua, &dcs_names);
+            if !on_parking {
+                if on_field {
+                    if !stopped {
+                        ensure_ground_parking_task(
+                            lua,
+                            db,
+                            spctx,
+                            &hub_pick,
+                            &hub_pick.slots,
+                            &dcs_names,
+                        )?;
+                        return Ok(());
+                    }
+                    park_shutdown_all(lua, &dcs_names)?;
+                    // Stopped on field (often a different DCS pad than assigned slot).
+                    if (duration_shutdown || mission_kind_one_shot(mission_kind))
+                        && now - phase_since > Duration::seconds(ONE_SHOT_SHUTDOWN_PARK_SEC)
+                    {
+                        log::info!(
+                            "ai air {gid}: one-shot/shutdown stopped on field -> removing from world"
+                        );
+                        db.delete_group(&gid)?;
+                    }
+                }
+                return Ok(());
+            }
+            park_shutdown_all(lua, &dcs_names)?;
             if mission_kind_cycles(mission_kind)
                 && !duration_shutdown
                 && cyclic_handoff
@@ -7842,6 +7998,7 @@ pub(super) fn issue_rtb(
         clear_aar_state(ai_air);
         ai_air.calcm_rack_empty_since = None;
         ai_air.last_airborne_task_push = None;
+        ai_air.rtb_land_recovery_count = 0;
         set_phase(ai_air, AiAirPhase::RtbInbound);
         if !req.preserve_mission_kind {
             spec.kind = ActionKind::Rtb;

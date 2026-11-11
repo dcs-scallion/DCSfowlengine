@@ -27,8 +27,17 @@ use bfprotocols::db::{
     group::{GroupId, UnitId},
     objective::ObjectiveId,
 };
+use chrono::{DateTime, Utc};
 use dcso3::{coalition::Side, net::Ucid, String};
 use serde_derive::{Deserialize, Serialize};
+
+/// DEP repair/rearm waiting for `repair_rearm_delay_secs` (survives mission reload).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PendingRepairRespawn {
+    pub due: DateTime<Utc>,
+    pub by: Ucid,
+    pub name: String,
+}
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct Persisted {
@@ -79,6 +88,9 @@ pub struct Persisted {
     /// Last `setmission.setmissionweather` profile index (None = use CFG `weather_start_index`).
     #[serde(default)]
     pub setmission_weather_index: Option<u32>,
+    /// DEP groups awaiting delayed repair/rearm respawn.
+    #[serde(default)]
+    pub pending_repair_respawn: MapM<GroupId, PendingRepairRespawn>,
 }
 
 impl Persisted {

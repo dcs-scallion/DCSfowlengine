@@ -1,0 +1,35 @@
+Caucasus1995
+
+A2A Weapons:
+TOP Fox 1 AAM R-27ER/ET vs. AIM-7M
+TOP Fox 2 AAM R-73 vs. AIM-9M (standard numbers in stock)
+TOP Fox 3 AAM R-77 vs. AIM-120B  (max 4 pcs)
+M-2000 C & Matra Super available to both coalitions
+
+Weapons with limited numbers per aircraft:
+2 pcs AGM-84D Harpoon & Rb15 & C802AK
+2 pcs AGM-88 & LD-10
+4 pcs R-73 vs. 4 pcs AIM-9M
+4 pcs GBU-24 Paveway III
+
+
+OK
+Bk90 (small numbers in stock)
+AGM-84E
+4 pcs CBU-97 SFW
+ALQ-184
+ADM-141A TALD
+LAU-138 With Chaff
+
+Forbidden:
+JSOW & GPS bombs & GB-6
+AGM-84H SLAM-ER & CM802AKG
+CBU-105 SFW+WCMD & GB-6-SFW
+CBU-103 (WCMD)
+Hydra 70 APKWS & BRM-1 90mm
+AN/APG-78 & AGM-114L
+KG-600 SPJ & ALQ-184 Long
+AN/ASQ-228 ATFLIR Targeting Pod & AN/AAQ-33 Advanced Targeting Pod
+CCD Imp ASM AGM-65H & K
+JHMCS
+GBU-43/B MOAB

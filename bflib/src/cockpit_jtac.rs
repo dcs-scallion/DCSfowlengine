@@ -2,7 +2,7 @@
 
 use crate::{
     db::group::DeployKind,
-    jtac::JtId,
+    jtac::{JtId, TARGET_RADIUS_MAX_M, TARGET_RADIUS_MIN_M},
     menu::{
         jtac::{
             call_bomber, init_jtac_menu_for_slot, jtac_artillery_combo_mission,
@@ -50,7 +50,7 @@ struct JtacListEntry {
     name: StdString,
     objective: StdString,
     code: u16,
-    /// Artillery FireAtPoint zone radius (meters), 0..=500.
+    /// Artillery FireAtPoint zone radius (meters), 10..=500.
     target_radius_m: f64,
     autoshift: bool,
     ir_pointer: bool,
@@ -189,7 +189,7 @@ pub(crate) fn list_jtacs_for_ucid(ctx: &Context, ucid: &Ucid) -> Result<StdStrin
 
     let mut jtacs = Vec::new();
     for jtac in ctx.jtac.jtacs() {
-        if jtac.side() != side {
+        if jtac.side() != side || !jtac.listed_in_ui(&ctx.db) {
             continue;
         }
         let id = jtac.gid();
@@ -427,8 +427,12 @@ pub(crate) fn run_jtac_action(
                 bail!("target radius must be a finite number");
             }
             let rounded = meters.round();
-            if rounded < 0.0 || rounded > 500.0 {
-                bail!("target radius {rounded} m out of range 0-500 m");
+            if rounded < TARGET_RADIUS_MIN_M || rounded > TARGET_RADIUS_MAX_M {
+                bail!(
+                    "target radius {rounded} m out of range {}-{} m",
+                    TARGET_RADIUS_MIN_M as u16,
+                    TARGET_RADIUS_MAX_M as u16
+                );
             }
             let meters_u = rounded as u16;
             jtac_set_target_radius(

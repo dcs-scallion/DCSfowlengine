@@ -547,6 +547,7 @@ fn on_player_try_connect(
     }
     let side = ctx.db.player(&ucid).map(|p| p.side).filter(|s| matches!(s, Side::Blue | Side::Red));
     ctx.do_bg_task(Task::Stat(Stat::Connect { id: ucid, addr, name, side }));
+    ctx.db.emit_points_balance_stat(&ucid, "sync on connect");
     record_perf(&mut Arc::make_mut(&mut unsafe { Perf::get_mut() }.inner).dcs_hooks, ts);
     Ok(None)
 }
@@ -2972,16 +2973,22 @@ fn run_timed_events(
     if let Err(e) = ctx.db.drain_pending_dep_farp_static_slot_releases(&spctx, &ctx.idx) {
         error!("error releasing DEP FARP static slots {:?}", e)
     }
-    if let Err(e) = ctx.db.ephemeral.process_spawn_queue(
-        perf,
-        &ctx.db.persisted,
-        ts,
-        &ctx.idx,
-        &spctx,
-        &ctx.shots_out,
-        false,
-    ) {
-        error!("error processing spawn queue {:?}", e)
+    {
+        let crate::db::Db {
+            ephemeral,
+            persisted,
+        } = &mut ctx.db;
+        if let Err(e) = ephemeral.process_spawn_queue(
+            perf,
+            persisted,
+            ts,
+            &ctx.idx,
+            &spctx,
+            &ctx.shots_out,
+            false,
+        ) {
+            error!("error processing spawn queue {:?}", e)
+        }
     }
     record_perf(&mut perf.spawn_queue, now);
     if let Err(e) = ctx.db.try_run_deferred_tisp_initial_ships(
@@ -3223,6 +3230,9 @@ fn delayed_init_miz(lua: MizLua) -> Result<()> {
         cfg: Box::new((*ctx.db.ephemeral.cfg).clone()),
         sortie: ctx.sortie.clone().into(),
     }));
+    // Absolute points into bfdb (offline pilots too) before unit spawn traffic.
+    ctx.db
+        .emit_all_points_balance_stats("sync on session start");
     info!("spawning units");
     ctx.respawn_groups(lua, &miz).context("setting up the mission after load")?;
     ctx.db
@@ -3272,6 +3282,7 @@ fn delayed_init_miz(lua: MizLua) -> Result<()> {
             name: name.clone(),
             side,
         }));
+        ctx.db.emit_points_balance_stat(&ucid, "sync on connect");
         let welcome = if let Some(player) = ctx.db.player(&ucid) {
             format_compact!(
                 "Welcome back, {}! You are on the {:?} team. Type -help for commands.",

@@ -258,7 +258,11 @@ pub enum Stat {
     },
     Points {
         id: Ucid,
+        /// Delta applied this event (`0` for absolute sync-only rows).
         points: i32,
+        /// Absolute balance after this event. Missing in legacy JSONL → bfdb uses `+= points`.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        balance: Option<i32>,
         reason: String,
     },
     PointsTransfer {

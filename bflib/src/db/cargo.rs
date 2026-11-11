@@ -16,6 +16,7 @@ for more details.
 
 use super::{Db, ephemeral::DeployableIndex, group::SpawnedGroup, objective::Objective};
 use super::campaign_stats::{deployable_invest_bucket, InvestBucket};
+use super::persisted::PendingRepairRespawn;
 use crate::{
     db::group::DeployKind,
     group, maybe, objective, objective_mut,
@@ -206,23 +207,51 @@ pub enum Oldest {
     Objective(ObjectiveId),
 }
 
+fn format_wait_duration(secs: u32) -> CompactString {
+    if secs < 60 {
+        if secs == 1 {
+            format_compact!("1 second")
+        } else {
+            format_compact!("{secs} seconds")
+        }
+    } else {
+        let mins = secs / 60;
+        let rem = secs % 60;
+        let min = if mins == 1 {
+            format_compact!("1 minute")
+        } else {
+            format_compact!("{mins} minutes")
+        };
+        if rem == 0 {
+            min
+        } else if rem == 1 {
+            format_compact!("{min} 1 second")
+        } else {
+            format_compact!("{min} {rem} seconds")
+        }
+    }
+}
+
 impl fmt::Display for Unpakistan {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::Unpacked(unit, 0) => write!(f, "unpacked a {unit}"),
             Self::Unpacked(unit, secs) => write!(
                 f,
-                "unpacked a {unit}, units will spawn in {secs} seconds get clear"
+                "unpacked a {unit}, units will spawn in {} get clear",
+                format_wait_duration(*secs)
             ),
             Self::UnpackedFarp(loc, 0) => write!(f, "unpacked {loc}"),
             Self::UnpackedFarp(loc, secs) => write!(
                 f,
-                "unpacked {loc}, units will spawn in {secs} seconds get clear"
+                "unpacked {loc}, units will spawn in {} get clear",
+                format_wait_duration(*secs)
             ),
             Self::Repaired(unit, 0) => write!(f, "repaired a {unit}"),
             Self::Repaired(unit, secs) => write!(
                 f,
-                "repaired a {unit}, units will respawn in {secs} seconds get clear"
+                "repaired a {unit}, units will respawn in {} get clear",
+                format_wait_duration(*secs)
             ),
             Self::RepairedBase(base, logi) => write!(f, "repaired logistics at {base} to %{logi}"),
             Self::RepairedProduction(opr, pct) => {
@@ -2860,6 +2889,14 @@ impl Db {
                         self.ephemeral.push_spawn(gid);
                     } else {
                         let at = Utc::now() + chrono::Duration::seconds(delay_secs as i64);
+                        self.persisted.pending_repair_respawn.insert_cow(
+                            gid,
+                            PendingRepairRespawn {
+                                due: at,
+                                by: st.ucid,
+                                name: dep.clone(),
+                            },
+                        );
                         self.ephemeral.delayspawnq.entry(at).or_default().push(gid);
                     }
                     if spec.repair_cost > 0 {

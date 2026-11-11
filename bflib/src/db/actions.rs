@@ -2139,6 +2139,7 @@ impl Db {
                 drone_climb_orbit: None,
                 drone_orbit_engaged: false,
                 rehydrate_fail_streak: 0,
+                rtb_land_recovery_count: 0,
             },
             owner_lock_released: false,
         };

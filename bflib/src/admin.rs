@@ -985,11 +985,15 @@ fn set_points(ctx: &mut Context, player: &String, amount: i32) -> Result<()> {
     match player.strip_prefix("objective:") {
         None => {
             let ucid = get_player_ucid(ctx, player)?;
-            let player = ctx
-                .db
-                .player_mut(&ucid)
-                .ok_or_else(|| anyhow!("no such player {player}"))?;
-            player.points = amount;
+            {
+                let p = ctx
+                    .db
+                    .player_mut(&ucid)
+                    .ok_or_else(|| anyhow!("no such player {player}"))?;
+                p.points = amount;
+            }
+            ctx.db
+                .emit_points_balance_stat(&ucid, "sync after admin set-points");
             ctx.db.ephemeral.dirty();
             Ok(())
         }

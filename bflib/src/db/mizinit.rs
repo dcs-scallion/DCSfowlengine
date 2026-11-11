@@ -849,6 +849,14 @@ impl Db {
             debug!("queue respawn deployables");
             let land = Land::singleton(spctx.lua())?;
             for gid in &self.persisted.deployed {
+                if let Some(pending) = self.persisted.pending_repair_respawn.get(gid) {
+                    self.ephemeral
+                        .delayspawnq
+                        .entry(pending.due)
+                        .or_default()
+                        .push(*gid);
+                    continue;
+                }
                 self.ephemeral.push_spawn(*gid);
             }
             for gid in &self.persisted.crates {
@@ -971,12 +979,31 @@ impl Db {
             Ok(())
         };
         spawn_deployed_and_logistics().context("spawning deployed and logistics")?;
-        // spawn everything before setting up warehouses, so that ship warehouses will also be set up correctly
+        // Promote overdue delayed spawns (repair/rearm) into spawnq, then drain.
+        {
+            let Db {
+                ephemeral,
+                persisted,
+            } = self;
+            ephemeral.process_spawn_queue(
+                perf,
+                persisted,
+                Utc::now(),
+                idx,
+                spctx,
+                &ShotDb::default(),
+                true,
+            )?;
+        }
         while self.ephemeral.spawnq_len() > 0 {
             self.drain_pending_dep_farp_static_slot_releases(spctx, idx)?;
-            self.ephemeral.process_spawn_queue(
+            let Db {
+                ephemeral,
+                persisted,
+            } = self;
+            ephemeral.process_spawn_queue(
                 perf,
-                &self.persisted,
+                persisted,
                 Utc::now(),
                 idx,
                 spctx,
@@ -1144,9 +1171,13 @@ impl Db {
                 return Ok(());
             }
             self.drain_pending_dep_farp_static_slot_releases(&spctx, idx)?;
-            self.ephemeral.process_spawn_queue(
+            let Db {
+                ephemeral,
+                persisted,
+            } = self;
+            ephemeral.process_spawn_queue(
                 perf,
-                &self.persisted,
+                persisted,
                 now,
                 idx,
                 &spctx,

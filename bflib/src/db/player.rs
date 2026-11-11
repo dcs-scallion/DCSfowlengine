@@ -331,6 +331,8 @@ impl Db {
                     to: *target,
                     points: amount,
                 });
+                self.emit_points_balance_stat(source, "sync after transfer");
+                self.emit_points_balance_stat(target, "sync after transfer");
                 self.ephemeral.dirty();
                 Ok(())
             }
@@ -342,6 +344,7 @@ impl Db {
                     to: target,
                     points: amount,
                 });
+                self.emit_points_balance_stat(source, "sync after objective transfer");
                 self.ephemeral.dirty();
                 Ok(())
             }
@@ -2477,12 +2480,41 @@ impl Db {
                 let m = format_compact!("{}({}) points {}", pp, amount, why);
                 self.ephemeral.stat(Stat::Points {
                     points: amount,
+                    balance: Some(pp),
                     reason: m.clone().into(),
                     id: *ucid,
                 });
                 self.ephemeral.panel_to_player(&self.persisted, 10, ucid, m);
                 self.ephemeral.dirty();
             }
+        }
+    }
+
+    /// Absolute points snapshot for bfdb (`balance` SET; delta 0).
+    pub fn emit_points_balance_stat(&mut self, ucid: &Ucid, why: &str) {
+        let Some(player) = self.persisted.players.get(ucid) else {
+            return;
+        };
+        let pp = player.points;
+        let m = format_compact!("{}(0) points {}", pp, why);
+        self.ephemeral.stat(Stat::Points {
+            id: *ucid,
+            points: 0,
+            balance: Some(pp),
+            reason: m.into(),
+        });
+    }
+
+    /// Mission-load / SessionStart: sync every registered pilot into bfdb.
+    pub fn emit_all_points_balance_stats(&mut self, why: &str) {
+        let ucids: SmallVec<[Ucid; 64]> = self
+            .persisted
+            .players
+            .into_iter()
+            .map(|(u, _)| *u)
+            .collect();
+        for ucid in ucids {
+            self.emit_points_balance_stat(&ucid, why);
         }
     }
 

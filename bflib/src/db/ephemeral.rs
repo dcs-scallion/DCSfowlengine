@@ -699,7 +699,7 @@ impl Ephemeral {
     pub fn process_spawn_queue(
         &mut self,
         perf: &mut PerfInner,
-        persisted: &Persisted,
+        persisted: &mut Persisted,
         now: DateTime<Utc>,
         idx: &MizIndex,
         spctx: &SpawnCtx,
@@ -719,6 +719,25 @@ impl Ephemeral {
             }
         }
         for gid in delayed {
+            if let Some(pending) = persisted.pending_repair_respawn.remove_cow(&gid) {
+                let player = persisted
+                    .players
+                    .get(&pending.by)
+                    .map(|p| p.name.clone())
+                    .unwrap_or_else(|| String::from("Unknown"));
+                let side = persisted
+                    .groups
+                    .get(&gid)
+                    .map(|g| g.side)
+                    .or_else(|| persisted.players.get(&pending.by).map(|p| p.side))
+                    .unwrap_or(Side::Neutral);
+                let msg = format_compact!(
+                    "{player} completed repair/rearm of {}",
+                    pending.name
+                );
+                self.msgs().panel_to_side(10, false, side, msg);
+                self.dirty();
+            }
             self.push_spawn(gid)
         }
         let mut due_despawns: SmallVec<[(GroupId, Despawn); 16]> = smallvec![];
@@ -1436,6 +1455,44 @@ impl Ephemeral {
         }
     }
 
+    /// Destroy leftover DCS wrecks/units before DEP respawn (repair/rearm).
+    fn clear_deployed_dcs_before_respawn<'lua>(
+        &mut self,
+        lua: MizLua<'lua>,
+        persisted: &Persisted,
+        group: &SpawnedGroup,
+    ) {
+        if !matches!(group.origin, DeployKind::Deployed { .. }) {
+            return;
+        }
+        if let Some(oid) = self.object_id_by_gid.remove(&group.id) {
+            self.gid_by_object_id.remove(&oid);
+            if let Ok(g) = Group::get_instance(lua, &oid) {
+                if g.is_exist().unwrap_or(false) {
+                    let _ = g.destroy();
+                }
+            }
+        }
+        if let Ok(g) = Group::get_by_name(lua, group.name.as_str()) {
+            if g.is_exist().unwrap_or(false) {
+                let _ = g.destroy();
+            }
+        }
+        for uid in &group.units {
+            if let Some(id) = self.object_id_by_uid.remove(uid) {
+                self.uid_by_object_id.remove(&id);
+            }
+            let Some(unit) = persisted.units.get(uid) else {
+                continue;
+            };
+            if let Ok(u) = Unit::get_by_name(lua, unit.name.as_str()) {
+                if u.is_exist().unwrap_or(false) {
+                    let _ = u.destroy();
+                }
+            }
+        }
+    }
+
     pub(super) fn spawn_group<'lua>(
         &mut self,
         perf: &mut PerfInner,
@@ -1446,6 +1503,7 @@ impl Ephemeral {
         mission: Vec<MissionPoint<'lua>>,
     ) -> Result<Option<Spawned<'lua>>> {
         let ts = Utc::now();
+        self.clear_deployed_dcs_before_respawn(spctx.lua(), persisted, group);
         let template = spctx
             .get_template(
                 idx,
@@ -1543,16 +1601,25 @@ impl Ephemeral {
             let point = centroid2d(points.iter().map(|p| *p));
             template.group.set_pos(point)?;
             let activate_gci = me_route_activate_gci(&template.group);
-            /*
-            let radius = points
-                .iter()
-                .map(|p: &Vector2| na::distance_squared(&(*p).into(), &point.into()))
-                .fold(0., |acc, d| if d > acc { d } else { acc });
-            let radius = radius.sqrt();
-            spctx.remove_junk(point, radius * 1.10).with_context(|| {
-                format_compact!("removing junk before spawn of {}", group.template_name)
-            })?;
-            */
+            if matches!(group.origin, DeployKind::Deployed { .. }) {
+                let radius = points
+                    .iter()
+                    .map(|p| {
+                        let dx = p.x - point.x;
+                        let dy = p.y - point.y;
+                        dx * dx + dy * dy
+                    })
+                    .fold(0f64, f64::max)
+                    .sqrt()
+                    .max(50.0)
+                    * 1.10;
+                if let Err(e) = spctx.remove_junk(point, radius) {
+                    warn!(
+                        "removeJunk before DEP respawn {}: {e:#}",
+                        group.template_name
+                    );
+                }
+            }
             let spawned = spctx
                 .spawn(template)
                 .with_context(|| format_compact!("spawning template {}", group.template_name))?;

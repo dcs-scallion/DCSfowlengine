@@ -445,7 +445,7 @@ pub fn jtac_set_full_code(lua: MizLua, arg: ArgTriple<JtId, u16, Ucid>) -> Resul
     jtac_code_changed_panel(lua, arg.fst, arg.trd)
 }
 
-/// `arg.snd` = target radius in meters (0..=500).
+/// `arg.snd` = target radius in meters (10..=500).
 pub fn jtac_set_target_radius(lua: MizLua, arg: ArgTriple<JtId, u16, Ucid>) -> Result<()> {
     let ctx = unsafe { Context::get_mut() };
     ctx.jtac
@@ -924,18 +924,14 @@ pub(super) fn add_menu_for_jtac(
     }
     let radius_root =
         mc.add_submenu_for_group(mizgid, "Target Radius".into(), Some(root.clone()))?;
-    const RADIUS_PRESETS_M: [u16; 10] = [0, 50, 100, 150, 200, 250, 300, 350, 400, 500];
+    const RADIUS_PRESETS_M: [u16; 10] = [10, 50, 100, 150, 200, 250, 300, 350, 400, 500];
     let mut radius_page = radius_root.clone();
     for (i, meters) in RADIUS_PRESETS_M.into_iter().enumerate() {
         if i > 0 && i % 9 == 0 {
             radius_page =
                 mc.add_submenu_for_group(mizgid, "Next>>".into(), Some(radius_page.clone()))?;
         }
-        let label = if meters == 0 {
-            format_compact!("0 m (point)")
-        } else {
-            format_compact!("{meters} m")
-        };
+        let label = format_compact!("{meters} m");
         mc.add_command_for_group(
             mizgid,
             label.into(),
@@ -1025,7 +1021,10 @@ fn add_jtacs_by_location(
         let mut root = mc.add_submenu_for_group(arg.snd, name, Some(arg.fth))?;
         let mut n = 0;
         for jtac in ctx.jtac.jtacs() {
-            if jtac.side() == player.side && jtac.location().oid == arg.trd {
+            if jtac.side() == player.side
+                && jtac.location().oid == arg.trd
+                && jtac.listed_in_ui(&ctx.db)
+            {
                 if n >= 8 {
                     root =
                         mc.add_submenu_for_group(arg.snd, "NEXT>>".into(), Some(root.clone()))?;
@@ -1097,7 +1096,7 @@ fn add_jtac_locations(lua: MizLua, arg: ArgTriple<Ucid, GroupId, SlotId>) -> Res
     }
     let mut jtacs: SmallVec<[JtEntry; 64]> = smallvec![];
     jtacs.extend(ctx.jtac.jtacs().filter_map(|jtac| {
-        if jtac.side() != player.side {
+        if jtac.side() != player.side || !jtac.listed_in_ui(&ctx.db) {
             return None;
         }
         let (near, oid) = match ctx

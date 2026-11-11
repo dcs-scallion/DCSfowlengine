@@ -4764,10 +4764,17 @@ impl StatsDb {
             Stat::Points {
                 id,
                 points,
+                balance,
                 reason: _,
             } => {
-                self.pilots
-                    .with_pilot_round_info(id, ctx.round, |ri| ri.points += points)?;
+                // Prefer absolute `balance` (bflib ≥ sync-on-connect). Legacy JSONL: += delta.
+                self.pilots.with_pilot_round_info(id, ctx.round, |ri| {
+                    if let Some(b) = balance {
+                        ri.points = b;
+                    } else {
+                        ri.points += points;
+                    }
+                })?;
             }
             Stat::PointsTransfer { from, to, points } => {
                 self.pilots
