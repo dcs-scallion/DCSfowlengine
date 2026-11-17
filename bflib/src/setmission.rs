@@ -1,11 +1,12 @@
-//! Spawn external `setmission` after round end: one unpack/inject/repack for
-//! ME datetime and/or static weather in the on-disk `.miz`.
+//! Spawn external `setmission` after round end: promote staged deploy files
+//! (`_*`), then one unpack/inject/repack for ME datetime and/or static weather.
 
 use anyhow::{anyhow, bail, Context, Result};
 use bfprotocols::cfg::{
     DcsserverBotScheduledRestartCfg, MissionDateOnNewCampaign, SetMissionCfg,
     WeatherProfileCfg, WeatherValueRange, SETMISSION_IMMINENT_RESTART_WINDOW_MINS,
 };
+use bfprotocols::fowl_miz_export::FowlMizExport;
 use chrono::{Duration as ChronoDuration, NaiveDate, Utc};
 use log::{info, warn};
 use rand::Rng;
@@ -29,12 +30,36 @@ pub struct SpawnArgs<'a> {
     pub campaign_rounds: u32,
     pub rounds_per_day: u32,
     pub miz_path: &'a Path,
+    /// `{writedir}/{sortie}` — base for `*_CFG` and `*_fowl_export.json`.
+    pub cfg_base_path: &'a Path,
     /// Admin campaign wipe / round reset (next mission is a new campaign).
     pub new_campaign: bool,
     /// Persisted weather rung; `None` means use CFG `weather_start_index`.
     pub weather_index: Option<u32>,
     /// When set, ME start time follows wall-clock restart slot (`times[i] % cycle`).
     pub scheduled_restart: Option<&'a DcsserverBotScheduledRestartCfg>,
+}
+
+fn staging_path(live: &Path) -> PathBuf {
+    let name = live
+        .file_name()
+        .map(|s| s.to_string_lossy().into_owned())
+        .unwrap_or_default();
+    live.with_file_name(format!("_{name}"))
+}
+
+fn live_cfg_path(cfg_base_path: &Path) -> PathBuf {
+    let stem = cfg_base_path
+        .file_name()
+        .map(|s| s.to_string_lossy().into_owned())
+        .unwrap_or_else(|| "CFG".into());
+    cfg_base_path.with_file_name(format!("{stem}_CFG"))
+}
+
+fn any_staging_present(miz: &Path, cfg_live: &Path, export_live: &Path) -> bool {
+    staging_path(miz).is_file()
+        || staging_path(cfg_live).is_file()
+        || staging_path(export_live).is_file()
 }
 
 pub struct SpawnOutcome {
@@ -51,7 +76,11 @@ pub fn maybe_spawn(args: SpawnArgs<'_>) -> Result<Option<SpawnOutcome>> {
     let datetime = &cfg.setmissionstartdatetime;
     let weather = &cfg.setmissionweather;
 
-    if !datetime.enabled && !weather.enabled {
+    let cfg_live = live_cfg_path(args.cfg_base_path);
+    let export_live = FowlMizExport::path(args.cfg_base_path);
+    let need_promote = any_staging_present(args.miz_path, &cfg_live, &export_live);
+
+    if !datetime.enabled && !weather.enabled && !need_promote {
         return Ok(None);
     }
 
@@ -59,12 +88,21 @@ pub fn maybe_spawn(args: SpawnArgs<'_>) -> Result<Option<SpawnOutcome>> {
         .skript_path
         .as_ref()
         .map(|s| s.trim())
-        .filter(|s| !s.is_empty())
-        .ok_or_else(|| anyhow!("setmission enabled but skript_path empty"))?;
-    if !Path::new(bat).is_file() {
-        warn!("setmission.skript_path not found, skipping: {bat}");
-        return Ok(None);
-    }
+        .filter(|s| !s.is_empty());
+    let bat = match bat {
+        Some(b) if Path::new(b).is_file() => b,
+        Some(b) => {
+            warn!("setmission.skript_path not found, skipping: {b}");
+            return Ok(None);
+        }
+        None if datetime.enabled || weather.enabled => {
+            return Err(anyhow!("setmission enabled but skript_path empty"));
+        }
+        None => {
+            warn!("setmission: staging present but skript_path empty, skipping promote");
+            return Ok(None);
+        }
+    };
     if !(1..=1800).contains(&cfg.post_round_delay_secs) {
         warn!(
             "setmission.post_round_delay_secs {} out of range, skipping",
@@ -72,7 +110,8 @@ pub fn maybe_spawn(args: SpawnArgs<'_>) -> Result<Option<SpawnOutcome>> {
         );
         return Ok(None);
     }
-    if !args.miz_path.is_file() {
+    // Live .miz may be replaced from staging after delay; require live or staging.
+    if !args.miz_path.is_file() && !staging_path(args.miz_path).is_file() {
         warn!(
             "setmission: mission .miz not found, skipping: {:?}",
             args.miz_path
@@ -80,6 +119,16 @@ pub fn maybe_spawn(args: SpawnArgs<'_>) -> Result<Option<SpawnOutcome>> {
         return Ok(None);
     }
 
+    if need_promote {
+        info!(
+            "setmission: staging detected (miz={} cfg={} export={})",
+            staging_path(args.miz_path).is_file(),
+            staging_path(&cfg_live).is_file(),
+            staging_path(&export_live).is_file()
+        );
+    }
+
+    // Date/time/weather from current (pre-promote) mission + campaign state.
     let date_arg: String;
     let time_arg: String;
     if datetime.enabled {
@@ -149,8 +198,9 @@ pub fn maybe_spawn(args: SpawnArgs<'_>) -> Result<Option<SpawnOutcome>> {
         }
     }
 
-    // Nothing to write into the .miz
-    if date_arg == "keep-date" && time_arg == "keep-time" && weather_json_path.is_none() {
+    let need_inject =
+        date_arg != "keep-date" || time_arg != "keep-time" || weather_json_path.is_some();
+    if !need_inject && !need_promote {
         SPAWNED_THIS_MISSION.store(true, Ordering::Release);
         return Ok(Some(SpawnOutcome {
             weather_index: new_weather_index,
@@ -164,6 +214,8 @@ pub fn maybe_spawn(args: SpawnArgs<'_>) -> Result<Option<SpawnOutcome>> {
         &time_arg,
         args.miz_path,
         weather_json_path.as_deref(),
+        &cfg_live,
+        &export_live,
     )?;
     SPAWNED_THIS_MISSION.store(true, Ordering::Release);
     Ok(Some(SpawnOutcome {
@@ -195,8 +247,21 @@ fn compute_next_mission_date(
     next_round: u32,
 ) -> Result<String> {
     let datetime = &cfg.setmissionstartdatetime;
-    let miz_date = read_miz_mission_date(args.miz_path)
-        .with_context(|| format!("read ME date from {:?}", args.miz_path))?;
+    // Prefer live .miz (pre-promote campaign calendar); fall back to staging.
+    let staged = staging_path(args.miz_path);
+    let date_src: &Path = if args.miz_path.is_file() {
+        args.miz_path
+    } else if staged.is_file() {
+        warn!(
+            "setmission: reading ME date from staging {:?} (live missing)",
+            staged
+        );
+        &staged
+    } else {
+        bail!("setmission: no live or staging .miz to read ME date")
+    };
+    let miz_date = read_miz_mission_date(date_src)
+        .with_context(|| format!("read ME date from {:?}", date_src))?;
     let base = if let Some(ref s) = datetime.mission_date_base {
         NaiveDate::parse_from_str(s.trim(), "%Y-%m-%d")
             .map_err(|e| anyhow!("mission_date_base: {e}"))?
@@ -369,6 +434,8 @@ fn spawn_detached(
     time_arg: &str,
     miz_path: &Path,
     weather_json: Option<&Path>,
+    cfg_live: &Path,
+    export_live: &Path,
 ) -> Result<()> {
     use std::os::windows::process::CommandExt;
     use std::process::Command;
@@ -390,6 +457,12 @@ fn spawn_detached(
         })
         .transpose()?
         .unwrap_or_else(|| String::from("none"));
+    let cfg_s = cfg_live
+        .to_str()
+        .ok_or_else(|| anyhow!("cfg path is not valid UTF-8"))?;
+    let export_s = export_live
+        .to_str()
+        .ok_or_else(|| anyhow!("export path is not valid UTF-8"))?;
 
     let mut cmd = Command::new(bat);
     cmd.arg("bflib")
@@ -397,7 +470,9 @@ fn spawn_detached(
         .arg(date_arg)
         .arg(time_arg)
         .arg(miz)
-        .arg(&weather);
+        .arg(&weather)
+        .arg(cfg_s)
+        .arg(export_s);
     let child = cmd
         .creation_flags(
             CREATE_NO_WINDOW
@@ -408,7 +483,7 @@ fn spawn_detached(
         .spawn()
         .map_err(|e| anyhow!("spawn {bat}: {e}"))?;
     info!(
-        "setmission: spawned {bat} delay={delay_secs}s date={date_arg} time={time_arg} weather={weather} miz={miz} (pid {})",
+        "setmission: spawned {bat} delay={delay_secs}s date={date_arg} time={time_arg} weather={weather} miz={miz} cfg={cfg_s} export={export_s} (pid {})",
         child.id()
     );
     Ok(())
@@ -422,6 +497,8 @@ fn spawn_detached(
     _time_arg: &str,
     _miz_path: &Path,
     _weather_json: Option<&Path>,
+    _cfg_live: &Path,
+    _export_live: &Path,
 ) -> Result<()> {
     let _ = bat;
     anyhow::bail!("setmission spawn is only supported on Windows DCS hosts")
@@ -490,5 +567,28 @@ mod tests {
             assert!((1300.0..=1500.0).contains(&v));
             assert_eq!(v % 100.0, 0.0);
         }
+    }
+
+    #[test]
+    fn staging_and_cfg_paths() {
+        let miz = Path::new(r"C:\DCS\Missions\Caucasus1987.miz");
+        assert_eq!(
+            staging_path(miz),
+            Path::new(r"C:\DCS\Missions\_Caucasus1987.miz")
+        );
+        let base = Path::new(r"C:\Users\x\Saved Games\DCS\Caucasus1987");
+        assert_eq!(
+            live_cfg_path(base),
+            Path::new(r"C:\Users\x\Saved Games\DCS\Caucasus1987_CFG")
+        );
+        assert_eq!(
+            staging_path(&live_cfg_path(base)),
+            Path::new(r"C:\Users\x\Saved Games\DCS\_Caucasus1987_CFG")
+        );
+        let export = FowlMizExport::path(base);
+        assert_eq!(
+            staging_path(&export),
+            Path::new(r"C:\Users\x\Saved Games\DCS\_Caucasus1987_fowl_export.json")
+        );
     }
 }

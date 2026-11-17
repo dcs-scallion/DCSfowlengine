@@ -41,6 +41,7 @@ use dcso3::{
         CircleSpec, LineType, MarkId, QuadSpec, SideFilter, TextSpec,
     },
 };
+use smallvec::{SmallVec, smallvec};
 
 /// Custom hub supply arrow: head length matches prior DCS default; width at 50%.
 const SUPPLY_ARROW_HEAD_LENGTH_M: f64 = 2500.;
@@ -111,6 +112,8 @@ pub(super) struct ObjectiveMarkup {
     production_repair: u16,
     static_repair_need: u16,
     static_repair: u16,
+    logi_repair_need: u16,
+    logi_repair: u16,
     spawnable_logi_repaired: bool,
     points: i32,
     name: String,
@@ -218,35 +221,54 @@ fn stat_plain_repair_row(label: &'static str, queued: u16, need: u16) -> Compact
     stat_plain_row(label, stat_repair_field(queued, need).as_str())
 }
 
-/// Under name (after a blank line); None when undamaged. ⚠ = idle queue, ※ = crates queued.
-fn objective_repair_markup_line(obj: &Objective) -> Option<CompactString> {
-    let (label, queued, need) = if obj.show_production_repair_in_markup() {
-        (
+fn repair_markup_row(label: &'static str, queued: u16, need: u16) -> CompactString {
+    let marker = if queued == 0 { "⚠ " } else { "※ " };
+    format_compact!(
+        " {marker}{} ",
+        stat_plain_repair_row(label, queued, need)
+    )
+}
+
+/// Under name; None when undamaged. Logi line above static. ⚠ = idle, ※ = queued.
+fn objective_repair_markup_block(obj: &Objective) -> Option<CompactString> {
+    if obj.show_production_repair_in_markup() {
+        return Some(repair_markup_row(
             "repair",
             obj.production_repair,
             obj.production_repair_slots_needed(),
-        )
-    } else if obj.show_static_repair_in_markup() {
-        (
-            "repair static",
+        ));
+    }
+    let mut lines: SmallVec<[CompactString; 2]> = smallvec![];
+    if obj.show_logi_repair_in_markup() {
+        lines.push(repair_markup_row(
+            "repair logi",
+            obj.logi_repair,
+            obj.logi_repair_need,
+        ));
+    }
+    if obj.show_static_repair_in_markup() {
+        lines.push(repair_markup_row(
+            "repair stat",
             obj.static_repair,
             obj.static_repair_need,
-        )
+        ));
+    }
+    if lines.is_empty() {
+        None
     } else {
-        return None;
-    };
-    let marker = if queued == 0 { "⚠ " } else { "※ " };
-    Some(format_compact!(
-        " {marker}{} ",
-        stat_plain_repair_row(label, queued, need)
-    ))
+        Some(lines.join("\n").into())
+    }
 }
 
 fn objective_name_markup_text(name: &str, obj: &Objective, include_repair: bool) -> CompactString {
     if include_repair {
-        if let Some(repair) = objective_repair_markup_line(obj) {
+        if let Some(repair) = objective_repair_markup_block(obj) {
             // DCS F10: em dash is ~2x a Latin letter; match longer of name/repair visually.
-            let cols = name.chars().count().max(repair.chars().count()).max(1);
+            let cols = name
+                .chars()
+                .count()
+                .max(repair.lines().map(|l| l.chars().count()).max().unwrap_or(0))
+                .max(1);
             let width = (cols + 1) / 2;
             let divider: CompactString = "—".repeat(width).into();
             return format_compact!("{name}\n{divider}\n{repair}");
@@ -255,16 +277,28 @@ fn objective_name_markup_text(name: &str, obj: &Objective, include_repair: bool)
     CompactString::from(name)
 }
 
+fn objective_repair_line_count(obj: &Objective) -> usize {
+    if obj.show_production_repair_in_markup() {
+        1
+    } else {
+        usize::from(obj.show_logi_repair_in_markup())
+            + usize::from(obj.show_static_repair_in_markup())
+    }
+}
+
 fn objective_shows_repair_under_name(obj: &Objective) -> bool {
-    obj.show_production_repair_in_markup() || obj.show_static_repair_in_markup()
+    objective_repair_line_count(obj) > 0
 }
 
 /// Skip name (+ divider + repair when friendly viewer sees them) so infobars sit below.
 fn objective_stats_leading_newlines(obj: &Objective, limited: bool) -> &'static str {
-    if !limited && objective_shows_repair_under_name(obj) {
-        "\n\n\n\n"
-    } else {
-        "\n\n"
+    if limited {
+        return "\n\n";
+    }
+    match objective_repair_line_count(obj) {
+        0 => "\n\n",
+        1 => "\n\n\n\n",
+        _ => "\n\n\n\n\n",
     }
 }
 
@@ -981,6 +1015,8 @@ fn sync_overlay_cache_from_objective(
     t.production_repair = obj.production_repair;
     t.static_repair_need = obj.static_repair_need;
     t.static_repair = obj.static_repair;
+    t.logi_repair_need = obj.logi_repair_need;
+    t.logi_repair = obj.logi_repair;
     t.spawnable_logi_repaired = obj.spawnable_logi_repaired;
     t.points = obj.points;
 }
@@ -1125,6 +1161,8 @@ impl ObjectiveMarkup {
             || self.production_repair != obj.production_repair
             || self.static_repair_need != obj.static_repair_need
             || self.static_repair != obj.static_repair
+            || self.logi_repair_need != obj.logi_repair_need
+            || self.logi_repair != obj.logi_repair
             || self.spawnable_logi_repaired != obj.spawnable_logi_repaired
             || self.points != obj.points
         {
@@ -1146,6 +1184,8 @@ impl ObjectiveMarkup {
             self.production_repair = obj.production_repair;
             self.static_repair_need = obj.static_repair_need;
             self.static_repair = obj.static_repair;
+            self.logi_repair_need = obj.logi_repair_need;
+            self.logi_repair = obj.logi_repair;
             self.spawnable_logi_repaired = obj.spawnable_logi_repaired;
             self.points = obj.points;
             refresh_objective_name_labels(msgq, self, obj);
@@ -1290,6 +1330,8 @@ impl ObjectiveMarkup {
         t.production_repair = obj.production_repair;
         t.static_repair_need = obj.static_repair_need;
         t.static_repair = obj.static_repair;
+        t.logi_repair_need = obj.logi_repair_need;
+        t.logi_repair = obj.logi_repair;
         t.spawnable_logi_repaired = obj.spawnable_logi_repaired;
         let label = resolve_objective_f10_map_label(display_aliases, obj);
         t.name = format_compact!(" {} ", label).into();

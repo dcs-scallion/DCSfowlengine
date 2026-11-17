@@ -218,9 +218,9 @@ See [Deployable Units Reference](./deployables.md) for complete details.
 ### Logistics Repair
 - **Type**: Infrastructure repair via helicopter or fixed-wing
 - **Cost**: **100 points** (helo) / **200 points** (fast)
-- **Function**: Deliver repair crate, increase objective logi by one step
+- **Function**: Deliver a repair crate into the objective’s repair queue (Logi first, then static)
 - **Target**: Your owned objectives
-- **Effect**: Immediate logi increase upon delivery
+- **Effect**: Queued gradual Logi repair (then static once Logi is complete); not an instant full step
 - **Use**: Prevent capture, restore functionality
 - **Speed**: Fast option reaches quickly
 

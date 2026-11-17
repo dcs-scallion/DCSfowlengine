@@ -923,6 +923,7 @@ pub fn collect_map_status_bar(
         player_crates: format_max_crates(cfg),
         threatened: format_duration_seconds(cfg.threatened_cooldown),
         bases_repair: format_duration_seconds(cfg.repair_time),
+        logi_repair: format_duration_seconds(cfg.logi_repair_rate_seconds),
         factory_repair: format_duration_seconds(cfg.production_repair_rate_seconds),
         static_repair: format_duration_seconds(cfg.static_repair_rate_seconds),
         supply_to_bases,

@@ -215,6 +215,10 @@ pub enum AdminCommand {
         ucid: Ucid,
         body: std::string::String,
     },
+    /// Attrition cockpit: INFO panel (live CFG rules + DEP/troop tables for player side)
+    InfoList {
+        ucid: Ucid,
+    },
     /// Dashboard MY PROFILE: side + remaining side_switches for a UCID
     PlayerSideInfo {
         ucid: Ucid,
@@ -840,6 +844,7 @@ pub(super) fn admin_shutdown(
                     campaign_rounds: ctx.db.persisted.campaign_stats.campaign_rounds,
                     rounds_per_day: ctx.db.ephemeral.cfg.discord_map.rounds_per_day,
                     miz_path: &miz_path,
+                    cfg_base_path: &ctx.cfg_base_path,
                     new_campaign,
                     weather_index,
                     scheduled_restart: ctx
@@ -1417,7 +1422,12 @@ pub(crate) fn query_objectives(ctx: &Context) -> Vec<ObjectiveInfo> {
                 logi: obj.logi(),
                 supply: obj.supply(),
                 fuel: obj.fuel(),
-                production: Some(obj.production()),
+                // Occupied OLO: hide Production (same as Discord live map).
+                production: if obj.is_occupied_logistics_hub() {
+                    None
+                } else {
+                    Some(obj.production())
+                },
                 threatened: obj.threatened(),
                 captureable: obj.captureable(),
                 group_count,
@@ -1464,7 +1474,11 @@ pub(crate) fn query_objective_details(ctx: &Context, name: &str) -> Result<Objec
             logi: obj.logi(),
             supply: obj.supply(),
             fuel: obj.fuel(),
-            production: Some(obj.production()),
+            production: if obj.is_occupied_logistics_hub() {
+                None
+            } else {
+                Some(obj.production())
+            },
             threatened: obj.threatened(),
             captureable: obj.captureable(),
             group_count,
@@ -1858,6 +1872,12 @@ pub(super) fn run_admin_commands(ctx: &mut Context, lua: MizLua) -> Result<Admin
             AdminCommand::MainTransfer { ucid, body } => {
                 match crate::cockpit_main::run_main_transfer(ctx, lua, ucid, body.as_str()) {
                     Ok(msg) => replies.push(NetIdxValue::from(msg)),
+                    Err(e) => reply_err!("{e:#}"),
+                }
+            }
+            AdminCommand::InfoList { ucid } => {
+                match crate::cockpit_info::list_info_panel_for_ucid(ctx, &ucid) {
+                    Ok(json) => replies.push(NetIdxValue::from(json)),
                     Err(e) => reply_err!("{e:#}"),
                 }
             }

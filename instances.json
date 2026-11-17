@@ -13,7 +13,7 @@
       "server_ip": "78.80.144.178:10308",
       "sortie": null,
       "stats_jsonl": "C:\\Users\\Robo\\Saved Games\\DCS.dcs_serverrelease\\Logs\\stats.jsonl",
-      "base": "/local/fowl/campaign"
+      "base": "/local/fowl/server1"
     },
     {
       "label": "Attrition #2 PvE Caucasus1985-TA",
@@ -28,7 +28,7 @@
       "server_ip": "78.80.144.178:10309",
       "sortie": null,
       "stats_jsonl": "C:\\Users\\Robo\\Saved Games\\DCS.dcs_serverrelease_2\\Logs\\stats.jsonl",
-      "base": "/local/fowl/campaign-ta"
+      "base": "/local/fowl/server2"
     }
   ],
   "default": "attrition1"

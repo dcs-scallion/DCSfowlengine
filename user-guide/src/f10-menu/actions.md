@@ -159,10 +159,10 @@ Relocate deployed ground units:
 ### Logistics Actions
 
 **Logistics Repair**:
-- Repairs objective logistics
-- Select from owned objectives
-- Costs points (200-500)
-- Immediate logi increase
+- Delivers a repair crate to an owned objective
+- Queues gradual Logi repair (static queue after Logi is full / complete)
+- Costs points (server-configured; often 100–200)
+- F10 shows `repair logi` / `repair stat` progress under the objective name
 
 **Logistics Transfer**:
 - Admin-only usually

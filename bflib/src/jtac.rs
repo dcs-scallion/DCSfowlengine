@@ -30,7 +30,7 @@ use bfprotocols::{
 use chrono::{Duration, prelude::*};
 use compact_str::{CompactString, format_compact};
 use dcso3::{
-    LuaVec2, LuaVec3, MizLua, String, Vector2, Vector3, azumith2d,
+    LuaVec2, LuaVec3, MizLua, String, Vector2, Vector3, azumith2d, normal2,
     coalition::Side,
     controller::{
         ActionTyp, AltType, AttackParams, MissionPoint, PointType, Task, TurnMethod,
@@ -45,7 +45,6 @@ use dcso3::{
     spot::{ClassSpot, Spot},
     trigger::{MarkId, SmokeColor, Trigger},
     unit::{ClassUnit, Unit},
-    weapon::Weapon,
 };
 use enumflags2::BitFlags;
 use fxhash::{FxBuildHasher, FxHashMap, FxHashSet};
@@ -168,12 +167,22 @@ simple_enum!(AdjustmentDir, u8, [
     Right => 3
 ]);
 
-#[derive(Debug, Clone)]
+/// Per-battery fire solution offset (PR #5 manual adjust; shared across JTACs).
+#[derive(Debug, Clone, Copy, Default)]
 pub struct ArtilleryAdjustment {
-    adjust: Vector2,
-    target: Vector2,
-    group: Vec<DcsOid<ClassUnit>>,
-    tracked: Option<(Weapon<'static>, Option<Vector3>)>,
+    pub short_long: i16,
+    pub left_right: i16,
+}
+
+impl ArtilleryAdjustment {
+    fn compute_final_solution(&self, ip: Vector2, tp: Vector2) -> Vector2 {
+        let delta = tp - ip;
+        if delta.norm() < 1.0 {
+            return tp;
+        }
+        let v = delta.normalize();
+        tp + (v * self.short_long as f64) + (normal2(v) * self.left_right as f64)
+    }
 }
 
 /// Hull-aim nudge before FireAtPoint (Grad/MLRS); port of Vector AGPL bflib helper.
@@ -519,6 +528,7 @@ impl Jtac {
             }
         }
         write!(msg, "]\n")?;
+        write!(msg, "target radius: {:.0}m\n", self.target_radius_m())?;
         write!(msg, "available artillery: [")?;
         let len = self.nearby_artillery.len();
         for (i, gid) in self.nearby_artillery.iter().enumerate() {
@@ -839,7 +849,7 @@ impl Jtac {
         &mut self,
         db: &Db,
         lua: MizLua,
-        adjustment: &mut ArtilleryAdjustment,
+        adjustment: &ArtilleryAdjustment,
         gid: &GroupId,
         n: u8,
     ) -> Result<()> {
@@ -850,8 +860,7 @@ impl Jtac {
                 let apos = db.group_center(gid)?;
                 let pos = Vector2::new(target.pos.x, target.pos.z);
                 db.ensure_artillery_fire_range(gid, pos)?;
-                adjustment.target = pos;
-                let pos = pos + adjustment.adjust;
+                let pos = adjustment.compute_final_solution(apos, pos);
                 let fire = Task::FireAtPoint {
                     point: LuaVec2(pos),
                     radius: self.fire_zone_radius(),
@@ -863,12 +872,6 @@ impl Jtac {
                 let task = aim_and_fire_route(apos, pos, group_facing(db, gid), fire);
                 let group = Group::get_by_name(lua, &name)
                     .with_context(|| format_compact!("getting group {}", name))?;
-                adjustment.tracked = None;
-                for unit in group.get_units()? {
-                    let unit = unit?;
-                    let id = unit.object_id()?;
-                    adjustment.group.push(id);
-                }
                 let con = group.get_controller().context("getting controller")?;
                 con.set_task(task)?;
             }
@@ -880,7 +883,7 @@ impl Jtac {
         &mut self,
         db: &Db,
         lua: MizLua,
-        adjustment: &mut ArtilleryAdjustment,
+        adjustment: &ArtilleryAdjustment,
         gid: &GroupId,
         rounds_per_target: u8,
         num_targets: u8,
@@ -888,9 +891,12 @@ impl Jtac {
         match self.target.as_mut() {
             None => bail!("no target"),
             Some(target) => {
-                let aim_target = Vector2::new(target.pos.x, target.pos.z);
                 let name = db.group(gid)?.name.clone();
                 let apos = db.group_center(gid)?;
+                let aim_target = adjustment.compute_final_solution(
+                    apos,
+                    Vector2::new(target.pos.x, target.pos.z),
+                );
 
                 // Get total ammunition from all units in the artillery group
                 let mut total_ammo = 0u8;
@@ -904,11 +910,11 @@ impl Jtac {
                     };
                     total_ammo = total_ammo.saturating_add(unit_ammo);
                 }
-                
+
                 if total_ammo == 0 {
                     bail!("Artillery Abort: {gid} is out of ammunition.");
                 }
-                
+
                 let total_required = rounds_per_target * num_targets;
                 if total_ammo < total_required {
                     bail!("Artillery Abort: {gid} has only {total_ammo} rounds remaining, cannot fire {total_required} rounds ({rounds_per_target} per target for {num_targets} targets).");
@@ -917,17 +923,16 @@ impl Jtac {
                 // Create fire tasks for each target
                 let mut fire_task_vec: Vec<Task> = vec![];
                 let mut allocated_ammo = total_ammo;
-                
+
                 for (i, (_, target)) in self.contacts.iter().enumerate() {
                     if i >= num_targets as usize || allocated_ammo < rounds_per_target {
                         break;
                     }
-                    
+
                     let pos = Vector2::new(target.pos.x, target.pos.z);
                     db.ensure_artillery_fire_range(gid, pos)?;
-                    adjustment.target = pos;
-                    let pos = pos + adjustment.adjust;
-                    
+                    let pos = adjustment.compute_final_solution(apos, pos);
+
                     let task = Task::FireAtPoint {
                         point: LuaVec2(pos),
                         radius: self.fire_zone_radius(),
@@ -936,11 +941,11 @@ impl Jtac {
                         altitude: Some(0.),
                         altitude_type: Some(AltType::RADIO),
                     };
-                    
+
                     fire_task_vec.push(task);
                     allocated_ammo -= rounds_per_target;
                 }
-                
+
                 if fire_task_vec.is_empty() {
                     bail!("Artillery Abort: No valid targets found for combo mission.");
                 }
@@ -954,12 +959,6 @@ impl Jtac {
 
                 let group = Group::get_by_name(lua, &name)
                     .with_context(|| format_compact!("getting group {}", name))?;
-                adjustment.tracked = None;
-                for unit in group.get_units()? {
-                    let unit = unit?;
-                    let id = unit.object_id()?;
-                    adjustment.group.push(id);
-                }
                 let con = group.get_controller().context("getting controller")?;
                 con.set_task(task)?;
             }
@@ -1433,16 +1432,29 @@ impl Jtacs {
             .iter_mut()
             .find_map(|(_, jtx)| jtx.get_mut(&jtid))
             .ok_or_else(|| anyhow!("no such jtac"))?;
-        let adjustment = self
-            .artillery_adjustment
-            .entry(*shooter)
-            .or_insert_with(|| ArtilleryAdjustment {
-                adjust: Vector2::zeros(),
-                target: Vector2::zeros(),
-                group: vec![],
-                tracked: None,
-            });
-        jtac.artillery_mission(db, lua, adjustment, &shooter, n)
+        let adjustment = *self.artillery_adjustment.entry(*shooter).or_default();
+        jtac.artillery_mission(db, lua, &adjustment, shooter, n)
+    }
+
+    pub fn adjust_artillery_solution(&mut self, arty: &GroupId, dir: AdjustmentDir, mag: u16) {
+        let adj = self.artillery_adjustment.entry(*arty).or_default();
+        match dir {
+            AdjustmentDir::Long => adj.short_long -= mag as i16,
+            AdjustmentDir::Short => adj.short_long += mag as i16,
+            AdjustmentDir::Left => adj.left_right -= mag as i16,
+            AdjustmentDir::Right => adj.left_right += mag as i16,
+        }
+    }
+
+    pub fn reset_artillery_solution(&mut self, arty: &GroupId) {
+        self.artillery_adjustment.insert(*arty, ArtilleryAdjustment::default());
+    }
+
+    pub fn get_artillery_adjustment(&self, arty: &GroupId) -> ArtilleryAdjustment {
+        self.artillery_adjustment
+            .get(arty)
+            .copied()
+            .unwrap_or_default()
     }
 
     pub fn artillery_fire_all(
@@ -1457,15 +1469,7 @@ impl Jtacs {
             .iter_mut()
             .find_map(|(_, jtx)| jtx.get_mut(&jtid))
             .ok_or_else(|| anyhow!("no such jtac"))?;
-        let adjustment = self
-            .artillery_adjustment
-            .entry(*shooter)
-            .or_insert_with(|| ArtilleryAdjustment {
-                adjust: Vector2::zeros(),
-                target: Vector2::zeros(),
-                group: vec![],
-                tracked: None,
-            });
+        let adjustment = *self.artillery_adjustment.entry(*shooter).or_default();
 
         // Get total ammunition from all units in the artillery group
         let total_ammo = {
@@ -1486,7 +1490,7 @@ impl Jtacs {
             total
         };
 
-        jtac.artillery_mission(db, lua, adjustment, &shooter, total_ammo)
+        jtac.artillery_mission(db, lua, &adjustment, shooter, total_ammo)
     }
 
     pub fn get_artillery_ammo(
@@ -1527,17 +1531,16 @@ impl Jtacs {
             .iter_mut()
             .find_map(|(_, jtx)| jtx.get_mut(&jtid))
             .ok_or_else(|| anyhow!("no such jtac"))?;
-        let adjustment = self
-            .artillery_adjustment
-            .entry(*shooter)
-            .or_insert_with(|| ArtilleryAdjustment {
-                adjust: Vector2::zeros(),
-                target: Vector2::zeros(),
-                group: vec![],
-                tracked: None,
-            });
+        let adjustment = *self.artillery_adjustment.entry(*shooter).or_default();
 
-        jtac.artillery_combo_mission(db, lua, adjustment, &shooter, rounds_per_target, num_targets)
+        jtac.artillery_combo_mission(
+            db,
+            lua,
+            &adjustment,
+            shooter,
+            rounds_per_target,
+            num_targets,
+        )
     }
 
     pub fn calcm_mission(

@@ -74,7 +74,7 @@ See [JTAC System](../f10-menu/jtac.md) for full guide.
 **A**: Logistics at 0 means the objective CAN be captured. The infrastructure is completely destroyed.
 
 ### Q: How do I repair logistics?
-**A**: Logistics repair slowly over time automatically. Admins can speed this with `-admin repair`. Some servers allow player logistics repair actions.
+**A**: Unpack repair crates at the objective (or call Logistics Repair). Crates enter a queue and restore Logi gradually — check `repair logi` on the F10 marker. Once Logi is fully repaired, queued static repairs can run. Admins can still use `-admin repair`.
 
 ### Q: Why is my objective low on supply?
 **A**: 

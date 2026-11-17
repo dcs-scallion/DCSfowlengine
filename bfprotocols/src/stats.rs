@@ -65,6 +65,139 @@ pub enum StaticKillKind {
     ObjectiveStatic,
 }
 
+/// Discord live-map "War losses" row (victim-side). Dashboard aggregates `Stat::WarLoss`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum WarLossBucket {
+    PlanesStandard,
+    PlanesIntercept,
+    PlanesAttack,
+    PlanesRecon,
+    PlanesBomber,
+    PlanesTanker,
+    PlanesAwacs,
+    PlanesLog,
+    Drones,
+    HelicoptersAtk,
+    HelicoptersLog,
+    Armored,
+    Artillery,
+    Troops,
+    Utility,
+    Aaa,
+    SamSr,
+    SamMr,
+    SamLr,
+    EwrRadars,
+    ShipsSmall,
+    ShipsMedium,
+    Carriers,
+    BuildingLogi,
+    BuildingProd,
+    BuildingStatic,
+}
+
+impl WarLossBucket {
+    pub const ALL: [WarLossBucket; 26] = [
+        Self::PlanesStandard,
+        Self::PlanesIntercept,
+        Self::PlanesAttack,
+        Self::PlanesRecon,
+        Self::PlanesBomber,
+        Self::PlanesTanker,
+        Self::PlanesAwacs,
+        Self::PlanesLog,
+        Self::Drones,
+        Self::HelicoptersAtk,
+        Self::HelicoptersLog,
+        Self::Armored,
+        Self::Artillery,
+        Self::Troops,
+        Self::Utility,
+        Self::Aaa,
+        Self::SamSr,
+        Self::SamMr,
+        Self::SamLr,
+        Self::EwrRadars,
+        Self::ShipsSmall,
+        Self::ShipsMedium,
+        Self::Carriers,
+        Self::BuildingLogi,
+        Self::BuildingProd,
+        Self::BuildingStatic,
+    ];
+
+    pub fn id(self) -> &'static str {
+        match self {
+            Self::PlanesStandard => "planes_standard",
+            Self::PlanesIntercept => "planes_intercept",
+            Self::PlanesAttack => "planes_attack",
+            Self::PlanesRecon => "planes_recon",
+            Self::PlanesBomber => "planes_bomber",
+            Self::PlanesTanker => "planes_tanker",
+            Self::PlanesAwacs => "planes_awacs",
+            Self::PlanesLog => "planes_log",
+            Self::Drones => "drones",
+            Self::HelicoptersAtk => "helicopters_atk",
+            Self::HelicoptersLog => "helicopters_log",
+            Self::Armored => "armored",
+            Self::Artillery => "artillery",
+            Self::Troops => "troops",
+            Self::Utility => "utility",
+            Self::Aaa => "aaa",
+            Self::SamSr => "sam_sr",
+            Self::SamMr => "sam_mr",
+            Self::SamLr => "sam_lr",
+            Self::EwrRadars => "ewr_radars",
+            Self::ShipsSmall => "ships_small",
+            Self::ShipsMedium => "ships_medium",
+            Self::Carriers => "carriers",
+            Self::BuildingLogi => "building_logi",
+            Self::BuildingProd => "building_prod",
+            Self::BuildingStatic => "building_static",
+        }
+    }
+
+    /// Same labels as Discord interactive map War losses.
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::PlanesStandard => "Planes standard",
+            Self::PlanesIntercept => "Planes intercept",
+            Self::PlanesAttack => "Planes attack",
+            Self::PlanesRecon => "Planes recon",
+            Self::PlanesBomber => "Planes bomber",
+            Self::PlanesTanker => "Planes tanker",
+            Self::PlanesAwacs => "Planes awacs",
+            Self::PlanesLog => "Planes log",
+            Self::Drones => "Drones",
+            Self::HelicoptersAtk => "Helicopters atk",
+            Self::HelicoptersLog => "Helicopters log",
+            Self::Armored => "Armored",
+            Self::Artillery => "Artillery",
+            Self::Troops => "Troops",
+            Self::Utility => "Utility",
+            Self::Aaa => "AAA",
+            Self::SamSr => "SAM SR",
+            Self::SamMr => "SAM MR",
+            Self::SamLr => "SAM LR",
+            Self::EwrRadars => "EWR radars",
+            Self::ShipsSmall => "Ships small",
+            Self::ShipsMedium => "Ships medium",
+            Self::Carriers => "Carriers",
+            Self::BuildingLogi => "Building logi",
+            Self::BuildingProd => "Building prod",
+            Self::BuildingStatic => "Building static",
+        }
+    }
+
+    pub fn divider_before(self) -> bool {
+        matches!(
+            self,
+            Self::HelicoptersAtk | Self::Armored | Self::ShipsSmall | Self::BuildingLogi
+        )
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum Stat {
     NewRound {
@@ -238,6 +371,14 @@ pub enum Stat {
         lives: MapS<LifeType, (DateTime<Utc>, u8)>,
     },
     Kill(Dead),
+    /// Victim-side war-loss bucket (Discord War losses taxonomy). Dashboard source of truth.
+    WarLoss {
+        side: Side,
+        bucket: WarLossBucket,
+        #[serde(default = "war_loss_count_one")]
+        count: u32,
+        time: DateTime<Utc>,
+    },
     /// ME objective static or OPR factory destroyed by a player (not unit ShotDb).
     StaticKill {
         by: Ucid,
@@ -331,4 +472,8 @@ pub enum Stat {
         visibility_m: Option<f64>,
     },
     GciPicture(crate::gci::GciPicture),
+}
+
+fn war_loss_count_one() -> u32 {
+    1
 }

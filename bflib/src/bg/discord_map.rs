@@ -183,6 +183,7 @@ pub struct DiscordMapStatusBar {
     pub player_crates: String,
     pub threatened: String,
     pub bases_repair: String,
+    pub logi_repair: String,
     pub factory_repair: String,
     pub static_repair: String,
     pub supply_to_bases: String,
@@ -1081,9 +1082,10 @@ fn stats_row_html(bar: &DiscordMapStatusBar, top: bool) -> String {
   <div class="stat"><div class="stat-h">Air-deslot penalty</div><div class="stat-v stat-accent">{deslot}</div></div>
   <div class="stat"><div class="stat-h">Player crates</div><div class="stat-v stat-accent">{crates}</div></div>
   <div class="stat"><div class="stat-h">Threatened</div><div class="stat-v stat-accent">{threatened}</div></div>
-  <div class="stat"><div class="stat-h">Bases repair</div><div class="stat-v stat-accent">{bases_repair}</div></div>
-  <div class="stat"><div class="stat-h">Factory repair</div><div class="stat-v stat-accent">{factory_repair}</div></div>
+  <div class="stat"><div class="stat-h">Logi repair</div><div class="stat-v stat-accent">{logi_repair}</div></div>
+  <div class="stat"><div class="stat-h">Health repair</div><div class="stat-v stat-accent">{bases_repair}</div></div>
   <div class="stat"><div class="stat-h">Static repair</div><div class="stat-v stat-accent">{static_repair}</div></div>
+  <div class="stat"><div class="stat-h">Factory repair</div><div class="stat-v stat-accent">{factory_repair}</div></div>
   <div class="stat"><div class="stat-h">Supply to bases</div><div class="stat-v stat-accent">{supply}</div></div>
   <div class="stat"><div class="stat-h">Delivery to HUBs</div><div class="stat-v stat-accent">{delivery}</div></div>
 </div>"#,
@@ -1092,6 +1094,7 @@ fn stats_row_html(bar: &DiscordMapStatusBar, top: bool) -> String {
             deslot = html_escape(&bar.deslot_penalty),
             crates = html_escape(&bar.player_crates),
             threatened = html_escape(&bar.threatened),
+            logi_repair = html_escape(&bar.logi_repair),
             bases_repair = html_escape(&bar.bases_repair),
             factory_repair = html_escape(&bar.factory_repair),
             static_repair = html_escape(&bar.static_repair),

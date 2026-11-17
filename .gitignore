@@ -117,6 +117,8 @@ miz/**/*_CFG
 *.7z
 *.rar
 *.zip
+# Excel workbooks (DEP/ACTIONS tables) — local only, not for GitHub
+*.xlsx
 # Build / local run logs (e.g. ! build-and-copy-mission-LOG.txt)
 *-LOG.txt
 # Editor / miz work dirs (e.g. temporary unpacks)
@@ -142,6 +144,8 @@ bftools/analyze_export_detail.ps1
 # Proprietary dashboard / marketing UI — keep local; do not push to public GitHub
 /bfweb/
 /bfsite/
+# Attrition Control Windows installer (local build / distribute outside GitHub)
+/bfcockpit/installer/
 **/node_modules/
 
 bfsystem.local.ps1

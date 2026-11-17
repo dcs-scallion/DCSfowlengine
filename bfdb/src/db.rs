@@ -10,7 +10,7 @@ use bfprotocols::{
     },
     perf::PerfInner,
     shots::{Dead, Shot, Who},
-    stats::{DetectionSource, EnId, Pos, Stat, StaticKillKind},
+    stats::{DetectionSource, EnId, Pos, Stat, StaticKillKind, WarLossBucket},
 };
 use chrono::prelude::*;
 use dcso3::{
@@ -245,6 +245,14 @@ fn kill_target_from_tags(tags: &UnitTags) -> KillTarget {
         KillTarget::Ship
     } else {
         KillTarget::Ground
+    }
+}
+
+fn war_loss_side_key(side: Side) -> Option<u8> {
+    match side {
+        Side::Blue => Some(0),
+        Side::Red => Some(1),
+        Side::Neutral => None,
     }
 }
 
@@ -790,6 +798,8 @@ pub(crate) struct StatsDbInner {
     deploys: Tree<(Ucid, RoundId, DeployId), DeployRecord>,
     static_kills: Tree<(Ucid, RoundId, KillId), StaticKillRecord>,
     static_kill_seen: Tree<(RoundId, UnitId, i64), KillId>,
+    /// Victim-side Discord War losses: (round, bucket, side_key 0=Blue/1=Red) → count.
+    war_loss_counts: Tree<(RoundId, WarLossBucket, u8), u32>,
     aircraft_sorties: Tree<(RoundId, std::string::String), (u32, f32)>,
     pilot_last_activity: Tree<(Ucid, RoundId), DateTime<Utc>>,
     admin_bans: Tree<Ucid, BanRecord>,
@@ -915,6 +925,7 @@ fn stat_variant_name(s: &Stat) -> &'static str {
         Stat::DynamicCargoDelivery { .. } => "DynamicCargoDelivery",
         Stat::CsarRescue { .. } => "CsarRescue",
         Stat::Kill(_) => "Kill",
+        Stat::WarLoss { .. } => "WarLoss",
         Stat::StaticKill { .. } => "StaticKill",
         Stat::Unit { .. } => "Unit",
         Stat::Position { .. } => "Position",
@@ -1064,6 +1075,7 @@ impl StatsDb {
             deploys: Tree::open(&db, "deploys")?,
             static_kills: Tree::open(&db, "static_kills")?,
             static_kill_seen: Tree::open(&db, "static_kill_seen")?,
+            war_loss_counts: Tree::open(&db, "war_loss_counts")?,
             aircraft_sorties: Tree::open(&db, "aircraft_sorties")?,
             pilot_last_activity: Tree::open(&db, "pilot_last_activity")?,
             admin_bans: Tree::open(&db, "admin_bans")?,
@@ -1962,8 +1974,19 @@ fn read_live_jsonl_stats(
     let mut first_unparsed: Option<std::string::String> = None;
     let mut undecodable = 0u64;
     let mut first_undecodable: Option<std::string::String> = None;
-    while reader.read_line(&mut line)? > 0 {
+    loop {
+        let line_start = reader.stream_position()?;
+        let n = reader.read_line(&mut line)?;
+        if n == 0 {
+            break;
+        }
+        // Live file: last write may be mid-line (big Stat::Kill with dozens of MG hits).
+        // Do not advance the cursor past an incomplete line or it is permanently skipped.
+        if !line.ends_with('\n') {
+            break;
+        }
         new_pos = reader.stream_position()?;
+        debug_assert_eq!(new_pos, line_start + n as u64);
         let trimmed = line.trim();
         if !trimmed.is_empty() {
             parse_stats_jsonl_line(
@@ -2675,14 +2698,17 @@ impl StatsDb {
     }
 
     /// Get the latest round for each scenario
-    /// Pilot points for active round, sorted descending
+    /// Pilot points for active round, sorted descending.
+    /// Linked dashboard accounts only (same set as `/api/leaderboard`).
     pub(crate) fn pilot_points(&self, round: RoundId) -> Result<Vec<(std::string::String, i32, std::string::String)>> {
         // Returns Vec<(name, points, side)>
+        let linked = self.web_auth().linked_ucids()?;
         let mut result = Vec::new();
         for r in self.pilots.round_info.iter() {
             let ((ucid, rid), ri) = r?;
             if rid != round { continue; }
             if ri.points == 0 { continue; }
+            if !linked.contains(&ucid.to_string()) { continue; }
             let name = self.pilots.pilots.get(&ucid)?
                 .and_then(|p| p.name.last().map(|s| s.to_string()))
                 .unwrap_or_default();
@@ -3980,6 +4006,64 @@ impl StatsDb {
         Ok(seen.len() as u32)
     }
 
+    fn record_war_loss(
+        &self,
+        ctx: &StatCtxInner,
+        side: Side,
+        bucket: WarLossBucket,
+        count: u32,
+    ) -> Result<()> {
+        let Some(sk) = war_loss_side_key(side) else {
+            return Ok(());
+        };
+        if count == 0 {
+            return Ok(());
+        }
+        self.war_loss_counts
+            .fetch_and_update(&(ctx.round, bucket, sk), |v| {
+                Some(v.unwrap_or(0).saturating_add(count))
+            })?;
+        Ok(())
+    }
+
+    /// Aggregate WAR LOSSES for dashboard (Discord buckets; `Stat::WarLoss` events).
+    /// `all_time`: every round of `inst`. Else: `round_id` or resolved current round.
+    pub(crate) fn war_losses(
+        &self,
+        inst: &InstanceId,
+        all_time: bool,
+        round_id: Option<u64>,
+    ) -> Result<Vec<(WarLossBucket, u32, u32)>> {
+        let mut blue = [0u32; 26];
+        let mut red = [0u32; 26];
+
+        let rounds: Vec<RoundId> = if all_time {
+            self.rounds_of(inst)?.into_iter().collect()
+        } else {
+            match self.resolve_round_id(inst, round_id)? {
+                Some(rid) => vec![rid],
+                None => Vec::new(),
+            }
+        };
+
+        for rid in rounds {
+            for (i, bucket) in WarLossBucket::ALL.iter().enumerate() {
+                if let Some(n) = self.war_loss_counts.get(&(rid, *bucket, 0))? {
+                    blue[i] = blue[i].saturating_add(n);
+                }
+                if let Some(n) = self.war_loss_counts.get(&(rid, *bucket, 1))? {
+                    red[i] = red[i].saturating_add(n);
+                }
+            }
+        }
+
+        Ok(WarLossBucket::ALL
+            .iter()
+            .enumerate()
+            .map(|(i, c)| (*c, blue[i], red[i]))
+            .collect())
+    }
+
     /// Same classification record_kill uses for air_kills vs ground/ship:
     /// a player death always counts as air (players are always in aircraft),
     /// an AI death counts as air only if the unit is tagged Aircraft or
@@ -4731,6 +4815,12 @@ impl StatsDb {
                 })?;
             }
             Stat::Kill(dead) => self.record_kill(ctx, dead)?,
+            Stat::WarLoss {
+                side,
+                bucket,
+                count,
+                time: _,
+            } => self.record_war_loss(ctx, side, bucket, count)?,
             Stat::StaticKill {
                 by,
                 side,

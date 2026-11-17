@@ -20,7 +20,7 @@
 -- DCS dxgui Window/WebViewWidget have no LuaLS stubs; calls are guarded with pcall.
 ---@diagnostic disable: undefined-field, need-check-nil
 
-local ATTRITION_COCKPIT_VERSION = "1.1.7"
+local ATTRITION_COCKPIT_VERSION = "1.2.0"
 
 local net = require('net')
 
@@ -361,6 +361,70 @@ local function dashboard_origin()
     return origin
 end
 
+-- Default caption color captured from the live skin (first apply).
+local title_color_default = nil
+-- ARGB yellow for pending-update title (whole caption — dxgui has no partial colors).
+local TITLE_COLOR_PENDING = "0xffcc00ff"
+
+local function collect_caption_text_nodes(skin)
+    local out = {}
+    local function visit_states(states)
+        if type(states) ~= "table" then return end
+        for _, st in pairs(states) do
+            if type(st) == "table" then
+                for _, layer in pairs(st) do
+                    if type(layer) == "table" and type(layer.text) == "table"
+                        and layer.text.color ~= nil then
+                        out[#out + 1] = layer.text
+                    end
+                end
+            end
+        end
+    end
+    local sd = skin and skin.skinData
+    if type(sd) ~= "table" then return out end
+    -- Prefer dedicated caption skins; fall back to window released-state text.
+    local skins = sd.skins
+    local found_caption = false
+    if type(skins) == "table" then
+        local cap = skins.caption
+        if type(cap) == "table" and type(cap.skinData) == "table" then
+            visit_states(cap.skinData.states)
+            found_caption = #out > 0
+        end
+        local header = skins.header
+        if type(header) == "table" and type(header.skinData) == "table" then
+            local hs = header.skinData.skins
+            if type(hs) == "table" and type(hs.caption) == "table"
+                and type(hs.caption.skinData) == "table" then
+                visit_states(hs.caption.skinData.states)
+                found_caption = #out > 0
+            end
+        end
+    end
+    if not found_caption then
+        visit_states(sd.states)
+    end
+    return out
+end
+
+local function apply_window_title_color(pending)
+    if not window then return end
+    pcall(function()
+        local skin = window:getSkin()
+        local texts = collect_caption_text_nodes(skin)
+        if #texts == 0 then return end
+        if title_color_default == nil then
+            title_color_default = texts[1].color
+        end
+        local color = pending and TITLE_COLOR_PENDING or title_color_default
+        for i = 1, #texts do
+            texts[i].color = color
+        end
+        window:setSkin(skin)
+    end)
+end
+
 local function apply_window_title()
     if not window then return end
     local pending = pending_update_version()
@@ -370,6 +434,8 @@ local function apply_window_title()
     else
         title = "  Attrition Control  v" .. ATTRITION_COCKPIT_VERSION
     end
+    -- Color before setText: some skins reset caption on setSkin.
+    apply_window_title_color(pending ~= nil)
     pcall(function() window:setText(title) end)
 end
 

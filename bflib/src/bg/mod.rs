@@ -378,7 +378,8 @@ enum Logs {
     Netidx {
         publisher: Publisher,
         perf: PubPerf,
-        stats: Statspub,
+        /// None if archive init failed after quarantine retry; JSONL + RPCs still live.
+        stats: Option<Statspub>,
         log: LogPublisher,
         stats_jsonl: Option<std::fs::File>,
         stats_jsonl_path: PathBuf,
@@ -516,7 +517,10 @@ impl Logs {
         }
         match self {
             Self::Files { .. } => Ok(()),
-            Self::Netidx { stats, .. } => stats.append(Utc::now(), stat),
+            Self::Netidx { stats, .. } => match stats {
+                Some(stats) => stats.append(Utc::now(), stat),
+                None => Ok(()),
+            },
         }
     }
 
@@ -553,6 +557,7 @@ impl Logs {
                 drop(log_file.take());
                 let taken_jsonl = stats_jsonl.take();
                 let jsonl_path = stats_jsonl_path.clone();
+                let stats_dir = stats_path.clone();
                 let go = || async {
                     let perf = PubPerf::new(
                         &publisher,
@@ -562,16 +567,24 @@ impl Logs {
                         &ApiPerfStat::default(),
                     )
                     .context("starting pubperf")?;
-                    let stats = Statspub::new(
-                        publisher.clone(),
+                    let log = LogPublisher::new(publisher.clone(), log_path, base.append("log"))
+                        .context("starting log pub")?;
+                    // Own archive publisher + quarantine retry; failure must not kill API.
+                    let stats = match Statspub::new_resilient(
                         &cfg,
-                        stats_path.clone(),
+                        stats_dir,
                         base.append("stats"),
                     )
                     .await
-                    .context("starting stats pub")?;
-                    let log = LogPublisher::new(publisher.clone(), log_path, base.append("log"))
-                        .context("starting log pub")?;
+                    {
+                        Ok(s) => Some(s),
+                        Err(e) => {
+                            error!(
+                                "stats archive unavailable after quarantine retry ({e:#}); continuing with JSONL only"
+                            );
+                            None
+                        }
+                    };
                     Ok::<_, anyhow::Error>((perf, stats, log))
                 };
                 match go().await {
@@ -588,10 +601,10 @@ impl Logs {
                     }
                     Err(e) => {
                         *stats_jsonl = taken_jsonl;
-                        if let Err(e) = self.open_files().await {
-                            eprintln!("netidx init failed and reopening files also failed {e:?}")
+                        if let Err(re) = self.open_files().await {
+                            error!("netidx init failed and reopening files also failed {re:?}")
                         }
-                        return Err(e);
+                        Err(e)
                     }
                 }
             }
@@ -601,7 +614,10 @@ impl Logs {
     fn flush_stats(&mut self) -> Result<()> {
         match self {
             Self::Files { .. } => Ok(()),
-            Self::Netidx { stats, .. } => task::block_in_place(|| stats.flush()),
+            Self::Netidx { stats, .. } => match stats {
+                Some(stats) => task::block_in_place(|| stats.flush()),
+                None => Ok(()),
+            },
         }
     }
 
@@ -615,7 +631,9 @@ impl Logs {
                 ..
             } => {
                 let _ = log.close().await;
-                let _ = task::block_in_place(|| stats.flush());
+                if let Some(stats) = stats {
+                    let _ = task::block_in_place(|| stats.flush());
+                }
                 publisher.clone().shutdown().await
             }
         }
@@ -661,12 +679,17 @@ async fn background_loop(write_dir: PathBuf, mut rx: UnboundedReceiver<Task>) {
                         .switch_to_netidx(publisher.clone(), &cfg, base.clone())
                         .await
                     {
-                        eprintln!("failed to initialize netidx logs {e:?}")
+                        error!("failed to initialize netidx logs ({e:#})")
                     }
                 }
                 match &logs {
                     Logs::Files { .. } => log::info!("log is in file mode"),
-                    Logs::Netidx { .. } => log::info!("log is in netidx mode"),
+                    Logs::Netidx { stats: Some(_), .. } => {
+                        log::info!("log is in netidx mode")
+                    }
+                    Logs::Netidx { stats: None, .. } => {
+                        log::info!("log is in netidx mode (stats archive offline; JSONL only)")
+                    }
                 }
             }
             Task::SaveState(path, db) => {

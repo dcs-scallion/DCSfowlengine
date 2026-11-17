@@ -9,6 +9,7 @@ use anyhow::Result;
 use bfprotocols::{
     cfg::{ActionKind, LifeType, UnitTag, Vehicle},
     db::group::GroupId,
+    stats::{Stat, WarLossBucket},
 };
 use chrono::{NaiveDate, prelude::*};
 use dcso3::{coalition::Side, net::Ucid, MizLua};
@@ -354,44 +355,59 @@ impl Db {
 
     fn loss_bucket_mut<'a>(
         losses: &'a mut CoalitionLossStats,
-        bucket: LossBucketField,
+        bucket: WarLossBucket,
     ) -> &'a mut u32 {
         match bucket {
-            LossBucketField::PlanesStandard => &mut losses.planes_standard,
-            LossBucketField::PlanesIntercept => &mut losses.planes_intercept,
-            LossBucketField::PlanesAttack => &mut losses.planes_attack,
-            LossBucketField::PlanesRecon => &mut losses.planes_recon,
-            LossBucketField::PlanesBomber => &mut losses.planes_bomber,
-            LossBucketField::PlanesTanker => &mut losses.planes_tanker,
-            LossBucketField::PlanesAwacs => &mut losses.planes_awacs,
-            LossBucketField::PlanesLog => &mut losses.planes_log,
-            LossBucketField::Drones => &mut losses.drones,
-            LossBucketField::HelicoptersAtk => &mut losses.helicopters_atk,
-            LossBucketField::HelicoptersLog => &mut losses.helicopters_log,
-            LossBucketField::Armored => &mut losses.armored,
-            LossBucketField::Artillery => &mut losses.artillery,
-            LossBucketField::Troops => &mut losses.troops,
-            LossBucketField::Utility => &mut losses.utility,
-            LossBucketField::Aaa => &mut losses.aaa,
-            LossBucketField::SamSr => &mut losses.sam_sr,
-            LossBucketField::SamMr => &mut losses.sam_mr,
-            LossBucketField::SamLr => &mut losses.sam_lr,
-            LossBucketField::EwrRadars => &mut losses.ewr_radars,
-            LossBucketField::ShipsSmall => &mut losses.ships_small,
-            LossBucketField::ShipsMedium => &mut losses.ships_medium,
-            LossBucketField::Carriers => &mut losses.carriers,
-            LossBucketField::BuildingLogi => &mut losses.building_logi,
-            LossBucketField::BuildingProd => &mut losses.building_prod,
-            LossBucketField::BuildingStatic => &mut losses.building_static,
+            WarLossBucket::PlanesStandard => &mut losses.planes_standard,
+            WarLossBucket::PlanesIntercept => &mut losses.planes_intercept,
+            WarLossBucket::PlanesAttack => &mut losses.planes_attack,
+            WarLossBucket::PlanesRecon => &mut losses.planes_recon,
+            WarLossBucket::PlanesBomber => &mut losses.planes_bomber,
+            WarLossBucket::PlanesTanker => &mut losses.planes_tanker,
+            WarLossBucket::PlanesAwacs => &mut losses.planes_awacs,
+            WarLossBucket::PlanesLog => &mut losses.planes_log,
+            WarLossBucket::Drones => &mut losses.drones,
+            WarLossBucket::HelicoptersAtk => &mut losses.helicopters_atk,
+            WarLossBucket::HelicoptersLog => &mut losses.helicopters_log,
+            WarLossBucket::Armored => &mut losses.armored,
+            WarLossBucket::Artillery => &mut losses.artillery,
+            WarLossBucket::Troops => &mut losses.troops,
+            WarLossBucket::Utility => &mut losses.utility,
+            WarLossBucket::Aaa => &mut losses.aaa,
+            WarLossBucket::SamSr => &mut losses.sam_sr,
+            WarLossBucket::SamMr => &mut losses.sam_mr,
+            WarLossBucket::SamLr => &mut losses.sam_lr,
+            WarLossBucket::EwrRadars => &mut losses.ewr_radars,
+            WarLossBucket::ShipsSmall => &mut losses.ships_small,
+            WarLossBucket::ShipsMedium => &mut losses.ships_medium,
+            WarLossBucket::Carriers => &mut losses.carriers,
+            WarLossBucket::BuildingLogi => &mut losses.building_logi,
+            WarLossBucket::BuildingProd => &mut losses.building_prod,
+            WarLossBucket::BuildingStatic => &mut losses.building_static,
         }
     }
 
-    fn record_loss(&mut self, side: Side, bucket: LossBucketField) {
+    /// Dashboard war-loss event (always). Discord map counters only if campaign_stats on.
+    fn record_loss(&mut self, side: Side, bucket: WarLossBucket) {
+        self.record_loss_n(side, bucket, 1);
+    }
+
+    fn record_loss_n(&mut self, side: Side, bucket: WarLossBucket, count: u32) {
+        if count == 0 || !matches!(side, Side::Blue | Side::Red) {
+            return;
+        }
+        self.ephemeral.stat(Stat::WarLoss {
+            side,
+            bucket,
+            count,
+            time: Utc::now(),
+        });
         if !self.campaign_stats_active() {
             return;
         }
         if let Some(c) = self.persisted.campaign_stats.coalition_mut(side) {
-            *Self::loss_bucket_mut(&mut c.losses, bucket) += 1;
+            let cell = Self::loss_bucket_mut(&mut c.losses, bucket);
+            *cell = cell.saturating_add(count);
             self.ephemeral.dirty();
         }
     }
@@ -703,9 +719,6 @@ impl Db {
     }
 
     pub fn campaign_record_unit_loss(&mut self, gid: GroupId, vehicle: &Vehicle) {
-        if !self.campaign_stats_active() {
-            return;
-        }
         let Ok(group) = self.group(&gid) else {
             return;
         };
@@ -727,10 +740,7 @@ impl Db {
             self.record_loss(side, bucket);
         }
         if para_troops_lost {
-            if let Some(c) = self.persisted.campaign_stats.coalition_mut(side) {
-                c.losses.troops = c.losses.troops.saturating_add(8);
-                self.ephemeral.dirty();
-            }
+            self.record_loss_n(side, WarLossBucket::Troops, 8);
         }
     }
 
@@ -740,9 +750,6 @@ impl Db {
         ucid: &Ucid,
         unit_id: &dcso3::object::DcsOid<dcso3::unit::ClassUnit>,
     ) {
-        if !self.campaign_stats_active() {
-            return;
-        }
         if !self
             .ephemeral
             .campaign_airframe_loss_ids
@@ -782,9 +789,6 @@ impl Db {
     }
 
     pub fn campaign_record_static_loss(&mut self, gid: GroupId) {
-        if !self.campaign_stats_active() {
-            return;
-        }
         let Ok(group) = self.group(&gid) else {
             return;
         };
@@ -799,7 +803,7 @@ impl Db {
             .as_ref()
             .is_some_and(|t| self.ephemeral.cfg.objective_static_units.contains_key(t.as_str()))
         {
-            self.record_loss(side, LossBucketField::BuildingStatic);
+            self.record_loss(side, WarLossBucket::BuildingStatic);
             return;
         }
         if let Some(bucket) = static_class_loss_bucket(class) {
@@ -830,14 +834,14 @@ impl Db {
         })
     }
 
-    fn classify_group_loss(&self, group: &SpawnedGroup, vehicle: &Vehicle) -> Option<LossBucketField> {
+    fn classify_group_loss(&self, group: &SpawnedGroup, vehicle: &Vehicle) -> Option<WarLossBucket> {
         if self
             .ephemeral
             .cfg
             .objective_static_units
             .contains_key(vehicle.as_str())
         {
-            return Some(LossBucketField::BuildingStatic);
+            return Some(WarLossBucket::BuildingStatic);
         }
         let helo = vehicle_is_helo(self, vehicle);
         if let DeployKind::Action { spec, .. } = &group.origin {
@@ -876,103 +880,73 @@ impl Db {
             || lower.contains("ammunition")
     }
 
-    fn classify_tags_loss(&self, vehicle: &Vehicle) -> Option<LossBucketField> {
+    fn classify_tags_loss(&self, vehicle: &Vehicle) -> Option<WarLossBucket> {
         let tags = self.ephemeral.cfg.unit_classification.get(vehicle)?;
         if tags.contains(UnitTag::ShipCarrier) {
-            return Some(LossBucketField::Carriers);
+            return Some(WarLossBucket::Carriers);
         }
         if tags.contains(UnitTag::ShipWithHeliport) {
-            return Some(LossBucketField::ShipsMedium);
+            return Some(WarLossBucket::ShipsMedium);
         }
         if tags.contains(UnitTag::ShipNoHeliport) | tags.contains(UnitTag::Boat) {
-            return Some(LossBucketField::ShipsSmall);
+            return Some(WarLossBucket::ShipsSmall);
         }
         if tags.contains(UnitTag::Artillery) {
-            return Some(LossBucketField::Artillery);
+            return Some(WarLossBucket::Artillery);
         }
         if tags.contains(UnitTag::Infantry) {
-            return Some(LossBucketField::Troops);
+            return Some(WarLossBucket::Troops);
         }
         if tags.contains(UnitTag::AAA) {
-            return Some(LossBucketField::Aaa);
+            return Some(WarLossBucket::Aaa);
         }
         if tags.contains(UnitTag::SAM) {
             if tags.contains(UnitTag::LR) {
-                return Some(LossBucketField::SamLr);
+                return Some(WarLossBucket::SamLr);
             }
             if tags.contains(UnitTag::MR) {
-                return Some(LossBucketField::SamMr);
+                return Some(WarLossBucket::SamMr);
             }
             if tags.contains(UnitTag::SR) {
-                return Some(LossBucketField::SamSr);
+                return Some(WarLossBucket::SamSr);
             }
-            return Some(LossBucketField::SamSr);
+            return Some(WarLossBucket::SamSr);
         }
         if tags.contains(UnitTag::EWR) {
-            return Some(LossBucketField::EwrRadars);
+            return Some(WarLossBucket::EwrRadars);
         }
         if tags.contains(UnitTag::Armor)
             | tags.contains(UnitTag::APC)
             | tags.contains(UnitTag::Launcher)
         {
-            return Some(LossBucketField::Armored);
+            return Some(WarLossBucket::Armored);
         }
         if tags.contains(UnitTag::Logistics) && tags.contains(UnitTag::Unarmed) {
             if Self::is_building_logi_facility(vehicle) {
-                return Some(LossBucketField::BuildingLogi);
+                return Some(WarLossBucket::BuildingLogi);
             }
-            return Some(LossBucketField::Utility);
+            return Some(WarLossBucket::Utility);
         }
         if tags.contains(UnitTag::Logistics) {
-            return Some(LossBucketField::BuildingLogi);
+            return Some(WarLossBucket::BuildingLogi);
         }
         if tags.contains(UnitTag::Unarmed) {
-            return Some(LossBucketField::Utility);
+            return Some(WarLossBucket::Utility);
         }
         if tags.contains(UnitTag::Helicopter) {
             if tags.contains(UnitTag::Logistics) {
-                return Some(LossBucketField::HelicoptersLog);
+                return Some(WarLossBucket::HelicoptersLog);
             }
-            return Some(LossBucketField::HelicoptersAtk);
+            return Some(WarLossBucket::HelicoptersAtk);
         }
         if tags.contains(UnitTag::Aircraft) {
             if tags.contains(UnitTag::AWACS) {
-                return Some(LossBucketField::PlanesAwacs);
+                return Some(WarLossBucket::PlanesAwacs);
             }
-            return Some(LossBucketField::PlanesStandard);
+            return Some(WarLossBucket::PlanesStandard);
         }
         None
     }
-}
-
-#[derive(Debug, Clone, Copy)]
-enum LossBucketField {
-    PlanesStandard,
-    PlanesIntercept,
-    PlanesAttack,
-    PlanesRecon,
-    PlanesBomber,
-    PlanesTanker,
-    PlanesAwacs,
-    PlanesLog,
-    Drones,
-    HelicoptersAtk,
-    HelicoptersLog,
-    Armored,
-    Artillery,
-    Troops,
-    Utility,
-    Aaa,
-    SamSr,
-    SamMr,
-    SamLr,
-    EwrRadars,
-    ShipsSmall,
-    ShipsMedium,
-    Carriers,
-    BuildingLogi,
-    BuildingProd,
-    BuildingStatic,
 }
 
 fn vehicle_is_helo(db: &Db, vehicle: &Vehicle) -> bool {
@@ -983,67 +957,68 @@ fn vehicle_is_helo(db: &Db, vehicle: &Vehicle) -> bool {
         .is_some_and(|t| t.contains(UnitTag::Helicopter))
 }
 
-fn life_type_loss_bucket(lt: LifeType, helo: bool) -> LossBucketField {
+fn life_type_loss_bucket(lt: LifeType, helo: bool) -> WarLossBucket {
     match lt {
-        LifeType::Standard => LossBucketField::PlanesStandard,
-        LifeType::Intercept => LossBucketField::PlanesIntercept,
-        LifeType::Attack if helo => LossBucketField::HelicoptersAtk,
-        LifeType::Attack => LossBucketField::PlanesAttack,
-        LifeType::Recon => LossBucketField::PlanesRecon,
-        LifeType::Logistics if helo => LossBucketField::HelicoptersLog,
-        LifeType::Logistics => LossBucketField::PlanesLog,
-        LifeType::CombinedArms => LossBucketField::PlanesAttack,
+        LifeType::Standard => WarLossBucket::PlanesStandard,
+        LifeType::Intercept => WarLossBucket::PlanesIntercept,
+        LifeType::Attack if helo => WarLossBucket::HelicoptersAtk,
+        LifeType::Attack => WarLossBucket::PlanesAttack,
+        LifeType::Recon => WarLossBucket::PlanesRecon,
+        LifeType::Logistics if helo => WarLossBucket::HelicoptersLog,
+        LifeType::Logistics => WarLossBucket::PlanesLog,
+        LifeType::CombinedArms => WarLossBucket::PlanesAttack,
     }
 }
 
-fn action_kind_loss_bucket(kind: &ActionKind, helo: bool) -> LossBucketField {
+fn action_kind_loss_bucket(kind: &ActionKind, helo: bool) -> WarLossBucket {
     match kind {
-        ActionKind::Fighters(_) | ActionKind::FighersWaypoint => LossBucketField::PlanesIntercept,
+        ActionKind::Fighters(_) | ActionKind::FighersWaypoint => WarLossBucket::PlanesIntercept,
         ActionKind::Attackers(_)
         | ActionKind::AttackersWaypoint
         | ActionKind::Sead(_)
         | ActionKind::SeadWaypoint => {
             if helo {
-                LossBucketField::HelicoptersAtk
+                WarLossBucket::HelicoptersAtk
             } else {
-                LossBucketField::PlanesAttack
+                WarLossBucket::PlanesAttack
             }
         }
-        ActionKind::Bomber(_) => LossBucketField::PlanesBomber,
-        ActionKind::Tanker(_) | ActionKind::TankerWaypoint => LossBucketField::PlanesTanker,
-        ActionKind::Awacs(_) | ActionKind::AwacsWaypoint => LossBucketField::PlanesAwacs,
-        ActionKind::Drone(_) | ActionKind::DroneWaypoint => LossBucketField::Drones,
-        ActionKind::CruiseMissileSpawn(_) | ActionKind::CruiseMissileWaypoint => {
-            LossBucketField::Drones
-        }
-        ActionKind::LogisticsRepair(_) | ActionKind::LogisticsTransfer(_) => {
+        ActionKind::Bomber(_)
+        | ActionKind::CruiseMissileSpawn(_)
+        | ActionKind::CruiseMissileWaypoint => WarLossBucket::PlanesBomber,
+        ActionKind::Tanker(_) | ActionKind::TankerWaypoint => WarLossBucket::PlanesTanker,
+        ActionKind::Awacs(_) | ActionKind::AwacsWaypoint => WarLossBucket::PlanesAwacs,
+        ActionKind::Drone(_) | ActionKind::DroneWaypoint => WarLossBucket::Drones,
+        ActionKind::Deployable(_)
+        | ActionKind::LogisticsRepair(_)
+        | ActionKind::LogisticsTransfer(_) => {
             if helo {
-                LossBucketField::HelicoptersLog
+                WarLossBucket::HelicoptersLog
             } else {
-                LossBucketField::PlanesLog
+                WarLossBucket::PlanesLog
             }
         }
-        ActionKind::Paratrooper(_) => LossBucketField::HelicoptersLog,
+        ActionKind::Paratrooper(_) => WarLossBucket::HelicoptersLog,
         _ => {
             if helo {
-                LossBucketField::HelicoptersAtk
+                WarLossBucket::HelicoptersAtk
             } else {
-                LossBucketField::PlanesStandard
+                WarLossBucket::PlanesStandard
             }
         }
     }
 }
 
-fn static_class_loss_bucket(class: ObjGroupClass) -> Option<LossBucketField> {
+fn static_class_loss_bucket(class: ObjGroupClass) -> Option<WarLossBucket> {
     match class {
-        ObjGroupClass::Logi => Some(LossBucketField::BuildingLogi),
-        ObjGroupClass::Production => Some(LossBucketField::BuildingProd),
-        ObjGroupClass::ObjectiveStatic => Some(LossBucketField::BuildingStatic),
-        ObjGroupClass::Aaa => Some(LossBucketField::Aaa),
-        ObjGroupClass::Sr => Some(LossBucketField::SamSr),
-        ObjGroupClass::Mr => Some(LossBucketField::SamMr),
-        ObjGroupClass::Lr | ObjGroupClass::Slr => Some(LossBucketField::SamLr),
-        ObjGroupClass::Armor => Some(LossBucketField::Armored),
+        ObjGroupClass::Logi => Some(WarLossBucket::BuildingLogi),
+        ObjGroupClass::Production => Some(WarLossBucket::BuildingProd),
+        ObjGroupClass::ObjectiveStatic => Some(WarLossBucket::BuildingStatic),
+        ObjGroupClass::Aaa => Some(WarLossBucket::Aaa),
+        ObjGroupClass::Sr => Some(WarLossBucket::SamSr),
+        ObjGroupClass::Mr => Some(WarLossBucket::SamMr),
+        ObjGroupClass::Lr | ObjGroupClass::Slr => Some(WarLossBucket::SamLr),
+        ObjGroupClass::Armor => Some(WarLossBucket::Armored),
         _ => None,
     }
 }

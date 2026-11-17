@@ -175,10 +175,10 @@ pub(crate) fn list_main_panel_for_ucid(ctx: &mut Context, ucid: &Ucid) -> Result
         });
     }
 
-    let restart_at = ctx
-        .shutdown
-        .as_ref()
-        .map(|asd| asd.when.to_rfc3339());
+    // Same source as restart warnings: CFG `shutdown`, else DCSServerBot schedule mirror.
+    let restart_at = cfg
+        .map_restart_when(now, ctx.shutdown.map(|s| s.when))
+        .map(|when| when.to_rfc3339());
     let chat_time_command = cfg
         .chat_time_command
         .as_deref()

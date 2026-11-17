@@ -874,6 +874,14 @@ fn default_objective_static_repair_crates() -> u16 {
     1
 }
 
+fn default_logi_repair_phases() -> u32 {
+    5
+}
+
+fn default_logi_repair_rate_seconds() -> u32 {
+    300
+}
+
 /// ME static in OFO / OLO / OAB zones (`objective_static_units` CFG map key = DCS unit type).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -1135,6 +1143,10 @@ impl Default for ActionGeoLimit {
     }
 }
 
+fn default_action_enabled() -> bool {
+    true
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Action {
     pub kind: ActionKind,
@@ -1144,6 +1156,12 @@ pub struct Action {
     /// defines where this action is allowed to run
     #[serde(default)]
     pub geo_limit: ActionGeoLimit,
+    /// When false, hide from F10 / `-action help` and reject start with a temporary-disable message.
+    #[serde(default = "default_action_enabled")]
+    pub enabled: bool,
+    /// Minimum enemy DCS-coalition online players required to start (`0` = no requirement).
+    #[serde(default)]
+    pub require_enemy_online: u32,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -2437,6 +2455,12 @@ pub struct Cfg {
     /// ME objective static repair tick interval in seconds (`ObjectiveStatic` queue from repair crates).
     #[serde(default)]
     pub static_repair_rate_seconds: u32,
+    /// Spawnable Logi repair: total seconds to consume one queued repair crate (split across phases).
+    #[serde(default = "default_logi_repair_rate_seconds")]
+    pub logi_repair_rate_seconds: u32,
+    /// Spawnable Logi repair: phases per crate (divmod split; 0 or 1 = one step for the whole crate).
+    #[serde(default = "default_logi_repair_phases")]
+    pub logi_repair_phases: u32,
     /// ME static repair crate: added to unpacker's points (negative deducts).
     #[serde(default)]
     pub static_repair_crate_cost: i32,

@@ -107,7 +107,7 @@ $corsOrigins = @()
 # NETIDX_CFG below / instances.json netidx_config). %APPDATA%\netidx\client.json
 # is still required for the DCS account that loads bflib (see
 # netidx\netidx-client.json.example).
-$netidxBase = "/local/fowl/campaign"
+$netidxBase = "/local/fowl/server1"
 $netidxClientConfig = Join-Path $PSScriptRoot "netidx\netidx-client.json"
 if (-not (Test-Path $netidxClientConfig)) {
     $netidxClientConfig = Join-Path $dcsWriteDir "netidx-client.json"

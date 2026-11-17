@@ -5,16 +5,18 @@ use crate::{
     jtac::{JtId, TARGET_RADIUS_MAX_M, TARGET_RADIUS_MIN_M},
     menu::{
         jtac::{
-            call_bomber, init_jtac_menu_for_slot, jtac_artillery_combo_mission,
-            jtac_artillery_fire_all, jtac_artillery_mission, jtac_calcm_mission, jtac_clear_filter,
-            jtac_filter, jtac_get_artillery_ammo, jtac_relay_target, jtac_set_code,
-            jtac_set_full_code, jtac_set_target_radius, jtac_shift, jtac_smoke_target, jtac_status,
-            jtac_toggle_auto_shift, jtac_toggle_ir_pointer,
+            call_bomber, init_jtac_menu_for_slot, jtac_adjust_solution,
+            jtac_artillery_combo_mission, jtac_artillery_fire_all, jtac_artillery_mission,
+            jtac_calcm_mission, jtac_clear_filter, jtac_filter, jtac_get_artillery_ammo,
+            jtac_relay_target, jtac_reset_adjustment, jtac_set_code, jtac_set_full_code,
+            jtac_set_target_radius, jtac_shift, jtac_show_adjustment, jtac_smoke_target,
+            jtac_status, jtac_toggle_auto_shift, jtac_toggle_ir_pointer,
         },
         ArgQuad, ArgTriple, ArgTuple,
     },
     Context,
 };
+use crate::jtac::AdjustmentDir;
 use anyhow::{anyhow, bail, Context as _, Result};
 use bfprotocols::{
     cfg::{ActionKind, UnitTag},
@@ -68,6 +70,8 @@ struct ArtyEntry {
     /// `null` when JTAC has no target (distance unknown).
     #[serde(skip_serializing_if = "Option::is_none")]
     in_range: Option<bool>,
+    short_long_m: i16,
+    left_right_m: i16,
 }
 
 #[derive(Debug, Serialize)]
@@ -102,6 +106,10 @@ struct JtacActionReq {
     calcm_n: Option<u8>,
     #[serde(default)]
     calcm_per: Option<u8>,
+    #[serde(default)]
+    adjust_dir: Option<StdString>,
+    #[serde(default)]
+    adjust_m: Option<u16>,
 }
 
 /// Shared with SELECT JTAC / ARTILLERY: `1200 (Mortar) Player` — unit in (), owner after.
@@ -237,7 +245,17 @@ pub(crate) fn list_jtacs_for_ucid(ctx: &Context, ucid: &Ucid) -> Result<StdStrin
                             }
                             None => (f64::INFINITY, base, None),
                         };
-                        Some((dist_m, ArtyEntry { id, name, in_range }))
+                        let adj = ctx.jtac.get_artillery_adjustment(g);
+                        Some((
+                            dist_m,
+                            ArtyEntry {
+                                id,
+                                name,
+                                in_range,
+                                short_long_m: adj.short_long,
+                                left_right_m: adj.left_right,
+                            },
+                        ))
                     })
                     .collect();
                 arty.sort_by(|a, b| {
@@ -526,6 +544,49 @@ pub(crate) fn run_jtac_action(
             )?;
             Ok(format!("arty combo {rpt}x{nt}"))
         }
+        "arty_adjust" => {
+            let aid = parse_arty(&req)?;
+            let dir = parse_adjust_dir(
+                req.adjust_dir
+                    .as_deref()
+                    .ok_or_else(|| anyhow!("adjust_dir required"))?,
+            )?;
+            let meters = req
+                .adjust_m
+                .ok_or_else(|| anyhow!("adjust_m required"))?;
+            jtac_adjust_solution(
+                lua,
+                ArgQuad {
+                    fst: aid,
+                    snd: dir,
+                    trd: meters,
+                    fth: ucid,
+                },
+            )?;
+            Ok(format!("arty adjust {dir:?} {meters}m"))
+        }
+        "arty_show_adjustment" => {
+            let aid = parse_arty(&req)?;
+            jtac_show_adjustment(
+                lua,
+                ArgTuple {
+                    fst: aid,
+                    snd: ucid,
+                },
+            )?;
+            Ok("arty adjustment shown".into())
+        }
+        "arty_reset_adjustment" => {
+            let aid = parse_arty(&req)?;
+            jtac_reset_adjustment(
+                lua,
+                ArgTuple {
+                    fst: aid,
+                    snd: ucid,
+                },
+            )?;
+            Ok("arty adjustment reset".into())
+        }
         "calcm" => {
             let aid = parse_arty(&req)?;
             let n = req.calcm_n.ok_or_else(|| anyhow!("calcm_n required"))?;
@@ -583,4 +644,14 @@ fn parse_arty(req: &JtacActionReq) -> Result<GroupId> {
         .ok_or_else(|| anyhow!("arty_id required"))?;
     s.parse::<GroupId>()
         .map_err(|e| anyhow!("invalid arty_id: {e:?}"))
+}
+
+fn parse_adjust_dir(s: &str) -> Result<AdjustmentDir> {
+    match s.to_ascii_lowercase().as_str() {
+        "short" => Ok(AdjustmentDir::Short),
+        "long" => Ok(AdjustmentDir::Long),
+        "left" => Ok(AdjustmentDir::Left),
+        "right" => Ok(AdjustmentDir::Right),
+        other => bail!("invalid adjust_dir {other}"),
+    }
 }

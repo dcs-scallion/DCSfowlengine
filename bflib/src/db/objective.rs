@@ -532,7 +532,22 @@ pub struct Objective {
     /// Next ME static repair tick (`static_repair` = queued crates).
     #[serde(default)]
     pub(super) static_repair_due: DateTime<Utc>,
-    /// All spawnable logi groups alive (gates static repair crate queue + markup).
+    /// Crates needed to fully repair spawnable Logi (`1 + total/2` units per crate).
+    #[serde(default)]
+    pub(super) logi_repair_need: u16,
+    /// Queued repair crates for spawnable Logi.
+    #[serde(default)]
+    pub(super) logi_repair: u16,
+    /// Next spawnable Logi repair phase tick.
+    #[serde(default)]
+    pub(super) logi_repair_due: DateTime<Utc>,
+    /// Units remaining in the active crate (0 = no active crate).
+    #[serde(default)]
+    pub(super) logi_repair_work_left: u16,
+    /// Phases remaining in the active crate (0 = no active crate).
+    #[serde(default)]
+    pub(super) logi_repair_phases_left: u16,
+    /// All spawnable logi groups alive (gates static repair processing + markup).
     #[serde(default = "default_true")]
     pub(super) spawnable_logi_repaired: bool,
     pub(super) threatened: bool,
@@ -625,21 +640,37 @@ impl Objective {
         self.static_repair_need
     }
 
-    pub(super) fn can_queue_static_repair_crate(&self) -> bool {
+    pub(super) fn can_queue_logi_repair_crate(&self) -> bool {
         if matches!(self.kind, ObjectiveKind::Production) {
             return false;
         }
-        if !self.spawnable_logi_repaired {
+        self.logi_repair_need > 0 && self.logi_repair < self.logi_repair_need
+    }
+
+    pub(super) fn logi_repair_queue_full(&self) -> bool {
+        self.logi_repair_need > 0 && self.logi_repair >= self.logi_repair_need
+    }
+
+    pub(super) fn can_queue_static_repair_crate(&self) -> bool {
+        if matches!(self.kind, ObjectiveKind::Production) {
             return false;
         }
         if self.static_repair_need == 0 {
             return false;
         }
-        self.static_repair < self.static_repair_need
+        if self.static_repair >= self.static_repair_need {
+            return false;
+        }
+        // Fill static while Logi still repairing only after Logi queue is full.
+        self.spawnable_logi_repaired || self.logi_repair_queue_full()
+    }
+
+    pub(super) fn show_logi_repair_in_markup(&self) -> bool {
+        !matches!(self.kind, ObjectiveKind::Production) && self.logi_repair_need > 0
     }
 
     pub(super) fn show_static_repair_in_markup(&self) -> bool {
-        self.spawnable_logi_repaired && self.static_repair_need > 0
+        !matches!(self.kind, ObjectiveKind::Production) && self.static_repair_need > 0
     }
 
     /// OPR: same gate as ME static Repair on OFO/OAB/OLO — hide when undamaged.
@@ -662,7 +693,8 @@ impl Objective {
         self.nominal_owner.unwrap_or(self.owner)
     }
 
-    pub(super) fn is_occupied_logistics_hub(&self) -> bool {
+    /// Captured enemy OLO — no Production tip/bar (Discord live map / F10).
+    pub(crate) fn is_occupied_logistics_hub(&self) -> bool {
         matches!(self.kind, ObjectiveKind::Logistics)
             && self.owner != self.nominal_owner()
             && matches!(self.nominal_owner(), Side::Red | Side::Blue)
@@ -981,6 +1013,41 @@ impl Db {
             }
         }
         Ok(true)
+    }
+
+    /// Spawnable Logi: (dead unit count, units repaired per crate).
+    fn spawnable_logi_repair_stats(&self, obj: &Objective) -> Result<(usize, usize)> {
+        let Some(groups) = obj.groups.get(&obj.owner) else {
+            return Ok((0, 0));
+        };
+        let mut dead = 0usize;
+        let mut max_group = 0usize;
+        for gid in groups {
+            let group = group!(self, gid)?;
+            if !group.class.is_logi() {
+                continue;
+            }
+            max_group = max(max_group, group.units.len());
+            for uid in &group.units {
+                if unit!(self, uid)?.dead {
+                    dead += 1;
+                }
+            }
+        }
+        let per_crate = if max_group == 0 {
+            0
+        } else {
+            1 + (max_group >> 1)
+        };
+        Ok((dead, per_crate))
+    }
+
+    fn compute_logi_repair_need(&self, obj: &Objective) -> Result<u16> {
+        let (dead, per_crate) = self.spawnable_logi_repair_stats(obj)?;
+        if dead == 0 || per_crate == 0 {
+            return Ok(0);
+        }
+        Ok(((dead + per_crate - 1) / per_crate) as u16)
     }
 
     fn compute_objective_status(&self, obj: &Objective) -> Result<(u8, u8)> {
@@ -1647,6 +1714,11 @@ impl Db {
             static_repair: 0,
             static_repair_progress: 0,
             static_repair_due: now,
+            logi_repair_need: 0,
+            logi_repair: 0,
+            logi_repair_due: now,
+            logi_repair_work_left: 0,
+            logi_repair_phases_left: 0,
             spawnable_logi_repaired: true,
             spawned: true,
             enabled: true,
@@ -1839,12 +1911,14 @@ impl Db {
                 (h, l, obj.production, obj.production_hp_sum, obj.production_repair_need)
             }
         };
-        let (static_need, spawnable_ok) = if matches!(kind, ObjectiveKind::Production) {
-            (0u16, true)
+        let (static_need, logi_need, spawnable_ok) = if matches!(kind, ObjectiveKind::Production)
+        {
+            (0u16, 0u16, true)
         } else {
             let obj = objective!(self, oid)?;
             (
                 self.compute_static_repair_need(obj)?,
+                self.compute_logi_repair_need(obj)?,
                 self.compute_spawnable_logi_repaired(obj)?,
             )
         };
@@ -1871,8 +1945,10 @@ impl Db {
                 obj.production_repair_need = repair_need;
             } else {
                 changed |= obj.static_repair_need != static_need
+                    || obj.logi_repair_need != logi_need
                     || obj.spawnable_logi_repaired != spawnable_ok;
                 obj.static_repair_need = static_need;
+                obj.logi_repair_need = logi_need;
                 obj.spawnable_logi_repaired = spawnable_ok;
                 if static_need == 0 && obj.static_repair_progress != 0 {
                     obj.static_repair_progress = 0;
@@ -1881,6 +1957,17 @@ impl Db {
                 if obj.static_repair > obj.static_repair_need {
                     obj.static_repair = obj.static_repair_need;
                     changed = true;
+                }
+                if spawnable_ok {
+                    if obj.logi_repair != 0
+                        || obj.logi_repair_work_left != 0
+                        || obj.logi_repair_phases_left != 0
+                    {
+                        obj.logi_repair = 0;
+                        obj.logi_repair_work_left = 0;
+                        obj.logi_repair_phases_left = 0;
+                        changed = true;
+                    }
                 }
             }
             if health_or_logi_changed {
@@ -2240,37 +2327,200 @@ impl Db {
         self.update_objective_status(None, &oid, now)
     }
 
+    /// Revive up to `count` dead spawnable Logi units for `side`.
+    fn repair_n_spawnable_logi_units(
+        &mut self,
+        side: Side,
+        oid: ObjectiveId,
+        mut count: usize,
+    ) -> Result<usize> {
+        if count == 0 {
+            return Ok(0);
+        }
+        let obj = objective!(self, oid)?;
+        let spawned = obj.spawned;
+        let gids: SmallVec<[GroupId; 16]> = maybe!(&obj.groups, &side, "side group")?
+            .into_iter()
+            .copied()
+            .collect();
+        let mut repaired = 0usize;
+        for gid in gids {
+            let group = group!(self, gid)?;
+            if !group.class.is_logi() {
+                continue;
+            }
+            let uids: SmallVec<[UnitId; 16]> = group.units.into_iter().copied().collect();
+            let mut touched = false;
+            for uid in uids {
+                if count == 0 {
+                    break;
+                }
+                let unit = unit_mut!(self, uid)?;
+                if unit.dead {
+                    unit.dead = false;
+                    count -= 1;
+                    repaired += 1;
+                    touched = true;
+                }
+            }
+            if touched && spawned {
+                self.ephemeral.push_spawn(gid);
+            }
+            if count == 0 {
+                break;
+            }
+        }
+        Ok(repaired)
+    }
+
+    /// One full crate of spawnable Logi work (legacy step size).
     pub fn repair_one_logi_step(
         &mut self,
         side: Side,
         now: DateTime<Utc>,
         oid: ObjectiveId,
     ) -> Result<()> {
-        let obj = objective_mut!(self, oid)?;
-        let mut total_logi = 0;
-        for gid in maybe!(&obj.groups, &side, "side group")? {
-            let group = group!(self, gid)?;
-            if group.class.is_logi() {
-                total_logi = max(total_logi, group.units.len());
-            }
+        let obj = objective!(self, oid)?;
+        let (_, per_crate) = self.spawnable_logi_repair_stats(obj)?;
+        self.repair_n_spawnable_logi_units(side, oid, per_crate)?;
+        self.update_objective_status(None, &oid, now)
+    }
+
+    /// Instant floor used by capture grace: revive until Logi % >= `min_pct`.
+    pub fn repair_logi_to_min_pct(
+        &mut self,
+        side: Side,
+        now: DateTime<Utc>,
+        oid: ObjectiveId,
+        min_pct: u8,
+    ) -> Result<()> {
+        if min_pct == 0 {
+            return self.update_objective_status(None, &oid, now);
         }
-        let mut to_repair = 1 + (total_logi >> 1);
-        for gid in maybe!(&obj.groups, &side, "side group")? {
-            let group = group_mut!(self, gid)?;
-            if group.class.is_logi() {
-                for uid in &group.units {
-                    let unit = unit_mut!(self, uid)?;
-                    if unit.dead && to_repair > 0 {
-                        to_repair -= 1;
-                        unit.dead = false;
-                    }
-                }
-                if obj.spawned {
-                    self.ephemeral.push_spawn(*gid);
-                }
+        for _ in 0..256 {
+            let obj = objective!(self, oid)?;
+            if obj.logi >= min_pct {
+                break;
             }
+            let (dead, _) = self.spawnable_logi_repair_stats(obj)?;
+            if dead == 0 {
+                break;
+            }
+            if self.repair_n_spawnable_logi_units(side, oid, 1)? == 0 {
+                break;
+            }
+            self.update_objective_status(None, &oid, now)?;
         }
         self.update_objective_status(None, &oid, now)
+    }
+
+    pub fn enqueue_logi_repair_crate(
+        &mut self,
+        oid: ObjectiveId,
+        now: DateTime<Utc>,
+    ) -> Result<(u16, u16)> {
+        let rate = self.ephemeral.cfg.logi_repair_rate_seconds;
+        let phases = self.ephemeral.cfg.logi_repair_phases.max(1);
+        let phase_secs = (rate / phases).max(1);
+        let obj = objective_mut!(self, oid)?;
+        if !obj.can_queue_logi_repair_crate() {
+            bail!("spawnable logi repair queue is full or not needed");
+        }
+        if obj.logi_repair == 0 && obj.logi_repair_phases_left == 0 {
+            obj.logi_repair_due = now + Duration::seconds(phase_secs as i64);
+        }
+        obj.logi_repair = obj.logi_repair.saturating_add(1);
+        Ok((obj.logi_repair, obj.logi_repair_need))
+    }
+
+    pub fn maybe_do_logi_repairs(&mut self, now: DateTime<Utc>) -> Result<()> {
+        let rate = self.ephemeral.cfg.logi_repair_rate_seconds;
+        if rate == 0 {
+            return Ok(());
+        }
+        let phases_cfg = self.ephemeral.cfg.logi_repair_phases.max(1);
+        let phase_secs = (rate / phases_cfg).max(1);
+        let interval = Duration::seconds(phase_secs as i64);
+        let oids: Vec<ObjectiveId> = self
+            .persisted
+            .objectives
+            .into_iter()
+            .filter(|(_, obj)| {
+                !matches!(obj.kind, ObjectiveKind::Production)
+                    && (obj.logi_repair > 0 || obj.logi_repair_phases_left > 0)
+                    && now >= obj.logi_repair_due
+            })
+            .map(|(id, _)| *id)
+            .collect();
+        for oid in oids {
+            let side = objective!(self, oid)?.owner;
+            let (dead, per_crate) = {
+                let obj = objective!(self, oid)?;
+                self.spawnable_logi_repair_stats(obj)?
+            };
+            if dead == 0 {
+                let obj = objective_mut!(self, oid)?;
+                obj.logi_repair = 0;
+                obj.logi_repair_work_left = 0;
+                obj.logi_repair_phases_left = 0;
+                self.update_objective_status(None, &oid, now)?;
+                if let Some(obj) = self.persisted.objectives.get(&oid) {
+                    self.ephemeral
+                        .update_objective_markup(&self.persisted, obj, &[]);
+                }
+                continue;
+            }
+
+            let mut phases_left = objective!(self, oid)?.logi_repair_phases_left;
+            let mut work_left = objective!(self, oid)?.logi_repair_work_left;
+            if phases_left == 0 {
+                if objective!(self, oid)?.logi_repair == 0 {
+                    continue;
+                }
+                work_left = (per_crate.min(dead)) as u16;
+                if work_left == 0 {
+                    let obj = objective_mut!(self, oid)?;
+                    obj.logi_repair = obj.logi_repair.saturating_sub(1);
+                    obj.logi_repair_due = now + interval;
+                    continue;
+                }
+                phases_left = phases_cfg as u16;
+                let obj = objective_mut!(self, oid)?;
+                obj.logi_repair_work_left = work_left;
+                obj.logi_repair_phases_left = phases_left;
+            }
+
+            // Divmod: remainder distributed to early phases.
+            let n = if phases_left <= 1 {
+                work_left
+            } else {
+                let base = work_left / phases_left;
+                let rem = work_left % phases_left;
+                base + u16::from(rem > 0)
+            };
+            let repaired = self.repair_n_spawnable_logi_units(side, oid, n as usize)? as u16;
+            let mut leftover = 0u16;
+            {
+                let obj = objective_mut!(self, oid)?;
+                obj.logi_repair_work_left = work_left.saturating_sub(repaired);
+                obj.logi_repair_phases_left = phases_left.saturating_sub(1);
+                obj.logi_repair_due = now + interval;
+                if obj.logi_repair_phases_left == 0 {
+                    leftover = obj.logi_repair_work_left;
+                    obj.logi_repair_work_left = 0;
+                    obj.logi_repair = obj.logi_repair.saturating_sub(1);
+                }
+            }
+            if leftover > 0 {
+                self.repair_n_spawnable_logi_units(side, oid, leftover as usize)?;
+            }
+            self.update_objective_status(None, &oid, now)?;
+            if let Some(obj) = self.persisted.objectives.get(&oid) {
+                self.ephemeral
+                    .update_objective_markup(&self.persisted, obj, &[]);
+            }
+        }
+        Ok(())
     }
 
     pub fn maybe_do_production_repairs(
@@ -2392,6 +2642,7 @@ impl Db {
             .into_iter()
             .filter(|(_, obj)| {
                 !matches!(obj.kind, ObjectiveKind::Production)
+                    && obj.spawnable_logi_repaired
                     && obj.static_repair > 0
                     && obj.static_repair_need > 0
                     && now >= obj.static_repair_due
@@ -2752,10 +3003,14 @@ impl Db {
                 obj.last_activate = now;
                 obj.owner = new_owner;
                 if previous_owner != new_owner {
-                    // Queued ME static repairs belong to the previous owner; cancel on flip.
+                    // Queued repairs belong to the previous owner; cancel on flip.
                     obj.static_repair = 0;
                     obj.static_repair_progress = 0;
                     obj.static_repair_due = now;
+                    obj.logi_repair = 0;
+                    obj.logi_repair_work_left = 0;
+                    obj.logi_repair_phases_left = 0;
+                    obj.logi_repair_due = now;
                 }
                 actually_captured.push((*side, oid));
                 for gid in obj.groups.get(&obj.owner).unwrap_or(&Set::new()) {
@@ -2796,8 +3051,8 @@ impl Db {
                         .context("setting airbase coalition")
                 };
                 set_owner()?;
-                self.repair_one_logi_step(*side, now, oid)
-                    .context("repairing captured airbase logi")?;
+                self.repair_logi_to_min_pct(*side, now, oid, 1)
+                    .context("capture grace logi floor")?;
                 self.repair_services(*side, now, oid)
                     .context("repairing captured airbase services")?;
                 self.capture_warehouse(lua, oid, previous_owner)

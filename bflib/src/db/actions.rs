@@ -12,7 +12,7 @@ use crate::{
 use anyhow::{Context, Ok, Result, anyhow, bail};
 use bfprotocols::{
     cfg::{
-        Action, ActionGeoLimit, ActionKind, AiPlaneCfg, AiPlaneKind, AwacsCfg, BomberCfg,
+        Action, ActionGeoLimit, ActionKind, AiPlaneCfg, AiPlaneKind, AwacsCfg, BomberCfg, Cfg,
         Deployable, DeployableCfg, DeployableKind, DroneCfg, LimitEnforceTyp, MoveCfg, NukeCfg,
         UnitTag, Vehicle,
     },
@@ -37,7 +37,7 @@ use dcso3::{
     env::miz::{GroupKind, MizIndex},
     group::Group,
     land::Land,
-    net::Ucid,
+    net::{Net, Ucid},
     pointing_towards2,
     trigger::{MarkId, Modulation, Trigger},
     world::World,
@@ -398,6 +398,35 @@ fn action_group_position(db: &Db, lua: MizLua, gid: GroupId) -> Result<Vector2> 
     ai_air::flight_center_pos(lua, &names).or_else(|_| db.group_center(&gid))
 }
 
+/// Online humans on a DCS coalition side (same headcount idea as balancing).
+fn dcs_side_online_count(lua: MizLua, side: Side, cfg: &Cfg) -> Result<u32> {
+    let net = Net::singleton(lua)?;
+    let mut n = 0u32;
+    for id in net.get_player_list()? {
+        let id = match id {
+            std::result::Result::Ok(id) => id,
+            std::result::Result::Err(_) => continue,
+        };
+        let ifo = match net.get_player_info(id) {
+            std::result::Result::Ok(ifo) => ifo,
+            std::result::Result::Err(_) => continue,
+        };
+        let s = match ifo.side() {
+            std::result::Result::Ok(s) => s,
+            std::result::Result::Err(_) => continue,
+        };
+        if s == side {
+            n += 1;
+        }
+    }
+    match side {
+        Side::Red => n = n.saturating_add(cfg.debugging_online_red_players),
+        Side::Blue => n = n.saturating_add(cfg.debugging_online_blue_players),
+        _ => {}
+    }
+    Ok(n)
+}
+
 impl Db {
     pub fn start_action(
         &mut self,
@@ -411,6 +440,28 @@ impl Db {
         cmd: ActionCmd,
     ) -> Result<()> {
         self.check_actions_allowed()?;
+        if !cmd.action.enabled {
+            bail!(
+                "action {} is temporarily disabled pending repair",
+                cmd.name
+            )
+        }
+        let need = cmd.action.require_enemy_online;
+        if need > 0 {
+            let enemy = match side {
+                Side::Blue => Side::Red,
+                Side::Red => Side::Blue,
+                _ => bail!("actions require Blue or Red side"),
+            };
+            let have = dcs_side_online_count(lua, enemy, self.ephemeral.cfg.as_ref())?;
+            if have < need {
+                bail!(
+                    "action {} requires at least {} enemy players online",
+                    cmd.name,
+                    need
+                )
+            }
+        }
         let cost = match &cmd.action.kind {
             ActionKind::Nuke(nc) => {
                 let div = max(1, self.persisted.nukes_used * nc.cost_scale as u32);
@@ -717,6 +768,7 @@ impl Db {
             } else {
                 ai_air::AiAirPersistSpawn::PersistGround
             };
+            // PersistInAir pushes post-spawn; skip OnMission pre-build (no live DCS groups yet).
             let mission = match phase {
                 ai_air::AiAirPhase::Bootstrap | ai_air::AiAirPhase::Departing => vec![],
                 ai_air::AiAirPhase::RtbInbound => {
@@ -747,8 +799,11 @@ impl Db {
                     )?
                 }
                 ai_air::AiAirPhase::OnMission => {
-                    // Ingress from live position; orbit center stays active_mission.pos.
-                    self.regenerate_ai_air_mission(lua, spctx, idx, gid, false)?
+                    if resume_air {
+                        vec![]
+                    } else {
+                        self.regenerate_ai_air_mission(lua, spctx, idx, gid, false)?
+                    }
                 }
                 ai_air::AiAirPhase::AwaitingLaunch
                 | ai_air::AiAirPhase::Servicing
@@ -771,6 +826,12 @@ impl Db {
                 if resume_air {
                     ai_air.bootstrap_grounded = false;
                     ai_air.bootstrap_mission_pushed = true;
+                    if matches!(phase, ai_air::AiAirPhase::OnMission) {
+                        ai_air.persist_in_air_repush_at =
+                            Some(now + ai_air::persist_in_air_settle_delay());
+                    } else {
+                        ai_air.persist_in_air_repush_at = None;
+                    }
                 } else if matches!(
                     phase,
                     ai_air::AiAirPhase::Bootstrap | ai_air::AiAirPhase::Departing
@@ -2133,6 +2194,7 @@ impl Db {
                 aar_since: None,
                 servicing_handoff: false,
                 last_airborne_task_push: None,
+                persist_in_air_repush_at: None,
                 calcm_rack_empty_since: None,
                 drone_climb_pos: None,
                 drone_climb_hub: None,
@@ -2836,19 +2898,22 @@ impl Db {
         }
         let oid = obj.id;
         let name = obj.name.clone();
+        let can_logi = obj.can_queue_logi_repair_crate();
         let spawnable_ok = obj.spawnable_logi_repaired;
         let can_static = obj.can_queue_static_repair_crate();
         let can_prod = obj.can_queue_production_repair_crate();
         let is_opr = matches!(obj.kind, ObjectiveKind::Production);
         let production = obj.production;
         let static_need = obj.static_repair_need;
+        let logi_need = obj.logi_repair_need;
         let now = Utc::now();
 
         // Same priority as player repair-crate unpack: logi → ME static → OPR.
-        let msg = if !spawnable_ok {
-            self.repair_one_logi_step(side, now, oid)?;
-            let logi = objective!(self, oid)?.logi();
-            format_compact!("repaired logistics at {name} to %{logi}")
+        let msg = if can_logi {
+            let (queued, need) = self.enqueue_logi_repair_crate(oid, now)?;
+            format_compact!("queued logi repair at {name} ({queued}/{need})")
+        } else if !spawnable_ok {
+            bail!("logi repair queue is full")
         } else if can_static {
             let rate = self.ephemeral.cfg.static_repair_rate_seconds;
             let obj = objective_mut!(self, oid)?;
@@ -2876,6 +2941,8 @@ impl Db {
                 bail!("OPR production is already at 100%")
             }
             bail!("repair queue is full or would exceed OPR damage (100% - Production)")
+        } else if logi_need > 0 {
+            bail!("logi repair queue is full")
         } else if static_need > 0 {
             bail!("static repair queue is full")
         } else {

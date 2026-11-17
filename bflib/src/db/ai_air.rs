@@ -387,6 +387,9 @@ pub struct AiAirState {
     /// Throttle airborne mission re-push (DCS task watchdog).
     #[serde(default)]
     pub last_airborne_task_push: Option<DateTime<Utc>>,
+    /// One settle re-push after in-air persist resume (DCS ignores immediate setTask).
+    #[serde(default)]
+    pub persist_in_air_repush_at: Option<DateTime<Utc>>,
     /// CALCM rack empty; bingo waits for in-flight missiles to impact.
     #[serde(default)]
     pub calcm_rack_empty_since: Option<DateTime<Utc>>,
@@ -4779,6 +4782,12 @@ const BINGO_FUEL_FRAC: f32 = 0.25;
 const ON_MISSION_BINGO_MIN: Duration = Duration::seconds(120);
 /// Min interval between airborne mission re-pushes when DCS drops `hasTask`.
 const AIR_TASK_REPUSH_MIN: Duration = Duration::seconds(90);
+/// Delay before second Mission push after in-air persist spawn (DCS airborne settle).
+const PERSIST_IN_AIR_SETTLE_REPUSH: Duration = Duration::seconds(3);
+
+pub(super) fn persist_in_air_settle_delay() -> Duration {
+    PERSIST_IN_AIR_SETTLE_REPUSH
+}
 /// After CALCM rack reads empty, wait for in-flight missiles before weapon bingo RTB.
 const CALCM_SALVO_SETTLE: Duration = Duration::minutes(3);
 /// Re-push orbit when airframes drift this far from the CAP mark (e.g. stale ME template task).
@@ -7026,6 +7035,39 @@ pub(super) fn advance_ai_air(
             }
         }
         AiAirPhase::OnMission => {
+            let settle_repush = {
+                let group = group!(db, gid)?;
+                match &group.origin {
+                    DeployKind::Action { ai_air, .. } => ai_air
+                        .persist_in_air_repush_at
+                        .filter(|at| now >= *at),
+                    _ => None,
+                }
+            };
+            if settle_repush.is_some() && in_air {
+                {
+                    let group = group_mut!(db, gid)?;
+                    if let DeployKind::Action { ai_air, .. } = &mut group.origin {
+                        ai_air.persist_in_air_repush_at = None;
+                    }
+                }
+                let route = if mission_kind == AiAirMissionKind::Drone {
+                    let from = flight_center_pos(lua, &dcs_names)?;
+                    drone_airborne_me_mission(lua, db, gid, from)?
+                } else {
+                    db.regenerate_ai_air_mission(lua, spctx, idx, gid, false)?
+                };
+                let n = route.len();
+                db.ai_air_push_mission(spctx, gid, route, true)?;
+                let group = group_mut!(db, gid)?;
+                if let DeployKind::Action { ai_air, .. } = &mut group.origin {
+                    ai_air.last_airborne_task_push = Some(now);
+                    if mission_kind == AiAirMissionKind::Drone {
+                        ai_air.drone_orbit_engaged = true;
+                    }
+                }
+                log::info!("ai air {gid}: in-air resume settle re-push ({n} wpts)");
+            }
             if duration_shutdown {
                 let retry = {
                     let group = group!(db, gid)?;
@@ -7998,6 +8040,7 @@ pub(super) fn issue_rtb(
         clear_aar_state(ai_air);
         ai_air.calcm_rack_empty_since = None;
         ai_air.last_airborne_task_push = None;
+        ai_air.persist_in_air_repush_at = None;
         ai_air.rtb_land_recovery_count = 0;
         set_phase(ai_air, AiAirPhase::RtbInbound);
         if !req.preserve_mission_kind {
@@ -8468,6 +8511,10 @@ pub(super) fn spawn_ai_air_group<'lua>(
             let group = group_mut!(db, gid)?;
             if let DeployKind::Action { ai_air, .. } = &mut group.origin {
                 set_phase(ai_air, AiAirPhase::OnMission);
+                ai_air.last_airborne_task_push = Some(Utc::now());
+                if ai_air.mission_kind == AiAirMissionKind::Drone {
+                    ai_air.drone_orbit_engaged = true;
+                }
             }
         }
     }

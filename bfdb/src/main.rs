@@ -554,12 +554,16 @@ async fn api_rounds(
     Ok(json_response(data))
 }
 
-/// GET /api/leaderboard — all-time pilot aggregates for one instance (`?instance=`).
+/// GET /api/leaderboard — pilot aggregates for one instance (`?instance=`).
+/// Omit `round`/`scope` for all-time; `?scope=current` = open campaign round;
+/// `?round=N` scopes to that round id.
 /// Requires login + completed -linkme (UCID), or admin.
 async fn api_leaderboard(
     session_id: Option<Uuid>,
     db: StatsDb,
     inst: Inst,
+    round_id: Option<u64>,
+    current_only: bool,
 ) -> std::result::Result<impl warp::Reply, Error> {
     let Some(id) = session_id else {
         return Err(anyhow::anyhow!("not logged in").into());
@@ -572,10 +576,24 @@ async fn api_leaderboard(
         })?;
     }
     let data = task::block_in_place(|| -> Result<String> {
-        // All-time within the selected DCS server (not merged across instances).
         // Only pilots with a linked dashboard account (same set as admin "linked").
         let linked = db.web_auth().linked_ucids()?;
-        let pilots = db.pilot_leaderboard(None, Some(&inst.id))?;
+        // CURRENT: open round only (do not fall back to latest closed).
+        let round = if current_only {
+            db.latest_rounds_for(&inst.id)?
+                .into_iter()
+                .find(|(_, _, r)| r.end.is_none())
+                .map(|(_, rid, _)| rid)
+        } else {
+            match round_id {
+                Some(rid) => db.resolve_round_id(&inst.id, Some(rid))?,
+                None => None,
+            }
+        };
+        if (current_only || round_id.is_some()) && round.is_none() {
+            return Ok("[]".to_string());
+        }
+        let pilots = db.pilot_leaderboard(round, Some(&inst.id))?;
         let mut entries = Vec::with_capacity(pilots.len().min(linked.len()));
         for (ucid, name, agg) in &pilots {
             if !linked.contains(&ucid.to_string()) {
@@ -772,8 +790,12 @@ async fn api_objectives(
                                     entry["owner"] = serde_json::json!(format!("{:?}", o.owner));
                                     entry["threatened"] = serde_json::Value::Bool(o.threatened);
                                     entry["captureable"] = serde_json::Value::Bool(o.captureable);
-                                    if let Some(p) = o.production {
-                                        entry["production"] = serde_json::json!(p);
+                                    // Occupied OLO: engine omits production — clear stale persisted %.
+                                    match o.production {
+                                        Some(p) => entry["production"] = serde_json::json!(p),
+                                        None => {
+                                            entry["production"] = serde_json::Value::Null;
+                                        }
                                     }
                                     if let Some(ref dn) = o.display_name {
                                         entry["display_name"] = serde_json::json!(dn);
@@ -976,6 +998,40 @@ fn public_id_opt(db: &StatsDb, ucid: Option<&dcso3::net::Ucid>) -> Result<Option
         Some(u) => Ok(Some(db.public_id_for(u)?)),
         None => Ok(None),
     }
+}
+
+/// GET /api/war-losses?scope=current|all&round=N — victim-side WAR LOSSES for SITREP.
+async fn api_war_losses(
+    db: StatsDb,
+    inst: Inst,
+    scope: Option<String>,
+    round_id: Option<u64>,
+) -> std::result::Result<impl warp::Reply, Error> {
+    let data = task::block_in_place(|| -> Result<String> {
+        let all_time = matches!(
+            scope.as_deref().map(|s| s.to_ascii_lowercase()).as_deref(),
+            Some("all") | Some("all_time") | Some("all-time")
+        );
+        let rows = db.war_losses(&inst.id, all_time, round_id)?;
+        let categories: Vec<_> = rows
+            .into_iter()
+            .map(|(c, blue, red)| {
+                serde_json::json!({
+                    "id": c.id(),
+                    "label": c.label(),
+                    "tip": c.label(),
+                    "divider_before": c.divider_before(),
+                    "blue": blue,
+                    "red": red,
+                })
+            })
+            .collect();
+        Ok(serde_json::to_string(&serde_json::json!({
+            "scope": if all_time { "all" } else { "current" },
+            "categories": categories,
+        }))?)
+    })?;
+    Ok(json_response(data))
 }
 
 async fn api_kills(
@@ -2553,6 +2609,10 @@ struct JtacActionBody {
     calcm_n: Option<u8>,
     #[serde(default)]
     calcm_per: Option<u8>,
+    #[serde(default)]
+    adjust_dir: Option<std::string::String>,
+    #[serde(default)]
+    adjust_m: Option<u16>,
 }
 
 /// POST /api/cockpit/jtac/action — one F10-parity JTAC command.
@@ -2638,6 +2698,28 @@ async fn api_cockpit_cargo_action(
     )
     .await?;
     Ok(warp::reply::json(&serde_json::json!({ "message": message })))
+}
+
+/// GET /api/cockpit/info — live CFG campaign rules + DEP/troop tables (player side).
+async fn api_cockpit_info(
+    session_id: Option<Uuid>,
+    query: std::collections::HashMap<std::string::String, std::string::String>,
+    inst: Inst,
+    db: StatsDb,
+    bot_cfg: Arc<Option<BotLinkConfig>>,
+) -> std::result::Result<impl warp::Reply, Error> {
+    let ucid = require_linked_player(&query, session_id, db.clone(), &bot_cfg, &inst).await?;
+    use netidx::publisher::Value;
+    let json = call_engine_rpc_str_for(
+        &db,
+        &inst,
+        "info-list",
+        vec![("ucid", Value::from(ucid.to_string()))],
+    )
+    .await?;
+    let data: serde_json::Value = serde_json::from_str(&json)
+        .map_err(|e| anyhow::anyhow!("bad info panel from engine: {e:?}"))?;
+    Ok(warp::reply::json(&data))
 }
 
 /// GET /api/cockpit/main — identity, lives, balance, time, transfer targets.
@@ -4755,21 +4837,28 @@ fn with_db(db: StatsDb) -> impl Filter<Extract = (StatsDb,), Error = std::conver
     warp::any().map(move || db.clone())
 }
 
+fn inst_from_query(
+    db: &StatsDb,
+    q: &std::collections::HashMap<std::string::String, std::string::String>,
+) -> Inst {
+    let by_server = q.get("server").and_then(|name| {
+        db.instances()
+            .by_dcs_server_name(name)
+            .map(|cfg| cfg.id.clone())
+    });
+    let requested = by_server
+        .as_deref()
+        .or_else(|| q.get("instance").map(|s| s.as_str()));
+    db.resolve_state(requested)
+        .unwrap_or_else(|_| db.state(db.instances().default_id()))
+}
+
 fn with_instance(db: StatsDb) -> impl Filter<Extract = (Inst,), Error = warp::Rejection> + Clone {
     warp::query::<std::collections::HashMap<std::string::String, std::string::String>>()
         .and(warp::any().map(move || db.clone()))
         .map(
             |q: std::collections::HashMap<std::string::String, std::string::String>, db: StatsDb| {
-                let by_server = q.get("server").and_then(|name| {
-                    db.instances()
-                        .by_dcs_server_name(name)
-                        .map(|cfg| cfg.id.clone())
-                });
-                let requested = by_server
-                    .as_deref()
-                    .or_else(|| q.get("instance").map(|s| s.as_str()));
-                db.resolve_state(requested)
-                    .unwrap_or_else(|_| db.state(db.instances().default_id()))
+                inst_from_query(&db, &q)
             },
         )
 }
@@ -5190,11 +5279,19 @@ async fn main() -> Result<()> {
         .and(with_instance(db.clone()))
         .then(api_rounds);
 
+    // Single query extract (avoid with_instance + query — round/scope must not be dropped).
     let leaderboard = warp::path!("api" / "leaderboard")
         .and(extract_session_cookie())
         .and(with_db(db.clone()))
-        .and(with_instance(db.clone()))
-        .then(api_leaderboard);
+        .and(warp::query::<std::collections::HashMap<String, String>>())
+        .then(|session_id, db, q: std::collections::HashMap<String, String>| {
+            let inst = inst_from_query(&db, &q);
+            let current_only = q
+                .get("scope")
+                .is_some_and(|s| s.eq_ignore_ascii_case("current"));
+            let round_id = q.get("round").and_then(|s| s.parse().ok());
+            api_leaderboard(session_id, db, inst, round_id, current_only)
+        });
 
     let all_pilots = warp::path!("api" / "pilots")
         .and(with_db(db.clone()))
@@ -5234,6 +5331,16 @@ async fn main() -> Result<()> {
             let round_id = q.get("round").and_then(|s| s.parse().ok());
             let limit = q.get("limit").and_then(|s| s.parse().ok());
             api_kills(db, inst, round_id, limit)
+        });
+
+    let war_losses = warp::path!("api" / "war-losses")
+        .and(with_db(db.clone()))
+        .and(with_instance(db.clone()))
+        .and(warp::query::<std::collections::HashMap<String, String>>())
+        .then(|db, inst, q: std::collections::HashMap<String, String>| {
+            let scope = q.get("scope").cloned();
+            let round_id = q.get("round").and_then(|s| s.parse().ok());
+            api_war_losses(db, inst, scope, round_id)
         });
 
     let capture_events = warp::path!("api" / "capture-events")
@@ -5847,6 +5954,15 @@ async fn main() -> Result<()> {
         .and(with_bot_link_cfg(bot_link_cfg.clone()))
         .then(api_cockpit_main);
 
+    let cockpit_info_route = warp::path!("api" / "cockpit" / "info")
+        .and(warp::get())
+        .and(extract_session_cookie())
+        .and(warp::query::<std::collections::HashMap<std::string::String, std::string::String>>())
+        .and(with_instance(db.clone()))
+        .and(with_db(db.clone()))
+        .and(with_bot_link_cfg(bot_link_cfg.clone()))
+        .then(api_cockpit_info);
+
     let cockpit_transfer_route = warp::path!("api" / "cockpit" / "transfer")
         .and(warp::post())
         .and(extract_session_cookie())
@@ -5955,6 +6071,7 @@ async fn main() -> Result<()> {
         .or(frontline)
         .or(briefing)
         .or(kills)
+        .or(war_losses)
         .or(capture_events)
         .or(pilot_sorties)
         .or(pilot_breakdown)
@@ -5977,6 +6094,7 @@ async fn main() -> Result<()> {
         .or(cockpit_carp_solve_latlon_route)
         .or(cockpit_whoami_route)
         .or(cockpit_main_route)
+        .or(cockpit_info_route)
         .or(cockpit_jtac_list_route)
         .or(cockpit_cargo_list_route)
         .or(cockpit_plugin_download_route)

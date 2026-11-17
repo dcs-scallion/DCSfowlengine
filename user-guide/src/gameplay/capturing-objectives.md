@@ -103,7 +103,7 @@ When capture succeeds:
 **Immediate Effects**:
 - Airbase coalition changes
 - Defensive units respawn for new owner
-- Logistics begins one step of repair
+- Logistics gets a small instant bump (enough to leave Logi 0 — not a full repair crate)
 - Supply lines recalculate
 
 ## Failed Captures
@@ -148,7 +148,8 @@ Points divided equally among all players whose troops participated in the captur
 When capture succeeds:
 - Objective changes owner immediately
 - Airbase coalition switches
-- Logistics repairs one step automatically
+- Logistics gets a small instant bump so the base is no longer at Logi 0
+- Further Logi repair still needs repair crates (queued, gradual)
 - Supply lines recalculate
 - Capturing troops are deleted
 - Points awarded to participants

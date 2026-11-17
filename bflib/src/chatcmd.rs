@@ -170,7 +170,12 @@ pub(super) fn format_duration(d: Duration) -> CompactString {
 }
 
 fn time_command(ctx: &mut Context, id: PlayerId, now: DateTime<Utc>) {
-    match ctx.shutdown.as_ref() {
+    match ctx
+        .db
+        .ephemeral
+        .cfg
+        .map_restart_when(now, ctx.shutdown.map(|s| s.when))
+    {
         None => {
             let msg: CompactString = ctx
                 .db
@@ -184,8 +189,8 @@ fn time_command(ctx: &mut Context, id: PlayerId, now: DateTime<Utc>) {
                 .into();
             ctx.db.ephemeral.msgs().send(MsgTyp::Chat(Some(id)), msg);
         }
-        Some(asd) => {
-            let remains = format_duration(asd.when - now);
+        Some(when) => {
+            let remains = format_duration(when - now);
             ctx.db.ephemeral.msgs().send(
                 MsgTyp::Chat(Some(id)),
                 format_compact!("The server will shutdown in {remains}"),
@@ -388,6 +393,9 @@ fn delete_command(ctx: &mut Context, id: PlayerId, s: &str) {
 fn action_help(ctx: &mut Context, actions: &IndexMap<String, Action, FxBuildHasher>, id: PlayerId) {
     let calcm_enabled = ctx.db.ephemeral.cfg.calcm_mission;
     for (name, action) in actions {
+        if !action.enabled {
+            continue;
+        }
         if !calcm_enabled && action.kind.is_calcm_deploy() {
             continue;
         }
@@ -736,8 +744,8 @@ fn run_jtac_command(
         } else {
             let bomber_missions = ctx.db.ephemeral.cfg.actions.get(&side);
             bomber_missions.iter().find_map(|acts| {
-                acts.iter().find_map(|(n, a)| match a.kind {
-                    ActionKind::Bomber(_) => Some(n.clone()),
+                acts.iter().find_map(|(n, a)| match (&a.kind, a.enabled) {
+                    (ActionKind::Bomber(_), true) => Some(n.clone()),
                     _ => None,
                 })
             })

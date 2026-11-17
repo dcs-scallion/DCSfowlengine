@@ -27,6 +27,6 @@ $dcsServerBotApiKey = ""
 $srsApiKey = ""
 
 # Optional: override $netidxBase from bfsystem.ps1 (must match CFG netidx_base).
-# Leave unset to keep the default "/local/fowl/campaign". Set to "" only if
+# Leave unset to keep the default "/local/fowl/server1". Set to "" only if
 # you intentionally want bfdb without --base.
-# $netidxBase = "/local/fowl/campaign"
+# $netidxBase = "/local/fowl/server1"

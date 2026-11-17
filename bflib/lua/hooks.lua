@@ -17,7 +17,7 @@ net.log("loading bflib.dll")
 package.cpath = package.cpath .. ";" .. lfs.writedir() .. "\\Scripts\\?.dll"
 
 local function file_exists(name)
-    local f=io.open(name, "r")
+    local f = io.open(name, "r")
     if f ~= nil then
         io.close(f)
         return true
@@ -38,18 +38,64 @@ local function copy_file(from, to)
     tof:write(fromf:read("*a"))
     fromf:close()
     tof:close()
+    return nil
+end
+
+-- Next free archive: live.old0, live.old1, ... (max existing + 1).
+local function next_old_path(live)
+    local dir = live:match("^(.*)\\[^\\]+$") or "."
+    local name = live:match("([^\\]+)$") or live
+    local prefix = name .. ".old"
+    local max_n = -1
+    for fname in lfs.dir(dir) do
+        if fname ~= "." and fname ~= ".." and fname:sub(1, #prefix) == prefix then
+            local rest = fname:sub(#prefix + 1)
+            local n = tonumber(rest)
+            if n and tostring(n) == rest and n > max_n then
+                max_n = n
+            end
+        end
+    end
+    return dir .. "\\" .. prefix .. tostring(max_n + 1)
+end
+
+local function promote_staged(live, staging)
+    if not file_exists(staging) then
+        return true
+    end
+    if file_exists(live) then
+        local old = next_old_path(live)
+        local ok, err = os.rename(live, old)
+        if not ok then
+            net.log("could not archive " .. live .. " -> " .. old .. ": " .. tostring(err))
+            return false
+        end
+        net.log("archived " .. live .. " -> " .. old)
+    end
+    local ok, err = os.rename(staging, live)
+    if ok then
+        net.log("promoted " .. staging .. " -> " .. live)
+        return true
+    end
+    -- Rename can fail across volumes; fall back to copy + remove staging.
+    local ce = copy_file(staging, live)
+    if ce ~= nil then
+        net.log("could not promote " .. staging .. ": " .. tostring(ce) .. " / " .. tostring(err))
+        return false
+    end
+    os.remove(staging)
+    net.log("promoted (copy) " .. staging .. " -> " .. live)
+    return true
 end
 
 local bflib_update_file = lfs.writedir() .. "\\Scripts\\_bflib.dll"
 local bflib_dll = lfs.writedir() .. "\\Scripts\\bflib.dll"
 
 if file_exists(bflib_update_file) then
-    local e = copy_file(bflib_update_file, bflib_dll)
-    if e ~= nil then
-       net.log("could not install updated dll " .. e) 
+    if not promote_staged(bflib_dll, bflib_update_file) then
+        net.log("could not install updated bflib.dll")
     else
-       os.remove(bflib_update_file)
-       net.log("installed updated bflib.dll")
+        net.log("installed updated bflib.dll")
     end
 end
 

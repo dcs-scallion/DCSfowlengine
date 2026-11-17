@@ -9,7 +9,7 @@
       "label": "Attrition #1",
 
       "//base": "netidx_base from THIS instance's engine CFG. Two instances must never share one.",
-      "base": "/local/fowl/campaign",
+      "base": "/local/fowl/server1",
       "//netidx_config": "Optional. Absolute path to netidx client JSON (see netidx/netidx-client.json.example). Prefer this over %APPDATA%\\netidx\\client.json so Start-Job / services do not depend on the interactive profile.",
       "netidx_config": "C:\\Users\\Robo\\Saved Games\\DCS.dcs_serverrelease\\netidx-client.json",
       "//sortie": "Leave null. Hint only until the engine reports in.",
@@ -33,7 +33,7 @@
     {
       "id": "attrition2",
       "label": "Attrition #2 (staging)",
-      "base": "/local/fowl/campaign-ta",
+      "base": "/local/fowl/server2",
       "netidx_config": "C:\\Users\\Robo\\Saved Games\\DCS.dcs_serverrelease\\netidx-client.json",
       "sortie": null,
       "stats_jsonl": "C:\\Users\\Robo\\Saved Games\\DCS.dcs_serverrelease_2\\Logs\\stats.jsonl",

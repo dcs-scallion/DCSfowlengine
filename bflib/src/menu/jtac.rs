@@ -22,7 +22,7 @@ use crate::{
         actions::{ActionArgs, ActionCmd, WithJtac},
         group::DeployKind,
     },
-    jtac::{JtId, Jtac, Jtacs},
+    jtac::{AdjustmentDir, JtId, Jtac, Jtacs},
     spawnctx::SpawnCtx,
 };
 use anyhow::{Context as ErrContext, Result, anyhow, bail};
@@ -270,6 +270,56 @@ pub fn jtac_artillery_fire_all(lua: MizLua, arg: ArgTriple<JtId, DbGid, Ucid>) -
                 .panel_to_player(&ctx.db.persisted, 10, &arg.trd, msg);
         }
     }
+    Ok(())
+}
+
+pub fn jtac_adjust_solution(
+    _lua: MizLua,
+    arg: ArgQuad<DbGid, AdjustmentDir, u16, Ucid>,
+) -> Result<()> {
+    let ctx = unsafe { Context::get_mut() };
+    ctx.jtac
+        .adjust_artillery_solution(&arg.fst, arg.snd, arg.trd);
+    let a = ctx.jtac.get_artillery_adjustment(&arg.fst);
+    ctx.db.ephemeral.panel_to_player(
+        &ctx.db.persisted,
+        10,
+        &arg.fth,
+        format_compact!(
+            "artillery solution for {} adjusted now short/long {}m left/right {}m",
+            arg.fst, a.short_long, a.left_right
+        ),
+    );
+    Ok(())
+}
+
+pub fn jtac_show_adjustment(_lua: MizLua, arg: ArgTuple<DbGid, Ucid>) -> Result<()> {
+    let ctx = unsafe { Context::get_mut() };
+    let a = ctx.jtac.get_artillery_adjustment(&arg.fst);
+    ctx.db.ephemeral.panel_to_player(
+        &ctx.db.persisted,
+        10,
+        &arg.snd,
+        format_compact!(
+            "adjustment for {} is short/long {}m left/right {}m",
+            arg.fst, a.short_long, a.left_right
+        ),
+    );
+    Ok(())
+}
+
+pub fn jtac_reset_adjustment(_lua: MizLua, arg: ArgTuple<DbGid, Ucid>) -> Result<()> {
+    let ctx = unsafe { Context::get_mut() };
+    ctx.jtac.reset_artillery_solution(&arg.fst);
+    ctx.db.ephemeral.panel_to_player(
+        &ctx.db.persisted,
+        10,
+        &arg.snd,
+        format_compact!(
+            "artillery solution for {} reset to short/long 0m left/right 0m",
+            arg.fst
+        ),
+    );
     Ok(())
 }
 
@@ -594,7 +644,42 @@ fn add_artillery_menu_for_jtac(
                 trd: ucid,
             },
         )?;
-        
+        mc.add_command_for_group(
+            mizgid,
+            "Show Adjustment".into(),
+            Some(root.clone()),
+            jtac_show_adjustment,
+            ArgTuple {
+                fst: *gid,
+                snd: ucid,
+            },
+        )?;
+        let add_adjust = |root: &GroupSubMenu, dir: AdjustmentDir| -> Result<()> {
+            for meters in [10u16, 25, 50, 100] {
+                mc.add_command_for_group(
+                    mizgid,
+                    format_compact!("{meters}m").into(),
+                    Some(root.clone()),
+                    jtac_adjust_solution,
+                    ArgQuad {
+                        fst: *gid,
+                        snd: dir,
+                        trd: meters,
+                        fth: ucid,
+                    },
+                )?;
+            }
+            Ok(())
+        };
+        let short = mc.add_submenu_for_group(mizgid, "Report Short".into(), Some(root.clone()))?;
+        add_adjust(&short, AdjustmentDir::Short)?;
+        let long = mc.add_submenu_for_group(mizgid, "Report Long".into(), Some(root.clone()))?;
+        add_adjust(&long, AdjustmentDir::Long)?;
+        let left = mc.add_submenu_for_group(mizgid, "Report Left".into(), Some(root.clone()))?;
+        add_adjust(&left, AdjustmentDir::Left)?;
+        let right = mc.add_submenu_for_group(mizgid, "Report Right".into(), Some(root.clone()))?;
+        add_adjust(&right, AdjustmentDir::Right)?;
+
         // Add Target Group submenu with combo options
         let target_group = mc.add_submenu_for_group(mizgid, "Target Group".into(), Some(root.clone()))?;
         let fire_1_per = mc.add_submenu_for_group(mizgid, "Fire 1 per".into(), Some(target_group.clone()))?;
@@ -969,8 +1054,8 @@ pub(super) fn add_menu_for_jtac(
 
     let bomber_missions = db.ephemeral.cfg.actions.get(&side);
     let bomber_missions = bomber_missions.iter().flat_map(|acts| {
-        acts.iter().filter_map(|(n, a)| match a.kind {
-            ActionKind::Bomber(_) => Some(n.clone()),
+        acts.iter().filter_map(|(n, a)| match (&a.kind, a.enabled) {
+            (ActionKind::Bomber(_), true) => Some(n.clone()),
             _ => None,
         })
     });

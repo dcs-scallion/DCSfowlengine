@@ -300,25 +300,39 @@ Logistics gradually repair over time:
 - Server-configured
 - Requires positive supply level
 
-### Manual Repair
+### Manual Repair (repair crates)
 
-Players can expedite repairs:
+Players speed up repairs by unpacking **repair crates** at a friendly objective (F10 Cargo unpack, or AI Logistics Repair).
 
-**Via Actions Menu**:
+**Priority** (same crate type):
+1. **Spawnable Logi** queue — fills first while Logi is damaged
+2. **Static** queue — only after the Logi queue is full (may fill ahead; work starts only when Logi is fully repaired)
+3. Both full → further crates are refused
+
+**What players see on F10**:
+- `repair logi` queued/need under the objective name
+- `repair stat` queued/need on the line below (when statics need work)
+
+**How Logi repair works**:
+- Unpacking does **not** snap Logi up instantly
+- Each crate joins a repair queue and restores Logi gradually over the server’s Logi repair time
+- Extra damage while a queue is running raises how many crates are still needed
+- Static repairs waiting in queue stay idle until spawnable Logi is fully repaired
+
+**Via Actions Menu** (AI delivery):
 ```
 F10 → Actions → Repair (or Repair-Fast) → [Select Objective]
 ```
 
 **Requirements**:
-- Costs **100 points** (helo) or **200 points** (fast fixed-wing)
+- Costs **100 points** (helo) or **200 points** (fast fixed-wing) where configured
 - Must own the objective
-- Repair crate must be delivered to objective
+- Repair crate delivered / unpacked at the objective
 
 **Benefits**:
-- Immediate logi increase (one step)
-- Prevents capture vulnerability
-- Strategic investment
-- Fast option gets there quicker
+- Restores Logi over time so the base leaves capture risk
+- Can pre-queue static repairs once the Logi queue is full
+- Fast AI option reaches the objective quicker
 
 ## Warehouse System
 

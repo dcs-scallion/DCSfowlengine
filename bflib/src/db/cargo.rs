@@ -197,6 +197,7 @@ pub enum Unpakistan {
     Repaired(String, u32),
     RepairedBase(String, u8),
     RepairedProduction(String, u8),
+    RepairedLogiQueue(String, u16, u16),
     RepairedStaticQueue(String, u16, u16),
     TransferedSupplies(String, String),
 }
@@ -256,6 +257,9 @@ impl fmt::Display for Unpakistan {
             Self::RepairedBase(base, logi) => write!(f, "repaired logistics at {base} to %{logi}"),
             Self::RepairedProduction(opr, pct) => {
                 write!(f, "queued production repair at {opr} (production {pct}%)")
+            }
+            Self::RepairedLogiQueue(base, queued, need) => {
+                write!(f, "queued logi repair at {base} ({queued}/{need})")
             }
             Self::RepairedStaticQueue(base, queued, need) => {
                 write!(f, "queued static repair at {base} ({queued}/{need})")
@@ -2512,7 +2516,7 @@ impl Db {
                     && obj.logi == 100
                 {
                     reasons.push("objective logistics are completely repaired".into());
-                } else if !obj.spawnable_logi_repaired {
+                } else if obj.can_queue_logi_repair_crate() {
                     if let Some(amount) = self
                         .ephemeral
                         .cfg
@@ -2535,7 +2539,8 @@ impl Db {
                             "for logistics repair",
                         );
                     }
-                    self.repair_one_logi_step(st.side, Utc::now(), oid)?;
+                    let now = Utc::now();
+                    let (queued, need) = self.enqueue_logi_repair_crate(oid, now)?;
                     self.delete_group(base_repairs.keys().next().unwrap())?;
                     self.ephemeral.stat(Stat::Repair {
                         id: oid,
@@ -2551,7 +2556,15 @@ impl Db {
                         award_repair_points(self, &st.ucid, amount, "for logistics repair");
                     }
                     let obj = objective!(self, oid)?;
-                    return Ok(Unpakistan::RepairedBase(obj.name.clone(), obj.logi()));
+                    return Ok(Unpakistan::RepairedLogiQueue(
+                        obj.name.clone(),
+                        queued,
+                        need,
+                    ));
+                } else if !obj.spawnable_logi_repaired {
+                    reasons.push(
+                        "logi repair queue is full (unload more repair crates)".into(),
+                    );
                 } else if obj.can_queue_static_repair_crate() {
                     let cost = self.ephemeral.cfg.static_repair_crate_cost;
                     require_repair_cost_points(

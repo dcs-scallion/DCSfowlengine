@@ -1,21 +1,24 @@
 # Attrition cockpit overlay
 
 Client-side DCS Hooks plugin that opens an in-game WebView on the Attrition
-`/cockpit` page (**Attrition Control** — JTAC panel first; more panels later).
+`/cockpit` page (**Attrition Control** — MAIN / CARGO / JTAC / INFO panels).
 Optional — F10 menus keep working without it.
 
 ## Install
 
-Copy:
+**Preferred (Windows):** dashboard **Download** → Windows installer
+(`attrition-control-setup-<version>.exe`, built locally / hosted from `bfweb/public`).
+It detects `%USERPROFILE%\Saved Games\DCS` (and other DCS* write folders),
+lets the player confirm or browse, then copies the hook into `Scripts\Hooks`.
+
+**Manual / advanced:** dashboard **Download** → Lua plugin, or copy
 
 ```
 bfcockpit/Scripts/Hooks/attrition_cockpit.lua
   → %USERPROFILE%\Saved Games\DCS\Scripts\Hooks\attrition_cockpit.lua
 ```
 
-Or download from the running dashboard:
-
-`GET /api/cockpit/plugin/download`
+Raw script API: `GET /api/cockpit/plugin/download`
 
 Restart DCS. First run writes `Config\AttritionCockpit.lua`.
 
@@ -30,7 +33,7 @@ restart reminder, and shows an in-panel banner until DCS is fully restarted.
   window title, or the sleep button in the UI; wake with double-click or Ctrl+Shift+J
 - Resize: drag the window corner only (minimum size enforced)
 - Compact / restore size: header button in the cockpit UI
-- Panels: tab row at the top (currently **JTAC** only); only the active panel polls
+- Panels: tab row at the top (**MAIN**, **CARGO**, **JTAC**, **INFO**); only the active panel polls
 - Point `url` in `AttritionCockpit.lua` at the **dashboard** host that serves
   the `/cockpit` SPA (Caddy + bfweb), e.g. `https://stats.attrition.cz/cockpit`.
   Do **not** use bfdb `:8880` — that port is localhost API-only and has no UI.

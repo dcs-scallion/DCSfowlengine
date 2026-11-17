@@ -307,6 +307,7 @@ pub fn apply_to_stat(stat: &mut Stat, table: &UcidAliasTable, event_ts: DateTime
         | Stat::SeaRouteDelivered { .. }
         | Stat::SeaRouteDestroyed { .. }
         | Stat::CampaignEvent { .. }
+        | Stat::WarLoss { .. }
         | Stat::Weather { .. }
         | Stat::GciPicture(_)
         | Stat::ConvoyDestroyed { killer: None, .. } => {}

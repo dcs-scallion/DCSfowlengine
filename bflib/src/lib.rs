@@ -19,6 +19,7 @@ mod admin;
 mod bg;
 mod chatcmd;
 mod cockpit_cargo;
+mod cockpit_info;
 mod cockpit_jtac;
 mod cockpit_main;
 mod db;
@@ -1177,6 +1178,7 @@ fn spawn_setmission(ctx: &mut Context, lua: MizLua, new_campaign: bool) {
         campaign_rounds: ctx.db.persisted.campaign_stats.campaign_rounds,
         rounds_per_day: ctx.db.ephemeral.cfg.discord_map.rounds_per_day,
         miz_path: &miz_path,
+        cfg_base_path: &ctx.cfg_base_path,
         new_campaign,
         weather_index,
         scheduled_restart: ctx
@@ -2822,6 +2824,9 @@ fn run_slow_timed_events(
             error!("error doing repairs {:?}", e)
         }
         let spctx = crate::spawnctx::SpawnCtx::new(lua)?;
+        if let Err(e) = ctx.db.maybe_do_logi_repairs(ts) {
+            error!("error doing spawnable logi repairs {:?}", e)
+        }
         if let Err(e) = ctx.db.maybe_do_production_repairs(lua, &spctx, &ctx.idx, ts) {
             error!("error doing OPR production repairs {:?}", e)
         }

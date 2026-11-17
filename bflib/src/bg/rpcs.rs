@@ -59,6 +59,7 @@ pub struct Rpcs {
     _cargo_spawn_crate: Proc,
     _main_list: Proc,
     _main_transfer: Proc,
+    _info_list: Proc,
     _player_side_info: Proc,
     _player_side_switch: Proc,
     _mark_web_linked: Proc,
@@ -728,6 +729,26 @@ impl Rpcs {
             body: Chars = Value::Null; "JSON { kind, target, amount }"
         )?;
         let _q = Arc::clone(&q);
+        let info_list = define_rpc!(
+            publisher,
+            base.append("info-list"),
+            "INFO cockpit panel: live CFG campaign rules and DEP/troop tables (JSON)",
+            |mut c: RpcCall, ucid: Chars| {
+                let (tx, rx) = oneshot::channel();
+                let ucid = match Ucid::from_str(&ucid) {
+                    Ok(ucid) => ucid,
+                    Err(e) => {
+                        c.reply.send(Value::Error(format!("{e:?}").into()));
+                        return None
+                    }
+                };
+                _q.push((AdminCommand::InfoList { ucid }, tx));
+                Some((c, rx))
+            },
+            Some(wait.clone()),
+            ucid: Chars = Value::Null; "The calling player's ucid"
+        )?;
+        let _q = Arc::clone(&q);
         let player_side_info = define_rpc!(
             publisher,
             base.append("player-side-info"),
@@ -886,6 +907,7 @@ impl Rpcs {
             _cargo_spawn_crate: cargo_spawn_crate,
             _main_list: main_list,
             _main_transfer: main_transfer,
+            _info_list: info_list,
             _player_side_info: player_side_info,
             _player_side_switch: player_side_switch,
             _mark_web_linked: mark_web_linked,

@@ -296,13 +296,13 @@ Triggers supply delivery cycle.
 ---
 
 #### `-admin repair <airbase>`
-Repair one step at airbase.
+Repair logistics at airbase (admin).
 
 ```
 -admin repair Batumi
 ```
 
-Increases logi by one step.
+Applies one logistics repair step at the named airbase.
 
 ---
 

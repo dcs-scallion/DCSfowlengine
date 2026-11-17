@@ -51,6 +51,7 @@ fn unpakistan(lua: MizLua, gid: GroupId) -> Result<()> {
                 Unpakistan::Repaired(_, _)
                 | Unpakistan::RepairedBase(_, _)
                 | Unpakistan::RepairedProduction(_, _)
+                | Unpakistan::RepairedLogiQueue(_, _, _)
                 | Unpakistan::RepairedStaticQueue(_, _, _) => "repair",
             };
             ctx.db.play_sound_player(lua, sound_key, &slot);

@@ -550,6 +550,9 @@ fn add_action_menu(lua: MizLua, arg: ArgTriple<Ucid, GroupId, SlotId>) -> Result
     let mut n = 0;
     let calcm_enabled = ctx.db.ephemeral.cfg.calcm_mission;
     for (name, action) in actions {
+        if !action.enabled {
+            continue;
+        }
         if !calcm_enabled && action.kind.is_calcm_deploy() {
             continue;
         }
