@@ -160,12 +160,13 @@ pub fn resolve_life_type_panel_label(
 }
 
 /// F10 map overlay label: alias (when set) plus objective kind suffix.
+/// Ground DEP names are already `FARP N` — do not append kind `FARP` again.
 pub fn resolve_objective_f10_map_label(
     aliases: &FxHashMap<String, std::string::String>,
     obj: &Objective,
 ) -> std::string::String {
     let display = resolve_objective_display_name(aliases, obj);
-    if matches!(obj.kind, ObjectiveKind::Farp { mobile: true, .. }) {
+    if matches!(obj.kind, ObjectiveKind::Farp { .. }) {
         display
     } else {
         format!("{} {}", display, objective_map_kind_label(&obj.kind))

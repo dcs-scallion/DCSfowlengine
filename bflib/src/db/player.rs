@@ -18,7 +18,7 @@ use super::{
     ai_air, Db, MapS, SetS, csar::CsarDowned, ephemeral::SlotInfo, group::DeployKind,
     objective::Objective,
 };
-use crate::{maybe, maybe_mut, objective, objective_mut};
+use crate::{maybe, maybe_mut, objective, objective_mut, spawnctx::airbase_for_pad_template};
 use super::campaign_stats::InvestBucket;
 use anyhow::{Context, Result, anyhow, bail};
 use bfprotocols::{
@@ -838,7 +838,7 @@ impl Db {
                     .get_warehouse()?
                     .get_item_count(String::from(typ))?
             } else {
-                Airbase::get_by_name(lua, pad_template.clone())?
+                airbase_for_pad_template(lua, pad_template.as_str())?
                     .get_warehouse()?
                     .get_item_count(String::from(typ))?
             };
@@ -1137,8 +1137,6 @@ impl Db {
                 }
                 if self.ephemeral.slot_info.contains_key(&slot) {
                     self.try_occupy_slot_deferred(lua, time, ucid, slot)
-                } else if self.ephemeral.dep_farp_pool_slot_ids.contains(&slot) {
-                    SlotAuth::Denied
                 } else {
                     player.changing_slots = true;
                     player.jtac_or_spectators = false;

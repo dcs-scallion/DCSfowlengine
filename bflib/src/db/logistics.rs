@@ -15,12 +15,15 @@ for more details.
 */
 
 use super::{
-    ephemeral::{Equipment, Production, WarehouseResourceMeta},
+    ephemeral::{
+        ground_dep_pad_airbase_kind, Equipment, GroundDepPadAirbaseKind, Production,
+        WarehouseResourceMeta,
+    },
     objective::Objective,
     persisted::Persisted,
     Db, Map, MapS, SetS,
 };
-use crate::{admin::WarehouseKind, maybe, objective, objective_mut, Task};
+use crate::{admin::WarehouseKind, maybe, objective, objective_mut, spawnctx::airbase_for_pad_template, Task};
 use anyhow::{anyhow, bail, Context, Result};
 use bfprotocols::{
     cfg::Vehicle,
@@ -35,14 +38,14 @@ use compact_str::{format_compact, CompactString};
 use dcso3::{
     airbase::Airbase,
     coalition::Side,
-    env::miz::Miz,
+    env::miz::{GroupKind, Miz},
     land::{Land, SurfaceType},
     object::DcsObject,
     perf::record_perf,
     unit::Unit,
     warehouse::{self, LiquidType, WSAircraftCategory, WSCategory},
     world::World,
-    LuaEnv, LuaVec2, MizLua, String, Vector2,
+    DeepClone, LuaEnv, LuaVec2, MizLua, String, Vector2,
 };
 use fxhash::{FxHashMap, FxHashSet};
 use log::{debug, error, info, warn};
@@ -131,6 +134,82 @@ fn me_warehouse_table_for_airbase_id<'lua>(
         }
     }
     Ok(None)
+}
+
+/// ME pad template `unitId` (warehouse key) for a ground DEP pad group name.
+fn me_pad_template_unit_id(
+    lua: MizLua,
+    idx: &dcso3::env::miz::MizIndex,
+    side: Side,
+    pad_template: &str,
+) -> Result<Option<i64>> {
+    let miz = Miz::singleton(lua)?;
+    let Some(gifo) = miz.get_group_by_name(idx, GroupKind::Any, side, pad_template)? else {
+        return Ok(None);
+    };
+    let unit = gifo.group.units()?.first()?;
+    Ok(Some(unit.id()?.inner()))
+}
+
+/// Copy ME pad `aircrafts` (incl. `linkDynTempl`) onto the live DEP FARP warehouse id.
+/// ED has no Warehouse:setDynSpawnTempl; this mirrors bftools ME wiring via `env.warehouses`.
+fn wire_ground_dep_farp_dyn_templates(
+    lua: MizLua,
+    live_ab_id: i64,
+    src_me_unit_id: i64,
+) -> Result<usize> {
+    let Some(warehouses) = env_warehouses_table(lua)? else {
+        return Ok(0);
+    };
+    let Some(src) = me_warehouse_table_for_airbase_id(&warehouses, src_me_unit_id)? else {
+        warn!(
+            "ground DEP dynTemplates: no ME warehouse for pad unitId {src_me_unit_id}"
+        );
+        return Ok(0);
+    };
+    let Ok(src_aircrafts) = src.raw_get::<_, LuaTable>("aircrafts") else {
+        warn!(
+            "ground DEP dynTemplates: ME warehouse {src_me_unit_id} has no aircrafts table"
+        );
+        return Ok(0);
+    };
+    let lua_inner = lua.inner();
+    let dest = if let Some(existing) = me_warehouse_table_for_airbase_id(&warehouses, live_ab_id)? {
+        existing
+    } else {
+        let section: LuaTable = match warehouses.raw_get("warehouses") {
+            Ok(t) => t,
+            Err(_) => {
+                let t = lua_inner.create_table()?;
+                warehouses.raw_set("warehouses", t.clone())?;
+                t
+            }
+        };
+        let clone = src.deep_clone(lua_inner)?;
+        section.raw_set(live_ab_id, clone.clone())?;
+        // Also try string key (ME sometimes stringifies ids).
+        let _ = section.raw_set(format!("{live_ab_id}").as_str(), clone.clone());
+        clone
+    };
+    let aircrafts = src_aircrafts.deep_clone(lua_inner)?;
+    let mut linked = 0usize;
+    for cat in ["helicopters", "planes"] {
+        let Ok(cat_tbl) = aircrafts.raw_get::<_, LuaTable>(cat) else {
+            continue;
+        };
+        for pair in cat_tbl.pairs::<Value, LuaTable>() {
+            let Ok((_, row)) = pair else {
+                continue;
+            };
+            let link = row.raw_get::<_, i64>("linkDynTempl").unwrap_or(0);
+            if link != 0 {
+                linked += 1;
+            }
+        }
+    }
+    dest.raw_set("aircrafts", aircrafts)?;
+    dest.raw_set("dynamicSpawn", true)?;
+    Ok(linked)
 }
 
 /// Opposite/capture: Invisible FARP / ROAD FOB ME weapon tables are incomplete vs airports.
@@ -1005,14 +1084,14 @@ fn apply_virtual_warehouse_to_dcs<'lua>(
     Ok(())
 }
 
-/// Ground DEP FARP: ME pad may still carry full stock; drop DCS rows not in virtual or above virtual `stored`.
+/// Ground DEP FARP: trim orphans and establish virtual rows (incl. 0/`capacity` stubs).
 fn reconcile_dcs_warehouse_to_virtual<'lua>(
     lua: MizLua<'lua>,
     obj: &Objective,
     warehouse: &warehouse::Warehouse<'lua>,
     resource_meta: Option<&FxHashMap<String, WarehouseResourceMeta>>,
 ) -> Result<()> {
-    apply_virtual_warehouse_to_dcs(lua, obj, warehouse, true, false, resource_meta)
+    apply_virtual_warehouse_to_dcs(lua, obj, warehouse, true, true, resource_meta)
 }
 
 fn equipment_capacity_for_discovered_row(
@@ -1347,6 +1426,44 @@ fn dep_farp_export_profile<'a>(
 /// Ground DEP FARP with per-pad export stock: 20% initial fill, DCS sync in tons, virtual prune.
 fn objective_is_ground_dep_farp_export(export: &FowlMizExport, obj: &Objective) -> bool {
     dep_farp_export_profile(export, obj).is_some()
+}
+
+/// Allowlist stubs (`stored=0`, `capacity>=1`) so deslot / dyn cargo can land like other hubs.
+fn seed_dep_farp_allowlist_stubs(
+    obj: &mut Objective,
+    export: &FowlMizExport,
+    resource_meta: &FxHashMap<String, WarehouseResourceMeta>,
+) {
+    let pad = match &obj.kind {
+        ObjectiveKind::Farp { pad_template, .. } => pad_template.as_str(),
+        _ => return,
+    };
+    let Some((aircraft, weapon_ws)) = objective_defaults_for_side(export, pad, obj.owner)
+        .or_else(|| objective_defaults_for_side(export, obj.name.as_str(), obj.owner))
+    else {
+        return;
+    };
+    for ac in aircraft {
+        let row = obj
+            .warehouse
+            .equipment
+            .get_or_default_cow(String::from(ac.as_str()));
+        if row.capacity == 0 {
+            row.capacity = 1;
+        }
+    }
+    for quad in weapon_ws {
+        let name = preferred_resource_meta_name_for_quad(*quad, resource_meta).unwrap_or_else(|| {
+            String::from(format_compact!(
+                "wsType [{},{},{},{}]",
+                quad[0], quad[1], quad[2], quad[3]
+            ))
+        });
+        let row = obj.warehouse.equipment.get_or_default_cow(name);
+        if row.capacity == 0 {
+            row.capacity = 1;
+        }
+    }
 }
 
 /// Fowl export / bftools `InitFuel` baselines: metric tons; DCS `getLiquidAmount` / `setLiquidAmount`: kg.
@@ -3313,6 +3430,7 @@ impl Db {
                     },
                 );
             }
+            seed_dep_farp_allowlist_stubs(obj, export.as_ref(), resource_meta.as_ref());
             log::info!(
                 "ground DEP FARP {:?} ({:?}): warehouse from export pad profile ({}% initial stock)",
                 oid,
@@ -3362,9 +3480,70 @@ impl Db {
         if !objective_is_ground_dep_farp_export(export, obj) {
             return Ok(());
         }
+        self.try_wire_ground_dep_dyn_templates(lua, *oid);
         self.sync_objective_to_warehouse(lua, *oid, false)
             .context("applying ground DEP FARP virtual stock to DCS warehouse")?;
         Ok(())
+    }
+
+    /// Copy ME pad `aircrafts`+`linkDynTempl` onto the live DEP FARP warehouse (`env.warehouses`).
+    fn try_wire_ground_dep_dyn_templates(&self, lua: MizLua, oid: ObjectiveId) {
+        let (name, pad_template, owner) = match objective!(self, oid) {
+            Ok(obj) => {
+                let pad = match &obj.kind {
+                    ObjectiveKind::Farp {
+                        mobile: false,
+                        pad_template,
+                        ..
+                    } => pad_template.clone(),
+                    _ => return,
+                };
+                (obj.name.clone(), pad, obj.owner)
+            }
+            Err(_) => return,
+        };
+        let Some(ab_oid) = self.ephemeral.airbase_by_oid.get(&oid).cloned() else {
+            return;
+        };
+        let Ok(ab) = Airbase::get_instance(lua, &ab_oid) else {
+            return;
+        };
+        let Ok(live_id) = ab.get_id() else {
+            return;
+        };
+        let live_id = live_id.inner();
+        let src_id = match me_pad_template_unit_id(
+            lua,
+            &self.ephemeral.miz_idx,
+            owner,
+            pad_template.as_str(),
+        ) {
+            Ok(Some(id)) => id,
+            Ok(None) => {
+                warn!(
+                    "ground DEP FARP {:?} ({:?}): ME pad {:?} not found for dynTemplates",
+                    oid, name, pad_template
+                );
+                return;
+            }
+            Err(e) => {
+                warn!(
+                    "ground DEP FARP {:?} ({:?}): ME pad unitId lookup failed: {e:?}",
+                    oid, name
+                );
+                return;
+            }
+        };
+        match wire_ground_dep_farp_dyn_templates(lua, live_id, src_id) {
+            Ok(n) => info!(
+                "ground DEP FARP {:?} ({:?}): wired {n} aircraft linkDynTempl row(s) from ME pad unitId {src_id} → live {live_id}",
+                oid, name
+            ),
+            Err(e) => warn!(
+                "ground DEP FARP {:?} ({:?}): dynTemplates wire failed: {e:?}",
+                oid, name
+            ),
+        }
     }
 
     fn mark_dep_farp_virtual_authoritative(&mut self, oid: ObjectiveId) {
@@ -3400,6 +3579,7 @@ impl Db {
         self.init_farp_warehouse(lua, oid)
             .context("initializing dynamic FARP warehouse")?;
         self.mark_dep_farp_virtual_authoritative(*oid);
+        // `apply_dep_farp_virtual_stock_to_dcs` also wires ME `linkDynTempl` before setItem.
         self.apply_dep_farp_virtual_stock_to_dcs(lua, oid)
             .context("applying ground DEP FARP initial stock to DCS warehouse")?;
         self.update_supply_status()
@@ -4045,21 +4225,27 @@ impl Db {
                             return Ok(());
                         }
                     };
+                    let airbase_oid =
+                        airbase.object_id().context("getting airbase object_id")?;
+                    let dep_pad_kind = match &obj.kind {
+                        ObjectiveKind::Farp {
+                            mobile: false,
+                            pad_template,
+                            ..
+                        } => ground_dep_pad_airbase_kind(pad_template.as_str(), name.as_str()),
+                        _ => None,
+                    };
                     match self.ephemeral.airbase_by_oid.entry(oid) {
                         Entry::Vacant(e) => {
-                            let airbase_oid =
-                                airbase.object_id().context("getting airbase object_id")?;
                             e.insert(airbase_oid.clone());
                             self.ephemeral
                                 .airbases_by_oid
                                 .insert(oid, smallvec![airbase_oid]);
                             objective_whid.insert(oid, whid);
                         }
-                        Entry::Occupied(_) => {
+                        Entry::Occupied(mut e) => {
                             match objective_whid.get(&oid) {
                                 Some(expected) if expected == &whid => {
-                                    let airbase_oid =
-                                        airbase.object_id().context("getting airbase object_id")?;
                                     let oairbases = self
                                         .ephemeral
                                         .airbases_by_oid
@@ -4069,12 +4255,40 @@ impl Db {
                                         oairbases.push(airbase_oid);
                                     }
                                 }
-                                Some(_) => {
-                                    bail!(
-                                        "multiple warehouses inside the trigger zone of {}",
-                                        obj.name
-                                    )
-                                }
+                                Some(_) => match dep_pad_kind {
+                                    // Multi Invisible FARP: sibling pads may get distinct DCS warehouses.
+                                    Some(GroundDepPadAirbaseKind::Sibling) => {
+                                        let oairbases = self
+                                            .ephemeral
+                                            .airbases_by_oid
+                                            .entry(oid)
+                                            .or_insert_with(|| smallvec![]);
+                                        if !oairbases.contains(&airbase_oid) {
+                                            oairbases.push(airbase_oid);
+                                        }
+                                    }
+                                    Some(GroundDepPadAirbaseKind::Anchor) => {
+                                        let prev = e.insert(airbase_oid.clone());
+                                        objective_whid.insert(oid, whid);
+                                        let oairbases = self
+                                            .ephemeral
+                                            .airbases_by_oid
+                                            .entry(oid)
+                                            .or_insert_with(|| smallvec![]);
+                                        if !oairbases.contains(&prev) {
+                                            oairbases.push(prev);
+                                        }
+                                        if !oairbases.contains(&airbase_oid) {
+                                            oairbases.push(airbase_oid);
+                                        }
+                                    }
+                                    None => {
+                                        bail!(
+                                            "multiple warehouses inside the trigger zone of {}",
+                                            obj.name
+                                        )
+                                    }
+                                },
                                 None => bail!("missing warehouse key while processing {}", obj.name),
                             }
                         }
@@ -4093,7 +4307,7 @@ impl Db {
                 let ObjectiveKind::Farp { pad_template, .. } = &obj.kind else {
                     continue;
                 };
-                let airbase = Airbase::get_by_name(lua, pad_template.clone()).with_context(|| {
+                let airbase = airbase_for_pad_template(lua, pad_template.as_str()).with_context(|| {
                     format_compact!(
                         "FARP objective {:?}: expected DCS airbase named {:?}",
                         obj.name,

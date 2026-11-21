@@ -104,6 +104,20 @@ impl<'lua> Coalition<'lua> {
         ))
     }
 
+    /// Hoggit: FARPs / heliports use `coalition.addGroup(country, -1, groupData)`.
+    /// DCS returns a Table (Airbase-like), not Group userdata — MOOSE assigns loosely in Lua.
+    pub fn add_farp_group(
+        &self,
+        country: Country,
+        data: env::miz::Group<'lua>,
+    ) -> Result<()> {
+        let _: Value = record_perf!(
+            add_group,
+            self.t.call_function("addGroup", (country, -1i64, data))?
+        );
+        Ok(())
+    }
+
     pub fn add_static_object(
         &self,
         country: Country,

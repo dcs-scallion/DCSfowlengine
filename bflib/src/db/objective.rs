@@ -23,7 +23,7 @@ use crate::{
     group, group_health, group_mut,
     landcache::LandCache,
     maybe, objective, objective_mut,
-    spawnctx::{Despawn, SpawnCtx, SpawnLoc},
+    spawnctx::{airbase_for_pad_template, Despawn, SpawnCtx, SpawnLoc},
     unit, unit_mut,
 };
 use anyhow::{Context, Result, anyhow, bail};
@@ -102,8 +102,7 @@ fn resolve_static_template_side(
 
 /// Ground XZ for FARP markup / zone (persisted unit.pos can lag ME template after spawn).
 pub(super) fn mobile_farp_anchor_ground2(lua: MizLua<'_>, pad_template: &str) -> Option<Vector2> {
-    let name = String::from(pad_template);
-    if let Ok(ab) = Airbase::get_by_name(lua, name.clone()) {
+    if let Ok(ab) = airbase_for_pad_template(lua, pad_template) {
         if ab.is_exist().unwrap_or(false) {
             if let Ok(p) = ab.get_point() {
                 return Some(Vector2::new(p.0.x, p.0.z));
@@ -734,6 +733,11 @@ impl Objective {
         }
     }
 
+    /// Ground DEP dynamic FARP (not naval/mobile pad).
+    pub fn is_ground_dep_farp(&self) -> bool {
+        matches!(self.kind, ObjectiveKind::Farp { mobile: false, .. })
+    }
+
     pub fn is_airbase(&self) -> bool {
         match &self.kind {
             ObjectiveKind::Airbase => true,
@@ -779,9 +783,18 @@ impl Objective {
     }
 }
 
+const GROUND_DEP_FARP_ZONE_RADIUS_M: f64 = 1000.;
+
 fn apply_farp_zone_pos(obj: &mut Objective, lua: MizLua, new_pos: Vector2) {
-    if let Zone::Circle { pos, .. } = &mut obj.zone {
+    if let Zone::Circle { pos, radius } = &mut obj.zone {
         *pos = new_pos;
+        // Ground DEP FARP zones: keep capture/life/F10 radius at the current default.
+        if matches!(
+            obj.kind,
+            ObjectiveKind::Farp { mobile: false, .. }
+        ) {
+            *radius = GROUND_DEP_FARP_ZONE_RADIUS_M;
+        }
     }
     let alt = Land::singleton(lua)
         .and_then(|land| land.get_height(LuaVec2(new_pos)))
@@ -847,12 +860,17 @@ impl Db {
         let Some(live) = mobile_farp_anchor_ground2(lua, pad.as_str()) else {
             return Ok(false);
         };
-        let old = objective!(self, oid)?.zone.pos();
-        if (live - old).norm() < GROUND_FARP_ZONE_SYNC_EPS_M {
+        let (old_pos, old_r) = match &objective!(self, oid)?.zone {
+            Zone::Circle { pos, radius } => (*pos, *radius),
+            _ => return Ok(false),
+        };
+        let pos_moved = (live - old_pos).norm() >= GROUND_FARP_ZONE_SYNC_EPS_M;
+        let radius_stale = (old_r - GROUND_DEP_FARP_ZONE_RADIUS_M).abs() > 0.5;
+        if !pos_moved && !radius_stale {
             return Ok(false);
         }
         let obj = objective_mut!(self, oid)?;
-        apply_farp_zone_pos(obj, lua, live);
+        apply_farp_zone_pos(obj, lua, if pos_moved { live } else { old_pos });
         self.ephemeral.dirty();
         Ok(true)
     }
@@ -1001,9 +1019,11 @@ impl Db {
         let Some(groups) = obj.groups.get(&obj.owner) else {
             return Ok(true);
         };
+        let ground_dep = obj.is_ground_dep_farp();
         for gid in groups {
             let group = group!(self, gid)?;
-            if !group.class.is_logi() {
+            // Ground DEP FARP: crate queue covers all component groups (ammo/fuel/tent/defenses).
+            if !ground_dep && !group.class.is_logi() {
                 continue;
             }
             for uid in &group.units {
@@ -1015,16 +1035,17 @@ impl Db {
         Ok(true)
     }
 
-    /// Spawnable Logi: (dead unit count, units repaired per crate).
+    /// Spawnable Logi (OFO/OAB/OLO) or ground DEP FARP components: (dead units, units per crate).
     fn spawnable_logi_repair_stats(&self, obj: &Objective) -> Result<(usize, usize)> {
         let Some(groups) = obj.groups.get(&obj.owner) else {
             return Ok((0, 0));
         };
+        let ground_dep = obj.is_ground_dep_farp();
         let mut dead = 0usize;
         let mut max_group = 0usize;
         for gid in groups {
             let group = group!(self, gid)?;
-            if !group.class.is_logi() {
+            if !ground_dep && !group.class.is_logi() {
                 continue;
             }
             max_group = max(max_group, group.units.len());
@@ -1096,6 +1117,37 @@ impl Db {
                 .unwrap_or(100);
             return Ok((health, logi));
         }
+        // Ground DEP FARP: components are often not ObjGroupClass::Logi; Health and Logi both
+        // track all component units so crate queue + logi==0 delete stay meaningful.
+        if matches!(obj.kind, ObjectiveKind::Farp { mobile: false, .. }) {
+            return obj
+                .groups
+                .get(&obj.owner)
+                .map(|groups| {
+                    let mut total = 0;
+                    let mut alive = 0;
+                    for gid in groups {
+                        let group = group!(self, gid)?;
+                        for uid in &group.units {
+                            let unit = unit!(self, uid)?;
+                            if unit.tags.contains(UnitTag::Invincible) {
+                                continue;
+                            }
+                            total += 1;
+                            if !unit.dead {
+                                alive += 1;
+                            }
+                        }
+                    }
+                    let pct = if total == 0 {
+                        100
+                    } else {
+                        ((alive as f32 / total as f32) * 100.).trunc() as u8
+                    };
+                    Ok((pct, pct))
+                })
+                .unwrap_or(Ok((0, 0)));
+        }
         obj.groups
             .get(&obj.owner)
             .map(|groups| {
@@ -1123,7 +1175,11 @@ impl Db {
                     }
                 }
                 let health = ((alive as f32 / total as f32) * 100.).trunc() as u8;
-                let logi = ((logi_alive as f32 / logi_total as f32) * 100.).trunc() as u8;
+                let logi = if logi_total == 0 {
+                    100
+                } else {
+                    ((logi_alive as f32 / logi_total as f32) * 100.).trunc() as u8
+                };
                 Ok((health, logi))
             })
             .unwrap_or(Ok((0, 0)))
@@ -1376,6 +1432,7 @@ impl Db {
         side: Side,
         pos: Vector2,
         parts: &DeployableObjective,
+        pad_template: Option<&str>,
     ) -> Result<SpawnLoc> {
         let mut points: SmallVec<[Vector2; 16]> = smallvec![];
         let defenses = parts
@@ -1398,6 +1455,9 @@ impl Db {
             .as_ref()
             .map(|t| spctx.get_template_ref(idx, GroupKind::Any, side, t))
             .transpose()?;
+        let pad = pad_template
+            .map(|t| spctx.get_template_ref(idx, GroupKind::Any, side, t))
+            .transpose()?;
         macro_rules! acc_points {
             ($group:expr) => {
                 if let Some(g) = $group.as_ref() {
@@ -1412,6 +1472,7 @@ impl Db {
         acc_points!(ammo);
         acc_points!(fuel);
         acc_points!(barracks);
+        acc_points!(pad);
         if points.is_empty() {
             Ok(SpawnLoc::AtPosWithCenter {
                 pos,
@@ -1472,7 +1533,8 @@ impl Db {
             return Ok(());
         }
         let land = Land::singleton(spctx.lua())?;
-        let location = Self::farp_spawn_loc(spctx, idx, side, pos, parts)?;
+        let location =
+            Self::farp_spawn_loc(spctx, idx, side, pos, parts, Some(pad_template.as_str()))?;
         let (spawn_pos, center) = match location {
             SpawnLoc::AtPosWithCenter { pos, center, .. } => (pos, center),
             other => bail!("unexpected FARP spawn location {other:?}"),
@@ -1491,6 +1553,7 @@ impl Db {
             &parts.ammo_template,
             &parts.fuel_template,
             &parts.barracks_template,
+            &Some(pad_template.clone()),
         ] {
             let Some(name) = name else {
                 continue;
@@ -1526,20 +1589,7 @@ impl Db {
         self.ephemeral
             .slot_info
             .retain(|_, si| &si.objective != oid);
-        if let ObjectiveKind::Farp {
-            pad_template,
-            mobile,
-            dep_static_slot_groups,
-            ..
-        } = &obj.kind
-        {
-            if !mobile && !dep_static_slot_groups.is_empty() {
-                for name in dep_static_slot_groups {
-                    self.ephemeral
-                        .pending_dep_farp_static_slot_release
-                        .push((obj.owner, name.clone()));
-                }
-            }
+        if let ObjectiveKind::Farp { pad_template, .. } = &obj.kind {
             self.ephemeral.return_pad_template(pad_template);
         }
         self.persisted.farps.remove_cow(oid);
@@ -1570,7 +1620,6 @@ impl Db {
             fuel_template,
             barracks_template,
         } = parts;
-        let location = Self::farp_spawn_loc(spctx, idx, side, pos, parts)?;
         let dep_name = spec
             .path
             .last()
@@ -1579,6 +1628,18 @@ impl Db {
             .ephemeral
             .take_pad_template(side, dep_name)
             .ok_or_else(|| anyhow!("not enough farp pads available to build this farp"))?;
+        let location = Self::farp_spawn_loc(
+            spctx,
+            idx,
+            side,
+            pos,
+            parts,
+            Some(pad_template.as_str()),
+        )?;
+        let layout_center = match &location {
+            SpawnLoc::AtPosWithCenter { center, .. } => *center,
+            _ => pos,
+        };
         let oid = ObjectiveId::new();
         let mut groups: Set<GroupId> = Set::new();
         // if the pad template is a boat then add it to units/groups so that it
@@ -1613,42 +1674,45 @@ impl Db {
                 }
             }
         }
-        // Delay other components so the unpacker can clear (CFG spawn_delay_secs).
+        // Ammo/fuel/barracks wait so the unpacker can clear; defenses (incl. ATC) with the pad.
+        // Ground pad stays a separate clean FARP static; these are offset groups from ME templates.
         let component_delay = if spec.spawn_delay_secs == 0 {
             None
         } else {
             Some(now + Duration::seconds(spec.spawn_delay_secs as i64))
         };
-        for name in [
-            &defenses_template,
-            &ammo_template,
-            &fuel_template,
-            &barracks_template,
-        ] {
-            if let Some(name) = name {
-                let gid = match self.add_and_queue_group(
-                    spctx,
-                    idx,
-                    side,
-                    location.clone(),
-                    &name,
-                    DeployKind::Objective { origin: oid },
-                    BitFlags::empty(),
-                    component_delay,
-                    None,
-                    None,
-                ) {
-                    Ok(gid) => gid,
-                    Err(e) => {
-                        for gid in &groups {
-                            let _ = self.delete_group(gid);
-                        }
-                        self.ephemeral.return_pad_template(&pad_template);
-                        return Err(e);
+        let component_specs: [(Option<&String>, Option<DateTime<Utc>>); 4] = [
+            (defenses_template.as_ref(), None),
+            (ammo_template.as_ref(), component_delay),
+            (fuel_template.as_ref(), component_delay),
+            (barracks_template.as_ref(), component_delay),
+        ];
+        for (name, delay) in component_specs {
+            let Some(name) = name else {
+                continue;
+            };
+            let gid = match self.add_and_queue_group(
+                spctx,
+                idx,
+                side,
+                location.clone(),
+                name,
+                DeployKind::Objective { origin: oid },
+                BitFlags::empty(),
+                delay,
+                None,
+                None,
+            ) {
+                Ok(gid) => gid,
+                Err(e) => {
+                    for gid in &groups {
+                        let _ = self.delete_group(gid);
                     }
-                };
-                groups.insert_cow(gid);
-            }
+                    self.ephemeral.return_pad_template(&pad_template);
+                    return Err(e);
+                }
+            };
+            groups.insert_cow(gid);
         }
         let name = if mobile {
             let mut n = 0u32;
@@ -1665,21 +1729,24 @@ impl Db {
                 n += 1;
             }
         } else {
-            let get_utm_zone = || -> Result<String> {
-                let coord = Coord::singleton(spctx.lua())?;
-                let pos = coord.lo_to_ll(LuaVec3(Vector3::new(pos.x, 0., pos.y)))?;
-                let mgrs = coord.ll_to_mgrs(pos.latitude, pos.longitude)?;
-                Ok(mgrs.utm_zone)
-            };
-            let utm_zone = get_utm_zone().unwrap_or_else(|_| String::from("UK"));
-            let mut n = 0;
+            // CFG pad order: DEPRFARPPAD0 → "FARP 1", … PAD3 → "FARP 4".
+            let slot = parts
+                .pad_templates
+                .iter()
+                .position(|p| p == &pad_template)
+                .map(|i| i + 1)
+                .unwrap_or(1);
+            let mut suffix = 0u32;
             loop {
-                let name = String::from(format_compact!("farp {} {n}", utm_zone));
+                let name = if suffix == 0 {
+                    String::from(format_compact!("FARP {slot}"))
+                } else {
+                    String::from(format_compact!("FARP {slot}-{suffix}"))
+                };
                 if self.persisted.objectives_by_name.get(&name).is_none() {
                     break name;
-                } else {
-                    n += 1
                 }
+                suffix += 1;
             }
         };
         let threat_pos3 = {
@@ -1694,9 +1761,11 @@ impl Db {
                 spec: spec.clone(),
                 mobile,
                 pad_template: pad_template.clone(),
-                dep_static_slot_groups: vec![],
             },
-            zone: Zone::Circle { pos, radius: 2000. },
+            zone: Zone::Circle {
+                pos,
+                radius: GROUND_DEP_FARP_ZONE_RADIUS_M,
+            },
             owner: side,
             nominal_owner: Some(side),
             health: 100,
@@ -1753,30 +1822,64 @@ impl Db {
                 .pad_template_to_objective
                 .insert(pad_template.clone(), oid);
         }
-        // move the pad to the new location
-        let pad_move = spctx
-            .move_farp_pad(idx, side, pad_template.as_str(), pos)
+        // Same ME→world translation as defenses/ammo (`AtPosWithCenter`).
+        let _ = spctx
+            .move_farp_pad(
+                idx,
+                side,
+                pad_template.as_str(),
+                pos,
+                Some(layout_center),
+            )
             .context("moving farp pad")?;
-        for (name, id) in pad_move.helipad_ids {
-            self.ephemeral.dep_farp_pad_helipad_ids.insert(name, id);
-        }
-        let _ = pad_move.spawned;
         // Align objective zone to live pad (supplier / supply lines use zone.pos).
         if let Some(live) = mobile_farp_anchor_ground2(lua, pad_template.as_str()) {
             if let Some(obj) = self.persisted.objectives.get_mut_cow(&oid) {
                 apply_farp_zone_pos(obj, lua, live);
             }
         }
-        let airbase = Airbase::get_by_name(spctx.lua(), pad_template.clone())
+        let airbase = airbase_for_pad_template(spctx.lua(), pad_template.as_str())
             .with_context(|| format_compact!("getting airbase {pad_template}"))?;
         airbase.set_coalition(side)?;
-        let airbase = airbase
+        let airbase_oid = airbase
             .object_id()
             .with_context(|| format_compact!("getting airbase {pad_template} object id"))?;
-        self.ephemeral.airbase_by_oid.insert(oid, airbase.clone());
-        self.ephemeral
-            .airbases_by_oid
-            .insert(oid, smallvec![airbase]);
+        let mut airbases = smallvec![airbase_oid.clone()];
+        // Multi-pad siblings: `{pad}-N-LIVE` under one addGroup(-1); may share DCS warehouse.
+        if !mobile {
+            if let Ok(gifo) =
+                spctx.get_template_ref(idx, GroupKind::Any, side, pad_template.as_str())
+            {
+                if let Ok(units) = gifo.group.units() {
+                    for unit in units {
+                        let Ok(unit) = unit else {
+                            continue;
+                        };
+                        let Ok(uname) = unit.name() else {
+                            continue;
+                        };
+                        if uname.as_str() == pad_template.as_str() {
+                            continue;
+                        }
+                        let live = SpawnCtx::ground_dep_live_pad_name(uname.as_str());
+                        let Ok(sib) = Airbase::get_by_name(spctx.lua(), live) else {
+                            continue;
+                        };
+                        if !sib.is_exist().unwrap_or(false) {
+                            continue;
+                        }
+                        let _ = sib.set_coalition(side);
+                        if let Ok(sid) = sib.object_id() {
+                            if !airbases.contains(&sid) {
+                                airbases.push(sid);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        self.ephemeral.airbase_by_oid.insert(oid, airbase_oid);
+        self.ephemeral.airbases_by_oid.insert(oid, airbases);
         if !self.ephemeral.defer_initial_hub_distribute {
             if matches!(
                 &objective!(self, oid)?.kind,
@@ -1784,29 +1887,6 @@ impl Db {
             ) {
                 self.finish_dynamic_farp_warehouse(lua, &oid)
                     .context("initializing dynamic FARP warehouse")?;
-            }
-        }
-        if !mobile {
-            let assigned = self
-                .spawn_ground_dep_farp_static_slots(
-                    spctx,
-                    idx,
-                    side,
-                    oid,
-                    objective!(self, oid)?.zone.pos(),
-                    pad_template.as_str(),
-                )
-                .context("linking DEP FARP static client slots to helipads")?;
-            if !assigned.is_empty() {
-                if let Some(obj) = self.persisted.objectives.get_mut_cow(&oid) {
-                    if let ObjectiveKind::Farp {
-                        dep_static_slot_groups,
-                        ..
-                    } = &mut obj.kind
-                    {
-                        *dep_static_slot_groups = assigned;
-                    }
-                }
             }
         }
         self.mark_farp_threatened_by_nearby_enemy_ground(oid)?;
@@ -2327,7 +2407,7 @@ impl Db {
         self.update_objective_status(None, &oid, now)
     }
 
-    /// Revive up to `count` dead spawnable Logi units for `side`.
+    /// Revive up to `count` dead spawnable Logi units (or ground DEP FARP components) for `side`.
     fn repair_n_spawnable_logi_units(
         &mut self,
         side: Side,
@@ -2339,6 +2419,7 @@ impl Db {
         }
         let obj = objective!(self, oid)?;
         let spawned = obj.spawned;
+        let ground_dep = obj.is_ground_dep_farp();
         let gids: SmallVec<[GroupId; 16]> = maybe!(&obj.groups, &side, "side group")?
             .into_iter()
             .copied()
@@ -2346,7 +2427,7 @@ impl Db {
         let mut repaired = 0usize;
         for gid in gids {
             let group = group!(self, gid)?;
-            if !group.class.is_logi() {
+            if !ground_dep && !group.class.is_logi() {
                 continue;
             }
             let uids: SmallVec<[UnitId; 16]> = group.units.into_iter().copied().collect();
@@ -2363,7 +2444,8 @@ impl Db {
                     touched = true;
                 }
             }
-            if touched && spawned {
+            // Ground DEP FARP groups stay world-side even when objective.spawned flips.
+            if touched && (spawned || ground_dep) {
                 self.ephemeral.push_spawn(gid);
             }
             if count == 0 {

@@ -50,7 +50,6 @@ pub mod dynamic_cargo;
 pub mod ephemeral;
 pub mod front_line;
 pub mod group;
-pub mod dep_farp_slots;
 pub mod logistics;
 pub mod markup;
     pub mod mizinit;

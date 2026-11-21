@@ -38,7 +38,7 @@ use bfprotocols::{
         group::GroupId,
         objective::{ObjectiveId, ObjectiveKind},
     },
-    fowl_miz_export::{FowlMizExport, DEP_FARP_STATIC_SLOT_GROUP_PREFIX},
+    fowl_miz_export::FowlMizExport,
     perf::PerfInner,
     stats::Stat,
 };
@@ -612,12 +612,6 @@ impl Db {
         if slot.raw_get::<_, bool>("dynSpawnTemplate").unwrap_or(false) {
             return Ok(());
         }
-        if slot.raw_get::<_, bool>("depFarpSlotTemplate").unwrap_or(false) {
-            return Ok(());
-        }
-        if slot.name()?.starts_with(DEP_FARP_STATIC_SLOT_GROUP_PREFIX) {
-            return Ok(());
-        }
         let mut ground_start = false;
         if !slot.raw_get::<_, bool>("linkOffset").unwrap_or(false) {
             for point in slot.route()?.points()? {
@@ -685,7 +679,6 @@ impl Db {
         let mut t = Self::default();
         t.ephemeral
             .set_cfg(miz, idx, cfg, to_bg, fowl_miz_export)?;
-        t.cache_dep_farp_static_slot_homes(&spctx, idx)?;
         let mut objective_names = FxHashSet::default();
         for zone in miz.triggers()? {
             let zone = zone?;
@@ -845,11 +838,7 @@ impl Db {
                 bail!("extra_fixed_wing_objectives {name} does not match any objective")
             }
         }
-        self.cache_dep_farp_static_slot_homes(spctx, idx)?;
         let mut deferred_hub_ai_air: SmallVec<[GroupId; 16]> = smallvec![];
-        let mut dep_farp_slot_reactivate: SmallVec<
-            [(ObjectiveId, Side, Vector2, String, Vec<String>); 8],
-        > = smallvec![];
         let mut spawn_deployed_and_logistics = || -> Result<()> {
             debug!("queue respawn deployables");
             let land = Land::singleton(spctx.lua())?;
@@ -913,7 +902,6 @@ impl Db {
                     spec: _,
                     mobile,
                     pad_template,
-                    dep_static_slot_groups,
                 } = &obj.kind
                 {
                     // ME DEP pad templates exist at editor coords after every mission load (`pad_live`).
@@ -921,27 +909,14 @@ impl Db {
                     // `add_farp`); skipping when `pad_live` left the invisible pad off-map.
                     if *mobile {
                         let _ = spctx
-                            .move_farp_pad(idx, obj.owner, &pad_template, pos)
-                            .context("moving mobile farp pad")?
-                            .spawned;
+                            .move_farp_pad(idx, obj.owner, &pad_template, pos, None)
+                            .context("moving mobile farp pad")?;
                         mobile_farp_hull_restore.push(obj.id);
                     } else {
-                        let pad_move = spctx
-                            .move_farp_pad(idx, obj.owner, &pad_template, pos)
+                        // `pos` is persisted zone / live anchor — pin unit 1, keep ME pad offsets.
+                        let _ = spctx
+                            .move_farp_pad(idx, obj.owner, &pad_template, pos, None)
                             .context("moving ground DEP FARP pad after load")?;
-                        for (name, id) in pad_move.helipad_ids {
-                            self.ephemeral.dep_farp_pad_helipad_ids.insert(name, id);
-                        }
-                        let _ = pad_move.spawned;
-                        if !dep_static_slot_groups.is_empty() {
-                            dep_farp_slot_reactivate.push((
-                                obj.id,
-                                obj.owner,
-                                pos,
-                                pad_template.clone(),
-                                dep_static_slot_groups.clone(),
-                            ));
-                        }
                         info!(
                             "respawned ground DEP FARP {:?} pad {:?} at persisted position",
                             obj.name, pad_template
@@ -1001,7 +976,6 @@ impl Db {
             )?;
         }
         while self.ephemeral.spawnq_len() > 0 {
-            self.drain_pending_dep_farp_static_slot_releases(spctx, idx)?;
             let Db {
                 ephemeral,
                 persisted,
@@ -1020,18 +994,6 @@ impl Db {
             .context("setting up warehouses")?;
         if let Err(e) = self.restore_dynamic_cargo_after_load(spctx.lua()) {
             error!("dynamic cargo restore after load: {e:?}");
-        }
-        for (oid, side, pos, pad_template, groups) in dep_farp_slot_reactivate {
-            self.reactivate_ground_dep_farp_static_slots(
-                spctx,
-                idx,
-                oid,
-                side,
-                pos,
-                pad_template.as_str(),
-                groups.as_slice(),
-            )
-            .with_context(|| format!("reactivating DEP FARP static slots for {oid:?}"))?;
         }
         debug!("respawn hub ai air actions");
         for gid in deferred_hub_ai_air {
@@ -1175,7 +1137,6 @@ impl Db {
             if self.ephemeral.spawnq_len() == 0 {
                 return Ok(());
             }
-            self.drain_pending_dep_farp_static_slot_releases(&spctx, idx)?;
             let Db {
                 ephemeral,
                 persisted,

@@ -465,9 +465,15 @@ pub(crate) fn jtac_filter(lua: MizLua, arg: ArgTriple<JtId, u64, Ucid>) -> Resul
     jtac.add_filter(&ctx.db, lua, filter)
         .context("setting jtac target filter")?;
     let (near, name) = change_info(jtac, &ctx.db, &arg.trd);
+    let filter_lbl = jtac
+        .filter()
+        .iter()
+        .map(UnitTag::jtac_filter_f10_label)
+        .collect::<Vec<_>>()
+        .join(", ");
     let msg = format_compact!(
-        "JTAC FILTER CHANGED TO {}\njtac {} near {}\nchanged by {}",
-        jtac.filter(),
+        "JTAC FILTER CHANGED TO [{}]\njtac {} near {}\nchanged by {}",
+        filter_lbl,
         arg.fst,
         near,
         name
@@ -961,7 +967,7 @@ pub(super) fn add_menu_for_jtac(
     let mut filter_root = mc.add_submenu_for_group(mizgid, "Filter".into(), Some(root.clone()))?;
     mc.add_command_for_group(
         mizgid,
-        "Clear".into(),
+        "CLEAR".into(),
         Some(filter_root.clone()),
         jtac_clear_filter,
         ArgTuple {
@@ -976,7 +982,7 @@ pub(super) fn add_menu_for_jtac(
         }
         mc.add_command_for_group(
             mizgid,
-            format_compact!("{:?}", tag).into(),
+            tag.jtac_filter_f10_label().into(),
             Some(filter_root.clone()),
             jtac_filter,
             ArgTriple {

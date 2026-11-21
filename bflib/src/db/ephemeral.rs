@@ -95,7 +95,8 @@ pub(super) struct DeployableIndex {
     pub(super) deployables_by_repair: FxHashMap<String, String>,
     pub(super) crates_by_name: FxHashMap<String, Crate>,
     pub(super) squads_by_name: FxHashMap<String, Troop>,
-    pub(super) pad_templates: FxHashMap<String, FxHashSet<String>>,
+    /// CFG `pad_templates` order (first free → first deploy).
+    pub(super) pad_templates: FxHashMap<String, Vec<String>>,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -148,12 +149,6 @@ pub struct Ephemeral {
     pub(super) naval_slot_zones: FxHashMap<String, Zone>,
     pub(super) slot_info: FxHashMap<SlotId, SlotInfo>,
     used_pad_templates: FxHashSet<String>,
-    /// ME group names from the DEP FARP client slot pool already assigned to a deploy.
-    pub(super) used_dep_farp_static_slot_groups: FxHashSet<String>,
-    /// Build-time home pose for pool groups (`zzDepFarpSlot-*`).
-    pub(super) dep_farp_static_slot_home: FxHashMap<String, (Vector2, f64)>,
-    /// Unassigned DEP FARP pool client slots (blocked until deploy registers them).
-    pub(super) dep_farp_pool_slot_ids: FxHashSet<dcso3::net::SlotId>,
     /// Player ground starts occupying hub parking/helipad slots (blocks AI air spawn).
     pub(super) player_hub_slot_claims: FxHashSet<(ObjectiveId, HubSlotKind, i64)>,
     pub(super) player_hub_slot_claim_by_slot:
@@ -165,9 +160,6 @@ pub struct Ephemeral {
     pub(super) player_hub_subplaces: FxHashSet<(ObjectiveId, i64)>,
     pub(super) player_hub_subplace_by_slot:
         FxHashMap<dcso3::net::SlotId, (ObjectiveId, i64)>,
-    /// Runtime static ids for `{pad_template}-HP-{n}` after `move_farp_pad`.
-    pub(super) dep_farp_pad_helipad_ids: FxHashMap<String, i64>,
-    pub(super) pending_dep_farp_static_slot_release: smallvec::SmallVec<[(Side, String); 16]>,
     pub(super) global_pad_templates: FxHashSet<String>,
     force_to_spectators: BTreeMap<DateTime<Utc>, SmallVec<[Ucid; 1]>>,
     /// Delayed public Server chat (e.g. web-link free-joins after DCSServerBot greetings).
@@ -327,16 +319,11 @@ impl Default for Ephemeral {
             naval_slot_zones: FxHashMap::default(),
             slot_info: FxHashMap::default(),
             used_pad_templates: FxHashSet::default(),
-            used_dep_farp_static_slot_groups: FxHashSet::default(),
-            dep_farp_static_slot_home: FxHashMap::default(),
-            dep_farp_pool_slot_ids: FxHashSet::default(),
             player_hub_slot_claims: FxHashSet::default(),
             player_hub_slot_claim_by_slot: FxHashMap::default(),
             player_hub_blocker_positions: FxHashMap::default(),
             player_hub_subplaces: FxHashSet::default(),
             player_hub_subplace_by_slot: FxHashMap::default(),
-            dep_farp_pad_helipad_ids: FxHashMap::default(),
-            pending_dep_farp_static_slot_release: smallvec::smallvec![],
             global_pad_templates: FxHashSet::default(),
             force_to_spectators: BTreeMap::default(),
             pending_server_chat: BTreeMap::default(),
@@ -967,14 +954,11 @@ impl Ephemeral {
                     }
                 }
                 for pad in pad_templates {
-                    if !idx
-                        .pad_templates
-                        .entry(name.clone())
-                        .or_default()
-                        .insert(pad.clone())
-                    {
+                    let slots = idx.pad_templates.entry(name.clone()).or_default();
+                    if slots.iter().any(|p| p == pad) {
                         bail!("{:?} has a duplicate pad template {pad}", dep)
                     }
+                    slots.push(pad.clone());
                     if !self.global_pad_templates.insert(pad.clone()) {
                         bail!(
                             "pad template names must be globally unique {pad} is used more than once"
@@ -983,7 +967,6 @@ impl Ephemeral {
                     let gifo = miz
                         .get_group_by_name(mizidx, GroupKind::Any, side, pad)?
                         .ok_or_else(|| anyhow!("missing pad template {:?} {:?}", side, pad))?;
-                    let helipad_prefix = format_compact!("{pad}-HP-");
                     let mut anchor_ok = false;
                     for unit in gifo.group.units()? {
                         let unit = unit?;
@@ -992,7 +975,7 @@ impl Ephemeral {
                             anchor_ok = true;
                             continue;
                         }
-                        if uname.starts_with(helipad_prefix.as_str()) {
+                        if pad_template_extra_unit_name_ok(pad, uname.as_str()) {
                             continue;
                         }
                         bail!(
@@ -1666,6 +1649,41 @@ struct ActivateGciParams {
 }
 
 /// ME ActivateGCI keeps template unitId; DEP addGroup assigns a new one.
+/// ME multi Invisible FARP: `{pad}-1`…; legacy static slots: `{pad}-HP-…`.
+pub(crate) fn pad_template_extra_unit_name_ok(pad: &str, uname: &str) -> bool {
+    let Some(rest) = uname.strip_prefix(pad).and_then(|s| s.strip_prefix('-')) else {
+        return false;
+    };
+    (!rest.is_empty() && rest.chars().all(|c| c.is_ascii_digit())) || rest.starts_with("HP-")
+}
+
+/// Ground DEP pad airbase name vs CFG `pad_template` (anchor or `{pad}-N` / `{pad}-HP-…`).
+/// Runtime live pads use `{meName}-LIVE`.
+pub(crate) fn ground_dep_pad_airbase_kind(
+    pad_template: &str,
+    airbase_name: &str,
+) -> Option<GroundDepPadAirbaseKind> {
+    let name = airbase_name.strip_suffix("-LIVE").unwrap_or(airbase_name);
+    if name == pad_template {
+        Some(GroundDepPadAirbaseKind::Anchor)
+    } else if pad_template_extra_unit_name_ok(pad_template, name) {
+        Some(GroundDepPadAirbaseKind::Sibling)
+    } else if name.starts_with(pad_template)
+        && name.as_bytes().get(pad_template.len()) == Some(&b'-')
+    {
+        // Belts/suspenders for odd ME suffixes beyond `-N` / `-HP-`.
+        Some(GroundDepPadAirbaseKind::Sibling)
+    } else {
+        None
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum GroundDepPadAirbaseKind {
+    Anchor,
+    Sibling,
+}
+
 fn me_route_activate_gci(group: &miz::Group) -> Option<ActivateGciParams> {
     let route: LuaTable = group.raw_get("route").ok()?;
     let points: LuaTable = route.raw_get("points").ok()?;

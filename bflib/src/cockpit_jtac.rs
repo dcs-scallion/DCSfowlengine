@@ -37,9 +37,19 @@ struct BomberMissionEntry {
 }
 
 #[derive(Debug, Serialize)]
+struct FilterTagEntry {
+    /// Engine `UnitTag` Debug name (action / active-filter match key).
+    tag: StdString,
+    /// Short Control panel button label.
+    label: StdString,
+    /// Hover tooltip (= F10 display name).
+    tooltip: StdString,
+}
+
+#[derive(Debug, Serialize)]
 struct JtacListResponse {
     jtacs: Vec<JtacListEntry>,
-    filter_tags: Vec<StdString>,
+    filter_tags: Vec<FilterTagEntry>,
     calcm_enabled: bool,
     bomber_missions: Vec<BomberMissionEntry>,
     /// Calling player's campaign points (bomber affordability).
@@ -293,8 +303,12 @@ pub(crate) fn list_jtacs_for_ucid(ctx: &Context, ucid: &Ucid) -> Result<StdStrin
         })
         .collect();
 
-    let filter_tags: Vec<StdString> = UnitTag::jtac_filter_choices()
-        .map(|t| format!("{:?}", t))
+    let filter_tags: Vec<FilterTagEntry> = UnitTag::jtac_filter_choices()
+        .map(|t| FilterTagEntry {
+            tag: format!("{:?}", t),
+            label: t.jtac_filter_cockpit_label().into(),
+            tooltip: t.jtac_filter_f10_label().into(),
+        })
         .collect();
 
     let points = ctx.db.player(ucid).map(|p| p.points).unwrap_or(0);

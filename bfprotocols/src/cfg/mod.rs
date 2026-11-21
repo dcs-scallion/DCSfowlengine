@@ -18,7 +18,7 @@ use anyhow::{anyhow, bail, Context, Result};
 use chrono::prelude::*;
 use compact_str::format_compact;
 use dcso3::{coalition::Side, controller::AltType, net::Ucid, String};
-use enumflags2::{bitflags, BitFlag, BitFlags};
+use enumflags2::{bitflags, BitFlags};
 use fxhash::{FxBuildHasher, FxHashMap, FxHashSet};
 use indexmap::IndexMap;
 use netidx::path::Path as NetIdxPath;
@@ -182,37 +182,96 @@ pub enum UnitTag {
 }
 
 impl UnitTag {
-    /// Player-selectable JTAC contact filters (F10 / cockpit). Other tags remain
-    /// for `unit_classification` and `jtac_priority`.
+    /// Player-selectable JTAC contact filters (F10 / cockpit), display order.
+    /// Other tags remain for `unit_classification` and `jtac_priority`.
+    pub const fn jtac_filter_choice_list() -> &'static [Self] {
+        &[
+            Self::SAM,
+            Self::AAA,
+            Self::Armor,
+            Self::APC,
+            Self::Logistics,
+            Self::Infantry,
+            Self::EWR,
+            Self::Helicopter,
+            Self::LR,
+            Self::SR,
+            Self::MR,
+            Self::TrackRadar,
+            Self::SearchRadar,
+            Self::AuxRadarUnit,
+            Self::ControlUnit,
+            Self::ATGM,
+            Self::Artillery,
+            Self::Boat,
+            Self::Factory,
+            Self::Structure,
+            Self::Aircraft,
+        ]
+    }
+
     pub fn is_jtac_filter_choice(self) -> bool {
-        !matches!(
-            self,
-            Self::Aircraft
-                | Self::ShipNoHeliport
-                | Self::ShipWithHeliport
-                | Self::ShipCarrier
-                | Self::AWACS
-                | Self::Link16
-                | Self::CALCM
-                | Self::NavalSpawnPoint
-                | Self::IRGuided
-                | Self::RadarGuided
-                | Self::OpticallyGuided
-                | Self::EngagesWeapons
-                | Self::Unguided
-                | Self::Launcher
-                | Self::LightCannon
-                | Self::HeavyCannon
-                | Self::RPG
-                | Self::SmallArms
-                | Self::Invincible
-                | Self::Driveable
-                | Self::Unarmed
-        )
+        Self::jtac_filter_choice_list().iter().any(|&t| t == self)
     }
 
     pub fn jtac_filter_choices() -> impl Iterator<Item = Self> {
-        Self::all().iter().filter(|t| t.is_jtac_filter_choice())
+        Self::jtac_filter_choice_list().iter().copied()
+    }
+
+    /// F10 radio menu label (also Control panel tooltip).
+    pub fn jtac_filter_f10_label(self) -> &'static str {
+        match self {
+            Self::SAM => "SAM",
+            Self::AAA => "AAA",
+            Self::Armor => "Armor",
+            Self::APC => "APC",
+            Self::Logistics => "Logistics",
+            Self::Infantry => "Infantry",
+            Self::EWR => "EWR",
+            Self::Helicopter => "Helicopter",
+            Self::LR => "LrSAM",
+            Self::SR => "SrSAM",
+            Self::MR => "MrSAM",
+            Self::TrackRadar => "TrackRadar",
+            Self::SearchRadar => "SearchRadar",
+            Self::AuxRadarUnit => "AuxRadar",
+            Self::ControlUnit => "ControlUnit",
+            Self::ATGM => "ATGM",
+            Self::Artillery => "Artillery",
+            Self::Boat => "Boat",
+            Self::Factory => "Factory",
+            Self::Structure => "Structure",
+            Self::Aircraft => "GroundedAircraft",
+            _ => "Unknown",
+        }
+    }
+
+    /// Attrition Control short button label.
+    pub fn jtac_filter_cockpit_label(self) -> &'static str {
+        match self {
+            Self::SAM => "SAM",
+            Self::AAA => "AAA",
+            Self::Armor => "Armor",
+            Self::APC => "APC",
+            Self::Logistics => "Logi",
+            Self::Infantry => "Inf",
+            Self::EWR => "EWR",
+            Self::Helicopter => "Heli",
+            Self::LR => "LrSAM",
+            Self::SR => "SrSAM",
+            Self::MR => "MrSAM",
+            Self::TrackRadar => "TrRDR",
+            Self::SearchRadar => "SrRDR",
+            Self::AuxRadarUnit => "AuxRDR",
+            Self::ControlUnit => "C2Unit",
+            Self::ATGM => "ATGM",
+            Self::Artillery => "Arty",
+            Self::Boat => "Boat",
+            Self::Factory => "Factory",
+            Self::Structure => "Struct",
+            Self::Aircraft => "GndAir",
+            _ => "Unknown",
+        }
     }
 }
 

@@ -2975,9 +2975,6 @@ fn run_timed_events(
     }
     let now = Utc::now();
     let spctx = SpawnCtx::new(lua)?;
-    if let Err(e) = ctx.db.drain_pending_dep_farp_static_slot_releases(&spctx, &ctx.idx) {
-        error!("error releasing DEP FARP static slots {:?}", e)
-    }
     {
         let crate::db::Db {
             ephemeral,

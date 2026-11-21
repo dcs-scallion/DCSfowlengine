@@ -521,10 +521,11 @@ impl Jtac {
         write!(msg, "\nfilter: [")?;
         let len = self.filter.len();
         for (i, tag) in self.filter.iter().enumerate() {
+            let lbl = tag.jtac_filter_f10_label();
             if i < len - 1 {
-                write!(msg, "{:?}, ", tag)?;
+                write!(msg, "{lbl}, ")?;
             } else {
-                write!(msg, "{:?}", tag)?;
+                write!(msg, "{lbl}")?;
             }
         }
         write!(msg, "]\n")?;
@@ -1893,6 +1894,18 @@ impl Jtacs {
             }
             if unit.side == jtac.side {
                 continue;
+            }
+            // CSAR downed pilots (ME "Downed Pilot Blue/Red" or Fowl CsarPilot groups): never JTAC targets.
+            let typ = unit.typ.as_str();
+            if db.persisted.csar_pilots.contains(&unit.group)
+                || matches!(
+                    db.group(&unit.group).map(|g| &g.origin),
+                    Ok(crate::db::group::DeployKind::CsarPilot { .. })
+                )
+                || typ == "Downed Pilot Blue"
+                || typ == "Downed Pilot Red"
+            {
+                lost!();
             }
             saw_units.insert(id);
             let detected = detected.entry(id).or_default();
