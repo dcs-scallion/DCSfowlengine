@@ -147,10 +147,13 @@ if ([string]::IsNullOrWhiteSpace($adminPassword)) {
 
 # ==========================================================
 
-# Ask bfdb to flush sled via POST /api/admin/shutdown, wait for exit,
-# then Force only if it is still alive (old builds without the endpoint).
+# Ask bfdb to flush sled via POST /api/admin/shutdown, wait for exit.
+# Hard-kill left DB inconsistent on the live server — no Stop-Process -Force unless -AllowForce.
 function Stop-BfdbGraceful {
-    param([int]$TimeoutSec = 25)
+    param(
+        [int]$TimeoutSec = 30,
+        [switch]$AllowForce
+    )
     $procs = @(Get-Process -Name "bfdb" -ErrorAction SilentlyContinue)
     if ($procs.Count -eq 0) { return $true }
 
@@ -164,8 +167,8 @@ function Stop-BfdbGraceful {
         $null = Invoke-WebRequest -Uri "$base/api/admin/shutdown" -Method POST `
             -WebSession $web -UseBasicParsing -TimeoutSec 5
     } catch {
-        Write-Host "Graceful API shutdown unavailable ($($_.Exception.Message)) -- short wait / force fallback." -ForegroundColor Yellow
-        # Old bfdb without /api/admin/shutdown -- don't sit for the full timeout.
+        Write-Host "Graceful API shutdown unavailable ($($_.Exception.Message))" -ForegroundColor Yellow
+        if (-not $AllowForce) { return $false }
         $TimeoutSec = [Math]::Min($TimeoutSec, 3)
     }
 
@@ -178,10 +181,15 @@ function Stop-BfdbGraceful {
         Start-Sleep -Milliseconds 250
     }
 
-    Write-Host "bfdb still running after ${TimeoutSec}s -- Stop-Process -Force." -ForegroundColor Yellow
-    Stop-Process -Name "bfdb" -Force -ErrorAction SilentlyContinue
-    Start-Sleep -Milliseconds 500
-    return -not [bool](Get-Process -Name "bfdb" -ErrorAction SilentlyContinue)
+    if ($AllowForce) {
+        Write-Host "bfdb still running after ${TimeoutSec}s -- Stop-Process -Force (explicit AllowForce)." -ForegroundColor Yellow
+        Stop-Process -Name "bfdb" -Force -ErrorAction SilentlyContinue
+        Start-Sleep -Milliseconds 500
+        return -not [bool](Get-Process -Name "bfdb" -ErrorAction SilentlyContinue)
+    }
+
+    Write-Host "bfdb still running after ${TimeoutSec}s -- refusing force-kill." -ForegroundColor Red
+    return $false
 }
 
 function Start-FowlStats {
@@ -310,11 +318,19 @@ function Start-FowlStats {
     Write-Host "bfdb API  : http://127.0.0.1:$dashPort/  (Caddy only)" -ForegroundColor Green
     Write-Host "Public UI : $publicStatsUrl" -ForegroundColor Green
     Write-Host "Press 'Q' to stop and exit.`n" -ForegroundColor Yellow
+    # Backup orchestrator (C:\Backup\backup.ps1) drops this flag for a clean stop
+    # without requiring a keypress — soft path keeps netidx up for DCS/bflib.
+    $backupStopFlag = "C:\Backup\request-bfsystem-stop.flag"
 
     while ($true) {
         if ([console]::KeyAvailable) {
             $key = [console]::ReadKey($true)
             if ($key.Key -eq 'Q') { Stop-FowlStats; break }
+        }
+        if (Test-Path -LiteralPath $backupStopFlag) {
+            Remove-Item -LiteralPath $backupStopFlag -Force -ErrorAction SilentlyContinue
+            Stop-FowlStatsForBackup
+            break
         }
 
         Clear-Host
@@ -343,10 +359,30 @@ function Start-FowlStats {
     }
 }
 
+function Stop-FowlStatsForBackup {
+    # Same sled flush as Q, but leave netidx running so bflib/DCS stay connected
+    # during the bfdb downtime window (Start-FowlStats will reuse an existing resolver).
+    # Never force-kill bfdb — if flush fails, stay up so backup.ps1 aborts instead of risking DB.
+    Write-Host "`nBackup stop requested — flushing bfdb, keeping netidx..." -ForegroundColor Yellow
+    if (-not (Stop-BfdbGraceful)) {
+        Write-Host "Graceful bfdb stop failed — supervisor stays running (no force-kill)." -ForegroundColor Red
+        return
+    }
+    Get-Job -Name "DBEngine" -ErrorAction SilentlyContinue | Stop-Job -ErrorAction SilentlyContinue
+    Get-Job -Name "DBEngine" -ErrorAction SilentlyContinue | Remove-Job -Force -ErrorAction SilentlyContinue
+    Write-Host "bfdb stopped; supervisor exiting (netidx left running)." -ForegroundColor Green
+    Start-Sleep -Seconds 1
+    # Environment.Exit closes the console host; bare `exit` can leave an empty window.
+    [System.Environment]::Exit(0)
+}
+
 function Stop-FowlStats {
     Write-Host "`nShutting down..." -ForegroundColor Red
     # Flush sled before tearing down the job host (Stop-Job alone is hard-kill).
-    $null = Stop-BfdbGraceful
+    if (-not (Stop-BfdbGraceful)) {
+        Write-Host "Graceful bfdb stop failed — not Stop-Job/force-killing. Fix manually or retry Q." -ForegroundColor Red
+        return
+    }
     Get-Job -Name "DBEngine" -ErrorAction SilentlyContinue | Stop-Job -ErrorAction SilentlyContinue
     Get-Job -Name "DBEngine" -ErrorAction SilentlyContinue | Remove-Job -Force -ErrorAction SilentlyContinue
     Get-Job -Name "NetidxResolver" -ErrorAction SilentlyContinue | Stop-Job -ErrorAction SilentlyContinue
@@ -354,7 +390,7 @@ function Stop-FowlStats {
     Stop-Process -Name "netidx" -Force -ErrorAction SilentlyContinue
     Write-Host "Stopped." -ForegroundColor Green
     Start-Sleep -Seconds 1
-    exit
+    [System.Environment]::Exit(0)
 }
 
 Start-FowlStats
